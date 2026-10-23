@@ -1,4 +1,4 @@
-import { DEFAULT_WATCH_MIN_INTERVAL_MS, JOB_LOG_CAPPED_MARKER } from "@valet/engine";
+import { DEFAULT_WATCH_MIN_INTERVAL_MS, EVENT_DELIVERED_MAX_KEYS, JOB_LOG_CAPPED_MARKER } from "@valet/engine";
 import type { EventMatchDigest, LeaseReleaseCause, Wakeup, WakeupCause, WakeupLimits, WakeupPatch, WakeupStatus } from "@valet/engine";
 
 /**
@@ -725,9 +725,11 @@ export function eventMatchedSignal(
  * 2026-10-16: delivery threads and claims, Part C step 5), and `hours` and
  * `count` are unused.
  */
-export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate" | "delivered", hours: number, count: number): SignalDraft {
+export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate" | "delivered" | "output_cap", hours: number, count: number): SignalDraft {
   let body: string;
-  if (cause === "delivered") {
+  if (cause === "output_cap") {
+    body = `The wait reached its ${EVENT_DELIVERED_MAX_KEYS}-output limit. Re-arm a new wait to keep watching.`;
+  } else if (cause === "delivered") {
     body = "The matching event arrived in this thread as a message. The wait ended.";
   } else if (cause === "rate") {
     body = `Ended after ${count} events in an hour. Narrow the clauses, then wait again.`;
@@ -785,6 +787,10 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
   if (row.kind !== "event" || row.status !== "running") return null;
   const match = row.eventMatch;
   if (match === undefined) return { to: "lost", patch: { endedAt: now }, signals: [], badRow: true };
+  if ((row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS) {
+    return { to: "done", cause: "output_cap", patch: { cause: "output_cap", endedAt: now, eventBuffer: [] },
+      signals: [eventEndedSignal(row, "output_cap", 0, 0)] };
+  }
   const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
   const pastDeadline = row.deadlineAt !== undefined && row.deadlineAt <= now;
 

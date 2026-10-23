@@ -923,6 +923,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "source", derive: "checks" }), 26)).toBe(true);
         await store.removeEventMatches("wk_ev", ["source"], 27, "source");
         expect((await store.getWakeup("wk_ev"))?.eventSeen).toHaveLength(EVENT_DELIVERED_MAX_KEYS);
+        expect((await store.listDueWakeups(28, 100)).rows.map((row) => row.id)).toContain("wk_ev");
       });
 
       it("consuming 257 derivation sources cannot evict a delivered completion", async () => {
@@ -960,6 +961,48 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(wakeup({ id: "wk_w", kind: "watch" }));
         expect(await store.appendEventMatch("wk_w", digest(), 20)).toBe(false);
         expect((await store.getWakeup("wk_w"))?.eventBuffer).toBeUndefined();
+      });
+
+      it("collapses retrying sources by derive and commit without blocking direct or new-head matches", async () => {
+        await store.createWakeup(eventWaiter());
+        const source = (i: number, commit = "aaaa", derive = "checks") => digest({ dedupeKey: `source-${i}`, derive,
+          subjects: [`github:acme/lean-proofs@${commit}`] });
+        for (let i = 0; i < 250; i++) expect(await store.appendEventMatch("wk_ev", source(i), 20 + i)).toBe(true);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((entry) => entry.dedupeKey)).toEqual(["source-249"]);
+        expect(await store.appendEventMatch("wk_ev", source(248), 300)).toBe(false);
+        expect(await store.appendEventMatch("wk_ev", source(250, "bbbb"), 300)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", source(251, "aaaa", "other-checks"), 301)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "direct" }), 302)).toBe(true);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(4);
+        expect((await store.getWakeup("wk_ev"))?.eventSeen ?? []).toEqual([]);
+        expect((await store.getWakeup("wk_ev"))?.eventSourceSeen).toHaveLength(249);
+      });
+
+      it("atomically collapses concurrent source admissions without losing a direct match", async () => {
+        await store.createWakeup(eventWaiter());
+        const base = digest({ derive: "checks", subjects: ["github:acme/lean-proofs@aaaa"] });
+        await Promise.all([
+          store.appendEventMatch("wk_ev", { ...base, dedupeKey: "older", occurredAt: "2026-10-19T00:00:00Z" }, 20),
+          store.appendEventMatch("wk_ev", { ...base, dedupeKey: "latest", occurredAt: "2026-10-20T00:00:00Z" }, 21),
+          store.appendEventMatch("wk_ev", digest({ dedupeKey: "direct" }), 22),
+        ]);
+        const entries = (await store.getWakeup("wk_ev"))?.eventBuffer ?? [];
+        expect(entries).toHaveLength(2);
+        expect(entries.some((entry) => entry.dedupeKey === "direct")).toBe(true);
+        expect(entries.filter((entry) => entry.derive === "checks")).toHaveLength(1);
+      });
+
+      it.each([
+        ["2026-10-21T05:00:00Z", "2026-10-21T05:00:00.500Z"],
+        ["2026-10-21T05:00:00.500Z", "2026-10-21T05:00:00Z"],
+        ["2026-10-21T05:00:00Z", "2026-10-21T05:00:00.000Z"],
+      ])("admits a new source after %s at %s using admission order", async (first, second) => {
+        await store.createWakeup(eventWaiter());
+        const initial = digest({ derive: "checks", dedupeKey: "first", occurredAt: first });
+        expect(await store.appendEventMatch("wk_ev", initial, 20)).toBe(true);
+        const next = { ...initial, dedupeKey: "second", occurredAt: second };
+        expect(await store.appendEventMatch("wk_ev", next, 21)).toBe(true);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([next]);
       });
 
       it("appendEventMatch refuses a digest past the 200-digest buffer cap", async () => {

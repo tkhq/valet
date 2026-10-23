@@ -1,5 +1,7 @@
 import { eq } from "drizzle-orm";
 import {
+  EVENT_DELIVERED_MAX_KEYS,
+  eventSourceCommit,
   recordLeaseNodeSeconds,
   recordLeaseOrphanReleased,
   recordLeasesActive,
@@ -31,7 +33,7 @@ import type {
   WakeupLimits,
   WakeupStatus,
 } from "@valet/engine";
-import type { EventWaiterDerive } from "../events/derive.js";
+import { deriveDeadlineNote, deriveRetryReason, type DeriveRetryReason, type EventWaiterDerive } from "../events/derive.js";
 import { derivedClausesAccept } from "../events/waiter-match.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
@@ -181,6 +183,10 @@ export class WakeWatcher {
   private lastPassAt: number | undefined;
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
+  /** Retry deadlines and exponential delays, retained until success or the idle reset. */
+  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number; sourceKey: string; sourceResetAt?: number; reason: DeriveRetryReason }>();
+  /** Last observed source commit per waiter/derive, for prompt stale-group revalidation. */
+  private readonly deriveHeads = new Map<string, { commits: Set<string>; seenAt: number }>();
   /** Event waiters that ingest appended to since the last light pass read them. */
   private readonly nudged = new Set<string>();
 
@@ -271,7 +277,7 @@ export class WakeWatcher {
       if (this.stopping) return;
       try {
         const row = await this.deps.engineStore.getWakeup(id);
-        if (row && row.kind === "event" && row.status === "running" && (row.eventBuffer ?? []).length > 0) rows.push(row);
+        if (row && row.kind === "event" && row.status === "running" && ((row.eventBuffer ?? []).length > 0 || (row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS)) rows.push(row);
       } catch (err) {
         console.error(`WakeWatcher: reading nudged event wakeup ${id} failed; the next full pass handles it:`, err);
       }
@@ -291,6 +297,8 @@ export class WakeWatcher {
   }
 
   private async pass(now: number): Promise<void> {
+    for (const [key, retry] of this.deriveCooldowns) if (retry.until + 30 * 60_000 <= now) this.deriveCooldowns.delete(key);
+    for (const [key, head] of this.deriveHeads) if (head.seenAt + 30 * 60_000 <= now) this.deriveHeads.delete(key);
     // INV-6 is measured before this pass ends or repairs anything, so the
     // repair cannot hide the violation it repairs (fix wave 3, M2).
     const stale = now - 2 * this.intervalMs;
@@ -444,6 +452,13 @@ export class WakeWatcher {
       this.metrics.badRow("engine_wakeups");
       console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
     }
+    if (decision.cause === "deadline") {
+      const notes = deriveGroups(row.eventBuffer ?? []).flatMap(({ latest }) => {
+        const retry = this.deriveCooldowns.get(JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]));
+        return retry && latest.derive ? [{ key: latest.derive, reason: retry.reason }] : [];
+      });
+      for (const signal of decision.signals) if (signal.signalType === "event.ended" && notes.length > 0) signal.body = deriveDeadlineNote(notes);
+    }
     await this.applyDecision(row, decision, null, progress);
   }
 
@@ -469,6 +484,7 @@ export class WakeWatcher {
    * decide on, or null when it is gone, and whether a derive call ran.
    */
   private async deriveStep(row: Wakeup, limit: ConcurrencyLimit): Promise<{ row: Wakeup | null; derived: boolean }> {
+    if ((row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS) return { row, derived: false };
     const groups = deriveGroups(row.eventBuffer ?? []);
     if (groups.length === 0) return { row, derived: false };
     const deriveEvent = this.deps.deriveEvent;
@@ -476,11 +492,37 @@ export class WakeWatcher {
       console.error(`WakeWatcher: event wakeup ${row.id} holds ${groups[0]?.latest.derive} digests, but this watcher has no derive step; they stay buffered.`);
       return { row, derived: false };
     }
+    const changed = new Set<string>();
+    const commits = new Map<string, Set<string>>();
+    for (const { latest } of groups) {
+      if (latest.derive === undefined) continue;
+      const seen = commits.get(latest.derive) ?? new Set<string>();
+      seen.add(eventSourceCommit(latest));
+      commits.set(latest.derive, seen);
+    }
+    for (const [key, current] of commits) {
+      const identity = JSON.stringify([row.id, key]);
+      const previous = this.deriveHeads.get(identity);
+      // New commits bypass generic backoff. Same-commit sources can shorten it once per minute.
+      // Removing a foreign group changes neither. Installation cooldowns stay intact.
+      if (previous && [...current].some((commit) => !previous.commits.has(commit))) changed.add(key);
+      this.deriveHeads.set(identity, { commits: current, seenAt: this.clock() });
+    }
     let ran = false;
     await Promise.all(groups.map((group) => limit(async () => {
       if (this.stopping) return;
-      ran = true;
       const { latest, sources } = group;
+      const cooldownKey = JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]);
+      if (latest.derive !== undefined && changed.has(latest.derive)) this.deriveCooldowns.delete(cooldownKey);
+      let previousRetry = this.deriveCooldowns.get(cooldownKey);
+      const newSource = previousRetry !== undefined && previousRetry.sourceKey !== latest.dedupeKey &&
+        (previousRetry.sourceResetAt === undefined || this.clock() - previousRetry.sourceResetAt >= 60_000);
+      if (previousRetry && newSource) {
+        previousRetry = { ...previousRetry, until: Math.min(previousRetry.until, this.clock() + 1_000), delayMs: 1_000, sourceKey: latest.dedupeKey, sourceResetAt: this.clock() };
+        this.deriveCooldowns.set(cooldownKey, previousRetry);
+      }
+      if ((previousRetry?.until ?? 0) > this.clock()) return;
+      ran = true;
       let outcome: Awaited<ReturnType<EventWaiterDerive>>;
       try {
         outcome = await deriveEvent(row, latest);
@@ -491,10 +533,16 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
-        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}:`, outcome.error);
+        if (!outcome.consumeSource) {
+          const delayMs = outcome.madeProgress || newSource ? 1_000 : Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs ?? 1_000));
+          const reason = deriveRetryReason(outcome.error);
+          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs, sourceKey: latest.dedupeKey, sourceResetAt: previousRetry?.sourceResetAt, reason });
+        } else this.deriveCooldowns.delete(cooldownKey);
+        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "retry delayed by backoff"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
       }
+      this.deriveCooldowns.delete(cooldownKey);
       const at = this.clock();
       await this.deps.engineStore.removeEventMatches(row.id, sources, at, "source");
       const key = latest.derive;
@@ -588,6 +636,7 @@ export class WakeWatcher {
 
     if (TERMINAL.includes(decision.to) && decision.cause) {
       this.metrics.wakeupEnded(updated.kind, decision.cause);
+      if (decision.cause === "output_cap") console.warn("WakeWatcher: event output limit reached; re-arm a new wait", { waiterId: row.id });
     }
     return updated;
   }
@@ -972,11 +1021,6 @@ function concurrencyLimit(max: number): ConcurrencyLimit {
   };
 }
 
-/** The commit subject (`<service>:<owner>/<repo>@<sha>`) of a digest, or "" when it has none. */
-function commitSubject(digest: EventMatchDigest): string {
-  return digest.subjects.find((subject) => /@[0-9a-f]+$/i.test(subject)) ?? "";
-}
-
 /**
  * The buffered derive digests grouped by derive key and source commit,
  * each with its latest digest and every source key of the group (spec
@@ -986,7 +1030,7 @@ function deriveGroups(buffer: readonly EventMatchDigest[]): Array<{ latest: Even
   const groups = new Map<string, { latest: EventMatchDigest; sources: string[] }>();
   for (const digest of buffer) {
     if (digest.derive === undefined) continue;
-    const key = `${digest.derive}\u0000${commitSubject(digest)}`;
+    const key = `${digest.derive}\u0000${eventSourceCommit(digest)}`;
     const group = groups.get(key);
     if (group) {
       group.latest = digest;

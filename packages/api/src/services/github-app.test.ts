@@ -19,6 +19,7 @@ import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
   buildAppConfig,
   githubIngressConfig,
+  githubAppRepositoryAccess,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
@@ -76,7 +77,7 @@ describe("github-app service", () => {
   it("caches live ingress configuration for one minute with App JWT auth", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
     const config = { events: ["check_run"], permissions: { checks: "read" } };
-    const http = vi.fn(async () => Response.json(config));
+    const http = vi.fn(async () => Response.json({ id: 77, suspended_at: null, ...config }));
     let now = 0;
     const deps = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test", now: () => now };
     expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
@@ -88,18 +89,47 @@ describe("github-app service", () => {
     expect(http).toHaveBeenCalledTimes(4);
   });
 
+  it("shares one installation read between concurrent coverage and grant checks", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async (_input: string | URL | Request) => Response.json({ id: 77, suspended_at: null, events: ["status"], permissions: { statuses: "read" } }));
+    const d = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test" };
+    const [coverage, grants] = await Promise.all([
+      githubAppRepositoryAccess(d, orgId, "acme/repo", 2_500), githubIngressConfig(d, orgId, "acme", "repo"),
+    ]);
+    expect(coverage).toBe(true);
+    expect(grants?.events).toEqual(["status"]);
+    expect(http.mock.calls.filter(([input]) => String(input).endsWith("/installation"))).toHaveLength(1);
+  });
+
+  it("uses the template path's five-second timeout and returns unknown for a transient failure", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const http = vi.fn(async () => new Response("{}", { status: 503 }));
+      expect(await githubAppRepositoryAccess({ credentials, env: {}, fetchImpl: http }, orgId, "acme/repo")).toBe("unknown");
+      expect(timeout).toHaveBeenCalledWith(5_000);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it("returns unknown rather than not-installed when the credential read fails", async () => {
+    const get = vi.spyOn(credentials, "get").mockRejectedValue(new Error("credential store unavailable"));
+    try {
+      expect(await githubAppRepositoryAccess({ credentials, env: {} }, orgId, "acme/repo")).toBe("unknown");
+    } finally { get.mockRestore(); }
+  });
+
   it("reads granted settings and detects pending owner approval", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
     const granted = { events: ["status"], permissions: { statuses: "read" } };
     const requested = { events: ["status", "check_run"], permissions: { statuses: "read", checks: "read" } };
-    const http = vi.fn(async (input: string | URL | Request) => Response.json(String(input).endsWith("/installation") ? granted : requested));
+    const http = vi.fn(async (input: string | URL | Request) => Response.json({ id: 77, suspended_at: null, ...(String(input).endsWith("/installation") ? granted : requested) }));
     expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
       .toEqual({ ...granted, pendingApproval: true });
   });
 
   it("accepts grants broader than the requested permission", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
-    const http = vi.fn(async (input: string | URL | Request) => Response.json({ events: ["check_run"], permissions: { checks: String(input).endsWith("/installation") ? "write" : "read" } }));
+    const http = vi.fn(async (input: string | URL | Request) => Response.json({ id: 77, suspended_at: null, events: ["check_run"], permissions: { checks: String(input).endsWith("/installation") ? "write" : "read" } }));
     expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
       .toEqual({ events: ["check_run"], permissions: { checks: "write" } });
   });
@@ -109,7 +139,7 @@ describe("github-app service", () => {
     const granted = { events: ["status"], permissions: { statuses: "read" } };
     const http = vi.fn(async (input: string | URL | Request) => {
       if (String(input).endsWith("/app")) throw new Error("network");
-      return Response.json(granted);
+      return Response.json({ id: 77, suspended_at: null, ...granted });
     });
     expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toEqual(granted);
   });
@@ -117,7 +147,7 @@ describe("github-app service", () => {
   it("bypasses a cached negative configuration after approval", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
     let approved = false;
-    const http = vi.fn(async () => Response.json(approved ? { events: ["check_run"], permissions: { checks: "read" } } : { events: [], permissions: {} }));
+    const http = vi.fn(async () => Response.json({ id: 77, suspended_at: null, ...(approved ? { events: ["check_run"], permissions: { checks: "read" } } : { events: [], permissions: {} }) }));
     const d = { credentials, env: {}, fetchImpl: http };
     expect((await githubIngressConfig(d, orgId, "acme", "repo"))?.events).toEqual([]);
     approved = true;
@@ -128,11 +158,11 @@ describe("github-app service", () => {
 
   it("isolates granted configuration caches by repository", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
-    const http = vi.fn(async () => Response.json({ events: [], permissions: {} }));
+    const http = vi.fn(async () => Response.json({ id: 77, suspended_at: null, events: [], permissions: {} }));
     const d = { credentials, env: {}, fetchImpl: http };
     await githubIngressConfig(d, orgId, "acme", "one");
     await githubIngressConfig(d, orgId, "acme", "two");
-    expect(http).toHaveBeenCalledTimes(4);
+    expect(http).toHaveBeenCalledTimes(3);
   });
 
   it("logs configuration read failures without exception contents", async () => {
@@ -141,7 +171,7 @@ describe("github-app service", () => {
     try {
       const http = vi.fn(async () => { throw new Error("secret-token-in-provider-error"); });
       expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
-      expect(log).toHaveBeenCalledWith("[github-app] granted ingress configuration read failed");
+      expect(log).toHaveBeenCalledWith("[github-app] granted ingress configuration read failed", { status: undefined });
       expect(JSON.stringify(log.mock.calls)).not.toContain("secret-token");
     } finally { log.mockRestore(); }
   });
@@ -749,6 +779,28 @@ describe("github-app service", () => {
       const [row] = await db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_1"));
       expect(row.cachedToken).not.toBe(token); // encrypted at rest
       expect(row.cachedTokenExpiresAt).not.toBeNull();
+    });
+
+    it("bypasses a still-fresh cached installation token on a 401 refresh", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await seedInstallation();
+      let calls = 0;
+      fixture = startGithubFixture({ createInstallationToken: () => ({ body: { token: `mint-${++calls}`, expires_at: new Date(Date.now() + 3600_000).toISOString() } }) });
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("mint-1");
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("mint-1");
+      expect(await mintInstallationToken(deps(), orgId, "acme", true)).toBe("mint-2");
+      expect(calls).toBe(2);
+    });
+
+    it("shares one in-flight forced refresh per installation", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await seedInstallation();
+      fixture = startGithubFixture({ createInstallationToken: () => ({ body: { token: "refreshed", expires_at: new Date(Date.now() + 3600_000).toISOString() } }) });
+      const results = await Promise.all(Array.from({ length: 5 }, () => mintInstallationToken(deps(), orgId, "acme", true)));
+      expect(results).toEqual(Array.from({ length: 5 }, () => "refreshed"));
+      expect(fixture.calls).toHaveLength(1);
+      expect(await mintInstallationToken(deps(), orgId, "acme", true)).toBe("refreshed");
+      expect(fixture.calls).toHaveLength(2);
     });
 
     it("returns the cached token without re-minting while more than 5 minutes remain", async () => {

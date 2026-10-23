@@ -926,6 +926,7 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
 export function parseEventSeenJson(raw: string): string[] {
   const parsed: unknown = JSON.parse(raw);
   if (!isStringArray(parsed)) throw new Error("engine_wakeups.event_seen is not a string array");
+  if (parsed.some((key) => key.includes("\0"))) throw new Error("engine_wakeups.event_seen contains a NUL key");
   return parsed;
 }
 
@@ -946,14 +947,21 @@ function isWakeupStatus(v: string): v is WakeupStatus {
 }
 
 function isWakeupCause(v: string): v is WakeupCause {
-  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "output_cap", "fired"].includes(v);
 }
 
 export function rowToWakeup(row: WakeupRow): Wakeup {
   if (!isWakeupKind(row.kind)) throw new Error(`engine_wakeups.kind "${row.kind}" is not a known kind`);
   if (!isWakeupStatus(row.status)) throw new Error(`engine_wakeups.status "${row.status}" is not a known status`);
-  if (row.cause !== null && !isWakeupCause(row.cause)) {
-    throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
+  let cause: WakeupCause | undefined;
+  if (row.cause !== null) {
+    if (isWakeupCause(row.cause)) cause = row.cause;
+    // A terminal row from a newer writer must remain readable after rollback.
+    else if (["done", "cancelled", "expired", "lost"].includes(row.status)) {
+      console.warn("store-postgres: mapped unknown terminal wakeup cause to fired", { id: row.id, cause: row.cause });
+      cause = "fired";
+    }
+    else throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
   }
   return {
     id: row.id,
@@ -969,7 +977,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...(row.fire_at !== null ? { fireAt: row.fire_at } : {}),
     ...(row.deadline_at !== null ? { deadlineAt: row.deadline_at } : {}),
     ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
-    ...(row.cause !== null ? { cause: row.cause } : {}),
+    ...(cause !== undefined ? { cause } : {}),
     logOffset: row.log_offset,
     logTail: row.log_tail,
     eventCount: row.event_count,

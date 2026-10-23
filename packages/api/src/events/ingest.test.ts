@@ -1,4 +1,4 @@
-import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type Wakeup } from "@valet/engine";
+import { EVENT_DELIVERED_MAX_KEYS, InMemorySessionStore, type CredentialStore, type NormalizedEvent, type Wakeup } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
@@ -94,19 +94,26 @@ describe("ingestEvent event waiter matching", () => {
     expect(JSON.stringify(stages)).not.toContain("Looks good");
   });
 
-  it("records no_candidates when the waiter session is gone", async () => {
+  it("skips the matching stage when the waiter session is gone", async () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => null }));
     expect(result).toMatchObject({ skipped: true });
     expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
+    expect((await stagesOf()).some((stage) => stage.stage === "waiter_match")).toBe(false);
     expect(nudge).not.toHaveBeenCalled();
   });
 
-  it("records no_candidates when no running waiter shares a subject", async () => {
+  it("skips the matching stage when no running waiter shares a subject", async () => {
     const elsewhere = { ...message("Ev-9"), subjects: ["slack:T001", "slack:T001/C777"], refs: { channel: "C777" } };
     await ingest(elsewhere, waiterDeps());
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
+    expect((await stagesOf()).some((stage) => stage.stage === "waiter_match")).toBe(false);
     expect(nudge).not.toHaveBeenCalled();
+  });
+
+  it("records the output cap on the match receipt", async () => {
+    store = new InMemorySessionStore();
+    await store.createWakeup({ ...waiter(), eventSeen: Array.from({ length: EVENT_DELIVERED_MAX_KEYS - 1 }, (_, i) => `old-${i}`) });
+    await ingest(message("Ev-last"), waiterDeps());
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "output_cap", detail: "Direct matches: 1. Buffered derivation sources: 0. Append failures: 0. Output limit reached for 1 wait. Re-arm a new wait." });
   });
 
   it("reports direct matches separately from buffered derivation sources", async () => {

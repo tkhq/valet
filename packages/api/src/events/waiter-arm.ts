@@ -233,22 +233,34 @@ export async function checkArm(
     return { ok: false, text: R7(parsed.service) };
   }
 
+  const selfRead = Promise.resolve().then(() => deps.selfIds(parsed.service)).catch((error: unknown) => {
+    console.warn("[wait_for_event] the self lookup failed; the wait has an empty self set:", error);
+    return [];
+  });
   let subject = parsed.subject;
   let warning: string | undefined;
   if (parsed.service === "github") {
     const { owner, repo } = parsed.target;
-    const coverage = await bounded(() => deps.githubInstallationCovers(owner, repo), ms, null);
+    const [coverage, initialConfig, read] = await Promise.all([
+      bounded(() => deps.githubInstallationCovers(owner, repo), ms, null),
+      bounded(() => deps.githubIngressConfig(owner, repo), ms, null),
+      bounded(() => deps.readGithub(parsed.target), ms, { readable: false }),
+    ]);
     if (coverage === false) return { ok: false, text: R2(owner, repo) };
     if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
-    let config = await bounded(() => deps.githubIngressConfig(owner, repo), ms, null);
+    let config = initialConfig;
+    const derivedChecks = req.on.some((clause) => clause.key === "github.pull_request.checks_completed");
     const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
-      for (const family of githubSourceFamilies(deps.plugins, req.on)) {
-        if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
-        if (!settings.events.includes(family)) missing.push(`event ${family}`);
-        const permissions = GITHUB_EVENT_PERMISSIONS[family];
-        if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
-          missing.push(`permission ${permissions.join(" or ")}: read`);
+      if (req.on.some((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key)) && !["read", "write", "admin"].includes(String(settings.permissions.pull_requests))) missing.push("permission pull_requests: read");
+      for (const clause of req.on) {
+        for (const family of githubSourceFamilies(deps.plugins, [clause])) {
+          if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
+          if (!settings.events.includes(family) && !(family === "status" && clause.key === "github.pull_request.checks_completed")) missing.push(`event ${family}`);
+          const permissions = GITHUB_EVENT_PERMISSIONS[family];
+          if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
+            missing.push(`permission ${permissions.join(" or ")}: read`);
+          }
         }
       }
       return [...new Set(missing)];
@@ -257,11 +269,13 @@ export async function checkArm(
     if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
     if (config) {
       const missing = missingSettings(config);
+      if (derivedChecks && !config.events.includes("status")) {
+        warning = `${warning ? `${warning} ` : ""}If a commit status finishes last, the wait ends only after another check event arrives or the deadline passes. Add the Status event to the App.`;
+      }
       if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
     } else {
       warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
     }
-    const read = await bounded(() => deps.readGithub(parsed.target), ms, { readable: false });
     if (!read.readable && (parsed.target.sha === undefined || parsed.target.sha.length === 40)) return { ok: false, text: R3(subject) };
     if (parsed.target.sha !== undefined) {
       if ((!read.readable || !read.sha || !/^[0-9a-f]{40}$/i.test(read.sha)) && parsed.target.sha.length !== 40) {
@@ -296,13 +310,7 @@ export async function checkArm(
 
   // No outer limit here: `selfIds` bounds each of its lookups, so a slow
   // bot-id lookup drops only that id, never the owner's link.
-  let self: string[];
-  try {
-    self = await deps.selfIds(parsed.service);
-  } catch (err) {
-    console.warn("[wait_for_event] the self lookup failed; the waiter has an empty self set:", err);
-    self = [];
-  }
+  const self = await selfRead;
   // A derived key's sources can carry only the repository and commit
   // subjects (a commit status names no pull request), so the waiter is
   // indexed by the repository too. Direct clauses still need the pull
@@ -461,7 +469,8 @@ export function armDeps(
 
     async githubInstallationCovers(owner, repo) {
       if (!(await installationResolvesFor(appDeps, session.orgId, owner, { strictOwner: true })).ok) return false;
-      return githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`);
+      const access = await githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`, 2_500);
+      return access === "unknown" ? null : access;
     },
 
     githubIngressConfig(owner, repo, refresh) {

@@ -1,5 +1,6 @@
 import {
   boundEventDigest,
+  eventSourceCommit,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
   EVENT_DELIVERED_MAX_KEYS,
@@ -332,6 +333,7 @@ function entryInsertParams(row: EntryInsertRow): unknown[] {
 }
 
 export class PgSessionStore implements SessionStore {
+  private readonly dueBadRowLogTimes = new Map<string, number>();
   constructor(private readonly db: PgDb) {}
 
   async saveSession(session: SessionData): Promise<void> {
@@ -1533,19 +1535,26 @@ export class PgSessionStore implements SessionStore {
       params.push(after.createdAt, after.id);
       keyset = " AND (created_at, id) > ($3, $4)";
     }
+    // Select event candidates without parsing persisted text in SQL. Per-row
+    // decoding isolates corrupt history before the due predicate runs.
     const r = await this.db.query(
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
+          OR (kind = 'event' AND status = 'running' AND
+              (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1 OR
+               octet_length(COALESCE(event_seen, '[]')) >= ${3 * EVENT_DELIVERED_MAX_KEYS + 1})))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
     // The cursor comes from the last raw row, so an unreadable row that
-    // mapGoodRows skips never makes a full page look short (fix wave 4, data N1).
+    // mapGoodRows skips, or an event that is not due, never ends pagination early.
     const last = r.rows[r.rows.length - 1];
     const next = r.rows.length < limit || !last ? null : { createdAt: toNum(last.created_at, "created_at"), id: asString(last.id, "id") };
-    return { rows: mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw))), next };
+    const rows = mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)), this.dueBadRowLogTimes)
+      .filter((row) => row.kind !== "event" || (row.eventBuffer?.length ?? 0) > 0 ||
+        (row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS || (row.deadlineAt !== undefined && row.deadlineAt <= now));
+    return { rows, next };
   }
 
   async transitionWakeup(
@@ -1571,22 +1580,37 @@ export class PgSessionStore implements SessionStore {
   }
 
   async appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean> {
-    // One statement: the kind and status checks, the dedupe checks against
-    // the buffer and the seen list, the cap, and the append commit
-    // together, so two ingests of one event append once (INV-E4). The
-    // outer SELECT reads the row as it was before the UPDATE, so it can
-    // tell a refusal at the cap from the other refusals.
+    const bounded = boundEventDigest(digest);
+    // Both subqueries run against the locked UPDATE row. A concurrent append
+    // cannot restore a source that this statement collapsed (INV-E4).
+    // Row-lock admission order is the sequence; timestamp text never rejects a new trigger.
+    const sameGroup = `$2::jsonb ? 'derive' AND COALESCE(e->>'derive' = $2::jsonb->>'derive', false)
+      AND COALESCE((SELECT subject FROM jsonb_array_elements_text(e->'subjects') AS s(subject)
+                     WHERE subject ~ '@[0-9a-fA-F]+$' LIMIT 1), '') = $6`;
+    const retained = (buffer: string) => `(SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
+      FROM jsonb_array_elements(${buffer}) WITH ORDINALITY AS b(e, ord) WHERE NOT (${sameGroup}))`;
     const r = await this.db.query(
       `WITH cur AS (
-         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) AS delivered_count, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf,
+                (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
            FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
        ),
        u AS (
          UPDATE engine_wakeups
-            SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
+            SET event_buffer = (${retained("COALESCE(event_buffer, '[]')::jsonb")} || jsonb_build_array($2::jsonb))::text,
+                event_source_seen = (
+                  SELECT COALESCE(jsonb_agg(key ORDER BY pos), '[]'::jsonb)::text FROM (
+                    SELECT key, pos FROM (
+                      SELECT value AS key, ord AS pos FROM jsonb_array_elements(COALESCE(event_source_seen, '[]')::jsonb) WITH ORDINALITY AS s(value, ord)
+                      UNION ALL
+                      SELECT e->'dedupeKey', 1000000000 + ord FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) WITH ORDINALITY AS b(e, ord)
+                        WHERE ${sameGroup}
+                    ) history ORDER BY pos DESC LIMIT $7
+                  ) bounded_history
+                ),
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
-            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND jsonb_array_length(${retained("COALESCE(event_buffer, '[]')::jsonb")}) < $4
             AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
@@ -1596,18 +1620,15 @@ export class PgSessionStore implements SessionStore {
        )
        SELECT EXISTS (SELECT 1 FROM u) AS appended,
               EXISTS (SELECT 1 FROM cur
-                       WHERE jsonb_array_length(cur.buf) >= $4
+                       WHERE jsonb_array_length(${retained("cur.buf")}) >= $4
                          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
                                           WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
-                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full,
-              EXISTS (SELECT 1 FROM cur WHERE NOT $2::jsonb ? 'derive' AND cur.delivered_count +
-                (SELECT count(*) FROM jsonb_array_elements(cur.buf) e WHERE NOT e ? 'derive') >= $5) AS exhausted`,
-      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS],
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full`,
+      [id, JSON.stringify(bounded), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, eventSourceCommit(bounded), EVENT_SOURCE_SEEN_MAX_KEYS],
     );
     const row = r.rows[0];
     if (row?.appended === true) return true;
     if (row?.full === true) recordEventWaiterBufferFull();
-    if (row?.exhausted === true) console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
     return false;
   }
 
@@ -1848,14 +1869,23 @@ async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
  * `valet.wakeups.bad_rows`, so one bad row never stops the whole sweep
  * (fix wave 2, M5). The count pages a human; the row stays for them.
  */
-function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T): T[] {
+const BAD_ROW_LOG_INTERVAL_MS = 5 * 60_000;
+
+function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T, logTimes?: Map<string, number>): T[] {
   const out: T[] = [];
   for (const raw of rows) {
     try {
       out.push(map(raw));
     } catch (err) {
       recordWakeupBadRow(table);
-      console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+      const key = `${table}:${JSON.stringify(raw.id)}`;
+      const now = Date.now();
+      if (logTimes) for (const [id, at] of logTimes) if (at + BAD_ROW_LOG_INTERVAL_MS <= now) logTimes.delete(id);
+      if (!logTimes?.has(key)) {
+        if (logTimes && logTimes.size >= 1024) logTimes.delete(logTimes.keys().next().value ?? "");
+        logTimes?.set(key, now);
+        console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+      }
     }
   }
   return out;

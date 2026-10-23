@@ -6,19 +6,43 @@
  * when a clause on a derived key matched one of its `sources`, and the
  * WakeWatcher calls `runDerive` for that digest before delivery. `runDerive`
  * is the one owner of the `valet_event_waiter_derive_total` counter: it
- * records exactly one result per call.
+ * records exactly one provider result per call. Context-resolution failures
+ * are recorded by the deriver before a plugin can run.
  */
 import { eq } from "drizzle-orm";
-import { DerivePermissionError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
+import { DerivePermissionError, DeriveRetryError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
-import { resolveInstallationApiToken, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { resolveInstallationApiToken, resolveInstallationRateLimitKey, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { toDigest } from "./waiter-match.js";
 
 export type RunDeriveResult =
   | { result: "event"; digest: EventMatchDigest }
   | { result: "null" }
-  | { result: "error"; error: unknown; consumeSource?: boolean };
+  | { result: "error"; error: unknown; consumeSource?: boolean; retryAfterMs?: number; madeProgress?: boolean };
+
+export type DeriveRetryReason = "jobs" | "timeout" | "rate" | "provider";
+
+/** Raw provider errors stay in logs. Only fixed phrases reach the ending message. */
+export function deriveRetryReason(error: unknown): DeriveRetryReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/rate.limit|cooldown/i.test(message)) return "rate";
+  if (/job details|job membership/i.test(message)) return "jobs";
+  if (/abort|timeout|timed out|\d+ ms/i.test(message)) return "timeout";
+  return "provider";
+}
+
+export function deriveDeadlineNote(retries: readonly { key: string; reason: DeriveRetryReason }[]): string {
+  const phrases: Record<DeriveRetryReason, string> = {
+    jobs: "GitHub job details were still loading.",
+    timeout: "The check took too long to finish.",
+    rate: "The service was limiting requests.",
+    provider: "The service could not confirm the result.",
+  };
+  const notes = retries.map(({ key, reason }) => `The wait could not confirm ${key} before its deadline. ${phrases[reason]}`);
+  const action = retries.every(({ key }) => key.startsWith("github.")) ? "Check the pull request, then wait again." : "Check the source, then wait again.";
+  return `${notes.join("\n")} ${action}`;
+}
 
 function findDerived(plugins: ValetPlugin[], key: string): DerivedEventDef | undefined {
   for (const plugin of plugins) {
@@ -84,16 +108,16 @@ export async function runDerive(
     return { result: "event", digest: toDigest(derived) };
   } catch (error) {
     record(key, "error");
-    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}) };
+    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}), ...(error instanceof DeriveRetryError ? { retryAfterMs: error.retryAfterMs, madeProgress: error.madeProgress } : {}) };
   }
 }
 
 /** Mints the org's app token for a GitHub owner, or null when none resolves. */
-export type GithubTokenFor = (orgId: string, owner: string | undefined) => Promise<string | null>;
+export type GithubTokenFor = (orgId: string, owner: string | undefined, forceRefresh?: boolean) => Promise<string | null>;
 
 /** The production `GithubTokenFor`: the org's GitHub App installation token for the owner. */
 export function githubInstallationTokenFor(deps: GitHubTokenDeps): GithubTokenFor {
-  return (orgId, owner) => resolveInstallationApiToken(deps, orgId, owner);
+  return (orgId, owner, forceRefresh) => resolveInstallationApiToken(deps, orgId, owner, forceRefresh);
 }
 
 /**
@@ -110,16 +134,18 @@ export function githubDeriveContext(
   subject: string,
   tokenFor: GithubTokenFor,
   fetchImpl: typeof fetch = fetch,
+  rateLimitKeyFor?: (orgId: string, owner: string | undefined) => Promise<string | null>,
 ): DeriveContext {
   const owner = /^github:([^/#@\s]+)/.exec(subject)?.[1]?.toLowerCase();
-  return { orgId, appToken: () => tokenFor(orgId, owner), fetch: fetchImpl };
+  return { orgId, appToken: (refresh) => refresh ? tokenFor(orgId, owner, true) : tokenFor(orgId, owner), fetch: fetchImpl,
+    ...(rateLimitKeyFor ? { rateLimitKey: () => rateLimitKeyFor(orgId, owner) } : {}) };
 }
 
 /**
- * The longest time the WakeWatcher waits for one derive call. One derive
- * can make about 22 sequential requests of up to 5 s each, and a pass
- * handles its rows one at a time. Past this, the call is an `error`, so
- * the source digest stays for the next tick.
+ * The longest time the WakeWatcher waits for one derive call. GitHub bounds
+ * membership reads by request count, concurrency, and an eight-second budget.
+ * Completed membership pages survive retries. A call past this deadline is
+ * an error, so its source stays buffered for the next tick.
  */
 export const EVENT_DERIVE_DEADLINE_MS = 20_000;
 
@@ -136,6 +162,8 @@ export interface EventWaiterDeriverDeps {
   deadlineMs?: number;
   /** Overrides `recordEventDerive`. Tests only. */
   record?: (key: string, result: EventDeriveResult) => void;
+  /** Clock for installation-wide provider cooldowns. */
+  now?: () => number;
 }
 
 /**
@@ -143,13 +171,16 @@ export interface EventWaiterDeriverDeps {
  * 1). It bounds the whole call with one deadline: the deadline aborts the
  * context's requests, and a derive that ignores the abort still returns
  * `error` at the deadline. `runDerive` stays the one recorder of
- * `valet_event_waiter_derive_total`.
+ * `valet_event_waiter_derive_total` for provider outcomes.
  */
 export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDerive {
   const deadlineMs = deps.deadlineMs ?? EVENT_DERIVE_DEADLINE_MS;
+  const now = deps.now ?? Date.now;
+  const installationCooldowns = new Map<string, number>();
   return async (row, digest) => {
     const subject = row.subjects?.[0];
-    if (subject === undefined || digest.derive === undefined) {
+    const deriveKey = digest.derive;
+    if (subject === undefined || deriveKey === undefined) {
       return { result: "error", error: new Error(`Waiter ${row.id} has no key, or digest ${digest.dedupeKey} has no derive key.`) };
     }
     const orgId = await deps.sessionOrg(row.sessionId);
@@ -165,9 +196,33 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
         resolve({ result: "error", error });
       }, deadlineMs);
     });
-    const ctx = deps.contextFor(orgId, digest.derive, subject, controller.signal);
+    const ctx: DeriveContext = { ...deps.contextFor(orgId, deriveKey, subject, controller.signal), signal: controller.signal };
+    // Resolve identity inside the overall deadline. Never use a rotating token as a key.
+    const run = async (): Promise<RunDeriveResult> => {
+      const installation = await ctx.rateLimitKey?.();
+      // Retired installations need no future lookup to release expired entries.
+      for (const [key, until] of installationCooldowns) if (until <= now()) installationCooldowns.delete(key);
+      const checkCooldown = () => {
+        if (!installation) return;
+        const until = installationCooldowns.get(installation) ?? 0;
+        if (until > now()) throw new DeriveRetryError("The GitHub installation is rate limited. Retry after the cooldown.", until - now());
+        installationCooldowns.delete(installation);
+      };
+      const bounded: DeriveContext = installation ? { ...ctx,
+        appToken: async (refresh) => { checkCooldown(); return ctx.appToken(refresh); },
+        fetch: async (input, init) => { checkCooldown(); return ctx.fetch(input, init); },
+        rateLimited(retryAfterMs) {
+          installationCooldowns.set(installation, Math.max(installationCooldowns.get(installation) ?? 0, now() + retryAfterMs));
+          ctx.rateLimited?.(retryAfterMs);
+        },
+      } : ctx;
+      return runDerive(deps.plugins, orgId, digest, subject, bounded, deps.record);
+    };
     try {
-      return await Promise.race([runDerive(deps.plugins, orgId, digest, subject, ctx, deps.record), deadline]);
+      return await Promise.race([run().catch((error): RunDeriveResult => {
+        (deps.record ?? recordEventDerive)(deriveKey, "error");
+        return { result: "error", error };
+      }), deadline]);
     } finally {
       clearTimeout(timer);
     }
@@ -198,7 +253,7 @@ export function productionEventWaiterDeriver(deps: { db: AppDb; plugins: ValetPl
     },
     contextFor(orgId, key, subject, signal) {
       const bounded = abortableFetch(fetch, signal);
-      if (key.startsWith("github.")) return githubDeriveContext(orgId, subject, tokenFor, bounded);
+      if (key.startsWith("github.")) return githubDeriveContext(orgId, subject, tokenFor, bounded, (org, owner) => resolveInstallationRateLimitKey(deps.githubTokenDeps, org, owner));
       return { orgId, appToken: async () => null, fetch: bounded };
     },
   });

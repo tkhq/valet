@@ -444,9 +444,9 @@ export async function resolveOrgPatApiToken(deps: GitHubTokenDeps, orgId: string
  * malformed `github_app` row. The wrapped message names the failure class
  * and carries the underlying message (which itself never includes secret or
  * response-body material — only a status code at most). */
-async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string): Promise<string | null> {
+async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string, forceRefresh = false): Promise<string | null> {
   try {
-    return await mintInstallationToken(deps, orgId, accountLogin);
+    return await mintInstallationToken(deps, orgId, accountLogin, forceRefresh);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new GitHubAuthError(`installation token minting failed for ${accountLogin}: ${detail}`);
@@ -457,13 +457,13 @@ async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLog
  * installation exists. `null` when there are zero or more than one — the
  * anonymous org-token path only auto-applies when the choice is
  * unambiguous. */
-async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string): Promise<string | null> {
+async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string, forceRefresh = false): Promise<string | null> {
   const rows = await deps.db
     .select()
     .from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
   if (rows.length !== 1) return null;
-  return mintInstallation(deps, orgId, rows[0].accountLogin);
+  return mintInstallation(deps, orgId, rows[0].accountLogin, forceRefresh);
 }
 
 /**
@@ -479,17 +479,27 @@ export async function resolveInstallationApiToken(
   deps: GitHubTokenDeps,
   orgId: string,
   repoOwner?: string,
+  forceRefresh = false,
 ): Promise<string | null> {
   await ensureInstallationsSynced(deps, orgId);
   if (repoOwner) {
-    const token = await mintInstallation(deps, orgId, repoOwner);
+    const token = await mintInstallation(deps, orgId, repoOwner, forceRefresh);
     // `null` alone means "no installation for this owner" — the one case
     // the sole-installation fallback is for. Any other value, even an
     // empty string, is a mint result and must surface, not be masked by
     // silently trying a different installation.
     if (token !== null) return token;
   }
-  return resolveSoleInstallationToken(deps, orgId);
+  return resolveSoleInstallationToken(deps, orgId, forceRefresh);
+}
+
+/** Rate-limit identity follows the same owner/sole fallback as installation tokens. No token is exposed. */
+export async function resolveInstallationRateLimitKey(deps: GitHubTokenDeps, orgId: string, owner?: string): Promise<string | null> {
+  await ensureInstallationsSynced(deps, orgId);
+  const rows = await deps.db.select({ installationId: githubInstallations.installationId, accountLogin: githubInstallations.accountLogin }).from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+  const selected = rows.find((row) => row.accountLogin.toLowerCase() === owner?.toLowerCase()) ?? (rows.length === 1 ? rows[0] : undefined);
+  return selected ? `github:installation:${selected.installationId}` : null;
 }
 
 /** Why an App installation would not answer a team `auto` read. */

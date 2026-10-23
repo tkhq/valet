@@ -29,7 +29,7 @@ import type {
   WriteFence,
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
-import { boundEventDigest } from "../../wakeups/digest.js";
+import { eventSourceCommit, boundEventDigest } from "../../wakeups/digest.js";
 import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -367,7 +367,7 @@ export class InMemorySessionStore implements SessionStore {
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
           (w.status === "running" &&
             w.kind === "event" &&
-            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
+            ((w.eventBuffer?.length ?? 0) > 0 || (w.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -409,14 +409,19 @@ export class InMemorySessionStore implements SessionStore {
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
     if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
     if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
-      console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    const collapsed = bounded.derive === undefined ? [] : buffer.filter((source) =>
+      source.derive === bounded.derive && eventSourceCommit(source) === eventSourceCommit(bounded));
+    // Serialized admission order is the monotonic sequence. Every new source
+    // replaces the trigger, even when provider timestamps tie or arrive out of order.
+    const retained = buffer.filter((source) => !collapsed.includes(source));
+    if (retained.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
     }
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt }));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...retained, bounded],
+      ...(collapsed.length > 0 ? { eventSourceSeen: [...(w.eventSourceSeen ?? []), ...collapsed.map((source) => source.dedupeKey)].slice(-EVENT_SOURCE_SEEN_MAX_KEYS) } : {}), updatedAt }));
     return true;
   }
 

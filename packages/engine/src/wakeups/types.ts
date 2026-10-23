@@ -98,6 +98,7 @@ export type WakeupCause =
   | "pid_missing"
   | "sandbox_unavailable"
   | "rate"
+  | "output_cap"
   | "fired";
 
 export interface Wakeup {

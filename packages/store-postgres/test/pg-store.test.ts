@@ -57,6 +57,62 @@ function corrupter(db: PgDb): (_store: unknown, id: string) => Promise<void> {
   };
 }
 
+/** Bad persisted text must not prevent a different kind of wakeup from being read. */
+function runDueScanSafetyTests(factory: () => Promise<PgSessionStore>, db: PgDb): void {
+  it.each(["not json", "{}", "null", '"scalar"', '["\\u0000"]'])("isolates malformed event_seen %s during the global due scan", async (seen) => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: `bad_${seen}`, kind: "event", status: "running", deadlineAt: 5 });
+    await store.createWakeup({ ...base, id: "good_timer", kind: "timer", status: "pending", fireAt: 5 });
+    await db.query(`UPDATE engine_wakeups SET event_seen = $1 WHERE id = $2`, [seen, `bad_${seen}`]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const due = await store.listDueWakeups(10, 10);
+      expect(due.rows.map((row) => row.id)).toEqual(["good_timer"]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("bad_"), expect.anything());
+    } finally { errors.mockRestore(); }
+  });
+
+  it("includes the 12289-byte cap boundary for 4096 empty seen keys", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", kind: "event" as const, status: "running" as const, reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, deadlineAt: 1000 };
+    await store.createWakeup({ ...base, id: "at_boundary" });
+    await store.createWakeup({ ...base, id: "below_boundary" });
+    const seen = JSON.stringify(Array.from({ length: 4096 }, () => ""));
+    expect(Buffer.byteLength(seen)).toBe(12289);
+    await db.query("UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'at_boundary'", [seen]);
+    await db.query("UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'below_boundary'", [JSON.stringify(Array.from({ length: 4095 }, () => ""))]);
+    expect((await store.listDueWakeups(10, 10)).rows.map((row) => row.id)).toEqual(["at_boundary"]);
+  });
+
+  it("advances through an empty candidate page to a healthy due timer", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: "large_idle_event", kind: "event", status: "running", deadlineAt: 1000, eventSeen: ["x".repeat(3 * 4096 + 1)] });
+    await store.createWakeup({ ...base, id: "due_timer", kind: "timer", status: "pending", createdAt: 2, fireAt: 5 });
+    const first = await store.listDueWakeups(10, 1);
+    expect(first.rows).toEqual([]);
+    expect(first.next).toEqual({ createdAt: 1, id: "large_idle_event" });
+    expect((await store.listDueWakeups(10, 1, first.next ?? undefined)).rows.map((row) => row.id)).toEqual(["due_timer"]);
+  });
+  it("does not decode small corrupt idle histories, and dedupes logs for due corrupt histories", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: "bad_idle", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: "due_timer", kind: "timer", status: "pending", fireAt: 5 });
+    await db.query("UPDATE engine_wakeups SET event_seen = 'invalid idle' WHERE id = 'bad_idle'");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.listDueWakeups(10, 10)).rows.map((row) => row.id)).toEqual(["due_timer"]);
+      expect(log).not.toHaveBeenCalled();
+      await store.listDueWakeups(1000, 10);
+      await store.listDueWakeups(1001, 10);
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
+}
+
 describe("PgSessionStore (PGlite)", () => {
   const pglite = new PGlite();
   const db = pgDbFromPglite(pglite);
@@ -68,6 +124,20 @@ describe("PgSessionStore (PGlite)", () => {
 
   runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
+
+  runDueScanSafetyTests(factory, db);
+
+  it("maps future terminal causes to a generic cause instead of hiding the row", async () => {
+    const store = await factory();
+    await store.createWakeup({ id: "future", sessionId: "s", threadId: "t", kind: "event", status: "done", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, endedAt: 2 });
+    await db.query(`UPDATE engine_wakeups SET cause = 'future_cap' WHERE id = 'future'`);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await store.getWakeup("future")).toMatchObject({ status: "done", cause: "fired" });
+      expect(await store.listWakeups("s")).toHaveLength(1);
+      expect(warning).toHaveBeenCalledWith("store-postgres: mapped unknown terminal wakeup cause to fired", { id: "future", cause: "future_cap" });
+    } finally { warning.mockRestore(); }
+  });
 
   it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
     const store = await factory();
@@ -208,4 +278,5 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PgSessionStore (docker-pg)", ()
 
   runSessionStoreContract("PgSessionStore (docker-pg)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (docker-pg)", { factory });
+  runDueScanSafetyTests(factory, db);
 });

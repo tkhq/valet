@@ -54,3 +54,8 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
   if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
   return out;
 }
+
+/** The commit subject of a source digest, or an empty string when it has none. */
+export function eventSourceCommit(digest: EventMatchDigest): string {
+  return digest.subjects.find((subject) => /@[0-9a-f]+$/i.test(subject)) ?? "";
+}

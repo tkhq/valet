@@ -1547,10 +1547,12 @@ describe("team GitHub template repository prerequisites", () => {
   it.each([
     { status: 200, body: { id: 1, suspended_at: null }, ok: true },
     { status: 404, body: {}, ok: false },
-    { status: 503, body: {}, ok: false },
+    { status: 503, body: {}, ok: false, unknown: true },
+    { status: 200, body: {}, ok: false, unknown: true, failure: "timeout" },
+    { status: 200, body: {}, ok: false, unknown: true, failure: "network" },
     { status: 200, body: { id: 1, suspended_at: "2026-09-01" }, ok: false },
-    { status: 200, body: {}, ok: false },
-  ])("checks the exact App installation and leaves no rows on refusal: $status $body", async ({ status, body, ok }) => {
+    { status: 200, body: {}, ok: false, unknown: true },
+  ])("checks the exact App installation and leaves no rows on refusal: $status $body", async ({ status, body, ok, unknown, failure }) => {
     await setup();
     let checks = 0;
     const dependencies = deps(bundledPlugins);
@@ -1558,6 +1560,8 @@ describe("team GitHub template repository prerequisites", () => {
       checks++;
       expect(String(url)).toBe("https://api.github.com/repos/acme/platform/installation");
       expect(new Headers(init?.headers).get("Authorization")).toMatch(/^Bearer ey/);
+      if (failure === "timeout") throw new DOMException("Request timed out", "TimeoutError");
+      if (failure === "network") throw new Error("Network unavailable");
       return Response.json(body, { status });
     } };
     const list = await listWorkflowTemplateSummaries(dependencies, OWNER, { teamId: "review-team" });
@@ -1569,6 +1573,7 @@ describe("team GitHub template repository prerequisites", () => {
       teamId: "review-team", inputs: { repository: "acme/platform", mention: "@review" },
     });
     expect(result.ok).toBe(ok);
+    if (unknown) expect(result).toMatchObject({ error: "Could not verify organization GitHub App repository access. Retry before installing this template." });
     expect(checks).toBe(1);
     expect(await db.select().from(workflowDefinitions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(eventSubscriptions)).toHaveLength(ok ? 1 : 0);

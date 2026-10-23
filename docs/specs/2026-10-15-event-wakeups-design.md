@@ -321,31 +321,86 @@ subject.
 
 1. Read the pull request. If the source event's SHA differs from the
    current head SHA, return `null`.
-2. Read check runs first, then latest status contexts, suites, and workflow runs.
-   Read all pages needed to select the current records.
-3. If any check run has a status other than `completed`, return `null` immediately.
-   This case makes no suite, workflow, or status reads.
-   If any latest status context is not `success`, `failure`, or `error`, return `null`.
-   Ignore suites with `latest_check_runs_count = 0`.
-   GitHub creates these suites for Apps that start no checks and Actions workflows skipped by filters.
-   Select the latest suite per App before computing terminality or failure.
-   Suite ids identify the newest suite, independent of response order.
-   Each selected suite must have status `completed`.
-   Workflow terminality applies to events `pull_request` and `pull_request_target`.
-   Select the latest run per workflow across all pages.
+2. Read check runs, workflow runs, and latest status contexts across all visible pages.
+   Suites never contribute failure or pending state. A queued zero-run suite adds no work.
+   The derive does not need a suites API read.
+3. Select the latest workflow run per `(workflow_id, event)` across all pages.
    Run number, run id, and attempt number order the workflow runs.
-   A superseded cancelled run or older attempt cannot change the selected result.
-   A push-triggered deploy waiting for environment approval does not block this workflow read.
-   All visible check runs still participate, including checks from other workflow events.
-   Check runs and latest contexts stop at the first nonterminal entry.
-   Suites and workflows need all pages before selecting the latest records.
+   Push and PR runs cannot supersede each other.
+   Only `schedule` and `workflow_dispatch` are excluded by event name.
+   Every other event on the head SHA has its own workflow/event key.
+   This includes `pull_request_review` and `pull_request_target` on that SHA.
+   `/actions/runs?head_sha=` returns one row per run id, with its latest `run_attempt`.
+   Read jobs only when a non-passing Actions check is unmapped or could be dropped.
+   Only superseded runs, schedule/dispatch runs, and runs with `run_attempt > 1` need membership reads.
+   Every job of a current attempt-1 run participates, so that run needs no jobs read.
+   Read `/actions/runs/{run_id}/jobs?filter=all` with four workers and an eight-second membership budget.
+   Each derive permits at most 80 GitHub requests, including at most 16 jobs pages.
+   Check and workflow pagination each permit 20 pages, leaving capacity for jobs even at both limits.
+   Reserve 22 request slots for remaining status pages, the final head read, and a token refresh.
+   Pages within one run can load in parallel after its first page establishes the total count.
+   Without `total_count`, a full page schedules the next page. A short page establishes the last page.
+   Stop scheduling when all result-relevant non-passing or pending checks have known mappings.
+   Already-started page reads can finish. Do not read the rest of an irrelevant matrix.
+   If incomplete membership could change the result, return a retryable error instead of a terminal event or `null`.
+   An unclassified pending check can change completion. An unclassified failed check can change success into failure.
+   Keep such sources buffered so the next derive resumes cached pages.
+   Unclassified checks can remain only when they cannot change the result.
+   A proven failure makes another unclassified failure irrelevant, but an unclassified pending check still requires retry.
+   Cache immutable job-to-run/attempt mappings for both active and completed runs.
+   Key entries by org, API host, repository, run id, and selected attempt.
+   The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
+   Successful pages accumulate across derives. Resume at the first missing page, not page one.
+   An active run can append jobs. A full traversal proves absence only for checks that existed before that traversal started.
+   Record the highest check id and scan start time for that proof.
+   Reuse absence proofs for those check ids, even while the run stays active.
+   For a newer id or later `started_at`, refresh the tail before treating that check as an unmapped reporter.
+   Refresh missing tails in least-recently-read order. Other entries retain their completed traversals across derives.
+   When an active run completes, its active snapshot cannot prove absence for the completed run.
+   Refresh its tail before accepting a completed snapshot. Keep the learned identities and earlier pages.
+   When `total_count` is present, completion also requires that many unique mapped jobs.
+   A completed snapshot requires a read made after run completion, with a count that matches the cached mappings.
+   A count mismatch remains retryable. It must leave a page eligible for another read.
+   Never discard learned identities when refreshing a tail.
+   Runs with the oldest read sequence go first, so earlier active matrices cannot starve later runs.
+   Process restart clears all mappings, page progress, and in-flight loads. Classification then starts again.
+   Concurrent readers share each page load. Only its owner can clear the matching in-flight promise.
+   Cache successful pages by unique page number. Completion requires contiguous successful pages through the last page or total count.
+   A failed page leaves the entry incomplete and stays eligible for the next read.
+   A healthy follower replaces a failed owner load after owner-local abort, timeout, or budget exhaustion.
+   Provider-wide failures still apply to both readers.
+   The jobs response contains all attempts. Parse the final path segment of `check_run_url` for its check id.
+   Fall back to the job's `id` when that URL is absent or malformed.
+   Map each check id to its run and `run_attempt`.
+   Drop an Actions check only when that mapping proves one of these conditions:
+   - Its attempt is older than its run's latest attempt.
+   - Its run is superseded under `(workflow_id, event)`.
+   - Its run uses `schedule` or `workflow_dispatch`.
+   Keep every unmapped Actions check, including reporters in superseded, dispatch, or separate suites.
+   Neither suite ids, job names, nor suite conclusions prove check membership.
+   Each Actions workflow run has its own suite.
+   API reporters can attach to any github-actions suite on the SHA.
+   A shared suite therefore does not prove that a reporter is a job of an excluded or superseded run.
+   See [GitHub's Checks API guide](https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-checks).
+   Rerun attempts also retain the run's suite id. Suite identity cannot identify the selected attempt.
+   An all-green PR makes no jobs calls.
+   A pending check in the current suite of an active relevant attempt-1 workflow can return `null` after three reads.
+   This conservative early return never drops a check. Completion still requires check-based selection.
+   For non-Actions checks, select the latest check per `(app.id, name)` across all suites.
+   Finished checks use `completed_at`, then id. Missing completion times fall back to id.
+   Distinct older check names still participate.
+   Return `null` when any selected check has not completed.
+   A workflow awaiting approval without a check cannot establish pending state by itself.
+   A labeled retrigger that skips every job can supersede an earlier synchronize run's mapped jobs.
+   With no remaining checks or status contexts, return `null`.
+   With other successful selected checks, return `success`.
+   Return `null` when any latest status context is not `success`, `failure`, or `error`.
    Terminality is independent of the combined status result.
-4. Compute status `failure` when any visible conclusion is `failure`,
-   `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
+4. Compute `failure` from selected check-run conclusions of `failure`, `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
    A latest status context of `failure` or `error` also gives `failure`.
-   Otherwise compute status `success`.
-   Re-read the pull request head immediately before returning the event.
-   If the head changed, return `null`.
+   Never compute failure from suite or workflow conclusions.
+   Otherwise compute `success`.
+   Re-read the pull request head before returning the event. If it changed, return `null`.
    Include the evaluated commit as `head_sha` in the event and delivered digest.
 5. The derived `dedupeKey` is
    `derived:checks_completed:<owner>/<repo>@<sha>:<status>:<latest>`.
@@ -354,8 +409,7 @@ subject.
    one. A CI re-run on the same SHA finishes later, so it gets a new key
    and the waiter is not blocked by the earlier run's seen key.
 
-Completion describes check runs, check suites, workflow runs, and latest status
-contexts visible at derivation time. GitHub can create new work after these
+Completion describes selected check runs and latest status contexts visible at derivation time. GitHub can create new work after these
 reads. The event does not guarantee that future checks will never appear.
 Consumers can compare `head_sha` with the current pull request head.
 
@@ -368,11 +422,55 @@ deadline ends that wait.
 |---|---|
 | Source SHA is an old head | `null` |
 | One check run `in_progress` | `null` |
-| One completed check and a queued suite with runs | `null` |
-| One completed check and a queued PR-triggered workflow | `null` |
+| One completed check and a queued suite without a pending check | status `success` |
+| One completed check and a queued workflow without a pending check | status `success` |
 | One completed check and a queued zero-run App suite | status `success` |
 | Actions suite with zero runs after workflow filters skip every job | ignored |
-| Unrelated push deploy waiting for environment approval | ignored |
+| Selected push workflow with no checks, waiting for approval; another check passed | status `success` |
+| Current push or PR deploy has a `waiting` check | `null` |
+| Newer push passed, current PR run still running | `null` |
+| Current push failed, current PR run passed, same workflow | status `failure` |
+| Current PR failed, newer push passed, same workflow | status `failure` |
+| Newer scheduled or manual run, PR run still running | `null` |
+| Job metadata proves an old cancelled job is superseded, new job passed | status `success` |
+| Failed Checks-API reporter shares a superseded or dispatch suite | status `failure` |
+| Unmapped Actions reporter check failed or pending | status `failure` or `null` |
+| Head-SHA `pull_request_review` failed, `pull_request` passed | status `failure` |
+| Head-SHA `pull_request_target` in progress | `null` |
+| Labeled retrigger skips every job after synchronize failure, no other checks | `null` |
+| Same labeled retrigger, other selected checks succeeded | status `success` |
+| Same-suite rerun, `filter=latest` exposes only the passed new attempt | status `success`, no jobs reads |
+| Defensive changed-suite snapshot, jobs map older failed and current passed attempts | status `success` |
+| 28 completed runs and 900 ms jobs latency | delivers before the 20-second deadline |
+| 1601 jobs, historical failure on page 17 | first derive retains source for retry, second derive returns success |
+| Two concurrent readers, 450 jobs, transient failure on page 5 | no partial terminal result, repaired page resumes to success |
+| Two concurrent readers, 251 jobs, historical failure on page 3 | both return success using three unique page reads |
+| Active excluded or superseded run, 1701 jobs, pending job on page 17 | first derive retries, second resumes at page 17 and returns success |
+| Finished run after 17 active matrices | next derive prioritizes unread runs and classifies the failure |
+| Active run read twice | second derive reuses learned immutable mappings |
+| 17 active dispatch runs with one queued check each | terminal success within two derives while all runs stay active |
+| Active 3000-job dispatch run, queued checks on pages 1, 11, 21 | terminal success within two derives, without reading the irrelevant tail |
+| Active 1000-job run, queued check each page, 900 ms jobs reads | parallel reads produce terminal success within one derive |
+| At least 27 check/workflow pages | jobs retain request capacity and classification progresses |
+| Cache owner aborts or exhausts its budget, healthy follower | follower starts its own load and returns success |
+| Deadline while classification is retrying | ending signal names the derive key and last retry reason |
+| Active dispatch snapshot complete, then run finishes with an added failed job | tail refresh classifies the new job, not false failure |
+| 17 active dispatch runs, unmapped failed reporter | second derive returns failure, without refreshing already-proven absences |
+| New check id or later started_at after an active absence proof | tail refresh classifies the new check |
+| Full jobs page without total_count | next page is read |
+| Completed snapshot count mismatch, then repaired response | retry retains learned mappings, repaired read settles |
+| Repeated same-commit sources without progress | source resets happen at most once per minute, not each second |
+| Deadline after loading, abort, or derive timeout errors | fixed copy names key, hides internal errors, and gives one action |
+| Failing check in a safe current attempt-1 suite | no jobs reads |
+| 4096 empty seen keys, 12289 bytes | due scan includes the capped row |
+| Expired installation no longer queried | another installation's derive prunes its expired cooldown |
+| Unclassified failure with a proven failure elsewhere | failure, because classification cannot change the result |
+| Unclassified pending check, even with a proven failure | retry, because classification can change completion |
+| Mixed-precision completion arrives during an earlier derive returning `null` | new source stays, next pass delivers |
+| Non-Actions App: older suite failed `lint`, newer suite passed a different `test` | status `failure` |
+| Non-Actions App: same name across suites, latest completion passed | status `success` |
+| Distinct selected workflow/events share a job name | every workflow/event participates |
+| Two independent Actions workflows share an App; one selected check failed | status `failure` |
 | Head changes during the reads | `null` |
 | Combined failure with a pending latest status context | `null` |
 | Pending context on a later page | `null` |
@@ -423,10 +521,22 @@ Each write method is one statement.
   digest and sets `updatedAt`. It appends only to a `running` row with
   `kind = "event"`.
   It refuses a `dedupeKey` in `event_buffer`, `event_seen`, or `event_source_seen`.
-  It refuses when the buffer holds 200 digests.
+  Before applying the 200-digest cap, collapse sources for the same `(waiter, derive, commit)`.
+  Keep the latest admitted source. Serialized admission order is its monotonic sequence.
+  Provider timestamps are metadata, not admission gates, even when precision differs or events arrive out of order.
+  A new trigger must survive removal of a source already being derived.
+  Record replaced source keys only in bounded `event_source_seen`, never in delivered history.
+  Different commits, derive keys, and direct matches remain separate.
+  Collapse and append share the same atomic write, including the source replay update.
+  One persistently failing group cannot fill the buffer and block direct matches or a new head.
+  Refuse when the retained buffer already holds 200 digests.
   It counts that refusal in `valet_event_waiter_buffer_full_total`.
   A waiter admits at most 4096 delivered output keys, including buffered outputs reserved for delivery.
-  At this budget, append refuses new outputs and logs the waiter id with a re-arm instruction.
+  At this budget, append refuses new outputs without logging each event.
+  Once all reserved outputs have been sent, the WakeWatcher ends the row with cause `output_cap`.
+  It sends one `event.ended` signal that tells the agent to re-arm.
+  Its terminal compare-and-swap owns the single log and `valet.wakeups.total` count with cause `output_cap`.
+  The match receipt records `output_cap` when an append reserves the last slot or hits the limit.
   Source digests can still be consumed without spending this output budget.
   The store retains every delivered key instead of evicting one to admit another.
   Existing rows above the budget keep their keys but cannot admit more outputs.
@@ -442,11 +552,43 @@ Each write method is one statement.
   It refuses removal that would add delivered keys beyond the budget.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
-  empty or whose `deadlineAt` has passed.
+  empty, whose delivered-key budget is exhausted, or whose `deadlineAt` has passed.
+  The global SQL query prefilters event candidates without parsing persisted text.
+  Select nonempty buffer text, expired deadlines, or seen text of at least `3 * 4096 + 1` bytes.
+  Even 4096 empty JSON string keys require that many bytes, so no capped row is excluded.
+  Small corrupt idle histories stay unread until the row otherwise becomes due.
+  TypeScript applies the buffer, cap, and deadline predicates after per-row decoding.
+  Invalid JSON, wrong shapes, and NUL-containing seen keys take the bad-row logging path.
+  The cursor uses raw candidate rows, including corrupt rows and valid events that are not due.
+  A page can have no returned rows and still have a next cursor.
+  Large below-cap histories can be false-positive candidates, but canonical empty idle rows are not loaded.
+  Due-row decode failures still count each time. Their log is limited to once per row per five minutes.
+  The log cache retains at most 1024 row ids per store instance.
+  No schema change or count backfill is needed.
+  The query adds no PostgreSQL requirement over `dev-v2`. The supported minimum is PostgreSQL 14.
+  It uses neither `IS JSON` nor JSONB casts in the global due query.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
+The replay risk is limited to waiters with more than 256 delivered keys.
 New pods never trim delivered keys.
-Drain old WakeWatchers before new pods handle event waiters to preserve replay protection during rollout.
+The signal card labels `output_cap` as "output limit reached".
+Drain old API pods before new pods write `output_cap` rows.
+Old parsers reject `output_cap` and can hide these waiters from list and history reads.
+This release maps unknown causes on terminal rows to `fired` and logs the id and original cause.
+Future cause additions stay readable.
+It still rejects unknown causes on active rows as invalid data.
+This parser change cannot repair already-running old pods.
+Before rollback to a release without tolerant parsing, stop new writers.
+Map persisted terminal `output_cap` causes to `fired` before starting the old release:
+
+```sql
+UPDATE engine_wakeups SET cause='fired' WHERE cause='output_cap' AND status IN ('done','cancelled','expired','lost');
+```
+
+The chart uses `strategy: Recreate`, not a rolling update.
+For any manual overlapping deployment, stop old pods before new writers start.
+The original cause remains in terminal logs and metrics.
+Draining old watchers also preserves replay protection during rollout.
 Source removal on new pods writes only `event_source_seen` and leaves delivered keys unchanged.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
@@ -511,10 +653,21 @@ D1 errata (Task 11):
   the rest.
 - R2 checks owner coverage with `installationResolvesFor` and `strictOwner`.
   It also checks the exact repository with the App-authenticated installation read.
-  A non-404 failure or timeout gives unknown coverage and an arm warning.
+  A non-404 failure or timeout gives explicit `unknown` coverage and an arm warning.
+  Team template installs use a five-second installation timeout and keep the "Could not verify" retry hint.
+  Arm uses a 2.5-second installation timeout within its four-second provider bound.
+  Caches separate reads with different timeout budgets.
   An org with no GitHub App gets R7.
 - GitHub arm checks read granted events and permissions from the repository installation endpoint.
-  The host caches each repository's configuration for 60 seconds.
+  Coverage and settings share one cached repository installation read for 60 seconds.
+  The requested App settings read runs in parallel with that installation read.
+  Coverage, configuration, subject readability, and self-id reads also run in parallel.
+  The default provider timeout is four seconds.
+  Service connection can take four seconds before these reads start.
+  Parallel self-id reads can take eight seconds, including their credential read.
+  A negative settings refresh adds at most four seconds after the initial parallel reads.
+  The worst-case arm bound is 12 seconds with these default timeouts.
+  This bound excludes synchronous parsing and persistence after validation.
   Before refusing missing settings, arm bypasses this cache and reads the installation again.
   Requested settings from `GET /app` explain a pending owner approval, not readiness.
   The refusal names pending approval when requested settings exceed the installation grants.
@@ -522,7 +675,12 @@ D1 errata (Task 11):
   Globs include direct catalog entries only, because glob matches do not trigger derivation.
   `checks_completed` needs `check_run`, `check_suite`, `workflow_run`, and `status`.
   These families need read access to `checks`, `actions`, and `statuses`.
-  A known missing event or permission refuses the wait.
+  Reading the PR head also needs `pull_requests`: read.
+  For `checks_completed`, a missing `status` webhook event warns instead of refusing.
+  The warning says: "If a commit status finishes last, the wait ends only after another check event arrives or the deadline passes. Add the Status event to the App."
+  Statuses read permission remains mandatory because an unreadable context can still be pending or failed.
+  A direct `github.status` clause still requires the Status event, even next to `checks_completed`.
+  Other known missing events or permissions refuse the wait.
   The refusal names the missing setting.
   It directs the person to update the App's "Permissions & events".
   An org owner must approve those changes.
@@ -611,14 +769,44 @@ step that returns early for an event that no subscription matched.
    The nudge runs a light pass over those rows only (Part F).
 7. Append a receipt stage `waiter_match` with separate counts for newly
    buffered direct matches and derivation sources.
-   A successful lookup with no candidates records outcome `no_candidates`.
+   A successful lookup with no candidates adds no matching stage.
+   This choice avoids a receipt write for every webhook and needs no extra org lookup.
    An evaluation or append failure records outcome `failed`.
    A partial evaluation retains the successful append counts in that failed stage.
    The stage holds metadata only.
    The WakeWatcher logs each later derivation outcome as `event`, `null`, or `error`.
    Each log names the waiter id and source dedupe key.
    Permission-denied derivations log `error` and consume the source.
-   Rate limits and transient read errors retain the source for retry.
+   Rate limits retain the source with exponential backoff, starting at 60 seconds and doubling to a 15-minute cap.
+   A `Retry-After` header or exhausted primary `x-ratelimit-reset` deadline is a minimum, even beyond that cap.
+   Any error with `Retry-After`, HTTP 429, or a secondary-limit/abuse HTTP 403 sets an installation-wide cooldown.
+   Resolve its identity from the actual installation id, including the sole-installation fallback, not the repository or token.
+   Every group and waiter using that installation checks the deadline before deriving and before each provider request.
+   A response sets the deadline before another in-flight group starts its next read.
+   Other installations remain independent. Success and `null` results never clear an installation deadline.
+   The shared deadline lives in the API deriver. Restarting the API clears this transient throttle.
+   Each derive removes expired installation deadlines, including installations no longer requested.
+   A 401 refreshes the cached installation token and retries the request once.
+   Concurrent forced refreshes share one in-flight mint per installation.
+   Repeated 401 responses keep the source with backoff starting at one second and doubling to 15 minutes.
+   Backoff is keyed by waiter, derive key, and source commit subject.
+   A null or successful result for another commit cannot clear its retry deadline.
+   Success or a permanent error resets only that group's backoff.
+   When a newly observed source commit arrives, re-derive stale groups immediately despite their generic backoff.
+   Removing a foreign group alone does not reset backoff. Installation cooldowns still apply.
+   A retry that learns mappings resets generic backoff to one second. Provider cooldowns still apply.
+   A new source for the same commit can shorten generic cooldown to at most one second, once per minute.
+   Repeated source arrivals cannot extend that shortened deadline or repeatedly reset no-progress backoff.
+   Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
+   Restart also clears membership mappings and page progress. It does not preserve a pagination cursor.
+   If the waiter reaches its deadline during retries, its ending signal names the derive key and a fixed retry phrase.
+   Retry phrases cover loading jobs, timeouts, rate limits, and other provider failures.
+   Raw errors stay in logs. The ending body replaces the default deadline copy and gives corrective action once.
+   Every other derive error also retains the source with exponential backoff, starting at one second and capped at 15 minutes.
+   This includes 5xx responses, timeouts, malformed payloads, and pagination safety limits.
+   Pagination-limit errors remain retryable because later snapshots or head changes can resolve them.
+   Consuming them would discard a completion source without a terminal or permission result.
+   Each attempt logs `error`. Repeated passes and nudges respect the same deadline.
    Source digests carry no receipt id, so these outcomes do not update receipts.
 
 Claims (`2026-10-16-delivery-threads-and-claims-design.md`, Part C)
@@ -668,7 +856,7 @@ subscription outcome or fail ingestion. The matcher increments
 *Depends on: Parts B, C, and E.*
 
 The WakeWatcher processes running event waiters with a non-empty
-`event_buffer`. A full pass handles them after the process, watch, and
+`event_buffer`, an exhausted output budget, or an expired deadline. A full pass handles them after the process, watch, and
 timer rows, so a slow derive never delays those rows. A nudge from ingest
 runs a light pass: it reads the nudged waiters by id and handles only
 those. It lists no due rows, probes no sandbox, and does no lease work.
@@ -692,7 +880,9 @@ The light pass never overlaps a full pass.
 2. Once mode: CAS the row from `running` to `done` with cause `fired`. Then
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
-3. Stream mode: CAS the row's event count, remove the digests it will send
+3. Stream mode: after the delivered-key budget is exhausted, end with cause `output_cap`.
+   Submit one `event.ended` signal with the re-arm instruction.
+   Otherwise CAS the row's event count, remove the digests it will send
    with `removeEventMatches`, then submit one `event.matched` signal with
    them. One signal holds the digests in buffer order while its body and
    its `digests` attribute fit in 64 KiB, and at least one digest. The

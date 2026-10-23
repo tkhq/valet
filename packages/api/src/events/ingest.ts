@@ -398,9 +398,7 @@ export async function ingestEvent(
     const appendDigests = async (decisions: ClaimDecision["waiters"] | undefined): Promise<void> => {
       if (!waiters) return;
       if (candidates.length === 0) {
-        await appendReceiptStage(deps.db, receiptId, waiterEvaluationFailed
-          ? { stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." }
-          : { stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
+        if (waiterEvaluationFailed) await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
         return;
       }
       try {
