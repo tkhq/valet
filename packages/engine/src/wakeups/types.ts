@@ -125,6 +125,8 @@ export interface Wakeup {
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
+  /** Set by the terminal CAS only when its decision emits a terminal signal. */
+  terminalSignalExpected?: boolean;
   /** The channel origin of the turn that created it. Signals carry it with `reply: "manual"`. */
   origin?: ChannelOrigin;
   /** `watch`: start of the current rate window (ms). */
@@ -190,6 +192,7 @@ export type WakeupPatch = Partial<
     | "watchBuffer"
     | "lastEmitAt"
     | "eventBuffer"
+    | "terminalSignalExpected"
   >
 >;
 

@@ -563,7 +563,11 @@ export class WakeWatcher {
     // can run for minutes, and the ChildWatcher compares endedAt with
     // admission times (fix wave 3, concurrency M1).
     const at = this.clock();
-    const patch = decision.patch.endedAt !== undefined ? { ...decision.patch, endedAt: at } : decision.patch;
+    // Only decisions that emit a terminal signal hold child retention through admission.
+    // Failed starts and bad rows also end, but never promise a terminal signal.
+    const patch = decision.patch.endedAt !== undefined
+      ? { ...decision.patch, endedAt: at, terminalSignalExpected: decision.signals.length > 0 }
+      : decision.patch;
     // The CAS and the lease release are one store write (fix wave 2, B2).
     // Null means another sweep or wakeup_cancel won the CAS (INV-5).
     const updated =

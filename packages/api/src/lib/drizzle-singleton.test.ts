@@ -60,6 +60,18 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM child_watches WHERE child_session_id IN ('repair-child', 'repair-done')");
   });
 
+  it("repairs terminal signal expectations without marking legacy ended rows as owed", async () => {
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_expected");
+    await db.query(`INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, created_at, updated_at, ended_at)
+      VALUES ('repair-terminal', 'child', 't', 'process', 'lost', 'failed start', 1, 2, 2)`);
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT terminal_signal_expected FROM engine_wakeups WHERE id = 'repair-terminal'")).rows)
+      .toEqual([{ terminal_signal_expected: false }]);
+    await db.query("DELETE FROM engine_wakeups WHERE id = 'repair-terminal'");
+  });
+
   it("repairs durable child-result outcomes and their pending index on an existing database", async () => {
     await db.query("ALTER TABLE engine_queue_items DROP COLUMN child_result_delivery");
     await applyAppMigrations(db);

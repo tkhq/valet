@@ -394,6 +394,11 @@ export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
   inst().wakeupSignalsLost.add(1, { kind });
 }
 
+/** A child retention sweep stopped waiting for an ended wakeup's terminal signal. */
+export function recordChildTerminalSignalAbandoned(kind: WakeupKind): void {
+  inst().wakeupSignalsLost.add(1, { kind, reason: "child_terminal_grace" });
+}
+
 /** A best-effort kill that threw after the row's terminal CAS (fix wave 4
  * re-review, F5). Nothing retries it: the process may run untracked until
  * its container stops, so an alert on this counter pages. */

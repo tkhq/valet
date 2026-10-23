@@ -191,6 +191,11 @@ export class InMemorySessionStore implements SessionStore {
     r.data = { ...r.data, ...metadata, status, updatedAt: Date.now() };
   }
 
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<void> {
+    const row = this.rows.get(sessionId);
+    if (row?.data.sandboxId === sandboxId) row.data = { ...row.data, sandboxId: undefined };
+  }
+
   async getSession(id: string): Promise<SessionData | null> {
     return this.rows.get(id)?.data ?? null;
   }

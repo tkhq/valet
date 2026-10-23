@@ -764,13 +764,20 @@ An event waiter follows the rule for timers:
   A child with an active lease, pending timer, or running event waiter keeps its sandbox.
   The reclaim sweep also runs when warm retention is off.
   It reclaims after cancelled background work stops owing turns.
-  An ended wakeup still owes work until its deterministic terminal dispatch ID exists.
+  An ended wakeup owes work until its deterministic terminal dispatch ID exists.
   This guard survives a restart between the terminal transition and signal admission.
-  Cancelled wakeups do not owe an automatic terminal signal.
-  With warm retention off, recent human activity gets a 60-second idle grace period.
+  The guard is bounded: four WakeWatcher ticks from `endedAt`.
+  Past that bound, the sweep logs the lost signal, counts it under `valet.wakeups.signals_lost` with reason `child_terminal_grace`, and proceeds.
+  The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal.
+  Failed or refused starts, bad rows, and silent cancellation never set it and never count.
+  Existing rows without this flag do not promise a terminal signal.
+  With warm retention off, recent human activity gets the platform idle timeout as grace.
+  The grace is `VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes, so one 15-minute sweep cadence cannot skip it.
   Queued work always blocks reclaim.
   Reclaim stamps follow successful sandbox-token revocation.
   A failed revoke leaves the row eligible for retry.
+  Both the parked handle and the session handle are cleared after destroy succeeds, before revoke.
+  Handle clearing compares the old ID so it cannot clear a replacement. A retry does not destroy or count it twice.
 - Event waiters on hidden threads are counted and never named.
 
 ### F3. Internal child events (TKAI-657)

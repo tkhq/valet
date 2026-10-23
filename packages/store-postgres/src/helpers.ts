@@ -750,6 +750,7 @@ export interface WakeupRow {
   created_at: number;
   updated_at: number;
   ended_at: number | null;
+  terminal_signal_expected: boolean;
   origin_json: string | null;
   window_start_at: number | null;
   window_count: number | null;
@@ -811,6 +812,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     created_at: toNum(raw.created_at, "created_at"),
     updated_at: toNum(raw.updated_at, "updated_at"),
     ended_at: toNumOrNull(raw.ended_at, "ended_at"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
     window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
     window_count: toNumOrNull(raw.window_count, "window_count"),
@@ -987,6 +989,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
     ...withOrigin(row.origin_json),
     ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
     ...(row.window_count !== null ? { windowCount: row.window_count } : {}),

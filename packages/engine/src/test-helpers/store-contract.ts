@@ -101,6 +101,15 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list.map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("clears only the destroyed sandbox handle without overwriting a replacement", async () => {
+      await store.saveSession(newSession({ sandboxId: "replacement" }));
+      await store.clearSessionSandboxId("sess-1", "destroyed");
+      expect((await store.getSession("sess-1"))?.sandboxId).toBe("replacement");
+      await store.clearSessionSandboxId("sess-1", "replacement");
+      expect((await store.getSession("sess-1"))?.sandboxId).toBeUndefined();
+      await store.clearSessionSandboxId("missing", "destroyed");
+    });
+
     it("saveSession round-trips the reasoning level", async () => {
       // The session-default reasoning level is a persisted column, not a
       // derived value: a restart must return the level the user chose.
@@ -733,8 +742,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
 
       it("transitionWakeup is a CAS: the second caller gets null", async () => {
         await store.createWakeup(wakeup());
-        const first = await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50 }, 50);
-        expect(first).toMatchObject({ status: "done", cause: "exit", exitCode: 0, endedAt: 50, updatedAt: 50 });
+        const first = await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50, terminalSignalExpected: true }, 50);
+        expect(first).toMatchObject({ status: "done", cause: "exit", exitCode: 0, endedAt: 50, updatedAt: 50, terminalSignalExpected: true });
+        expect((await store.getWakeup("wk_a"))?.terminalSignalExpected).toBe(true);
         const second = await store.transitionWakeup("wk_a", ["running"], "expired", { cause: "deadline" }, 60);
         expect(second).toBeNull();
         expect((await store.getWakeup("wk_a"))?.status).toBe("done");
@@ -1087,8 +1097,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(lost).toBeNull();
         expect(await store.countActiveLeases("sess-1")).toBe(1);
 
-        const moved = await store.transitionWakeupAndReleaseLease("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50 }, 50, "owner_ended");
-        expect(moved).toMatchObject({ status: "done", cause: "exit", exitCode: 0 });
+        const moved = await store.transitionWakeupAndReleaseLease("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50, terminalSignalExpected: true }, 50, "owner_ended");
+        expect(moved).toMatchObject({ status: "done", cause: "exit", exitCode: 0, terminalSignalExpected: true });
+        expect((await store.getWakeup("wk_a"))?.terminalSignalExpected).toBe(true);
         expect(await store.countActiveLeases("sess-1")).toBe(0);
         // The release used the CAS time and cause; a second release finds nothing.
         expect(await store.releaseLease("ls_a", "deadline", 60)).toBeNull();

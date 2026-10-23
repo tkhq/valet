@@ -26,6 +26,7 @@ import {
   namespaceInternalDispatchId,
   PendingCapError,
   recordSandboxDestroyed,
+  recordChildTerminalSignalAbandoned,
   recordScratchRefused,
   recordScratchRequested,
   ValidationError as EngineValidationError,
@@ -60,6 +61,7 @@ import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
+import { WAKE_WATCHER_INTERVAL_MS } from "../engine/wake-watcher.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { ingestEvent } from "../events/ingest.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
@@ -70,6 +72,14 @@ const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
 const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 /** Cadence of the parked-sandbox retention sweep. Coarse on purpose — retention windows are hours. */
 const DEFAULT_RETENTION_SWEEP_INTERVAL_MS = 15 * 60_000;
+/** Matches the default platform idle timeout, so one sweep cadence cannot skip the grace. */
+const DEFAULT_CHILD_IDLE_GRACE_MS = 30 * 60_000;
+/**
+ * How long an ended wakeup may wait for its terminal signal before retention
+ * stops counting it as owed work. Four WakeWatcher ticks cover a slow pass
+ * and one retry of a delivery that failed after the terminal transition.
+ */
+export const CHILD_TERMINAL_SIGNAL_GRACE_MS = 4 * WAKE_WATCHER_INTERVAL_MS;
 /**
  * What `parkChildSandbox` does with a settled child's sandbox in each
  * attachment state. A `provisioning` sandbox is skipped: a forced replace
@@ -122,6 +132,12 @@ export interface ChildrenDeps {
   retentionMs?: number;
   /** Override for the retention sweep cadence. Tests only. */
   retentionSweepIntervalMs?: number;
+  /**
+   * Idle grace for a person's recent child turn when warm retention is off.
+   * Production passes the platform idle timeout (`VALET_SANDBOX_IDLE_MINUTES`).
+   * Absent or non-positive uses `DEFAULT_CHILD_IDLE_GRACE_MS`.
+   */
+  idleGraceMs?: number;
   /** Records a refused `task` scratch request. Tests inject a spy. */
   recordScratchRefused?: (source: string, reason: string) => void;
   /**
@@ -1197,7 +1213,7 @@ export class ChildWatcher {
     return true;
   }
 
-  private async subscriptionActiveUnlocked(row: Wakeup): Promise<boolean> {
+  private async subscriptionActiveUnlocked(row: Wakeup, now = Date.now()): Promise<boolean> {
     const child = row.eventMatch?.childSessionId;
     if (!child) return false;
     if (await this.discardUnavailableChild(child)) return false;
@@ -1211,16 +1227,16 @@ export class ChildWatcher {
       .where(and(eq(childWatches.childSessionId, child), sql`EXISTS (SELECT 1 FROM engine_queue_items WHERE session_id = ${child} AND child_result_delivery = 'pending')`)).limit(1);
     return !watch.settled || pending !== undefined || (current?.eventBuffer?.length ?? 0) > 0 || owed.length > 0
       || (await this.deps.engineStore.listUnsettledSubmissions(child)).length > 0
-      || await this.holdsBackgroundWork(child);
+      || await this.holdsBackgroundWork(child, now);
   }
 
   /** Publication and idle close share a lock; the store CAS also refuses a concurrent buffer append. */
-  async closeSubscription(row: Wakeup): Promise<void> {
+  async closeSubscription(row: Wakeup, now = Date.now()): Promise<void> {
     const child = row.eventMatch?.childSessionId;
     if (!child) return;
     await withChildDelivery(this.deps.db, child, async () => {
-      if (await this.subscriptionActiveUnlocked(row)) return;
-      const ended = await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: Date.now() }, Date.now(), { eventBufferEmpty: true });
+      if (await this.subscriptionActiveUnlocked(row, now)) return;
+      const ended = await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now, { eventBufferEmpty: true });
       if (ended) await this.deps.db.update(childWatches).set({ deliveryActive: false }).where(eq(childWatches.childSessionId, child));
     });
   }
@@ -1498,6 +1514,14 @@ export class ChildWatcher {
       .where(eq(childWatches.childSessionId, childSessionId));
   }
 
+  private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<void> {
+    // Clear both durable handles before revoke. Its retry must not destroy
+    // or count the same sandbox again, even after restart.
+    await this.deps.engineStore.clearSessionSandboxId(childSessionId, sandboxId);
+    await this.deps.db.update(childWatches).set({ parkedSandboxId: null })
+      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.parkedSandboxId, sandboxId)));
+  }
+
   /**
    * Park or reclaim a settled child's compute. With `child_send` in the
    * toolset a settled child is revivable, so on a hibernation-capable
@@ -1563,8 +1587,10 @@ export class ChildWatcher {
         return;
       }
 
-      await live.attachment.destroy("child_settled");
+      const sandboxId = live.attachment.sandboxId;
+      if (!await live.attachment.destroy("child_settled")) return;
       this.deps.engineHost.evictCache(childSessionId);
+      if (sandboxId) await this.forgetDestroyedSandbox(childSessionId, sandboxId);
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
       // `EngineHost.destroy` does.
@@ -1611,13 +1637,13 @@ export class ChildWatcher {
     for (const row of rows) {
       try {
         const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
-        if (waiter?.status === "running") await this.closeSubscription(waiter);
+        if (waiter?.status === "running") await this.closeSubscription(waiter, now);
         const unsettled = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
         if (unsettled.length > 0) continue;
         const activityAt = await this.deps.engineStore.latestActivityAt(row.childSessionId);
         if (activityAt != null && activityAt > cutoff) continue;
         if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
-        if (await this.holdsBackgroundWork(row.childSessionId)) continue;
+        if (await this.holdsBackgroundWork(row.childSessionId, now)) continue;
         const live = this.deps.engineHost.liveSession(row.childSessionId);
         const sandboxId = (await this.deps.engineStore.getSession(row.childSessionId))?.sandboxId ?? row.parkedSandboxId;
         if (live) {
@@ -1627,8 +1653,8 @@ export class ChildWatcher {
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
           if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
-          if (await this.holdsBackgroundWork(row.childSessionId)) continue;
-          await live.attachment.destroy("child_retention");
+          if (await this.holdsBackgroundWork(row.childSessionId, now)) continue;
+          if (!await live.attachment.destroy("child_retention")) continue;
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (sandboxId) {
           await this.deps.engineHost.destroySandbox(sandboxId);
@@ -1643,6 +1669,7 @@ export class ChildWatcher {
             `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
           );
         }
+        if (sandboxId) await this.forgetDestroyedSandbox(row.childSessionId, sandboxId);
         await revokeSandboxTokens(this.deps.db, row.childSessionId);
         await this.markReclaimed(row.childSessionId, now);
       } catch (err) {
@@ -1651,11 +1678,29 @@ export class ChildWatcher {
     }
   }
 
-  /** With warm retention off, a person's completed turn still gets an idle grace period. */
+  /** With warm retention off, a person's completed turn still gets the platform idle grace. */
   private async recentHumanActivity(childSessionId: string, delegationId: string, now: number): Promise<boolean> {
+    const graceMs = this.deps.idleGraceMs !== undefined && this.deps.idleGraceMs > 0 ? this.deps.idleGraceMs : DEFAULT_CHILD_IDLE_GRACE_MS;
     const recent = await this.deps.engineStore.listSettledSubmissionsBefore(childSessionId, now + 1);
-    return recent.some(item => (item.id !== delegationId || item.author !== undefined) && item.updatedAt >= now - 60_000
+    return recent.some(item => (item.id !== delegationId || item.author !== undefined) && item.updatedAt >= now - graceMs
       && !isSignalSubmission(item) && !isParentDelegation(item));
+  }
+
+  /**
+   * True while an ended wakeup still owes its terminal signal. The terminal
+   * transition precedes admission, so the ended row and deterministic
+   * dispatch ID are the durable evidence, including after a reboot. Only
+   * the terminal decision can promise a signal. Refused starts and bad
+   * rows never count. Past the grace the signal is lost; count it and proceed.
+   */
+  private async owesTerminalSignal(childSessionId: string, wakeup: Wakeup, now: number): Promise<boolean> {
+    if (wakeup.eventMatch?.childSessionId !== undefined || wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) return false;
+    if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost") return false;
+    if (await this.deps.engineStore.getQueueItemByDispatchId(childSessionId, `wakeup:${wakeup.id}:terminal`)) return false;
+    if (now - wakeup.endedAt <= CHILD_TERMINAL_SIGNAL_GRACE_MS) return true;
+    recordChildTerminalSignalAbandoned(wakeup.kind);
+    console.error(`ChildWatcher: ${wakeup.kind} wakeup ${wakeup.id} of child ${childSessionId} ended at ${new Date(wakeup.endedAt).toISOString()} and its terminal signal never arrived; retention proceeds.`);
+    return false;
   }
 
   /**
@@ -1664,7 +1709,7 @@ export class ChildWatcher {
    * that work must keep its sandbox past the retention window (fix wave 3,
    * concurrency M2; spec INV-8). Logged once per child.
    */
-  private async holdsBackgroundWork(childSessionId: string): Promise<boolean> {
+  private async holdsBackgroundWork(childSessionId: string, now = Date.now()): Promise<boolean> {
     const store = this.deps.engineStore;
     const leases = await store.countActiveLeases(childSessionId);
     // One snapshot covers both open work and terminal rows. Separate reads
@@ -1672,11 +1717,8 @@ export class ChildWatcher {
     const wakeups = await store.listWakeups(childSessionId);
     const timers = wakeups.filter(w => w.kind === "timer" && w.status === "pending").length;
     const events = wakeups.filter(w => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
-    // Terminal transitions precede signal admission. The ended row and deterministic
-    // dispatch ID are durable evidence of work still owed, including after reboot.
     for (const wakeup of wakeups) {
-      if (wakeup.eventMatch?.childSessionId !== undefined || !["done", "expired", "lost"].includes(wakeup.status)) continue;
-      if (!await store.getQueueItemByDispatchId(childSessionId, `wakeup:${wakeup.id}:terminal`)) return true;
+      if (await this.owesTerminalSignal(childSessionId, wakeup, now)) return true;
     }
     if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);

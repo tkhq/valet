@@ -2051,6 +2051,8 @@ export interface SubmissionAdmissionOptions {
 
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
+  /** Forget a destroyed sandbox only if the session still names that handle. */
+  clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
   /** Read a thread row and its entries from one coherent store snapshot. */
   getThreadSnapshot(

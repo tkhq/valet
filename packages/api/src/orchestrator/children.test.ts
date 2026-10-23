@@ -44,6 +44,7 @@ import {
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
+  CHILD_TERMINAL_SIGNAL_GRACE_MS,
   ChildLimitError,
   childParkAction,
   classifyWatcherError,
@@ -3920,7 +3921,7 @@ describe("child sandbox retention", () => {
       reason: "follow up", prompt: "Continue with workspace", fireAt: now + 1000, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
     watcher.arm(watch);
     await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
-    await store.transitionWakeup("wk_bot_timer", ["pending"], "done", { endedAt: Date.now() }, Date.now());
+    await store.transitionWakeup("wk_bot_timer", ["pending"], "done", { cause: "fired", endedAt: Date.now(), terminalSignalExpected: true }, Date.now());
     await watcher.sweepRetention();
     expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
     expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
@@ -3931,6 +3932,34 @@ describe("child sandbox retention", () => {
     await store.settleUnclaimed(child.id, childThread.id, "timer-turn", { outcome: "completed" });
     await watcher.sweepRetention();
     expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it.each([
+    { label: "a refused background start", row: { kind: "process" as const, status: "lost" as const, cause: "pid_missing" as const, command: "sleep 9", execId: "job-1" }, bounded: false },
+    { label: "a bad timer row", row: { kind: "timer" as const, status: "lost" as const }, bounded: false },
+    { label: "a failed terminal delivery", row: { kind: "timer" as const, status: "done" as const, cause: "fired" as const, prompt: "ping", terminalSignalExpected: true }, bounded: true },
+  ])("stops waiting for the terminal signal of $label after the grace window", async ({ row, bounded }) => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "xl-no-signal", "parent-xl-no-signal");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ended = Date.now();
+    await api.providers.engineStore.createWakeup({ id: "wk_xl_ended", sessionId: child.id, threadId: childThread.id, reason: "work",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: ended - 1000, updatedAt: ended, endedAt: ended, ...row });
+    try {
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await watcher.sweepRetention(ended + 1000);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt === null).toBe(bounded);
+      await watcher.sweepRetention(ended + CHILD_TERMINAL_SIGNAL_GRACE_MS + 1);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+      expect(api.providers.engineHost.liveSession(child.id)).toBeNull();
+      expect((await api.providers.engineStore.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
+      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal never arrived"))).toBe(bounded);
+      await watcher.sweepRetention(ended + 365 * 24 * 60 * 60_000);
+      expect((await api.providers.engineStore.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
+    } finally { errors.mockRestore(); }
   });
 
   it("retains an ended timer across reboot and a failed terminal admission", async () => {
@@ -3959,6 +3988,9 @@ describe("child sandbox retention", () => {
       await reboot.sweepRetention();
       expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
       expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
+      expect((await store.getWakeup("wk_bot_reboot"))?.terminalSignalExpected).toBe(true);
+      await reboot.sweepRetention(Date.now() + CHILD_TERMINAL_SIGNAL_GRACE_MS + 1);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
     } finally { prompt.mockRestore(); errors.mockRestore(); }
   });
 
@@ -3977,8 +4009,61 @@ describe("child sandbox retention", () => {
     await watcher.sweepRetention();
     expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
     expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
-    await watcher.sweepRetention(Date.now() + 60_001);
+    // The default grace matches the 30-minute platform idle timeout.
+    await watcher.sweepRetention(Date.now() + 29 * 60_000);
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+    await watcher.sweepRetention(Date.now() + 30 * 60_000 + 1);
     expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it("uses the configured idle grace when warm retention is off", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0, idleGraceMs: 5 * 60_000 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "xl-idle-grace", "parent-xl-idle-grace");
+    const store = api.providers.engineStore;
+    await store.admitSubmission(child.id, childThread.id, { ...queuedItem("human-chat", childThread.id, "Human chat"), author: { id: "local-user" } });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await store.settleUnclaimed(child.id, childThread.id, "human-chat", { outcome: "completed" });
+    await watcher.sweepRetention(Date.now() + 4 * 60_000);
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+    await watcher.sweepRetention(Date.now() + 5 * 60_000 + 1);
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it("destroys a parked handle once when the revoke fails and the sweep retries", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: RETENTION_MS }));
+    const { watch, child } = await seedParkableChild(api, "xl-destroy-once", "parent-xl-destroy-once");
+    const original = sandboxTokenAuth.revokeSandboxTokens;
+    const revoke = vi.spyOn(sandboxTokenAuth, "revokeSandboxTokens");
+    const destroySandbox = vi.spyOn(api.providers.engineHost, "destroySandbox");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await vi.waitFor(() => expect(provider.suspendCalls).toHaveLength(1));
+      // An api restart evicted the cached session: the sweep reclaims through the parked handle.
+      const stored = await api.providers.engineStore.getSession(child.id);
+      expect(stored).not.toBeNull();
+      if (!stored) throw new Error("missing child session");
+      // Exercise the session handle fallback as well as the parked handle.
+      await api.providers.engineStore.saveSession({ ...stored, sandboxId: provider.suspendCalls[0] });
+      api.providers.engineHost.evictCache(child.id);
+      revoke.mockRejectedValue(new Error("token store unavailable"));
+      await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+      expect(destroySandbox).toHaveBeenCalledTimes(1);
+      expect((await watchRow(api, child.id))?.parkedSandboxId).toBeNull();
+      expect((await api.providers.engineStore.getSession(child.id))?.sandboxId).toBeUndefined();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      revoke.mockImplementation(original);
+      const reboot = testChildWatcher(childrenDeps(api, { retentionMs: RETENTION_MS }));
+      await reboot.sweepRetention(Date.now() + RETENTION_MS + 60_000);
+      expect(destroySandbox).toHaveBeenCalledTimes(1);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { revoke.mockRestore(); destroySandbox.mockRestore(); errors.mockRestore(); }
   });
 
   it.each(["eager", "sweep"] as const)("bot repro 8: retries token revocation before stamping %s reclaim", async mode => {

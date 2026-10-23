@@ -567,6 +567,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    idleGraceMs: resolveIdleMinutes(process.env) * 60_000,
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
     scratchCaps,
     nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),

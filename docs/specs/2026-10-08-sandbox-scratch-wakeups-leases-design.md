@@ -1258,11 +1258,21 @@ with an earlier entry, the entry below wins.
 - **A3: child retention and leases.** The retention sweep skips a child
   while it holds an active lease or a pending timer, at both checks, and
   logs once per child (INV-8).
-  An ended wakeup without its terminal dispatch ID also keeps the child sandbox.
-  The check excludes cancelled rows, which do not always send a signal.
-  With warm retention off, recent human turns defer reclaim for 60 seconds.
+  An ended wakeup without its terminal dispatch ID also keeps the child sandbox,
+  for at most four WakeWatcher ticks after `endedAt`. Past that the sweep logs
+  and counts the lost signal, then reclaims. The terminal CAS sets
+  `terminalSignalExpected` only if its decision emits a signal. Failed starts,
+  bad rows, and silent cancellation never count.
+  With warm retention off, recent human turns defer reclaim for the platform
+  idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
   Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
+  Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.
+  A retry does not destroy the same handle twice or clear a replacement.
+- **Claim lock order.** `claimSubmission` locks the thread row before the
+  item CAS, the same order steer admission uses, so claim and steer cannot
+  deadlock. A real-Postgres stress test races one claim against two steers
+  on 20 fresh threads and asserts zero deadlock retries.
 - **A3: job logs on scratch.** The seam caps a detached log at
   `min(jobLogMaxBytes, scratch / 4)` when the host passes `scratchBytes`.
   A capped kubernetes log ends with `[valet: log capped at <n> bytes;

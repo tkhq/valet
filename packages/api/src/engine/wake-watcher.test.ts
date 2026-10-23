@@ -243,7 +243,7 @@ describe("WakeWatcher", () => {
 
     await h.watcher().sweep();
 
-    expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+    expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable", terminalSignalExpected: true });
     expect(await h.store.countActiveLeases("sess-1")).toBe(0);
     const { content } = signalOf(h.prompt.mock.calls[0]);
     expect(attr(content, "cause")).toBe("sandbox_unavailable");
@@ -334,7 +334,7 @@ describe("WakeWatcher", () => {
     await h.watcher({ metrics: { badRow } }).sweep();
 
     expect(await h.store.getWakeup("wk_ok")).toMatchObject({ status: "done" });
-    expect(await h.store.getWakeup("wk_bad")).toMatchObject({ status: "lost" });
+    expect(await h.store.getWakeup("wk_bad")).toMatchObject({ status: "lost", terminalSignalExpected: false });
     expect(badRow).toHaveBeenCalledWith("engine_wakeups");
     expect(h.prompt).toHaveBeenCalledTimes(1);
     expect(error.mock.calls.some((c) => String(c[0]).includes("wk_bad"))).toBe(true);

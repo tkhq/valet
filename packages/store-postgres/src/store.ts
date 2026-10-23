@@ -195,8 +195,9 @@ const STEER_CANDIDATES_SQL = `
 // only when itemId IS the thread's runnable head (oldest 'queued',
 // not-superseded item) — the subquery re-derives the head so a concurrent
 // claim of a different item (or of a non-head item) loses (rowCount=0).
-// claimSubmission runs this CAS in a transaction, then locks the thread row
-// to capture continuation provenance before execution starts.
+// claimSubmission locks the thread row first, runs this CAS, then captures
+// continuation provenance before execution starts. Steer admission uses the
+// same thread-then-item lock order, so the two writers cannot form a cycle.
 const CLAIM_SQL = `
   UPDATE engine_queue_items
   SET status = 'running', attempt_id = $1, owner_id = $2,
@@ -677,6 +678,10 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<void> {
+    await this.db.query("UPDATE engine_sessions SET sandbox_id = NULL WHERE id = $1 AND sandbox_id = $2", [sessionId, sandboxId]);
+  }
+
   async getSession(id: string): Promise<SessionData | null> {
     const result = await this.db.query("SELECT * FROM engine_sessions WHERE id = $1", [id]);
     const raw = result.rows[0];
@@ -1036,6 +1041,8 @@ export class PgSessionStore implements SessionStore {
   async claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null> {
     const now = Date.now();
     return this.db.transaction(async (tx) => {
+      // Same lock root as steer admission: the thread first, then its items.
+      await tx.query("SELECT id FROM engine_threads WHERE id = $1 FOR UPDATE", [claim.threadId]);
       const result = await tx.query(`${CLAIM_SQL} RETURNING *`, [
         claim.attemptId, claim.ownerId, now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS), now,
         claim.itemId, claim.sessionId, claim.threadId, SUBMISSION_TIMEOUT_MS,
@@ -1050,7 +1057,7 @@ export class PgSessionStore implements SessionStore {
         await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
       }
       if (item.attemptCount === 1) {
-        const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2 FOR UPDATE", [claim.sessionId, claim.threadId]);
+        const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2", [claim.sessionId, claim.threadId]);
         const metadata = parseJson<Record<string, unknown>>(asStringOrNull(thread.rows[0]?.metadata, "thread.metadata")) ?? {};
         const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
         if (signal) {
@@ -1512,7 +1519,7 @@ export class PgSessionStore implements SessionStore {
     // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
     const r = await this.db.query(
       `WITH t AS (${TRANSITION_SQL} RETURNING *),
-       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $18
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $19
              WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
        SELECT * FROM t`,
       [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
@@ -1773,7 +1780,8 @@ const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
          exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
          window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count),
          watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at),
-         event_buffer = COALESCE($17, event_buffer)
+         event_buffer = COALESCE($17, event_buffer),
+         terminal_signal_expected = COALESCE($18, terminal_signal_expected)
        WHERE id = $1 AND status = ANY($2::text[])`;
 
 function transitionParams(
@@ -1801,6 +1809,7 @@ function transitionParams(
     patch.watchBuffer ?? null,
     patch.lastEmitAt ?? null,
     jsonOrNull(patch.eventBuffer),
+    patch.terminalSignalExpected ?? null,
   ];
 }
 
@@ -1809,8 +1818,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
        origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
-       event_seen, event_source_seen)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
+       event_seen, event_source_seen, terminal_signal_expected)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)`,
     [
       w.id,
       w.sessionId,
@@ -1842,6 +1851,7 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       jsonOrNull(w.eventBuffer),
       jsonOrNull(w.eventSeen),
       jsonOrNull(w.eventSourceSeen),
+      w.terminalSignalExpected ?? false,
     ],
   );
 }
