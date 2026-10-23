@@ -1086,6 +1086,8 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
+Image blocks get one more correction in `convertToLlm` (TKAI-661). `correctImageBlocks` reads the first bytes of each image block and sets `mimeType` to the type the bytes show: PNG (full 8-byte signature), JPEG, GIF (`GIF87a` or `GIF89a`) or WebP. The bytes win over the stored type, so a thread that holds a mislabelled image recovers with no data migration. If the bytes match no supported type, the block becomes a text placeholder, `[image omitted: ... data is not a supported image]`, and the turn continues. The check reads the signature only. It identifies the format. It does not prove that the file is valid or complete, so a corrupt image with a good signature still reaches the provider. Slack and Telegram `fetchMedia` use the same helper (`sniffImageMediaType`) for the type they report.
+
 Restored threads use the same transcript conversion as compaction. `restoreSession` restores thread metadata without reading idle thread entries.
 
 A restored thread loads its transcript before its first prompt, gate recovery, or compaction. Gate recovery loads before acquiring the retained claim. Concurrent loads share one promise. Failed loads remain retryable.

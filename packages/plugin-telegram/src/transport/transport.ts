@@ -13,7 +13,7 @@ import type {
   SendRef,
   TransportContext,
 } from "@valet/engine";
-import { credentialSecret } from "@valet/engine";
+import { credentialSecret, sniffImageMediaType } from "@valet/engine";
 import { TelegramApi } from "./api.js";
 import { escapeTelegramHtml, markdownToTelegramHtml } from "./format.js";
 
@@ -266,7 +266,7 @@ export class TelegramTransport implements ChannelTransport {
       (media.kind === "photo"
         ? ext === "png" ? "image/png" : "image/jpeg"
         : media.kind === "voice" ? "audio/ogg" : "application/octet-stream");
-    return { data, mimeType, name: media.fileName };
+    return { data, mimeType: (mimeType.startsWith("image/") ? sniffImageMediaType(data) : undefined) ?? mimeType, name: media.fileName };
   }
 
   async sendTyping(conversationKey: string): Promise<void> {
