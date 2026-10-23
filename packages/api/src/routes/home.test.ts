@@ -54,6 +54,22 @@ describe("home conversation", () => {
     expect(all.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
   });
 
+  it("refuses to rename the home thread and keeps other settings editable", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    const patch = (body: unknown) => fetch(`${test.baseUrl}/api/threads/${home.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const renamed = await patch({ title: "Incident triage" });
+    expect(renamed.status).toBe(400);
+    expect(((await renamed.json()) as { error: string }).error).toContain("Home keeps its name");
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { title: string | null };
+    expect(detail.title).toBe("Home");
+    // Other settings are not the name: a model change still lands.
+    const model = await patch({ model: null });
+    expect(model.status).toBe(200);
+  });
+
   it("creates the morning brief routine once, posting into home at 08:00", async () => {
     const test = await boot();
     const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
