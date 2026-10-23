@@ -377,7 +377,7 @@ describe("Presence overview", () => {
     })];
     channelNames = { C0QUIET: "alerts-prod" };
     mountOverview();
-    const slack = await screen.findByRole("region", { name: "Everywhere in Slack" });
+    const slack = await screen.findByRole("region", { name: "Filtered channels" });
     expect(within(slack).getByRole("link", { name: "When someone posts a message in #incidents or #alerts-prod, work in a new thread each time." })).toBeTruthy();
     expect(within(slack).queryByText(/C0QUIET/)).toBeNull();
   });
