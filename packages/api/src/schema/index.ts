@@ -816,6 +816,21 @@ export const channelBindings = pgTable(
   ],
 );
 
+/** The first thread selected for one user's direct-channel conversation. */
+export const channelConversationBindings = pgTable(
+  "channel_conversation_bindings",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId, t.sessionId, t.channelType, t.conversationKey] })],
+);
+
 export const userIdentityLinks = pgTable(
   "user_identity_links",
   {

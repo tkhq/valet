@@ -967,9 +967,9 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
 
 /**
  * The pinned Home row at the top of the web sidebar: the person's one
- * conversation with Valet, the same one the phone opens first and a Slack
- * DM continues. It is never archived, renamed, pinned, or moved, so it has
- * none of a thread row's controls. Its marks follow the thread rows'.
+ * conversation with Valet, the same one the phone opens first. It cannot be
+ * archived, renamed, pinned, or moved, so it has no thread row controls.
+ * Its marks follow the thread rows'.
  */
 function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   sessionId: string;
@@ -985,7 +985,7 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   const unread = !active && thread !== undefined && isThreadUnread(thread);
   return (
     <section aria-label="Home" className="pt-1">
-      <Tooltip content="Your conversation with Valet: the same one on your phone and in your Slack DM." delayDuration={600}>
+      <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
         <Link
           to="/chat"
           search={(prev) => ({ ...prev, thread: threadId, child: undefined })}

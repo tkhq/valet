@@ -255,6 +255,17 @@ describe("ThreadTree — Home row", () => {
     expect(section.compareDocumentPosition(recents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("keeps existing Slack conversations visible alongside saved Home history", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
+    renderTree();
+    const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
+    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
+    expect(within(recents).queryByText("Home")).toBeNull();
+  });
+
   it("shows no Home row on a phone, where Home is the first screen", () => {
     mobile = true;
     homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
