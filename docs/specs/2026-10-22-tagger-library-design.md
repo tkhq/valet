@@ -157,3 +157,10 @@ Unchanged text and rejected output do not consume that budget.
 Workflow-step sessions (`wf:`) are excluded.
 Child-session threads are included and identified in the card tooltip.
 The response retains the `sessions` count field, but each count now represents one thread.
+
+## Transcript branches
+
+For an edited thread, outcome rendering follows the active leaf's parent links.
+User eligibility, the compaction summary and recent textual messages all use that path.
+Abandoned branches remain stored but cannot affect classification. Returning to a branch selects its transcript again.
+Unbranched legacy threads retain their full linear history. SQL walks identities only, before loading bounded text.

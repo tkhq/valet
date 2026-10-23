@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InMemoryEventStream, type MessageEntry } from "@valet/engine";
+import { InMemoryEventStream, THREAD_BRANCHED_KEY, type MessageEntry } from "@valet/engine";
 import { PgSessionStore } from "@valet/store-postgres";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { eq } from "drizzle-orm";
@@ -277,4 +277,51 @@ it("does not defer a newer job version when a cap-blocked drain acknowledges its
   expect(await db.select().from(tagJobs)).toEqual([expect.objectContaining({ version: 2, attempts: 0 })]);
   expect((await db.select().from(tagJobs))[0]?.nextAttemptAt).toBeLessThan(Date.now() + 1000);
   expect(classify).toHaveBeenCalledTimes(4);
+});
+
+it("classifies only the active edited branch, including its user outside the textual tail", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("user", "user", "Deliver the revised patch."),
+    { ...message("old-result", "assistant", "Abandoned branch failed completely.", 100), parentId: "user" },
+    { id: "old-summary", sessionId: "session", threadId: "thread", parentId: "old-result", type: "compaction", summary: "Obsolete summary: work failed.", coveredEntryIds: [], tokenCountBefore: 100, tokenCountAfter: 20, createdAt: 101 },
+    { id: "new-summary", sessionId: "session", threadId: "thread", parentId: "user", type: "compaction", summary: "Revised work is ready.", coveredEntryIds: [], tokenCountBefore: 100, tokenCountAfter: 20, createdAt: 2 },
+    ...Array.from({ length: 14 }, (_, i) => ({ ...message(`active-${i}`, "assistant", `Revised progress ${i}.`, 3 + i), parentId: i ? `active-${i - 1}` : "new-summary" })),
+    { ...message("new-result", "assistant", "The revised patch passed and is delivered.", 20), parentId: "active-13" }]);
+  await fixture.pgdb.query("UPDATE engine_threads SET metadata = $1 WHERE id = 'thread'", [JSON.stringify({ [THREAD_BRANCHED_KEY]: true })]);
+  const render = sessionOutcomeRenderer(db, "org");
+  const refs = [{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }];
+  const rendered = await render(refs);
+  expect(rendered).toHaveLength(1);
+  expect(rendered[0]?.text).toContain("Summary: Revised work is ready.");
+  expect(rendered[0]?.text).toContain("The revised patch passed and is delivered.");
+  expect(rendered[0]?.text).not.toContain("Abandoned branch");
+  expect(rendered[0]?.text).not.toContain("Obsolete summary");
+  const classify = vi.fn<Classify>(async () => result("completed"));
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify, renderers: new Map([["session_thread", render]]) });
+  await tagger.enqueueTagging("session_outcome", refs); await tagger.drain("session_outcome");
+  expect(classify).toHaveBeenCalledOnce();
+  expect((await tagger.labelsFor("session_thread", "session:thread"))[0]?.key).toBe("completed");
+  // Return to the older leaf: its summary is now authoritative again.
+  await fixture.pgdb.query("UPDATE engine_threads SET active_leaf_entry_id = 'old-summary' WHERE id = 'thread'");
+  expect((await render(refs))[0]?.text).toContain("Obsolete summary: work failed.");
+  expect((await render(refs))[0]?.text).not.toContain("Revised work is ready.");
+  // User messages on another branch must not make a userless active path eligible.
+  await store.appendEntries("session", "thread", [message("userless", "assistant", "Unrequested result.", 200)]);
+  expect(await render(refs)).toEqual([]);
+});
+
+it("retains the legacy null-parent prefix when a branched path starts at a pre-DAG entry", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("legacy-user", "user", "Original legacy request.", 1),
+    message("legacy-assistant", "assistant", "Legacy answer.", 2),
+    { id: "branch-note", sessionId: "session", threadId: "thread", parentId: "legacy-assistant", type: "branch_summary", summary: "Switched branch.", branchRootId: "legacy-assistant", branchLeafId: "legacy-assistant", createdAt: 3 },
+    { ...message("revised", "assistant", "Revised answer delivered.", 4), parentId: "branch-note" }]);
+  await fixture.pgdb.query("UPDATE engine_threads SET metadata = $1 WHERE id = 'thread'", [JSON.stringify({ [THREAD_BRANCHED_KEY]: true })]);
+  const rendered = await sessionOutcomeRenderer(db, "org")([{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }]);
+  expect(rendered[0]?.text).toContain("Original legacy request.");
+  expect(rendered[0]?.text).toContain("Revised answer delivered.");
 });
