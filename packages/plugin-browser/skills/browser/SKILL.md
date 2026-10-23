@@ -60,7 +60,7 @@ An explicit Pause agent action blocks agent mutations until the user resumes sha
 Private sign-in also blocks observations until the user ends it. Expiry does not restore access.
 Future credential handoff should resolve valet-secrets references through the broker, without placing secret values in tool code or evidence.
 In a team session, current team members can use the browser. Its screenshots and page text appear in the team transcript.
-A sign-in in a team session stays in that session's browser for other members. Suggest private sign-in for personal accounts.
+A sign-in in a team session stays in that session's browser for other members, also after private sign-in ends. For a personal account, ask the person to use a personal session.
 
 If the user asks to finish on, leave open, show, or hand off a page, call
 `markDeliverable()` on that tab before replying. Use `markHandoff()` only when a

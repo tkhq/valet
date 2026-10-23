@@ -621,16 +621,19 @@ person cannot use a shared agent as a proxy into the signed-in browser. Backgrou
 work needs an explicitly authorized service principal and grant.
 
 Default both permissions to the owner of a personal session. A team session
-follows the same rule as its sandbox and credentials: every current member of the
-owning team, and the assistant acting for a member, can use the browser. A
-nonmember actor, such as an organization-audience Slack mention, cannot. Browser
+follows the same rule as its threads: every current member of the owning team,
+and the assistant acting for a member, can use the browser. A
+nonmember actor, such as an organization-audience Slack mention, cannot. A turn
+with no person behind it runs as the team itself (`team:<id>`), so the browser
+refuses it, although its shell commands still run. Browser
 outputs enter the team-readable transcript, the same as shell and tool output in
 that session. A team or session admin can disable the browser for one session.
 This first design does not support a private browser inside a team-readable chat:
 hiding image URLs would not hide extracted text. The profile is a shared session
 resource, never a personal profile silently borrowed from its creator. A member's
-sign-in stays in that session's profile for the other members, so the browser
-skill suggests private sign-in for personal accounts. Narrower per-person team
+sign-in stays in that session's profile for the other members, also after
+private sign-in ends. The Browser panel says so, and the browser skill asks the
+person to use a personal session for a personal account. Narrower per-person team
 grants require transcript information-flow controls and are deferred.
 
 Before 2026-10-22, a team session required an admin to select a team audience in
@@ -689,7 +692,7 @@ the host allows observation, navigation, UI mutation, history, and diagnostics b
 default. Normal navigation and UI work need no origin grant or per-operation user
 prompt. This includes opening a permitted preview, `tab.reload`, scrolling, and
 routine form edits within the user's task. The host still checks every typed
-operation. Browser ownership, team audience, membership, and disabled access apply
+operation. Browser ownership, team membership, and disabled access apply
 before these defaults.
 
 The browser skill requires the agent to check consequential effects against the

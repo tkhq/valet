@@ -35,16 +35,18 @@ describe("durable browser policy", () => {
   let makeService: () => BrowserPolicy;
   let member: boolean;
   let team: boolean;
+  let org: boolean;
   let store: ReturnType<typeof pluginStore>;
   beforeEach(async () => {
     const { appDb } = await freshTestPgDb();
     store = pluginStore(appDb, "browser");
     member = true;
     team = false;
+    org = false;
     makeService = () =>
       new BrowserPolicy({
         store,
-        owner: async () => ({ type: team ? "team" : "user", id: "u" }),
+        owner: async () => ({ type: org ? "org" : team ? "team" : "user", id: "u" }),
         isMember: async () => member,
         isAdmin: async (_owner, actor) => actor === "u",
         blobs: {
@@ -139,6 +141,12 @@ describe("durable browser policy", () => {
     await expect(
       service.decide({ ...request, actorId: "member" }),
     ).rejects.toThrow("Only members");
+  });
+  it("refuses a session owned by neither a person nor a team", async () => {
+    org = true;
+    await expect(service.authorize(identity)).rejects.toThrow(
+      "personal or team session",
+    );
   });
   it("ignores the audience that older settings rows store", async () => {
     team = true;

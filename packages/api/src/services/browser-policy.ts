@@ -52,9 +52,11 @@ export class BrowserPolicy implements BrowserPolicyService {
           "Browser access denied. Ask the session owner to use the browser.",
         );
     } else if (owner.type === "team") {
-      // Same rule as the team sandbox and its credentials: current members act
-      // in a team session, and a nonmember actor (an organization-audience Slack
-      // mention) does not reach what members signed in to.
+      // Thread rule: current members of the owning team can use a team
+      // session's browser. A nonmember actor (an organization-audience Slack
+      // mention) cannot reach what members signed in to. A turn with no person
+      // behind it runs as `team:<id>`, which is not a member, so it is refused
+      // too, although its shell commands still run.
       if (!(await this.options.isMember(owner, identity.actorId)))
         throw new Error(
           "Browser access denied. Only members of the owning team can use this browser. Ask a team admin to add you.",

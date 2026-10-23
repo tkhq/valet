@@ -353,7 +353,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             ? leaseExpired
               ? "Your exclusive control expired. Renew control to continue, or end it to resume shared use."
               : lease.privateMode
-                ? "Private sign-in is active. The agent cannot observe the page. End private sign-in when you finish."
+                ? "Private sign-in is active. The agent cannot observe the page. End private sign-in when you finish. The sign-in stays in this browser for everyone who can use this thread."
                 : lease.state === "paused"
                   ? "Browser input is paused. Resume control to interact, or resume the agent for shared use."
                   : "Agent browser actions are paused. You can still use the page. Resume the agent when ready."
@@ -362,7 +362,8 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
       ) : runtime?.state === "ready" ? (
         <p className="shrink-0 border-b border-line px-3 py-2 text-xs text-muted">
           You and the agent can use this browser. Pause the agent when you need
-          exclusive control.
+          exclusive control. Everyone who can use this thread can use this
+          browser and its sign-ins.
         </p>
       ) : null}
 
