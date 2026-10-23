@@ -99,7 +99,7 @@ export function MobileBrowser({
           )
             event.preventDefault();
         }}
-        className="inset-0 flex h-dvh max-h-dvh w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="left-0 right-0 top-[var(--app-viewport-top,0px)] bottom-auto flex h-[var(--app-viewport-height,100dvh)] max-h-[var(--app-viewport-height,100dvh)] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
       >
         <header className="flex shrink-0 items-center gap-3 border-b border-line px-2">
           <DialogClose asChild>

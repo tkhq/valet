@@ -203,7 +203,7 @@ Each project shows a touch-sized New thread button. Creation expands a collapsed
 
 Questions use one response area within the available phone viewport.
 The composer stays mounted but hidden while a response form is expanded, preserving its draft with input shortcuts inactive.
-Folding or resolving the request restores the composer. Desktop keeps its existing layout.
+Folding or resolving the request restores the composer. Folding keeps the answer text and attachments mounted for Show. Desktop keeps its existing layout.
 
 The phone composer places message text above an action row with attachments, a model-and-thinking pill, and Send.
 The pill opens the existing thread-scoped model settings. Context usage remains available in those settings.

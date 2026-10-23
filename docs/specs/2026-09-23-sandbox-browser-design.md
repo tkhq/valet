@@ -1347,7 +1347,8 @@ The card aligns with the composer. A chevron toggles the preview; the expand ico
 Open browser shows the existing interactive pane in a full-screen dialog.
 Back to chat closes the dialog without stopping the remote browser.
 Only the dialog streams images while it is open. Resizing to desktop closes the dialog.
-The dialog uses dynamic viewport height and safe-area padding.
+The dialog uses the app visual-viewport height and top offset, with dynamic viewport fallback and safe-area padding.
+The keyboard therefore reduces the canvas and keeps its controls above the keyboard.
 Shared interaction, exclusive control, and private sign-in retain their existing access checks.
 
 A touch tap clicks the remote page. A swipe scrolls it instead of dragging.

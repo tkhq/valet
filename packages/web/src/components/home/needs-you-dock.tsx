@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNotificationDecisions } from "~/api/queries";
 import { useWorkflowActionRequired } from "~/api/workflows";
+import { cn } from "~/lib/cn";
 import { Button } from "~/components/primitives";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { ResolvedGateNotice, useResolvedGateNotice } from "~/components/session/gate-outcome";
@@ -30,15 +31,16 @@ export function NeedsYouDock({ homeThreadId, onOpenTasks, onExpandedChange }: { 
   useEffect(() => () => onExpandedChange?.(false), [onExpandedChange]);
   if (total === 0 && workflowCount === 0) return resolved ? <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} className="border-t border-line" /> : null;
   const label = total > 0 ? `${current?.gate.type === "question" ? "Question" : "Approval"} ${Math.min(index, total - 1) + 1} of ${total}` : "";
-  if (folded || !current) {
-    const waiting = total + workflowCount;
-    return <div className="flex items-center gap-2 border-t border-line px-4 py-1.5 text-xs text-muted">
+  const waiting = total + workflowCount;
+  const summary = <div className="flex items-center gap-2 border-t border-line px-4 py-1.5 text-xs text-muted">
       <span className="min-w-0 flex-1 truncate">{waiting} {waiting === 1 ? "request is" : "requests are"} waiting</span>
       {current && <Button size="sm" variant="ghost" onClick={() => setFolded(false)}>Show</Button>}
       <Button size="sm" variant="ghost" onClick={onOpenTasks}>All in Tasks</Button>
     </div>;
-  }
-  return <section aria-label="Approvals from your work" className="min-h-0 shrink overflow-y-auto overscroll-contain border-t border-line max-md:max-h-[min(70dvh,calc(var(--app-viewport-height,100dvh)-8rem))] max-md:pb-[env(safe-area-inset-bottom)]">
+  if (!current) return summary;
+  return <>
+  {folded && summary}
+  <section aria-label="Approvals from your work" aria-hidden={folded || undefined} className={cn("min-h-0 shrink overflow-y-auto overscroll-contain border-t border-line max-md:max-h-[min(70dvh,calc(var(--app-viewport-height,100dvh)-8rem))] max-md:pb-[env(safe-area-inset-bottom)]", folded && "hidden")}>
     {resolved && <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} />}
     <div className="flex items-center gap-2 px-4 pt-2 text-xs text-muted">
       <span className="min-w-0 flex-1 truncate">{label} · {current.title}</span>
@@ -46,5 +48,6 @@ export function NeedsYouDock({ homeThreadId, onOpenTasks, onExpandedChange }: { 
       <Button size="sm" variant="ghost" onClick={() => setFolded(true)}>Not now</Button>
     </div>
     <DecisionGateCard key={current.gate.id} sessionId={current.sessionId} gate={current.gate} placement="notification" mobileScroll />
-  </section>;
+  </section>
+  </>;
 }
