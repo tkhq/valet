@@ -312,6 +312,18 @@ describe("skill companion tools", () => {
     } finally { allowFirst(); allowSecond(); await rm(root, { recursive: true, force: true }); }
   });
 
+  it("reports a failed sandbox job explicitly without inventing an exit code", async () => {
+    const ctx = skillContext();
+    vi.spyOn(ctx.sandbox, "exec").mockImplementation(async command => ({ stdout: command === "sh -s" ? "/cache/valet/skills/x@sha" : "", stderr: "", exitCode: 0 }));
+    const kickoff = vi.spyOn(ctx.sandbox, "execJob").mockResolvedValue({ execId: "failed-job" });
+    vi.spyOn(ctx.sandbox, "pollJob").mockResolvedValue({ status: "failed", output: "partial output", nextOffset: 14 });
+    const result = await buildSkillScriptTool([fixture]).execute({ name: fixture.name, script: "scripts/check.py", timeout: 61 }, ctx);
+    expect(kickoff).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(result.text)).toMatchObject({ jobFailed: true, stdout: "partial output", stderr: "" });
+    expect(JSON.parse(result.text)).not.toHaveProperty("exitCode");
+    expect(result.text).toContain("job failed");
+  });
+
   it.each(["timeout", "abort", "stuck-poll"])("cancels remote script jobs on %s", async cause => {
     vi.useFakeTimers();
     try {

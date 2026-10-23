@@ -402,7 +402,7 @@ export const bashTool = defineTool({
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
     const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
-    const outcome = result.jobFailed || result.exitCode === undefined ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
+    const outcome = result.timedOut || result.jobFailed || result.exitCode === undefined ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
     return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
   },
 });

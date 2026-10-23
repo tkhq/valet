@@ -183,11 +183,13 @@ The optional timeout accepts 1 through 3600 seconds and defaults to 120 seconds.
 Bash and skill scripts share the foreground execution helper.
 Above 60 seconds, supported providers use job mode.
 The helper cancels jobs at the deadline or on abort, including a stalled poll.
+A timed-out bash job records no terminal outcome, even if its output contains a comment URL.
 Job output combines stdout and stderr in the stdout result field.
 The tool stays registered so scripts added after session construction can become reachable through skill refresh.
 An unknown script skill triggers at most one extra refresh for that tool instance.
 A session without a sandbox gets a text error.
 The result contains the script path, exit code, stdout, and stderr.
+A failed sandbox job includes `jobFailed: true` and an explicit failure message without inventing an exit code.
 Each output stream is limited to 32 KiB.
 Telemetry records successful file reads as `file_read` and script executions as `script_run`.
 Usage reports expose separate file-read and script-run counts.

@@ -129,6 +129,7 @@ rm -rf -- /tmp/valet-skills/${quote(temporary)} "/tmp/valet-skills-$(id -u)/"${q
         });
         const bounded = (text: string) => Buffer.from(text).subarray(0, OUTPUT_BYTES).toString("utf8");
         const text = JSON.stringify({ path, exitCode: result.exitCode, stdout: bounded(result.stdout), stderr: bounded(result.stderr),
+          ...(result.jobFailed ? { jobFailed: true, error: "The job failed. Check the sandbox, then retry." } : {}),
           ...(result.timedOut ? { timedOut: true } : {}),
           ...(result.truncated || Buffer.byteLength(result.stdout) > OUTPUT_BYTES || Buffer.byteLength(result.stderr) > OUTPUT_BYTES ? { truncated: true } : {}),
         });

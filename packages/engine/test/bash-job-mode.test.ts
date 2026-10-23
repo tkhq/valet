@@ -232,6 +232,26 @@ describe("bash tool: job-mode poll loop", () => {
     }
   });
 
+  it("does not record a comment outcome from job output on timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+      const sandbox: FakeSandbox = {
+        id: "comment-timeout",
+        execJob: async () => ({ execId: "comment-job" }),
+        pollJob: vi.fn(async (_execId, offset): Promise<JobPoll> => ({ status: "running", output: offset === 0 ? url : "", nextOffset: url.length })),
+        cancelJob: vi.fn(async () => {}),
+      };
+      const pending = execute({ command: "gh pr comment 1031 --body test", timeout: 61 }, makeCtx(sandbox));
+      await vi.advanceTimersByTimeAsync(65_000);
+      const result = await pending;
+      expect(result.text).toContain(url);
+      expect(result.text).toContain("timed out");
+      expect(result.outcome).toBeUndefined();
+      expect(sandbox.cancelJob).toHaveBeenCalledWith("comment-job");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("ctx.signal abort mid-poll cancels the job then throws the abort error", async () => {
     const controller = new AbortController();
     let pollCount = 0;
