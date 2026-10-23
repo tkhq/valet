@@ -403,15 +403,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     "created_at" bigint NOT NULL,
     PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
   )` },
-  { describe: "Home queue channel lookup", probe: { kind: "index", index: "channel_home_queue_channel" }, sql: `CREATE INDEX "channel_home_queue_channel" ON "engine_queue_items"
-    ("session_id", "thread_id", ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelType'), ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelId'))` },
-  { describe: "Home queue origin lookup", probe: { kind: "index", index: "channel_home_queue_origin" }, sql: `CREATE INDEX "channel_home_queue_origin" ON "engine_queue_items"
-    ("session_id", "thread_id", ((replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'channelType'), ((replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'threadKey'))
-    WHERE replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json->>'kind' = 'signal'` },
-  { describe: "Home entry channel lookup", probe: { kind: "index", index: "channel_home_entry_channel" }, sql: `CREATE INDEX "channel_home_entry_channel" ON "engine_entries"
-    ("session_id", "thread_id", ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelType'), ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelId'))` },
-  { describe: "Home entry origin lookup", probe: { kind: "index", index: "channel_home_entry_origin" }, sql: `CREATE INDEX "channel_home_entry_origin" ON "engine_entries"
-    ("session_id", "thread_id", ((replace("signal", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'channelType'), ((replace("signal", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'threadKey'))` },
   { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
   { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (

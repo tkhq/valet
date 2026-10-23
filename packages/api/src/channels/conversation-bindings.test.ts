@@ -12,7 +12,7 @@ const scope: ConversationScope = {
   orgId: "org-1", userId: "user-1", sessionId: "session-1", channelType: "slack", conversationKey: "D1:111.1",
 };
 const threadKey = "slack:D1:111.1";
-const indexes = ["channel_home_queue_channel", "channel_home_queue_origin", "channel_home_entry_origin", "channel_home_entry_channel"];
+const indexes = ["engine_queue_items_thread", "engine_entries_thread"];
 let directory: string;
 let pglite: PGlite;
 let pgdb: ReturnType<typeof pgDbFromPglite>;
@@ -72,6 +72,13 @@ async function entry(signal: unknown, sessionId = scope.sessionId, threadId = "h
   await pgdb.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, signal, content, created_at)
     VALUES (gen_random_uuid()::text, $1, $2, 'message', 'user', $3, $4, 1)`,
   [sessionId, threadId, signal === null ? null : JSON.stringify(signal), content]);
+}
+
+async function rawQueueItem(content: string, channel: string | null = null) {
+  await pgdb.query(`INSERT INTO engine_queue_items
+    (id, session_id, thread_id, status, content, channel, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+    VALUES (gen_random_uuid()::text, $1, 'home', 'queued', $2, $3, 0, 1, 1000, 1, 1)`,
+  [scope.sessionId, content, channel]);
 }
 
 const origin = { channelType: "slack", threadKey };
@@ -161,6 +168,23 @@ describe("durable conversation bindings", () => {
 });
 
 describe("legacy Home submissions", () => {
+  it.each([
+    "prompt", "secret prompt", "", "{broken", '"unterminated',
+    '{"kind":"signal","origin":{"channelType":"slack","threadKey":"slack:D1:111.1"},"body":"\\ud800"}',
+  ])("accepts legacy TEXT %j in queue and entry columns without treating it as provenance", async value => {
+    await rawQueueItem(value, value);
+    await pgdb.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, signal, channel, created_at)
+      VALUES ('legacy-text', $1, 'home', 'message', $2, $2, 1)`, [scope.sessionId, value]);
+    expect(await hasLegacyHomeConversation(db, scope, "home", threadKey)).toBe(false);
+    expect(await bindConversation(db, scope, "native")).toBe("native");
+    expect(await findConversationBinding(db, scope)).toBe("native");
+  });
+
+  it("keeps plaintext command content when an explicit channel mark proves the Home conversation", async () => {
+    await rawQueueItem("secret prompt", JSON.stringify({ channelType: "slack", channelId: scope.conversationKey }));
+    expect(await hasLegacyHomeConversation(db, scope, "home", threadKey)).toBe(true);
+  });
+
   it.each(["queue channel", "queue origin", "entry channel", "entry origin"])("accepts escaped NUL in unrelated work and finds %s provenance", async source => {
     await queueItem({ content: "non-Slack work with\0NUL", channel: { channelType: "telegram", channelId: "other" } });
     await queueItem({ content: { kind: "signal", signalType: "github.comment", body: "unrelated\0signal", origin: { channelType: "github", threadKey: "github:other" } } });
@@ -255,7 +279,7 @@ describe("legacy Home submissions", () => {
 });
 
 describe("conversation binding migrations", () => {
-  it("creates the scoped primary key, timestamp, and legacy lookup indexes on a fresh database", async () => {
+  it("creates the scoped primary key and timestamp and reuses the engine lookup indexes", async () => {
     expect((await pgdb.query(`SELECT column_name FROM information_schema.key_column_usage
       WHERE table_name = 'channel_conversation_bindings' ORDER BY ordinal_position`)).rows)
       .toEqual(["org_id", "user_id", "session_id", "channel_type", "conversation_key"].map(column_name => ({ column_name })));
@@ -268,29 +292,34 @@ describe("conversation binding migrations", () => {
   });
 
   it("repairs an already applied migration and preserves bindings on subsequent boots", async () => {
+    await rawQueueItem("secret prompt");
     await queueItem({ content: "non-Slack work with\0NUL" });
     await queueItem({ channel: { channelType: "slack", channelId: scope.conversationKey } });
     await queueItem({ content: { kind: "signal", signalType: "slack.message", origin } });
     await entry({ signalType: "slack.message", origin });
+    const engineIndexes = await pgdb.query("SELECT indexname, indexdef FROM pg_indexes WHERE indexname = ANY($1::text[]) ORDER BY indexname", [indexes]);
     await pgdb.query("DROP TABLE channel_conversation_bindings");
-    for (const index of indexes) await pgdb.query(`DROP INDEX ${index}`);
-    expect((await missingSchemaRepairs(pgdb)).length).toBe(5);
+    expect((await missingSchemaRepairs(pgdb)).length).toBe(1);
     await applyAppMigrations(pgdb);
     expect(await missingSchemaRepairs(pgdb)).toEqual([]);
+    expect((await pgdb.query("SELECT indexname, indexdef FROM pg_indexes WHERE indexname = ANY($1::text[]) ORDER BY indexname", [indexes])).rows)
+      .toEqual(engineIndexes.rows);
     await bindConversation(db, scope, "home");
     await applyAppMigrations(pgdb);
     expect(await findConversationBinding(db, scope)).toBe("home");
     expect(await hasLegacyHomeConversation(db, scope, "home", threadKey)).toBe(true);
-    expect((await pgdb.query("SELECT count(*)::integer AS count FROM engine_queue_items")).rows).toEqual([{ count: 3 }]);
+    expect((await pgdb.query("SELECT count(*)::integer AS count FROM engine_queue_items")).rows).toEqual([{ count: 4 }]);
     expect((await pgdb.query("SELECT count(*)::integer AS count FROM engine_entries")).rows).toEqual([{ count: 1 }]);
   });
 
-  it("uses provenance indexes to locate a conversation without reading the Home history", async () => {
+  it("uses session and thread indexes to bound each provenance lookup", async () => {
+    const safeJson = (column: string) => `(CASE WHEN pg_input_is_valid(replace(${column}, chr(92)||'u0000', chr(92)||'uFFFD'), 'jsonb')
+      THEN replace(${column}, chr(92)||'u0000', chr(92)||'uFFFD')::jsonb END)`;
     const lookups = [
-      { index: "channel_home_queue_channel", table: "engine_queue_items", predicate: "replace(channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelType' = 'slack' AND replace(channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelId' = 'D1:111.1'" },
-      { index: "channel_home_queue_origin", table: "engine_queue_items", predicate: "replace(content, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'kind' = 'signal' AND replace(content, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'channelType' = 'slack' AND replace(content, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'threadKey' = 'slack:D1:111.1'" },
-      { index: "channel_home_entry_channel", table: "engine_entries", predicate: "replace(channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelType' = 'slack' AND replace(channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelId' = 'D1:111.1'" },
-      { index: "channel_home_entry_origin", table: "engine_entries", predicate: "replace(signal, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'channelType' = 'slack' AND replace(signal, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'threadKey' = 'slack:D1:111.1'" },
+      { index: "engine_queue_items_thread", table: "engine_queue_items", predicate: `${safeJson("channel")} ->> 'channelType' = 'slack' AND ${safeJson("channel")} ->> 'channelId' = 'D1:111.1'` },
+      { index: "engine_queue_items_thread", table: "engine_queue_items", predicate: `${safeJson("content")} ->> 'kind' = 'signal' AND ${safeJson("content")} -> 'origin' ->> 'channelType' = 'slack' AND ${safeJson("content")} -> 'origin' ->> 'threadKey' = 'slack:D1:111.1'` },
+      { index: "engine_entries_thread", table: "engine_entries", predicate: `${safeJson("channel")} ->> 'channelType' = 'slack' AND ${safeJson("channel")} ->> 'channelId' = 'D1:111.1'` },
+      { index: "engine_entries_thread", table: "engine_entries", predicate: `${safeJson("signal")} -> 'origin' ->> 'channelType' = 'slack' AND ${safeJson("signal")} -> 'origin' ->> 'threadKey' = 'slack:D1:111.1'` },
     ];
     await pgdb.transaction(async tx => {
       await tx.query("SET LOCAL enable_seqscan = off");
@@ -300,7 +329,9 @@ describe("conversation binding migrations", () => {
         const text = JSON.stringify(plan.rows);
         expect(text).toContain(lookup.index);
         expect(text).toContain("Index Cond:");
-        expect(text).not.toContain("Filter:");
+        expect(text).toContain("session_id = 'session-1'");
+        expect(text).toContain("thread_id = 'home'");
+        expect(text).not.toContain("Seq Scan");
       }
     });
   });

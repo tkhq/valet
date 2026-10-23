@@ -461,19 +461,6 @@ CREATE TABLE "channel_conversation_bindings" (
   PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
 );
 --> statement-breakpoint
-CREATE INDEX "channel_home_queue_channel" ON "engine_queue_items"
-  ("session_id", "thread_id", ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelType'), ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelId'));
---> statement-breakpoint
-CREATE INDEX "channel_home_queue_origin" ON "engine_queue_items"
-  ("session_id", "thread_id", ((replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'channelType'), ((replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'threadKey'))
-  WHERE replace("content", chr(92)||'u0000', chr(92)||'uFFFD')::json->>'kind' = 'signal';
---> statement-breakpoint
-CREATE INDEX "channel_home_entry_channel" ON "engine_entries"
-  ("session_id", "thread_id", ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelType'), ((replace("channel", chr(92)||'u0000', chr(92)||'uFFFD')::json)->>'channelId'));
---> statement-breakpoint
-CREATE INDEX "channel_home_entry_origin" ON "engine_entries"
-  ("session_id", "thread_id", ((replace("signal", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'channelType'), ((replace("signal", chr(92)||'u0000', chr(92)||'uFFFD')::json)->'origin'->>'threadKey'));
---> statement-breakpoint
 CREATE TABLE "user_identity_links" (
 	"id" text PRIMARY KEY NOT NULL,
 	"provider" text NOT NULL,
