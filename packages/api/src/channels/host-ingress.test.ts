@@ -307,7 +307,7 @@ describe("long-poll mode", () => {
     }
   });
 
-  it("tracks an addressed Slack channel origin from a live queue event", async () => {
+  it("tracks a Slack DM origin from a live queue event", async () => {
     await saveCredential("slack");
     const transport = new PollingFakeTransport([], "slack");
     const host = buildHost(transport);
@@ -315,15 +315,15 @@ describe("long-poll mode", () => {
     try {
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost },
         { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-      const thread = session.thread("slack:C1:123.456");
+      const thread = session.thread("slack:D1:123.456");
       await testDb.pgdb.query(`INSERT INTO engine_queue_items
         (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
         VALUES ('channel-status-q', $1, $2, 'queued', $3, 0, 10, 99999999, 0, 0)`,
-        [session.id, thread.id, JSON.stringify({ kind: "signal", signalType: "slack.message", body: "Help", origin: { channelType: "slack", threadKey: "slack:C1:123.456" } })]);
+        [session.id, thread.id, JSON.stringify({ kind: "signal", signalType: "slack.message", body: "Help", origin: { channelType: "slack", threadKey: "slack:D1:123.456" } })]);
       await events.append({ sessionId: session.id, threadId: thread.id, timestamp: 1,
         event: { type: "queue_state", threadId: thread.id, state: { threadId: thread.id, mode: "followup", status: "running", activeItemId: "channel-status-q", pending: [] } } }, "channel-status-queued");
       await waitFor(async () => transport.statuses.some(call => call.status === "is thinking…"));
-      expect(transport.statuses[0].conversationKey).toBe("slack:T:C1:123.456");
+      expect(transport.statuses[0].conversationKey).toBe("slack:T:D1:123.456");
       await events.append({ sessionId: session.id, threadId: thread.id, timestamp: 2,
         event: { type: "submission_settled", sessionId: session.id, threadId: thread.id, queueItemId: "channel-status-q", outcome: { outcome: "completed" } } }, "channel-status-settled");
       await waitFor(async () => transport.statuses.at(-1)?.status === "");
