@@ -100,6 +100,51 @@ describe("EngineHost.evictAll", () => {
     } finally { allowClaim(); release(); await session.thread().kick(); claim?.mockRestore(); faux.unregister(); vi.unstubAllEnvs(); }
   });
 
+  it.each(["followup", "inject", "collect", "steer"] as const)("runs another thread with new credentials while the old turn drains and fences %s on its successor", async queueMode => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const credentials: Array<string | undefined> = [];
+    faux.appendResponses([async () => { entered(); await held; return fauxAssistantMessage("A done"); }, async () => {
+      credentials.push((await api!.providers.engineHost.liveSession(original.id)!.credentialProvider().get("linear"))?.accessToken);
+      return fauxAssistantMessage("B done");
+    }, async () => {
+      credentials.push((await api!.providers.engineHost.liveSession(original.id)!.credentialProvider().get("linear"))?.accessToken);
+      return fauxAssistantMessage("A next done");
+    }]);
+    api = await bootTestApi();
+    const { engineHost: host, engineStore: store, db, engineCredentials } = api.providers;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const original = await host.sessionFor("per-thread-handoff", meta);
+    await original.setModel("claude-haiku-4-5");
+    await db.insert(agentSessions).values({ id: original.id, userId: "local-user", orgId: "local-org", workspace: "/tmp",
+      ownerType: "user", ownerId: "local-user", status: "active", createdAt: 1, updatedAt: 1 });
+    await engineCredentials.save({ type: "user", id: "test-member" }, "linear", { type: "api_key", apiKey: "new-owner" });
+    const first = await original.prompt("A hold");
+    try {
+      await entering;
+      await db.update(agentSessions).set({ ownerId: "test-member", userId: "test-member" }).where(eq(agentSessions.id, original.id));
+      await host.invalidateSession(original.id);
+      const other = await original.createThread("web:other");
+      const b = await other.submitPrompt("B must not wait", {});
+      await vi.waitFor(async () => expect(await store.getQueueItem(original.id, b.queueItemId)).toMatchObject({ status: "settled", attemptCount: 1 }), { timeout: 5000 });
+      expect(credentials).toEqual(["new-owner"]);
+      expect(await store.getQueueItem(original.id, first.queueItemId)).toMatchObject({ status: "running", attemptCount: 1 });
+      const rebuilt = host.liveSession(original.id)!;
+      const next = await rebuilt.prompt("A next", { queueMode });
+      expect(await store.getQueueItem(original.id, next.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+      expect(rebuilt).not.toBe(original);
+      expect(rebuilt.attachment).toBe(original.attachment);
+      expect(await rebuilt.beginReclaim()).toBe(false);
+      release();
+      await vi.waitFor(async () => expect(await store.getQueueItem(original.id, next.queueItemId)).toMatchObject({ status: "settled", attemptCount: 1 }), { timeout: 10000 });
+      expect(credentials).toEqual(["new-owner", "new-owner"]);
+    } finally { release(); await original.thread().kick(); faux.unregister(); vi.unstubAllEnvs(); }
+  });
+
   it("fences a build that finishes after terminal shutdown", async () => {
     api = await bootTestApi();
     const { engineHost: host, engineStore: store } = api.providers;

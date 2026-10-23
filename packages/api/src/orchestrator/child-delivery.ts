@@ -34,6 +34,13 @@ export async function discardChildDelivery(db: AppDb, store: Pick<SessionStore, 
       await tx.insert(eventDropLog).values({ id: randomUUID(), orgId: watch.orgId, reason: "child_delivery_cancelled",
         conversationKey: child, detail: `${reason} Removed ${pending.length} outbox events and ${replies.length} unadmitted replies.`, createdAt: Date.now() });
     }
+    // Cancellation acknowledges only this generation after its delegated turn has settled. Running work still owns capacity.
+    if (watch && !watch.settled) {
+      await tx.execute(sql`UPDATE child_watches SET settled = true, settled_at = ${Date.now()}
+        WHERE child_session_id = ${child} AND queue_item_id = ${watch.queueItemId} AND settled = false
+          AND NOT EXISTS (SELECT 1 FROM engine_queue_items WHERE session_id = ${child}
+            AND (status <> 'settled' OR child_result_delivery = 'pending'))`);
+    }
     await tx.update(childWatches).set({ deliveryActive: false, pendingCapIncident: null, eventsStartedAt: Date.now() })
       .where(eq(childWatches.childSessionId, child));
   });

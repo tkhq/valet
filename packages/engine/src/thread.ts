@@ -24,6 +24,7 @@ import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   DecisionGateExpiredError,
+  DecisionGateHandoffError,
   DecisionGateWithdrawnError,
   findStickyTerminalGate,
   fromRequest,
@@ -434,6 +435,8 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  private gateHandedOff = false;
+  private rearmedGate = false;
   /**
    * The most recent `status` event this instance emitted. In-memory only —
    * feeds `currentAgentStatus` so a client that connects mid-turn can seed
@@ -759,7 +762,7 @@ export class Thread {
       );
     }
     // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
-    const requestedMode = this.session.isExecutionFenced ? "followup" : opts.queueMode ?? this.mode;
+    const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -776,7 +779,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect" && !this.session.isExecutionFenced) {
+    if (effectiveMode === "collect" && !this.session.isThreadExecutionFenced(this.id)) {
       return this.submitCollect(content, opts);
     }
 
@@ -818,7 +821,7 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" && !this.session.isExecutionFenced ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -1559,6 +1562,7 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
+    this.rearmedGate = false;
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -1748,12 +1752,27 @@ export class Thread {
     }
   }
 
+  /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
+  handoffParkedGate(): void {
+    if (!this.blockedGateId || !this.gates.isPending(this.blockedGateId)) return;
+    this.gateHandedOff = true;
+    this.agent.abort();
+    this.gates.handoff(this.blockedGateId);
+    if (this.rearmedGate) {
+      this.runningItem = null;
+      this.fence = undefined;
+      this.blockedGateId = undefined;
+      this.session.notifyExecutionIdle();
+    }
+  }
+
   /**
    * Re-arm the GateManager for a still-pending gate after restart, so a
    * future resolveDecision triggers replay.
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
+    this.rearmedGate = true;
     this.gates
       .register(gate, () => {
         // Terminalization is driven off the promise rejection below (which the
@@ -1765,6 +1784,7 @@ export class Thread {
         );
       })
       .catch((err) => {
+        if (err instanceof DecisionGateHandoffError) return;
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
         // state as the live path: persist the gate's terminal status, flip the
         // durable block back to running, clear the suspended checkpoint, and
@@ -1786,6 +1806,7 @@ export class Thread {
           err instanceof Error ? err.message : String(err),
         );
       });
+    if (this.session.isExecutionFenced) this.handoffParkedGate();
   }
 
   /**
@@ -2086,7 +2107,7 @@ export class Thread {
     }
 
     try {
-      const rawResolution = await this.gates.register(gate, async (gateId) => {
+      const waiting = this.gates.register(gate, async (gateId) => {
         await session.providers.store.updateDecisionGateEntry(
           session.id,
           this.id,
@@ -2098,6 +2119,8 @@ export class Thread {
           { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
         );
       });
+      if (this.session.isExecutionFenced) this.handoffParkedGate();
+      const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
       // call_tool's policy audit) needs this to distinguish a
@@ -2126,6 +2149,7 @@ export class Thread {
       );
       return resolution;
     } catch (err) {
+      if (err instanceof DecisionGateHandoffError) throw err;
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
       await persistTerminalGate(
@@ -2842,7 +2866,7 @@ export class Thread {
         await store.insertAttemptMarker(item.id, attemptId);
         this.runningItem = item;
         return item;
-      });
+      }, this.id);
       if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
@@ -3148,6 +3172,7 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    if (this.gateHandedOff) return;
     return this.inSubmissionContext(() =>
       withSpan(
         "submission.settle",
@@ -3476,7 +3501,7 @@ export class Thread {
       await store.insertAttemptMarker(item.id, attemptId);
       this.runningItem = claimed;
       return claimed;
-    });
+    }, this.id);
     if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
@@ -3557,7 +3582,7 @@ export class Thread {
       await store.insertAttemptMarker(item.id, attemptId);
       this.runningItem = claimed;
       return claimed;
-    });
+    }, this.id);
     if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };

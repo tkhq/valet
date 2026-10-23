@@ -1291,7 +1291,11 @@ with an earlier entry, the entry below wins.
   The host restores the durable queue on fresh compute. Web, signals, CLI, and child sends share this engine behavior.
   Reclaim eviction refuses active execution. Config invalidation is not discarded when execution is active.
   It fences new claims immediately and stores a token in `session_config_invalidations` before acknowledging the request.
-  The active owner drains, then leaves the cache. Queued work restores from current configuration before claiming.
+  A rebuilt owner replaces the cache immediately and shares the sandbox attachment while old execution drains.
+  The old owner reserves only threads with active execution or in-flight claims. Other threads claim with current configuration.
+  Every later turn on a reserved thread waits for its old run to finish, then claims once on the rebuilt owner.
+  A parked durable approval transfers to the rebuilt owner without withdrawing or resolving the gate.
+  Reclaim and teardown account for every generation sharing compute. Shutdown suspends all owners' timers.
   Each builder captures a config generation. Claims from an obsolete build are refused, including during startup reconciliation.
   A fresh build removes only the invalidation token it observed. A newer token survives that deletion.
   Archive leaves queued work unclaimed. Shutdown fences and evicts every owner without deleting durable rows or destroying compute.

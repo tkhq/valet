@@ -901,6 +901,16 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.appendEventMatch("missing", digest(), 24)).toBe(false);
       });
 
+      it("appendEventMatch sanitizes lone UTF-16 surrogates before JSONB and preserves whole astral characters", async () => {
+        await store.createWakeup(eventWaiter());
+        expect(await store.appendEventMatch("wk_ev", digest({ summary: "a\ud800b\udfff😀", refs: { "bad\udc00key": "ok\ud800😀" } }), 20)).toBe(true);
+        const event = (await store.getWakeup("wk_ev"))?.eventBuffer?.[0];
+        expect(event?.summary).toBe("ab😀");
+        expect(event?.refs).toEqual({ badkey: "ok😀" });
+        await store.removeEventMatches("wk_ev", [event!.dedupeKey], 21);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "after-invalid" }), 22)).toBe(true);
+      });
+
       it("appendEventMatch cuts text to 4096 bytes", async () => {
         await store.createWakeup(eventWaiter());
         await store.appendEventMatch("wk_ev", digest({ text: "é".repeat(5000) }), 20);

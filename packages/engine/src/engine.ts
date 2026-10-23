@@ -41,11 +41,13 @@ export class Engine {
   }
 
   async restoreSession(args: RestoreSessionOptions): Promise<Session> {
+    if (args.predecessor && args.predecessor.id !== args.sessionId) throw new Error("Configuration handoff must keep the session identity");
     const cached = this.sessions.get(args.sessionId);
     if (cached) return cached;
     const data = await this.opts.providers.store.getSession(args.sessionId);
     if (!data) throw new Error(`session not found: ${args.sessionId}`);
-    const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
+    const shared = args.predecessor?.attachment.state !== "released" ? args.predecessor?.sharedExecutionRuntime() : undefined;
+    const { attachment, sandbox, policySandbox } = shared ?? await this.materializeSandbox(
       args.sessionId,
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
@@ -60,6 +62,7 @@ export class Engine {
       sandbox,
       attachment,
       policySandbox,
+      args.predecessor,
     );
     this.sessions.set(args.sessionId, session);
     return session;

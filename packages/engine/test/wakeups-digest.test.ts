@@ -60,3 +60,8 @@ describe("stripNul", () => {
     expect(stripNul("a\\u0000b")).toBe("a\\u0000b");
   });
 });
+
+it("removes lone UTF-16 surrogates recursively but keeps whole astral characters", () => {
+  expect(stripNul({ "bad\ud800key": ["a\ud800b\udc00c", "😀"], text: "\u0000\udfff" }))
+    .toEqual({ badkey: ["abc", "😀"], text: "" });
+});

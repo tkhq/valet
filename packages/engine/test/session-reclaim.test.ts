@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 function fixture() {
@@ -80,6 +80,59 @@ describe("session reclaim fence", () => {
       expect(await store.getQueueItem(session.id, next.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
       expect(await store.getQueueItem(session.id, other.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
     } finally { release(); await session.destroy(); faux.unregister(); }
+  });
+
+  it.each([1, 2])("hands a parked durable gate through %i config rebuilds without holding other threads or executing the action twice", async generations => {
+    const store = new InMemorySessionStore();
+    const stream = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const faux = registerFauxProvider({ provider: "gate-config-handoff" });
+    let performed = 0;
+    const options = { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [{ name: "ask", description: "Approval", parameters: Type.Object({}), execute: async (_args: unknown, ctx: import("../src/types.js").ToolContext) => {
+        await ctx.requestDecision({ type: "approval", title: "Approve", resumeKey: "ask" });
+        performed++;
+        return { text: "approved" };
+      } }],
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask", {}, { id: "ask1" })], { stopReason: "toolUse" }),
+      // Agent's in-flight tool-error unwind can consume a response after abort; it cannot execute another queued turn.
+      fauxAssistantMessage("old tool unwound"), fauxAssistantMessage("B done"), fauxAssistantMessage("A resumed"), fauxAssistantMessage("A next"),
+    ]);
+    const original = await new Engine({ providers: { store, stream, sandboxProvider } }).createSession(options);
+    let rebuilt: import("../src/session.js").Session | undefined;
+    try {
+      const a = await original.prompt("gate A");
+      await vi.waitFor(() => expect(original.thread().pendingDecisionGates()).toHaveLength(1));
+      const gate = original.thread().pendingDecisionGates()[0]!;
+      await store.saveDecisionGate(original.id, original.thread().id, { ...gate, expiresAt: undefined });
+      original.retireExecution(async () => {});
+      await vi.waitFor(() => expect(original.hasOwnActiveExecution).toBe(false));
+      expect((await store.getDecisionGate(original.id, gate.id))?.status).toBe("pending");
+      expect((await store.getQueueItem(original.id, a.queueItemId))?.status).toBe("blocked_on_decision_gate");
+      expect(performed).toBe(0);
+      rebuilt = await new Engine({ providers: { store, stream, sandboxProvider } }).restoreSession({ sessionId: original.id, options, predecessor: original });
+      for (let generation = 1; generation < generations; generation++) {
+        const previous = rebuilt;
+        previous.retireExecution(async () => {});
+        expect(previous.hasOwnActiveExecution).toBe(false);
+        rebuilt = await new Engine({ providers: { store, stream, sandboxProvider } }).restoreSession({ sessionId: original.id, options, predecessor: previous });
+      }
+      expect(rebuilt.thread().isPendingGate(gate.id)).toBe(true);
+      expect(original.thread().isPendingGate(gate.id)).toBe(false);
+      const b = await (await rebuilt.createThread("B")).submitPrompt("B", {});
+      expect((await rebuilt.thread("B").awaitResult(b.queueItemId)).outcome).toBe("completed");
+      const next = await rebuilt.prompt("A next");
+      expect((await store.getQueueItem(original.id, next.queueItemId))?.attemptCount).toBe(0);
+      expect(rebuilt.thread().resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() })).toBe(true);
+      expect((await rebuilt.thread().awaitResult(a.queueItemId)).outcome).toBe("completed");
+      expect((await rebuilt.thread().awaitResult(next.queueItemId)).outcome).toBe("completed");
+      expect(performed).toBe(1);
+      expect((await store.getQueueItem(original.id, a.queueItemId))?.attemptCount).toBe(generations + 1);
+      expect((await store.getQueueItem(original.id, b.queueItemId))?.attemptCount).toBe(1);
+      expect((await store.getQueueItem(original.id, next.queueItemId))?.attemptCount).toBe(1);
+    } finally { await (rebuilt ?? original).destroy(); faux.unregister(); }
   });
 
   it("cannot restart timers after permanent cache eviction even if a reserved claim installs late", async () => {

@@ -863,6 +863,7 @@ export class EngineHost {
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
   private configWrites = new Map<string, Promise<void>>();
+  private draining = new Map<string, Session>();
   private shuttingDown = false;
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
@@ -1360,6 +1361,7 @@ export class EngineHost {
     const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
+          predecessor: this.draining.get(sessionId),
           sessionId,
           options: {
             isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
@@ -3219,7 +3221,7 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     const epochNow = this.buildEpoch.get(sessionId) ?? 0;
@@ -3290,15 +3292,15 @@ export class EngineHost {
     // A build can still be inserting its token. Settle it before revocation,
     // including failed builds that may have written only part of their state.
     await this.inflight.get(sessionId)?.catch(() => undefined);
-    const entry = this.cache.get(sessionId);
+    const session = this.liveSession(sessionId);
     // Existing browser state keeps its audit obligation after allocation is disabled.
-    if (entry && !entry.session.options.sandboxLifecycle) {
+    if (session && !session.options.sandboxLifecycle) {
       const rows = await this.opts.sandboxProvider.list?.() ?? [];
       for (const row of rows.filter((value) => value.sessionId === sessionId && value.browserEnabled)) {
         await this.stopBrowserBefore(row.id, 'destroy');
       }
     }
-    if (!entry) {
+    if (!session) {
       await this.destroyRetainedBrowserSandboxes(sessionId);
       // Cold session: nothing cached in this process, but every caller of
       // destroy() means "this session is being deleted", and the durable
@@ -3320,9 +3322,10 @@ export class EngineHost {
     try {
       // Replacement drops its attachment handle before it releases compute.
       // Final deletion also owns any browser state that remains in inventory.
-      await entry.session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
+      await session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
     } finally {
       this.cache.delete(sessionId);
+      this.draining.delete(sessionId);
       this.buildEpoch.delete(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
@@ -3383,7 +3386,7 @@ export class EngineHost {
 
   /**
    * Invalidate the cache without deleting durable engine state or destroying compute.
-   * Config eviction retires the owner: current execution drains, but every later admission queues for a fresh build.
+   * Config eviction retires the owner and rebuilds immediately. Only its active threads wait for handoff.
    * The identity-checked reclaim path can drop only an idle owner. Old references remain fenced after either handoff.
    */
   evictCache(sessionId: string, expected?: Session | null): void {
@@ -3394,26 +3397,35 @@ export class EngineHost {
     if (!entry) return;
     if (expected !== undefined) { this.dropCacheEntry(sessionId); return; }
     const retired = entry.session;
+    if (retired.hasActiveExecution && retired.attachment.state !== "released") this.draining.set(sessionId, retired);
     retired.retireExecution(async () => {
-      await this.configWrites.get(sessionId);
-      if (this.shuttingDown || retired.hasActiveExecution) return;
-      await this.withSandboxCleanup(sessionId, async () => {
-        if (this.cache.get(sessionId)?.session === retired && !retired.hasActiveExecution) this.dropCacheEntry(sessionId);
-      });
-      if (this.shuttingDown || retired.hasActiveExecution) return;
-      const [row] = this.opts.db ? await this.opts.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1) : [];
-      if (row?.status === "deleted") return;
-      if (!(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length) return;
       try {
+        await this.configWrites.get(sessionId);
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        await this.withSandboxCleanup(sessionId, async () => {
+          if (this.cache.get(sessionId)?.session === retired) this.cache.delete(sessionId);
+        });
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        const [row] = this.opts.db ? await this.opts.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1) : [];
+        if (row?.status === "deleted" || !(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length) return;
         const data = await retired.toData();
         const replacement = await this.sessionFor(sessionId, row && this.opts.db ? await loadSessionMeta(this.opts.db, row) : {
           userId: data.userId, orgId: data.orgId, workspace: data.workspace, ownerType: data.owner.type,
         });
+        if (replacement !== retired) await replacement.refreshExecutionThreads();
         for (const thread of replacement.listThreads()) void thread.kick();
-      } catch (error) { if (!(error instanceof ArchivedAssistantError)) throw error; }
+      } catch (error) {
+        if (!(error instanceof ArchivedAssistantError)) throw error;
+      } finally {
+        if (!retired.hasOwnActiveExecution) {
+          retired.suspendTimers({ permanent: true });
+          if (this.draining.get(sessionId)?.hasDrainingExecution === false) this.draining.delete(sessionId);
+        }
+      }
     });
-    // No active owner exists to protect. Old references remain fenced and recover late admissions.
-    if (!retired.hasActiveExecution) this.dropCacheEntry(sessionId);
+    // The replacement can claim other threads now. Old references stay fenced and recover late admissions.
+    this.cache.delete(sessionId);
+    if (!retired.hasOwnActiveExecution) retired.suspendTimers({ permanent: true });
   }
 
   /**
@@ -3431,9 +3443,13 @@ export class EngineHost {
     this.shuttingDown = opts.shutdown ?? true;
     for (const [id, entry] of this.cache) {
       this.buildEpoch.set(id, (this.buildEpoch.get(id) ?? 0) + 1);
-      entry.session.retireExecution(async () => {});
+      entry.session.stopExecutionOwners();
       this.dropCacheEntry(id);
     }
+    for (const session of this.draining.values()) {
+      session.stopExecutionOwners();
+    }
+    this.draining.clear();
     this.clearSweepInterval();
   }
 
@@ -3453,7 +3469,7 @@ export class EngineHost {
    * `evictAll()`. Kept for tests and true delete-everything flows.
    */
   async destroyAll(): Promise<void> {
-    const ids = [...this.cache.keys()];
+    const ids = [...new Set([...this.cache.keys(), ...this.draining.keys()])];
     await Promise.allSettled(ids.map((id) => this.destroy(id)));
     this.clearSweepInterval();
   }
@@ -3549,16 +3565,18 @@ export class EngineHost {
    * exists while the session is live.
    */
   sessionsWithActiveRuns(): string[] {
-    return [...this.cache].filter(([, entry]) => entry.session.listThreads().some(thread => thread.hasActiveRun)).map(([id]) => id);
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.hasActiveExecution).map(([id]) => id);
   }
 
   runningSandboxSessionIds(): string[] {
-    return [...this.cache].filter(([, { session }]) => session.attachment.sandboxId !== undefined
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.attachment.sandboxId !== undefined
       && session.attachment.state !== "suspended" && session.attachment.state !== "released").map(([id]) => id);
   }
 
   liveSession(sessionId: string): Session | null {
-    return this.cache.get(sessionId)?.session ?? null;
+    return this.cache.get(sessionId)?.session ?? this.draining.get(sessionId) ?? null;
   }
 
   /**
@@ -4418,7 +4436,7 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions, predecessor: this.draining.get(childSessionId) })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     builtSession = session;
@@ -4603,7 +4621,7 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);

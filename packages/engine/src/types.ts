@@ -1,3 +1,4 @@
+import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
@@ -3208,6 +3209,8 @@ export type ChildSender = (
  * creation options across restarts.
  */
 export interface RestoreSessionOptions {
+  /** Same-process configuration handoff: share compute and reserve active threads on their existing owner. */
+  predecessor?: Session;
   sessionId: string;
   options: Omit<CreateSessionOptions, "id">;
 }

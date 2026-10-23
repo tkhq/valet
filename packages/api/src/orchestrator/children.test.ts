@@ -33,7 +33,7 @@ import * as sandboxTokenAuth from "../auth/sandbox-tokens.js";
 import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
-import { VirtualSandbox } from "@valet/engine";
+import { VirtualSandbox, VirtualSandboxProvider } from "@valet/engine";
 import * as engineMetrics from "@valet/engine";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -1207,8 +1207,8 @@ describe("ChildWatcher", () => {
   });
 
   describe("child event subscriptions", () => {
-    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}, origin?: ChannelOrigin) {
-      api = await bootTestApi();
+    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}, origin?: ChannelOrigin, boot?: Parameters<typeof bootTestApi>[0], outcome: "completed" | "failed" = "completed") {
+      api = await bootTestApi(boot);
       const deps = childrenDeps(api, overrides);
       const watcher = testChildWatcher(deps);
       const { engineHost, engineStore, db } = api.providers;
@@ -1228,7 +1228,7 @@ describe("ChildWatcher", () => {
       const itemId = `qi-${name}-1`;
       await engineStore.admitSubmission(`child-${name}`, childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
         metadata: parentDelegationMetadata(parent.id, parentThread.id, origin) });
-      await engineStore.settleUnclaimed(`child-${name}`, childThread.id, itemId, { outcome: "completed" });
+      await engineStore.settleUnclaimed(`child-${name}`, childThread.id, itemId, { outcome, ...(outcome === "failed" ? { error: "public failure" } : {}) });
       await db.insert(agentSessions).values({
         id: `child-${name}`, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
         ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
@@ -1248,11 +1248,13 @@ describe("ChildWatcher", () => {
     }
 
 
-    it.each(["result", "background-work"] as const)("delivers child settlement with NUL in %s", async kind => {
+    it.each(["result", "background-work", "lone-surrogate", "astral-boundary"] as const)("delivers child settlement with invalid Unicode in %s", async kind => {
       const c = await armedChild(`nul-${kind}`);
       const db = api!.providers.db;
       const result = vi.spyOn(c.childThread, "awaitResult").mockResolvedValue({
-        queueItemId: c.watch.queueItemId, outcome: "completed", text: kind === "result" ? "finished\u0000work" : "finishedwork",
+        queueItemId: c.watch.queueItemId, outcome: "completed", text: kind === "result" ? "finished\u0000work"
+          : kind === "lone-surrogate" ? "finished\ud800work\udfff"
+          : kind === "astral-boundary" ? "finishedwork" + "a".repeat(CHILD_RESULT_MAX_CHARS - 13) + "😀" + "later" : "finishedwork",
       });
       const leases = c.engineStore.listActiveLeases.bind(c.engineStore);
       const reason = kind === "background-work" ? vi.spyOn(c.engineStore, "listActiveLeases").mockImplementation(async id => [
@@ -1267,7 +1269,7 @@ describe("ChildWatcher", () => {
         await vi.waitFor(async () => expect(await db.select().from(childEventOutbox)).toHaveLength(1));
         const [pending] = await db.select().from(childEventOutbox);
         expect(pending!.event.summary).toContain("finishedwork");
-        expect(JSON.stringify(pending!.event)).not.toContain("\\u0000");
+        expect(JSON.stringify(pending!.event)).not.toMatch(/\\u(?:0000|d[89a-f][0-9a-f]{2})/i);
         if (kind === "background-work") {
           expect(pending!.event.payload).toMatchObject({ backgroundWork: [{ reason: "watchingbuild" }] });
           expect(JSON.parse(pending!.event.refs.background_work!)).toMatchObject([{ reason: "watchingbuild" }]);
@@ -1428,10 +1430,10 @@ describe("ChildWatcher", () => {
 
     it("does not overtake an older outbox result and retries empty-buffer ingestion failures", async () => {
       const c = await armedChild("outbox-order", { retryDelayMs: 10 });
-      c.watcher.arm(c.watch);
       const find = vi.spyOn(c.engineStore, "findEventWaiters").mockRejectedValue(new Error("ingest offline"));
       const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
+        c.watcher.arm(c.watch);
         await vi.waitFor(async () => expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(1));
         await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("newer-sig", c.childThread.id, ""),
           content: { kind: "signal", signalType: "lease.released", body: "newer" } });
@@ -1447,6 +1449,74 @@ describe("ChildWatcher", () => {
         }, { timeout: 5000 });
         await waitFor(c.settled);
       } finally { find.mockRestore(); errors.mockRestore(); }
+    });
+
+    it("settles cancelled published work so capacity and retention recover without reboot", async () => {
+      // The default VirtualSandbox.destroy clears files but leaves provider inventory intact.
+      // Model provider-owned destruction here so retention's absence confirmation is exercised, not bypassed.
+      const provider = new VirtualSandboxProvider();
+      const create = provider.create.bind(provider);
+      const destroy = provider.destroy.bind(provider);
+      vi.spyOn(provider, "create").mockImplementation(async opts => {
+        const sandbox = await create(opts);
+        const clear = sandbox.destroy!.bind(sandbox);
+        sandbox.destroy = async () => {
+          sandbox.destroy = clear;
+          await destroy(sandbox.id);
+        };
+        return sandbox;
+      });
+      const c = await armedChild("cancel-published-capacity", { retentionMs: 1, idleGraceMs: 1 }, undefined, { sandboxProvider: provider });
+      await c.child.attachment.ensureReady({ timeoutMs: 5000 });
+      c.watcher.arm(c.watch);
+      const db = api!.providers.db;
+      await vi.waitFor(async () => expect(await db.select().from(childEventOutbox)).toHaveLength(1));
+      await cancelChildDelivery(db, c.engineStore, c.child.id, "Cancel after publication");
+      await childDelivery!.sweep();
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, c.child.id));
+      expect(watch).toMatchObject({ settled: true, deliveryActive: false });
+      expect(watch!.settledAt).not.toBeNull();
+      expect(await db.select().from(childWatches).where(and(eq(childWatches.parentSessionId, c.parent.id), eq(childWatches.settled, false)))).toHaveLength(0);
+      await db.update(childWatches).set({ settledAt: 1, parkedSandboxId: c.child.attachment.sandboxId }).where(eq(childWatches.childSessionId, c.child.id));
+      await c.watcher.sweepRetention(Date.now() + 100);
+      expect((await db.select().from(childWatches).where(eq(childWatches.childSessionId, c.child.id)))[0]?.sandboxReclaimedAt).not.toBeNull();
+      expect(await c.settledSignal()).toBeUndefined();
+      const spawned = await buildChildSpawner({ ...c.deps, orgSessionCeiling: 1 }, c.watcher)({ prompt: "capacity recovered" }, {
+        parentSessionId: c.parent.id, parentThreadId: c.parentThread.id, actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+      });
+      expect(spawned.childSessionId).not.toBe(c.child.id);
+    });
+
+    it.each(["retry", "boot", "retry-private-prefix", "boot-private-prefix"] as const)("bounds public failure checkpoints to the reported turn during %s", async variant => {
+      const mode = variant.startsWith("retry") ? "retry" : "boot";
+      const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+      const c = await armedChild(`checkpoint-privacy-${mode}`, { retryDelayMs: 10 }, origin, undefined, "failed");
+      const db = api!.providers.db;
+      await db.update(childWatches).set({ originJson: JSON.stringify(origin), replyRoute: "origin" }).where(eq(childWatches.childSessionId, c.child.id));
+      const original = await c.engineStore.getQueueItem(c.child.id, c.watch.queueItemId);
+      if (!original) throw new Error("missing original");
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("later-private", c.childThread.id, "private human work"), author: { id: "human", interactive: true } });
+      const privateFirst = variant.endsWith("private-prefix");
+      await c.engineStore.appendEntries(c.child.id, c.childThread.id, [
+        { id: "public-failure-entry", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: c.watch.queueItemId,
+          parentId: privateFirst ? "later-private-checkpoint" : null, type: "message", role: "user", content: "public request", createdAt: privateFirst ? 40 : 10 },
+        { id: "private-entry", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: "later-private",
+          parentId: privateFirst ? null : "public-failure-entry", type: "message", role: "user", content: "secret", createdAt: 20 },
+        { id: "later-private-checkpoint", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: "later-private",
+          parentId: "private-entry", type: "compaction", summary: "SECRET LATER CHECKPOINT", coveredEntryIds: ["private-entry"],
+          tokenCountBefore: 2, tokenCountAfter: 1, createdAt: 30 },
+      ]);
+      const leaf = privateFirst ? "public-failure-entry" : "later-private-checkpoint";
+      await c.engineStore.saveThread(c.child.id, { ...(await c.engineStore.getThread(c.child.id, c.childThread.id))!, activeLeafEntryId: leaf });
+      const ingest = mode === "retry" ? vi.spyOn(c.engineStore, "findEventWaiters").mockRejectedValueOnce(new Error("retry publication")) : undefined;
+      try {
+        if (mode === "boot") await c.watcher.rearm();
+        else c.watcher.arm(c.watch);
+        await waitFor(c.settled);
+        expect((await c.settledSignal())?.body).toContain("public failure");
+        expect((await c.settledSignal())?.body).not.toContain("SECRET LATER CHECKPOINT");
+        expect((await c.settledSignal())?.attributes).not.toHaveProperty("continuation_checkpoint_entry_id");
+      } finally { ingest?.mockRestore(); }
     });
 
     it("cancellation removes the outbox and logs the abandoned reply before a new send", async () => {
@@ -3020,6 +3090,15 @@ describe("classifyWatcherError", () => {
 describe("resultBody", () => {
   const childId = "sess_child_abc";
 
+  it.each(["result", "checkpoint"] as const)("truncates %s without splitting a surrogate pair", kind => {
+    const limit = kind === "result" ? CHILD_RESULT_MAX_CHARS : CHILD_RESULT_MAX_CHARS / 2;
+    const text = "a".repeat(limit - 1) + "😀" + "z".repeat(CHILD_RESULT_MAX_CHARS);
+    const body = resultBody({ queueItemId: "q1", outcome: kind === "result" ? "completed" : "failed", text, error: "failed" }, childId,
+      kind === "checkpoint" ? { id: "checkpoint", sessionId: childId, threadId: "thread", parentId: null, type: "compaction",
+        summary: text, coveredEntryIds: [], tokenCountBefore: 1, tokenCountAfter: 1, createdAt: 1 } : undefined);
+    expect(Array.from(body).some(ch => ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff)).toBe(false);
+  });
+
   it("passes a short result through untouched", () => {
     const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "all done" }, childId);
     expect(body).toBe("all done");
@@ -4250,7 +4329,7 @@ describe("child sandbox retention", () => {
       expect(destroy).not.toHaveBeenCalled();
       expect(childThread.hasActiveRun).toBe(true);
       expect(child.isReclaiming).toBe(false);
-      host.evictCache(child.id);
+      host.evictCache(child.id, child); // reclaim's identity-checked path must refuse the active owner
       expect(host.liveSession(child.id)).toBe(child);
       expect(await host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toBe(child);
       expect((await api.providers.engineStore.getQueueItem(child.id, itemId))?.attemptCount).toBe(1);

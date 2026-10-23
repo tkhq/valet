@@ -802,7 +802,7 @@ An event waiter follows the rule for timers:
   After destroy returns, the caller evicts the terminal session without deleting submissions. A pending-release failure keeps its cached owner.
   The old reference stays fenced. Admissions on it schedule recovery after cleanup, without awaiting that recovery inside the barrier.
   Recovery builds one fresh session and kicks its durable queue. No admission caller needs its own reclaim protocol.
-  Cache eviction refuses active execution. Session builders replace idle released entries; `liveSession()` only reads the cache.
+  Reclaim eviction refuses active execution. Session builders replace idle released entries; `liveSession()` reads cached or draining ownership.
   The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
   A retry uses that handle directly, never the released attachment's no-op destroy.
   Both the parked handle and the session handle are cleared after confirmation, before revoke.
@@ -946,7 +946,9 @@ The delivered types stay `child.settled` and `child.gate_opened`.
 Private transcript input permanently downgrades an automatic reply route.
 Gate updates use manual replies.
 Config-change eviction does not discard an active owner's invalidation.
-It fences later claims and persists a token, lets current execution finish, then rebuilds before queued work can claim.
+It fences old claims and persists a token, then rebuilds without waiting for unrelated active threads.
+The rebuilt owner shares compute but cannot claim a predecessor's active thread until that run ends.
+A parked durable gate transfers to the rebuilt owner. Reclaim and teardown count all owners of the attachment.
 Reclaim still refuses active execution. Shutdown fences and evicts all cached owners without deleting durable work.
 
 Delivery intersects the child session, result submission, and delegation submission tool scopes.

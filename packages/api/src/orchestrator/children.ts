@@ -1045,7 +1045,7 @@ export class ChildWatcher {
         { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey });
       const body = resultBody(result, watch.childSessionId,
         result.outcome === "failed" || result.outcome === "aborted"
-          ? await this.latestContinuationCheckpoint(watch.childSessionId, childSession.thread().id) : undefined);
+          ? await this.latestContinuationCheckpoint(watch, itemId, row.originJson !== null) : undefined);
       await this.publish(watch, {
         key: "child.settled",
         dedupeKey: `settled:${watch.childSessionId}:${itemId}`,
@@ -1073,10 +1073,7 @@ export class ChildWatcher {
     const title = appRows[0]?.title ?? undefined;
     const continuationCheckpoint =
       result.outcome === "failed" || result.outcome === "aborted"
-        ? await this.latestContinuationCheckpoint(
-            watch.childSessionId,
-            childSession.thread().id,
-          )
+        ? await this.latestContinuationCheckpoint(watch, itemId, row.originJson !== null)
         : undefined;
 
     // Private input in this result's transcript downgrades an automatic
@@ -1563,21 +1560,29 @@ export class ChildWatcher {
   }
 
   private async latestContinuationCheckpoint(
-    childSessionId: string,
-    childThreadId: string,
+    watch: ArmArgs,
+    itemId: string,
+    channelAudience: boolean,
   ): Promise<CompactionEntry | undefined> {
-    const snapshot = await this.deps.engineStore.getThreadSnapshot(
-      childSessionId,
-      childThreadId,
-    );
+    const store = this.deps.engineStore;
+    const item = await store.getQueueItem(watch.childSessionId, itemId);
+    if (!item) return undefined;
+    const [row] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, watch.childSessionId));
+    if (channelAudience && await privateInputThrough(store, watch.childSessionId, itemId,
+      { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row?.originJson ?? null)?.threadKey })) return undefined;
+    const snapshot = await store.getThreadSnapshot(watch.childSessionId, item.threadId);
     if (!snapshot) return undefined;
-    const activeEntries = walkTranscriptDag(
-      snapshot.entries,
-      snapshot.thread.activeLeafEntryId,
-    );
+    // Storage order is execution order, not queue admission time. A later turn must never donate its checkpoint.
+    const entries = snapshot.entries;
+    let last = -1;
+    for (let i = 0; i < entries.length; i++) if (entries[i]?.queueItemId === itemId) last = i;
+    const later = last < 0 ? -1 : entries.findIndex((entry, i) => i > last && entry.queueItemId !== undefined && entry.queueItemId !== itemId);
+    const allowed = new Set(entries.slice(0, later < 0 ? entries.length : later)
+      .filter(entry => entry.createdAt <= item.updatedAt).map(entry => entry.id));
+    const activeEntries = walkTranscriptDag(entries, snapshot.thread.activeLeafEntryId);
     for (let index = activeEntries.length - 1; index >= 0; index--) {
       const entry = activeEntries[index];
-      if (entry.type === "compaction") return entry;
+      if (entry.type === "compaction" && allowed.has(entry.id)) return entry;
     }
     return undefined;
   }
@@ -2346,6 +2351,13 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
  */
 export const CHILD_RESULT_MAX_CHARS = 16_000;
 
+function codePointPrefix(text: string, maxUnits: number): string {
+  const end = Math.max(0, Math.floor(maxUnits));
+  const high = text.charCodeAt(end - 1);
+  const low = text.charCodeAt(end);
+  return text.slice(0, high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff ? end - 1 : end);
+}
+
 /**
  * The child's result as the parent receives it, bounded.
  *
@@ -2375,14 +2387,14 @@ export function resultBody(
   const checkpointSummary = continuationCheckpoint?.summary ?? "";
   const checkpoint = checkpointSummary.length <= checkpointMaxChars
     ? checkpointHeader + checkpointSummary
-    : checkpointHeader + checkpointSummary.slice(0, checkpointMaxChars) +
+    : checkpointHeader + codePointPrefix(checkpointSummary, checkpointMaxChars) +
       `\n\n[Checkpoint truncated. Call child_read with child_session_id ` +
       `"${childSessionId}" for the complete recovery state.]`;
   const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length);
   if (full.length <= available) return full + checkpoint;
 
-  const dropped = full.length - available;
-  const prefix = full.slice(0, available);
+  const prefix = codePointPrefix(full, available);
+  const dropped = full.length - prefix.length;
   if (isFailure) {
     return (
       prefix +
