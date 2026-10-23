@@ -197,6 +197,7 @@ import type {
   WriteFence,
 } from "./types.js";
 import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { correctImageBlocks } from "./image-media-type.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -6314,9 +6315,9 @@ export class Thread {
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
-        return messages.filter(
+        return correctImageBlocks(messages.filter(
           (m) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-        ) as Message[];
+        ) as Message[]);
       },
       // Re-read the live model between loop iterations (TKAI-338).
       //

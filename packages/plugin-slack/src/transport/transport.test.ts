@@ -1515,3 +1515,27 @@ describe("attention delivery metadata", () => {
     expect(gate.channelId).toBe("D-U1");
   });
 });
+
+describe("fetchMedia image type (TKAI-661)", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]);
+  const register = (bytes: Uint8Array) => {
+    fake.addFile("thumb_1024.png", bytes);
+    fake.setFileInfo("F1", {
+      id: "F1",
+      url_private: `${fake.baseUrl}/files/shot.png`,
+      thumb_1024: `${fake.baseUrl}/files/thumb_1024.png`,
+      mimetype: "image/png",
+      name: "Screenshot.png",
+    });
+    return makeTransport().fetchMedia({ kind: "photo", fileId: "F1" });
+  };
+
+  it("reports image/png for a PNG thumbnail instead of a hardcoded image/jpeg", async () => {
+    expect((await register(PNG))?.mimeType).toBe("image/png");
+  });
+
+  it("reports image/jpeg for JPEG bytes declared as PNG", async () => {
+    expect((await register(JPEG))?.mimeType).toBe("image/jpeg");
+  });
+});
