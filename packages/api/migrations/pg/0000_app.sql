@@ -632,6 +632,7 @@ CREATE TABLE "skills" (
 	"frontmatter" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"content_sha" text NOT NULL,
 	"upstream_path" text,
+    "upstream_blob_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

@@ -489,17 +489,15 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     const data = await this.readBody(res, repoFullName, what);
     if (!isRecord(data) || data.type !== "file") return null;
     const raw = typeof data.content === "string" ? data.content : "";
-    const text =
-      data.encoding === "base64"
-        ? Buffer.from(raw.replace(/\n/g, ""), "base64").toString("utf8")
-        : raw;
+    const bytes = data.encoding === "base64" ? Buffer.from(raw.replace(/\n/g, ""), "base64") : undefined;
+    const text = bytes ? bytes.toString("utf8") : raw;
     // The blob sha is the manifest key, so a response without one cannot be
     // mirrored: two different versions of the file would hash the same and
     // the sync would report no change. GitHub sends `sha` on every file.
     if (typeof data.sha !== "string" || data.sha.length === 0) {
       throw new SkillRepoReadError(what, 200, "The file response carried no sha. Retry the sync.");
     }
-    return { text, ...(data.encoding === "base64" ? { bytes: Buffer.from(raw.replace(/\n/g, ""), "base64") } : {}), blobSha: data.sha };
+    return { text, ...(bytes ? { bytes } : {}), blobSha: data.sha };
   }
 
   /** The `ContentsRequest` seam `collectDirectoryEntries` drives. */

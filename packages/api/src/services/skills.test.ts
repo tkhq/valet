@@ -433,6 +433,7 @@ describe("rowToSkillSource", () => {
       frontmatter: { name: "standup", description: "Daily standup", ...frontmatter },
       contentSha: "sha",
       upstreamPath: null,
+      upstreamBlobSha: null,
       createdAt: now,
       updatedAt: now,
     };

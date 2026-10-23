@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { Type, type TSchema } from "typebox";
-import { bashTool, type SkillSource, type ToolDef, type ToolResult } from "@valet/engine";
+import { bashTool, runForegroundExec, type SkillSource, type ToolDef, type ToolResult } from "@valet/engine";
 import { skillWithFilesSha, validSkillPath } from "../services/content-sync/skill-files.js";
 import type { SkillToolSession } from "./skill-tool.js";
 
@@ -18,8 +18,9 @@ function quote(value: string): string {
 }
 
 function interpreter(bytes: Uint8Array, path: string): string[] {
-  const first = new TextDecoder().decode(bytes).split(/\r?\n/, 1)[0] ?? "";
-  if (first.startsWith("#!")) return first.slice(2).trim().split(/\s+/);
+  const newline = bytes.indexOf(10);
+  const first = new TextDecoder().decode(bytes.subarray(0, Math.min(newline < 0 ? bytes.length : newline, 256))).trimEnd();
+  if (first.startsWith("#!") && first.slice(2).trim()) return first.slice(2).trim().split(/\s+/);
   if (path.endsWith(".py")) return ["python3"];
   if (path.endsWith(".sh")) return ["bash"];
   if (path.endsWith(".js") || path.endsWith(".mjs")) return ["node"];
@@ -64,31 +65,53 @@ export function buildSkillScriptTool(
       }
       try {
         const sandbox = ctx.sandbox;
-        const cwd = await sandbox.exec("pwd -P", { signal: ctx.signal, maxOutputBytes: 4096 });
-        const workingDirectory = cwd.stdout.replace(/\r?\n$/, "");
-        if (cwd.exitCode !== 0 || !posix.isAbsolute(workingDirectory) || workingDirectory.includes("\0")) {
-          return { text: "[skill_script_failed] The sandbox has no absolute working directory. Check the sandbox, then call skill_script again." };
-        }
         const sha = skillWithFilesSha(skill.content, skill.files ?? []);
-        const directory = posix.join(workingDirectory, ".valet", "skills", `${skill.name}@${sha}`);
+        const key = `${skill.name}@${sha}`;
+        const temporary = `.tmp-${randomUUID()}`;
         let scriptBytes: Uint8Array | undefined;
-        // Publish complete files by rename. Concurrent calls must never see a truncated script.
+        const writes: string[] = [];
+        const moves: string[] = [];
         for (const file of skill.files ?? []) {
           if (!file.path.startsWith("scripts/") || !validSkillPath(file.path)) continue;
           const bytes = file.bytes ?? await skill.readFile?.(file);
           if (!bytes) throw new Error(`Stored script ${file.path} changed or was removed`);
-          const path = `${directory}/${file.path}`;
-          await sandbox.mkdir(posix.dirname(path));
-          const temporary = `${path}.tmp-${randomUUID()}`;
-          await sandbox.writeBinary(temporary, bytes);
-          const chmod = await sandbox.exec(`chmod ${file.mode === "100755" ? "755" : "644"} ${quote(temporary)} && mv -f -- ${quote(temporary)} ${quote(path)}`, { signal: ctx.signal });
-          if (chmod.exitCode !== 0) throw new Error(`Cannot publish script: ${chmod.stderr}`);
+          const parent = quote(posix.dirname(file.path));
+          const relative = quote(file.path);
+          writes.push(`mkdir -p -- "$stage/"${parent}
+printf %s ${quote(Buffer.from(bytes).toString("base64"))} | base64 -d > "$stage/"${relative}
+chmod ${file.mode === "100755" ? "755" : "644"} "$stage/"${relative}`);
+          moves.push(`mkdir -p -- "$directory/"${parent}
+mv -f -- "$stage/"${relative} "$directory/"${relative}`);
           if (file.path === args.script) scriptBytes = bytes;
         }
         if (!scriptBytes) throw new Error("Stored script is unavailable");
+        // One exec publishes the full set. The trap and host finally own temporary cleanup.
+        const setup = `set -eu
+base="\${XDG_CACHE_HOME:-\${HOME:+$HOME/.cache}}"
+case "$base" in /*) ;; *) base=/tmp/valet-skills ;; esac
+if [ "$base" != /tmp/valet-skills ]; then base="$base/valet/skills"; fi
+if ! (mkdir -p -- "$base" && test -w "$base") 2>/dev/null; then base=/tmp/valet-skills; mkdir -p -- "$base"; fi
+directory="$base/"${quote(key)}
+stage="$base/"${quote(temporary)}
+trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
+mkdir -p -- "$stage"
+${writes.join("\n")}
+${moves.join("\n")}
+printf '%s' "$directory"`;
+        let directory: string;
+        try {
+          const published = await sandbox.exec("sh -s", { stdin: setup, signal: ctx.signal, maxOutputBytes: 4096 });
+          if (published.exitCode !== 0) throw new Error(`Cannot publish scripts: ${published.stderr}`);
+          directory = published.stdout;
+          if (!posix.isAbsolute(directory) || directory.includes("\0")) throw new Error("Invalid sandbox cache path");
+        } finally {
+          // A provider can stop its client before the remote shell handles the abort.
+          // Remove only this call's unique stage, without the aborted signal.
+          await sandbox.exec(`base="\${XDG_CACHE_HOME:-\${HOME:+$HOME/.cache}}"; case "$base" in /*) ;; *) base=/tmp/valet-skills ;; esac; if [ "$base" != /tmp/valet-skills ]; then rm -rf -- "$base/valet/skills/"${quote(temporary)}; fi; rm -rf -- /tmp/valet-skills/${quote(temporary)}`, { timeout: 10_000 }).catch(() => {});
+        }
         const path = `${directory}/${args.script}`;
         const command = [...interpreter(scriptBytes, path), path, ...(args.args ?? [])].map(quote).join(" ");
-        const result = await sandbox.exec(command, {
+        const result = await runForegroundExec(ctx, command, {
           env: { SKILL_DIR: directory }, signal: ctx.signal,
           timeout: (args.timeout ?? 120) * 1000, maxOutputBytes: OUTPUT_BYTES,
         });

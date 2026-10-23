@@ -397,6 +397,7 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
   "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
   "path" text NOT NULL,

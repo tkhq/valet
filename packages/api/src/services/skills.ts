@@ -504,6 +504,7 @@ export async function createSkill(
     frontmatter: fm,
     contentSha: skillContentSha(input.content),
     upstreamPath: input.upstreamPath ?? null,
+    upstreamBlobSha: null,
     createdAt: now,
     updatedAt: now,
   };

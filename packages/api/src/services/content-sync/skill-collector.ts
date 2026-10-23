@@ -30,13 +30,14 @@ import { skills, skillFiles, type ContentSourceRow, type SkillRow } from "../../
 import { newSkillId } from "../skills.js";
 import {
   SkillRepoListingTruncatedError,
+  SkillRepoTooManySkillsError,
   SkillRepoNotFoundError,
   type SkillRepoReader,
-  type SkillRepoFile,
   type SkillTreeEntry,
 } from "../skill-repo-reader.js";
 import {
   discoverFromTree,
+  MAX_SKILL_CANDIDATES,
   resolveNameCollisions,
   SKILL_FILE,
   PROMPTS_DIR,
@@ -53,13 +54,15 @@ import type {
   ContentManifestEntry,
 } from "./collector.js";
 
-import { companionEntries, readSkillFiles, skillWithFilesSha } from "./skill-files.js";
+import { indexCompanions, readSkillFiles, skillWithFilesSha, type SkillBlob } from "./skill-files.js";
 
 export class SkillCollector implements ContentCollector {
   readonly kind = "skills" as const;
 
   discover({ entries, source }: CollectorDiscoverContext): CollectorPass {
-    return new SkillPass(discoverFromTree(entries, source.subpath), new Map(), entries);
+    const found = discoverFromTree(entries, source.subpath);
+    if (found.discovered > MAX_SKILL_CANDIDATES) throw new SkillRepoTooManySkillsError(source.repoFullName, found.discovered, MAX_SKILL_CANDIDATES);
+    return new SkillPass(found, new Map(), entries);
   }
 
   async walkDirectory({ source, headSha, reader }: CollectorWalkContext): Promise<CollectorPass> {
@@ -72,6 +75,8 @@ export class SkillCollector implements ContentCollector {
     const candidates: SkillCandidate[] = [];
     const text = new Map<string, string>();
     const entries: SkillTreeEntry[] = [];
+    const subtrees: { path: string; sha: string; bodySha: string; prefix: string }[] = [];
+    const unavailable = new Set<string>();
 
     for (const dir of listing.entries) {
       if (dir.type !== "dir") continue;
@@ -87,11 +92,9 @@ export class SkillCollector implements ContentCollector {
         blobSha: file.blobSha,
         kind: "skill",
       });
+      if (candidates.length > MAX_SKILL_CANDIDATES) throw new SkillRepoTooManySkillsError(source.repoFullName, candidates.length, MAX_SKILL_CANDIDATES);
       text.set(path, file.text);
-      const subtree = await reader.listTree(source.repoFullName, dir.sha);
-      if (subtree.truncated) throw new SkillRepoListingTruncatedError(source.repoFullName, path);
-      const prefix = joinPath(source.subpath, dir.name);
-      entries.push(...subtree.entries.map((entry) => ({ ...entry, path: `${prefix}/${entry.path}` })));
+      subtrees.push({ path, sha: dir.sha, bodySha: file.blobSha, prefix: joinPath(source.subpath, dir.name) });
     }
 
     const promptsDir = joinPath(source.subpath, PROMPTS_DIR);
@@ -126,6 +129,21 @@ export class SkillCollector implements ContentCollector {
       }
     }
 
+    if (candidates.length > MAX_SKILL_CANDIDATES) throw new SkillRepoTooManySkillsError(source.repoFullName, candidates.length, MAX_SKILL_CANDIDATES);
+    // Read every body before companion subtree discovery can consume the budget.
+    for (const { path, sha, bodySha, prefix } of subtrees) {
+      let subtree;
+      try { subtree = await reader.listTree(source.repoFullName, sha); }
+      catch (err) {
+        if (err instanceof SkillRepoListingTruncatedError) throw err;
+        unavailable.add(path);
+        continue;
+      }
+      if (subtree.truncated) throw new SkillRepoListingTruncatedError(source.repoFullName, path);
+      entries.push({ path, sha: bodySha, type: "blob", mode: "100644" });
+      entries.push(...subtree.entries.map(entry => ({ ...entry, path: `${prefix}/${entry.path}` })));
+    }
+
     // The same collision rule as the tree path, so the two never disagree
     // about which of two same-named files is a skill.
     const resolved = resolveNameCollisions(candidates);
@@ -133,6 +151,7 @@ export class SkillCollector implements ContentCollector {
       { ...resolved, discovered: candidates.length, excludedCandidates: [] },
       text,
       entries,
+      unavailable,
     );
   }
 }
@@ -161,7 +180,6 @@ class SkillPass implements CollectorPass {
 
   private readonly companionFiles = new Map<string, SkillTreeEntry[]>();
   private readonly preparedFiles = new Map<string, SkillFile[]>();
-  private readonly skippedFiles = new Set<string>();
   private readonly fileWarnings: string[] = [];
   private readonly deferred: string[] = [];
   /** Names that came from `prompts/`, so reconcile parses them differently. */
@@ -173,7 +191,9 @@ class SkillPass implements CollectorPass {
     found: SkillDiscovery,
     readonly text: Map<string, string>,
     tree: SkillTreeEntry[],
+    private readonly unavailable = new Set<string>(),
   ) {
+    const companions = indexCompanions(tree);
     const skillEntries: ContentManifestEntry[] = [];
     const promptEntries: ContentManifestEntry[] = [];
     const promptNames = new Set<string>();
@@ -183,7 +203,7 @@ class SkillPass implements CollectorPass {
         promptEntries.push(entry);
         promptNames.add(candidate.name);
       } else {
-        this.companionFiles.set(candidate.path, companionEntries(candidate, tree));
+        this.companionFiles.set(candidate.path, companions.get(candidate.path) ?? []);
         skillEntries.push(entry);
       }
     }
@@ -206,25 +226,57 @@ class SkillPass implements CollectorPass {
     this.excluded = found.excludedCandidates.length;
   }
 
+  async hydrateBodies(ctx: CollectorReconcileContext): Promise<void> {
+    const rows = await ctx.db.select({ path: skills.upstreamPath, blobSha: skills.upstreamBlobSha,
+      content: skills.content, frontmatter: skills.frontmatter }).from(skills)
+      .where(and(eq(skills.sourceId, ctx.source.id), eq(skills.origin, "repo")));
+    const cached = new Map(rows.map(row => [row.path, row]));
+    for (const entry of this.readEntries) {
+      const row = cached.get(entry.path);
+      if (row?.blobSha === entry.blobSha && !this.text.has(entry.path)) {
+        this.text.set(entry.path, `---\n${JSON.stringify(row.frontmatter)}\n---\n${row.content}`);
+      }
+    }
+  }
+
   async prepareReconcile(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>> {
     if (!ctx.reader) throw new Error("Skill sync needs a repository reader.");
     const previous = await ctx.db.select({ file: { path: skillFiles.path, blobSha: skillFiles.blobSha,
       size: skillFiles.size, mode: skillFiles.mode }, upstreamPath: skills.upstreamPath })
       .from(skillFiles).innerJoin(skills, eq(skillFiles.skillId, skills.id))
       .where(and(eq(skills.sourceId, ctx.source.id), eq(skills.origin, "repo")));
-    const reads = new Map<string, SkillRepoFile | null>();
+    const previousByPath = new Map<string | null, SkillFile[]>();
+    for (const row of previous) {
+      const files = previousByPath.get(row.upstreamPath) ?? [];
+      files.push(row.file);
+      previousByPath.set(row.upstreamPath, files);
+    }
+    const reads = new Map<string, SkillBlob | null>();
+    const remaining = new Map<string, number>();
+    for (const entries of this.companionFiles.values()) for (const entry of entries) remaining.set(entry.sha, (remaining.get(entry.sha) ?? 0) + 1);
     for (const [path, entries] of this.companionFiles) {
       if (!ctx.text.has(path)) continue;
+      if (this.unavailable.has(path)) {
+        this.preparedFiles.set(path, previousByPath.get(path) ?? []);
+        this.deferred.push(path);
+        this.fileWarnings.push(`${path}: Companion discovery was deferred. Saved the body. Sync again to retry the files.`);
+        continue;
+      }
       const result = await readSkillFiles(ctx.reader, ctx.source.repoFullName, ctx.commitSha, path,
-        entries, previous.filter((row) => row.upstreamPath === path).map((row) => row.file), reads);
+        entries, previousByPath.get(path) ?? [], reads);
+      for (const entry of entries) {
+        const count = (remaining.get(entry.sha) ?? 1) - 1;
+        remaining.set(entry.sha, count);
+        if (count === 0) reads.delete(entry.sha);
+      }
       if (result.warning) {
         this.fileWarnings.push(`${path}: ${result.warning}`);
-        this.deferred.push(path);
       }
-      if (result.unread) this.skippedFiles.add(path);
-      else this.preparedFiles.set(path, result.files);
+      if (result.deferred) this.deferred.push(path);
+      this.preparedFiles.set(path, result.files);
     }
-    return (db) => this.reconcile({ ...ctx, db });
+    reads.clear();
+    return (db) => this.reconcile({ ...ctx, db }).finally(() => this.preparedFiles.clear());
   }
 
   unreadWarning(path: string): string {
@@ -276,7 +328,7 @@ class SkillPass implements CollectorPass {
       // Keyed by PATH, so a same-named skill directory and prompt file cannot
       // overwrite each other.
       const raw = text.get(entry.path);
-      if (raw === undefined || this.skippedFiles.has(entry.path)) continue;
+      if (raw === undefined) continue;
       const files = this.preparedFiles.get(entry.path) ?? [];
       const isPrompt = this.promptNames.has(entry.name);
       const parsed = isPrompt ? parsePromptFile(raw, entry.name) : parseSkillFile(raw, entry.name);
@@ -299,9 +351,11 @@ class SkillPass implements CollectorPass {
             `${entry.name}: a skill with this name already exists here. Rename the skill directory, or remove the skill that holds the name.`,
           );
         }
+        this.preparedFiles.delete(entry.path);
         continue;
       }
       if (await updateMirror(db, row, entry, parsed, files, ctx.now())) updated += 1;
+      this.preparedFiles.delete(entry.path);
     }
 
     const stale = existing.filter((row) => !upstream.has(row.name));
@@ -408,6 +462,7 @@ async function insertMirror(
     frontmatter: parsed.frontmatter,
     contentSha: skillWithFilesSha(parsed.body, files),
     upstreamPath: entry.path,
+    upstreamBlobSha: entry.blobSha,
     createdAt: now,
     updatedAt: now,
   };
@@ -461,7 +516,8 @@ async function updateMirror(
     row.contentSha === contentSha &&
     canonicalJson(row.frontmatter) === canonicalJson(parsed.frontmatter) &&
     row.description === parsed.description &&
-    row.upstreamPath === entry.path;
+    row.upstreamPath === entry.path &&
+    row.upstreamBlobSha === entry.blobSha;
   if (unchanged) return false;
   await writeFiles(db, row.id, files);
   await db
@@ -472,6 +528,7 @@ async function updateMirror(
       frontmatter: parsed.frontmatter,
       contentSha,
       upstreamPath: entry.path,
+      upstreamBlobSha: entry.blobSha,
       updatedAt: now,
     })
     .where(eq(skills.id, row.id));

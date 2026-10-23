@@ -453,6 +453,9 @@ export class ContentSyncService {
       }));
     }
 
+    for (const pass of scan.passes) {
+      await pass.hydrateBodies?.({ db: this.deps.db, reader, source, commitSha: head.sha, text: pass.text, discovery: scan.discovery, now: this.now });
+    }
     const read = await this.readContents(source, head.sha, reader, scan);
     const writers = await Promise.all(scan.passes.map(async (pass) => {
       const ctx = { db: this.deps.db, reader, source, commitSha: head.sha, text: read.text, discovery: scan.discovery, now: this.now };

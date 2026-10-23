@@ -1070,6 +1070,8 @@ export const skills = pgTable(
     contentSha: text("content_sha").notNull(),
     /** Path of the `SKILL.md` inside its repository. Null for a local skill. */
     upstreamPath: text("upstream_path"),
+    /** Last body Git blob, for retrying companions without re-reading bodies. */
+    upstreamBlobSha: text("upstream_blob_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

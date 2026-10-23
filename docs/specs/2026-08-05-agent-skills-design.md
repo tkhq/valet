@@ -115,8 +115,9 @@ The discovery manifest includes companion paths, blob SHAs, and modes.
 The skill's `contentSha` includes the body and these file identities.
 A script-only edit or executable-bit change therefore updates the skill.
 A complete read replaces the stored file set, including deletions.
-A missing file keeps the whole stored skill unchanged and makes the sync incomplete.
-A transport failure or partial listing reconciles nothing.
+A companion read failure defers unfinished files without blocking the body or successful file reads.
+Deferred skills retain old files until a complete read can apply deletions.
+A body transport failure or partial listing reconciles nothing.
 When the repository tree is truncated, sync reads a complete subtree for each skill found by the directory fallback.
 A truncated skill subtree fails the sync before any writes.
 
@@ -125,7 +126,10 @@ The companion files for one skill can contain at most 2 MiB in total.
 One skill can store at most 64 companion files.
 Sync imports the skill body and the files that fit these caps.
 It skips offending files and records per-skill warnings that name them.
-The sync remains incomplete so an unchanged commit retries after a cap increase.
+Cap skips are complete outcomes, not retries.
+Warnings name at most ten skipped files, followed by the remaining count.
+Both comparison fingerprints include the cap values.
+A deployment that raises a cap therefore resyncs unchanged commits.
 Other skills still sync.
 Session inventories and sync reuse queries load file metadata without bytes.
 A reference read loads one file by stored skill ID, path, and blob SHA.
@@ -141,32 +145,41 @@ Each read returns at most 64 KiB, so a 17 KB reference is returned whole.
 `offset` is a zero-based byte offset and defaults to 0.
 `limit` is the maximum returned byte count and defaults to 65536.
 Pages end at UTF-8 character boundaries.
-Add the returned text's UTF-8 byte length to the offset to read the next page.
-An empty page means end of file.
+Each page includes a footer with `total_bytes`, `next_offset`, and `end`.
+Use `next_offset` to continue until `end=true`.
 An offset inside a UTF-8 character returns a corrective error.
 Tool, host, and slash-command body reads include the file manifest.
 Reference reads do not write files to the sandbox.
 
 `skill_script({ name, script, args, timeout })` runs a stored file under `scripts/`.
 Only this call writes the skill's scripts to the sandbox.
-The directory is `<sandbox working directory>/.valet/skills/<name>@<sha>/scripts/`.
-The tool asks the sandbox for its working directory instead of using an API-host path or HOME.
-Docker, Kubernetes, and local providers can write inside this directory.
-Each call writes unique temporary files and sets their stored modes.
+The directory is `${XDG_CACHE_HOME:-$HOME/.cache}/valet/skills/<name>@<sha>/scripts/`.
+If the cache is not writable, the tool uses `/tmp/valet-skills/<name>@<sha>/scripts/`.
+No script cache is created inside the cloned repository.
+Publication uses one shell payload on exec stdin, not provider file APIs.
+The shell decodes every script into a unique temporary directory and sets its stored mode.
 It renames each complete file into place before execution.
+A shell trap removes temporary files on failure.
+A second cleanup exec handles aborted provider clients without reusing their aborted signal.
+Publication takes two execs, independent of the number of files.
 Concurrent calls cannot expose truncated files.
 Each call replaces agent edits with the stored script bytes.
 The tool preserves executable bits.
 It never writes references or assets.
 The script runs in the session's normal working directory.
 `SKILL_DIR` contains the content-addressed skill directory.
-The tool uses the shebang interpreter when present.
+The tool decodes only the first line when selecting a shebang interpreter.
+It accepts a UTF-8 BOM and ignores a bare `#!`.
 It splits interpreter arguments on whitespace and quotes each argument separately.
 Otherwise, `.py` uses `python3`, `.sh` uses `bash`, and `.js` or `.mjs` uses `node`.
 Other files run directly.
 The tool quotes each argument separately and uses the same native-tool authorization path as `bash`.
 It sends no API-host working directory to the sandbox.
 The optional timeout accepts 1 through 3600 seconds and defaults to 120 seconds.
+Bash and skill scripts share the foreground execution helper.
+Above 60 seconds, supported providers use job mode.
+The helper cancels jobs at the deadline or on abort, including a stalled poll.
+Job output combines stdout and stderr in the stdout result field.
 The tool stays registered so scripts added after session construction can become reachable through skill refresh.
 An unknown script skill triggers at most one extra refresh for that tool instance.
 A session without a sandbox gets a text error.
@@ -244,7 +257,16 @@ The fallback also reads one complete subtree per discovered skill.
 All these operations share a 600-read budget, including fallback directory reads.
 A whole-sync 180-second deadline aborts GitHub requests, including directory pagination.
 The per-request timeout stays 15 seconds.
-Budget exhaustion fails before reconciliation and keeps stored skills unchanged.
+All bodies are read before companion bytes.
+Companion budget, deadline, or rate-limit failures save bodies and successful file reads.
+Only skills with deferred files need more repository file reads on the next pass.
+`skills.upstream_blob_sha` records the last body blob so retries reuse stored bodies.
+Unchanged companion files also reuse stored metadata.
+The shared blob-read cache drops entries after their last consumer and clears before writes.
+Prepared bytes are released as each skill is persisted.
+Body-read budget exhaustion still fails before reconciliation.
+The 300-candidate cap is checked before companion indexing.
+The tree index visits each entry a constant number of times, not once per skill.
 The 180-second window leaves time to record failure before the five-minute claim lease expires.
 Discovery rules version 2 forces a first-deploy rescan, which uses these same bounds.
 

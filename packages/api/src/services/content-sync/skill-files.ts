@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { SkillFile } from "@valet/engine";
-import type { SkillCandidate } from "../skill-discovery.js";
 import {
   type SkillRepoReader,
   type SkillRepoFile,
@@ -10,6 +9,8 @@ import {
 export const MAX_SKILL_FILE_BYTES = 256 * 1024;
 export const MAX_SKILL_FILES = 64;
 export const MAX_SKILL_BYTES = 2 * 1024 * 1024;
+export type SkillBlob = Pick<SkillRepoFile, "bytes" | "blobSha">;
+export const SKILL_CAPS = `${MAX_SKILL_FILES}:${MAX_SKILL_FILE_BYTES}:${MAX_SKILL_BYTES}`;
 
 /** Reject path aliases before they reach storage or the sandbox. */
 export function validSkillPath(path: string): boolean {
@@ -18,20 +19,35 @@ export function validSkillPath(path: string): boolean {
     path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
 
-/** A nested SKILL.md makes its whole directory belong to another skill. */
-export function companionEntries(candidate: SkillCandidate, tree: SkillTreeEntry[]): SkillTreeEntry[] {
-  if (candidate.kind !== "skill") return [];
-  const prefix = candidate.path.slice(0, -"SKILL.md".length);
-  const nested = tree.filter((entry) => entry.type === "blob" &&
-    (entry.mode === "100644" || entry.mode === "100755") && entry.path.startsWith(prefix) &&
-    entry.path !== candidate.path && entry.path.endsWith("/SKILL.md"))
-    .map((entry) => entry.path.slice(0, -"SKILL.md".length));
-  return tree.filter((entry) => entry.type === "blob" &&
-    (entry.mode === "100644" || entry.mode === "100755") &&
-    entry.path.startsWith(prefix) && entry.path !== candidate.path &&
-    validSkillPath(entry.path.slice(prefix.length)) &&
-    !nested.some((dir) => entry.path.startsWith(dir)))
-    .sort((a, b) => a.path.localeCompare(b.path));
+/** Index each regular blob under its nearest regular SKILL.md boundary.
+ * Each tree entry is visited twice, independent of the number of skills. */
+export function indexCompanions(tree: SkillTreeEntry[]): Map<string, SkillTreeEntry[]> {
+  const directories = new Set<string>();
+  const regular = (entry: SkillTreeEntry) => entry.type === "blob" && (entry.mode === "100644" || entry.mode === "100755");
+  for (const entry of tree) {
+    if (regular(entry) && entry.path.endsWith("/SKILL.md")) directories.add(entry.path.slice(0, -"/SKILL.md".length));
+  }
+  const groups = new Map<string, SkillTreeEntry[]>();
+  for (const entry of tree) {
+    if (!regular(entry) || entry.path.endsWith("/SKILL.md")) continue;
+    let directory = entry.path.slice(0, entry.path.lastIndexOf("/"));
+    while (directory) {
+      if (directories.has(directory)) {
+        const relative = entry.path.slice(directory.length + 1);
+        if (validSkillPath(relative)) {
+          const key = `${directory}/SKILL.md`;
+          const files = groups.get(key) ?? [];
+          files.push(entry);
+          groups.set(key, files);
+        }
+        break;
+      }
+      const slash = directory.lastIndexOf("/");
+      directory = slash < 0 ? "" : directory.slice(0, slash);
+    }
+  }
+  for (const files of groups.values()) files.sort((a, b) => a.path.localeCompare(b.path));
+  return groups;
 }
 
 export function skillWithFilesSha(body: string, files: SkillFile[]): string {
@@ -50,40 +66,56 @@ export async function readSkillFiles(
   skillPath: string,
   entries: SkillTreeEntry[],
   previous: SkillFile[],
-  reads: Map<string, SkillRepoFile | null>,
-): Promise<{ files: SkillFile[]; warning?: string; unread?: boolean }> {
+  reads: Map<string, SkillBlob | null>,
+): Promise<{ files: SkillFile[]; warning?: string; deferred?: boolean }> {
   const files: SkillFile[] = [];
   const cached = new Map(previous.map((file) => [`${file.path}:${file.blobSha}`, file]));
   const prefix = skillPath.slice(0, -"SKILL.md".length);
   let total = 0;
-  const warnings: string[] = [];
+  const skipped: string[] = [];
+  let skippedCount = 0;
+  let deferred = false;
+  const warnCap = (path: string) => { skippedCount++; if (skipped.length < 10) skipped.push(path); };
   for (const entry of entries) {
     const old = cached.get(`${entry.path.slice(prefix.length)}:${entry.sha}`);
     const size = entry.size ?? old?.size ?? 0;
     if (files.length >= MAX_SKILL_FILES || size > MAX_SKILL_FILE_BYTES || total + size > MAX_SKILL_BYTES) {
-      warnings.push(`${entry.path} exceeds a companion cap (${MAX_SKILL_FILES} files, ${MAX_SKILL_FILE_BYTES} bytes per file, ${MAX_SKILL_BYTES} bytes per skill).`);
+      warnCap(entry.path);
       continue;
     }
     let read = old ? null : reads.get(entry.sha);
-    if (read === undefined) {
-      read = await reader.readFile(repo, entry.path, ref);
-      reads.set(entry.sha, read);
+    if (read === undefined && !deferred) {
+      try {
+        read = await reader.readFile(repo, entry.path, ref);
+        reads.set(entry.sha, read ? { bytes: read.bytes, blobSha: read.blobSha } : null);
+      } catch {
+        // Rate limits, the shared read budget, and deadlines defer companions,
+        // never the body or successful reads from this pass.
+        deferred = true;
+      }
     }
-    if (!old && (read === null || read.bytes === undefined)) {
-      return { files: [], unread: true, warning: `${entry.path} could not be read. Sync again to retry. The stored skill is unchanged.` };
+    if (!old && (!read?.bytes || read.blobSha !== entry.sha)) {
+      deferred = true;
+      const stored = previous.find(file => file.path === entry.path.slice(prefix.length));
+      if (stored) files.push(stored);
+      continue;
     }
     const bytes = read?.bytes;
     const actualSize = old?.size ?? bytes!.byteLength;
     if (actualSize > MAX_SKILL_FILE_BYTES || total + actualSize > MAX_SKILL_BYTES) {
-      warnings.push(`${entry.path} exceeds the ${MAX_SKILL_FILE_BYTES}-byte file cap or ${MAX_SKILL_BYTES}-byte skill cap.`);
+      warnCap(entry.path);
       continue;
-    }
-    if (read && read.blobSha !== entry.sha) {
-      return { files: [], unread: true, warning: `${entry.path} changed during the read. Sync again to retry. The stored skill is unchanged.` };
     }
     total += actualSize;
     files.push({ path: entry.path.slice(prefix.length), blobSha: entry.sha, size: actualSize, mode: entry.mode,
       ...(bytes ? { bytes } : {}) });
   }
-  return { files, ...(warnings.length ? { warning: warnings.join(" ") + " Sync again after raising the caps or reducing these files." } : {}) };
+  if (deferred) {
+    const kept = new Set(files.map(file => file.path));
+    for (const file of previous) if (!kept.has(file.path)) files.push(file);
+  }
+  const warnings: string[] = [];
+  if (skippedCount) warnings.push(`${skipped.join(", ")}${skippedCount > 10 ? ` and ${skippedCount - 10} more` : ""} exceed companion caps (${SKILL_CAPS}). Reduce these files to import them.`);
+  if (deferred) warnings.push("Companion reads were deferred. Saved the body and available files. Sync again to retry remaining files.");
+  return { files, deferred, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
 }

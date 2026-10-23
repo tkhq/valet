@@ -64,7 +64,7 @@ function describeSkills(skills: SkillSource[]): string {
     "Call this before you use an integration's tools for the first time in a turn.",
     "Omit path to read the protected SKILL.md body and file manifest. Path reads are not protected from pruning.",
     "Read references with path, offset (byte offset, default 0), and limit (bytes, default and maximum 65536).",
-    "Pages end at UTF-8 character boundaries. Add the returned text's UTF-8 byte length to offset for the next page. Empty text means end of file.",
+    "Pages end at UTF-8 character boundaries. The footer reports total_bytes, next_offset, and end. Use next_offset to continue.",
     "",
     "Available skills:",
     ...lines,
@@ -105,7 +105,8 @@ async function renderSkillResult(
     if (end === offset && offset < bytes.byteLength) {
       return { text: "[skill_bad_range] Limit is too small for the next UTF-8 character. Increase limit to at least 4 bytes." };
     }
-    return { text: new TextDecoder().decode(bytes.subarray(offset, end)), skill };
+    return { text: new TextDecoder().decode(bytes.subarray(offset, end)) +
+      `\n\n[total_bytes=${bytes.byteLength} next_offset=${Math.min(end, bytes.byteLength)} end=${end >= bytes.byteLength}]`, skill };
   }
   if (skill.argsSchema) {
     const validator = Compile(skill.argsSchema);
@@ -192,7 +193,9 @@ export function buildSkillTool(
       }
       let rendered;
       try { rendered = await renderSkillResult(current(), args.name, args.args ?? {}, args.path, args.offset, args.limit); }
-      catch { return { text: "[skill_file_unavailable] The stored file could not be read. Retry the skill call." }; }
+      catch { return { text: args.path === undefined
+        ? "[skill_body_unavailable] The skill body could not be rendered. Check the skill arguments, then retry."
+        : "[skill_file_unavailable] The stored file could not be read. Retry the skill call." }; }
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, args.path === undefined ? "model_tool" : "file_read", rendered.text);
       }
