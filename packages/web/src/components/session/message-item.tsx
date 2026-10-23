@@ -13,6 +13,7 @@ import { CodeBlock } from "~/components/code-block";
 import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
+import { fallbackRenderer } from "./tool-renderers/fallback";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
@@ -64,6 +65,7 @@ export const MessageItem = memo(function MessageItem({
   onBranch,
   dimmed = false,
   ratings = true,
+  readOnly = false,
   continuation = false,
 }: {
   message: StreamMessage;
@@ -85,6 +87,8 @@ export const MessageItem = memo(function MessageItem({
   onReply?: (target: MessageReplyReference) => void;
   /** The per-reply rating buttons; see `MessageList`'s prop doc. */
   ratings?: boolean;
+  /** Historical previews show receipts without message actions or interactive tool renderers. */
+  readOnly?: boolean;
 }) {
   if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
@@ -94,7 +98,7 @@ export const MessageItem = memo(function MessageItem({
   // Defined only for another member's message on a shared session; the
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
-  const actions = <>
+  const actions = readOnly ? null : <>
     {message.role === "assistant" && message.completed === true && copyText && onReply && (
       <button
         type="button"
@@ -185,6 +189,7 @@ export const MessageItem = memo(function MessageItem({
               <PartView
                 key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
                 part={part}
+                readOnly={readOnly}
                 skillMeta={isUser ? message.skill : undefined}
                 detectSkill={isUser}
                 collapseStructured={collapseStructured}
@@ -294,7 +299,9 @@ function PartView({
   skillMeta,
   detectSkill,
   collapseStructured,
+  readOnly,
 }: {
+  readOnly?: boolean;
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
@@ -306,7 +313,7 @@ function PartView({
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
-      return <ToolCallBlock part={part} />;
+      return <ToolCallBlock part={part} readOnly={readOnly} />;
   }
 }
 
@@ -480,8 +487,8 @@ function UserAttachmentStrip({
   );
 }
 
-function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
-  const renderer = pickRenderer(part.toolName, part.args);
+function ToolCallBlock({ part, readOnly = false }: { part: Extract<MessagePart, { kind: "tool_call" }>; readOnly?: boolean }) {
+  const renderer = readOnly ? fallbackRenderer : pickRenderer(part.toolName, part.args);
   // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
   // formatTarget/formatSummary would compute from partial, jagged args
   // (truncated paths, churning line counts) the renderer never opted to see.

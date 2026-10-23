@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
 import type { MessageBranchNote } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
-import { Button, textLinkClass } from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogTrigger, ScrollArea, Time, LoadingRow, ErrorRow, EmptyRow, textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { useBranchPreview } from "~/api/branch-preview";
+import { MessageItem } from "./message-item";
 import { FileChangeChoice } from "./file-change-choice";
 
 /**
@@ -11,7 +13,7 @@ import { FileChangeChoice } from "./file-change-choice";
  * a return to an earlier version, or a fork changed this thread's history
  * (docs/specs/2026-10-22-thread-edit-fork-design.md). Consecutive notes, as
  * repeated edits of one message leave, share one row. It expands to what
- * still stands from each version the thread left, and offers the way back.
+ * still stands from the selected version in a separate history panel.
  */
 export function BranchNoteDivider({
   notes,
@@ -26,8 +28,22 @@ export function BranchNoteDivider({
   onOpenThread?: (threadId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const branches = notes.flatMap((note) => (note.branch ? [{ id: note.id, branch: note.branch }] : []));
+  const [selectedId, setSelectedId] = useState<string>();
+  const [visibleCount, setVisibleCount] = useState(20);
+  const branches = notes.flatMap((note) => (note.branch ? [{ id: note.id, branch: note.branch, createdAt: note.createdAt, threadId: note.threadId }] : []));
   const first = branches[0];
+  const threadId = first?.threadId;
+  useEffect(() => {
+    setSelectedId(undefined);
+    setVisibleCount(20);
+  }, [threadId]);
+  function changeOpen(next: boolean) {
+    setOpen(next);
+    if (!next) {
+      setSelectedId(undefined);
+      setVisibleCount(20);
+    }
+  }
   if (!first) return null;
   const calls = branches.reduce((total, { branch }) => total + callCount(branch), 0);
   const fork = branches.length === 1 && first.branch.kind === "fork" ? first.branch : undefined;
@@ -37,38 +53,91 @@ export function BranchNoteDivider({
       : singleLabel(first.branch, calls);
 
   return (
-    <div className="px-4 py-2" data-testid="branch-note">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="group flex w-full items-center gap-2 rounded text-[11px] text-muted hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40 max-sm:min-h-11"
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <div className="px-4 py-2" data-testid="branch-note">
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            aria-expanded={open}
+            className="group flex w-full items-center gap-2 rounded text-[11px] text-muted hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40 max-sm:min-h-11"
+          >
+            <span className="h-px flex-1 bg-[--border]" aria-hidden />
+            <GitBranch className="h-3 w-3 shrink-0" aria-hidden />
+            <span className="min-w-0 truncate">{label}</span>
+            {open ? <ChevronDown className="h-3 w-3 shrink-0" aria-hidden /> : <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />}
+            <span className="h-px flex-1 bg-[--border]" aria-hidden />
+          </button>
+        </DialogTrigger>
+      </div>
+      <DialogContent
+        title={fork ? "Branch source" : "Version history"}
+        description={fork ? "Where this thread started." : "Select View to inspect an earlier version before restoring it."}
+        className="left-auto right-0 top-0 flex h-dvh max-h-dvh w-full max-w-none translate-x-0 translate-y-0 flex-col gap-3 overflow-hidden rounded-none p-4 text-xs sm:w-[min(44rem,85vw)]"
       >
-        <span className="h-px flex-1 bg-[--border]" aria-hidden />
-        <GitBranch className="h-3 w-3 shrink-0" aria-hidden />
-        <span className="min-w-0 truncate">{label}</span>
-        {open ? <ChevronDown className="h-3 w-3 shrink-0" aria-hidden /> : <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />}
-        <span className="h-px flex-1 bg-[--border]" aria-hidden />
-      </button>
-      {open && (
-        <div className="mx-auto mt-2 max-w-3xl divide-y divide-[--border] rounded-md border border-[--border] bg-[--bg-secondary] text-xs">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
           {fork ? (
-            <ForkDetails branch={fork} onOpenThread={onOpenThread} />
+            <div className="min-h-0 overflow-y-auto"><ForkDetails branch={fork} onOpenThread={onOpenThread} /></div>
           ) : (
-            // Newest first: the version the person most likely wants back.
-            [...branches].reverse().map(({ id, branch }, index) => (
-              <VersionDetails
-                key={id}
-                noteEntryId={id}
-                branch={branch}
-                heading={branches.length > 1 ? (index === 0 ? "Latest version left" : "Earlier version left") : undefined}
-                onReturn={onReturn}
-              />
-            ))
+            <>
+              <ScrollArea className="max-h-[25dvh] shrink-0 rounded border border-[--border]" style={{ height: Math.min(branches.length * 64, 192) }} aria-label="Earlier versions">
+                <ul className="divide-y divide-[--border]">
+                  {branches.slice(-visibleCount).reverse().map(({ id, branch, createdAt }, index) => (
+                    <li key={id} className="flex items-center gap-3 px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate" title={branch.version?.excerpt}>
+                          {branch.version?.excerpt || (index === 0 ? "Latest version left" : "Earlier version left")}
+                        </p>
+                        <Time ts={branch.version?.createdAt ?? createdAt} format="absolute" className="text-muted" />
+                      </div>
+                      <Button variant="ghost" size="sm" aria-pressed={selectedId === id} onClick={() => setSelectedId(id)}>View</Button>
+                    </li>
+                  ))}
+                </ul>
+                {visibleCount < branches.length && <Button variant="ghost" size="sm" className="m-2" onClick={() => setVisibleCount((count) => count + 20)}>Show older versions</Button>}
+              </ScrollArea>
+              <div key={selectedId} className="min-h-0 flex-1 overflow-y-auto">
+                {branches.filter(({ id }) => id === selectedId).map(({ id, branch, threadId }) => (
+                  <div key={id} className="min-w-0">
+                    <BranchPreview threadId={threadId ?? undefined} noteEntryId={id} />
+                    <VersionDetails noteEntryId={id} branch={branch} onReturn={onReturn ? async (noteEntryId, opts) => {
+                      await onReturn(noteEntryId, opts);
+                      changeOpen(false);
+                    } : undefined} />
+                  </div>
+                ))}
+                {!selectedId && <EmptyRow>Select a version to view its messages and file changes.</EmptyRow>}
+              </div>
+            </>
           )}
         </div>
-      )}
-    </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BranchPreview({ threadId, noteEntryId }: { threadId: string | undefined; noteEntryId: string }) {
+  const preview = useBranchPreview(threadId, noteEntryId);
+  const messages = preview.data?.pages.slice().reverse().flatMap((page) => page.messages) ?? [];
+  return (
+    <section aria-label="Selected version transcript" className="min-w-0 py-2">
+      {preview.isPending ? <LoadingRow label="Loading version…" />
+        : !preview.data && preview.isError ? <ErrorRow>{errorText(preview.error, "Could not load this version. Try again.")} <Button variant="ghost" size="sm" onClick={() => void preview.refetch()}>Try again</Button></ErrorRow>
+        : <>
+            {preview.hasNextPage && <Button variant="secondary" size="sm" disabled={preview.isFetchingNextPage} onClick={() => void preview.fetchNextPage()}>
+              {preview.isFetchingNextPage ? "Loading older messages…" : "Load older messages"}
+            </Button>}
+            {preview.isFetchNextPageError && <ErrorRow>{errorText(preview.error, "Could not load older messages. Try again.")}</ErrorRow>}
+            {messages.length === 0 ? <EmptyRow>No messages in this version.</EmptyRow>
+              : messages.map((message) => message.branch ? (
+                  <p key={message.id} className="flex items-center gap-2 border-y border-[--border] px-3 py-2 text-xs text-muted">
+                    <GitBranch className="h-3 w-3 shrink-0" aria-hidden />
+                    {message.branch.kind === "edit" ? "Earlier edit"
+                      : message.branch.kind === "return" ? "Returned to an earlier version"
+                        : "Branched from another thread"}
+                  </p>
+                ) : <MessageItem key={message.id} message={message} readOnly />)}
+          </>}
+    </section>
   );
 }
 
@@ -111,10 +180,9 @@ function ForkDetails({ branch, onOpenThread }: { branch: MessageBranchNote; onOp
   );
 }
 
-function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
+function VersionDetails({ noteEntryId, branch, onReturn }: {
   noteEntryId: string;
   branch: MessageBranchNote;
-  heading?: string;
   onReturn?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
 }) {
   const [returning, setReturning] = useState(false);
@@ -129,14 +197,13 @@ function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
     try {
       await onReturn(noteEntryId, { restoreFiles: Boolean(files?.canBringBack) && bringBack });
     } catch (err) {
-      setError(errorText(err, "Could not go back. Try again."));
+      setError(errorText(err, "Could not restore this version. Try again."));
     } finally {
       setReturning(false);
     }
   }
   return (
     <div className="space-y-2 px-3 py-2">
-      {heading && <p className="font-medium text-ink">{heading}</p>}
       {callCount(branch) === 0 ? (
         <p>Nothing in the {version} ran outside the chat.</p>
       ) : (
@@ -185,7 +252,7 @@ function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
       {branch.canReturn && onReturn && (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <Button variant="secondary" size="sm" disabled={returning} onClick={() => void goBack()}>
-            Go back to this version
+            Restore this version
           </Button>
           {error && <span role="alert" className="text-danger-500">{error}</span>}
         </div>

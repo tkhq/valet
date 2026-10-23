@@ -1,4 +1,5 @@
 import { AppPageHintContext, inAskValetDock } from "~/lib/app-page-hint";
+import { useNavigate } from "@tanstack/react-router";
 import { announceTyping } from "~/api/ws";
 import {
   useCallback,
@@ -366,6 +367,7 @@ export function Composer({
     inputRef.current?.focus();
   }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
+  const navigate = useNavigate();
   const appPageHint = useContext(AppPageHintContext);
   const abort = useAbortThread(sessionId);
   const resume = useResumeThread(sessionId);
@@ -732,6 +734,9 @@ export function Composer({
         }
       }
       onSent?.();
+      if (res.fork) {
+        await navigate({ to: "/threads/$threadId", params: { threadId: res.fork.id } });
+      }
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
       // failed send is not a "use". Matched case-insensitively (dispatch

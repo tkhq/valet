@@ -639,6 +639,10 @@ export function useSendPrompt(sessionId: string) {
       qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread => thread.id === data.threadId
         ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) } : thread));
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
+      if (data.fork) {
+        void qc.invalidateQueries(threadListFilters(sessionId));
+        if (data.fork.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(data.fork.sessionId));
+      }
     },
   });
 }

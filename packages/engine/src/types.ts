@@ -379,6 +379,8 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /** Request-scoped host operation; must enforce the source thread permissions. */
+  forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**
    * Target thread id. When set, the prompt (or command result) goes to this
    * thread instead of the session default. Throws if no thread has this id.

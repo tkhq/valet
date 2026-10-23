@@ -153,6 +153,7 @@ export {
 } from "./branch-note.js";
 export {
   FILE_CHECKPOINT_KEY,
+  WORKSPACE_FILES,
   applySeedBundle,
   changedPaths,
   checkpointRef,

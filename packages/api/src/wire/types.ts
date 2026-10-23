@@ -1545,6 +1545,8 @@ export interface Message {
 /** A branch note: where an edit, a return, or a fork changed the thread's history. */
 export interface MessageBranchNote {
   kind: "edit" | "return" | "fork";
+  /** Message excerpt and time identify an earlier version without opening it. */
+  version?: { excerpt: string; createdAt: number };
   /** What ran on the version the thread left and still stands. Empty for a fork. */
   actions: Array<{ label: string; count: number; urls: string[] }>;
   /** Calls past the listed actions. */
@@ -1682,6 +1684,8 @@ export interface SendPromptRequest {
 }
 
 export interface SendPromptResponse {
+  /** Destination created by a successful /fork command. */
+  fork?: ThreadSummary;
   /**
    * Queue item id for client-side optimistic linkage. `null` when the text
    * executed as a slash command — commands never take a queue item.

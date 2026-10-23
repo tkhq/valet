@@ -79,6 +79,7 @@ import {
   changedPaths,
   checkpointRef,
   findRepos,
+  WORKSPACE_FILES,
   planFileUndo,
   repoDir,
   restorePaths,
@@ -2637,8 +2638,12 @@ export class Thread {
     const ran = kind === "fork"
       ? { actions: [], moreActions: 0, filesChanged: false, grants: [] }
       : summarizeBranchActions(args.left, this.branchNoteTools());
+    const firstMessage = args.left.find((entry) => entry.type === "message" && entry.role === "user" && !entry.signal);
     const note: BranchNote = {
       kind,
+      ...(firstMessage?.type === "message" ? {
+        version: { excerpt: firstMessage.content.replace(/\s+/g, " ").trim().slice(0, 180), createdAt: firstMessage.createdAt },
+      } : {}),
       ...ran,
       ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
       ...(args.actorId ? { actorId: args.actorId } : {}),
@@ -2698,15 +2703,18 @@ export class Thread {
     const sandbox = this.session.sandbox;
     const workspace = this.session.options.workspace;
     const repos: PendingCheckpoint["repos"] = [];
-    for (const repo of await findRepos(sandbox, workspace)) {
+    const unavailable: NonNullable<TurnCheckpoint["unavailable"]> = [];
+    const found = await findRepos(sandbox, workspace);
+    for (const repo of found.includes(".") ? found : [...found, WORKSPACE_FILES]) {
       try {
-        const snapshot = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, entryId, "before"));
+        const snapshot = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, entryId, "before"), repo === WORKSPACE_FILES);
         repos.push({ repo, before: snapshot.commit, partial: snapshot.partial });
       } catch (err) {
+        unavailable.push({ repo, reason: "The before snapshot failed or exceeded the file size limit." });
         console.error(`[engine] file checkpoint skipped repo=${repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return { entryId, repos };
+    return { entryId, repos, unavailable, discovered: found };
   }
 
   /**
@@ -2719,30 +2727,51 @@ export class Thread {
     this.turnCheckpoint = undefined;
     try {
       const taken = pending ? await pending : undefined;
-      if (!taken || taken.repos.length === 0) return;
+      if (!taken) return;
+      const unavailable = [...taken.unavailable];
       const sandbox = this.session.sandbox;
       const workspace = this.session.options.workspace;
       const repos: RepoCheckpoint[] = [];
       for (const repo of taken.repos) {
-        const dir = repoDir(workspace, repo.repo);
-        const after = await snapshotRepo(sandbox, dir, checkpointRef(this.id, taken.entryId, "after"));
-        const changed = await changedPaths(sandbox, dir, repo.before, after.commit);
-        if (changed.length === 0) continue;
-        repos.push({
-          repo: repo.repo,
-          before: repo.before,
-          after: after.commit,
-          changed,
-          ...(after.branch ? { branch: after.branch } : {}),
-          ...(repo.partial || after.partial ? { partial: true } : {}),
-        });
+        try {
+          const dir = repoDir(workspace, repo.repo);
+          const after = await snapshotRepo(sandbox, dir, checkpointRef(this.id, taken.entryId, "after"), repo.repo === WORKSPACE_FILES);
+          const changed = await changedPaths(sandbox, dir, repo.before, after.commit, repo.repo === WORKSPACE_FILES);
+          if (repo.repo === WORKSPACE_FILES && changed.length === 0 && after.empty) continue;
+          repos.push({
+            repo: repo.repo,
+            before: repo.before,
+            after: after.commit,
+            changed,
+            ...(after.branch ? { branch: after.branch } : {}),
+            ...(repo.partial || after.partial ? { partial: true } : {}),
+          });
+        } catch (err) {
+          unavailable.push({ repo: repo.repo, reason: "The after snapshot failed or exceeded the file size limit." });
+          console.error(`[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
-      if (repos.length === 0) return;
+      for (const repo of await findRepos(sandbox, workspace)) {
+        if (taken.discovered.includes(repo)) continue;
+        try {
+          const after = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, taken.entryId, "after"));
+          repos.push({
+            repo, before: after.commit, after: after.commit, changed: [],
+            ...(after.branch ? { branch: after.branch } : {}),
+            ...(after.partial ? { partial: true } : {}),
+            undoUnavailable: "This repository was created during the turn. Its earlier file state was not checkpointed.",
+          });
+        } catch (err) {
+          unavailable.push({ repo, reason: "The new repository snapshot failed." });
+          console.error(`[engine] new repository checkpoint not recorded repo=${repo}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (repos.length === 0 && unavailable.length === 0) return;
       const store = this.session.providers.store;
       const entries = await store.getEntries(this.session.id, this.id, this.runningItem ? { queueItemId: this.runningItem.id } : undefined);
       const entry = entries.find((candidate) => candidate.id === taken.entryId);
       if (entry?.type !== "message") return;
-      const checkpoint: TurnCheckpoint = { repos };
+      const checkpoint: TurnCheckpoint = { repos, ...(unavailable.length > 0 ? { unavailable } : {}) };
       const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [FILE_CHECKPOINT_KEY]: checkpoint } };
       await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
     } catch (err) {
@@ -2788,7 +2817,9 @@ export class Thread {
     const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) return;
     const note = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId)
-      .find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
+      // Copied history can contain completed forks. This destination owns
+      // the newest fork note on its active path.
+      .reverse().find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
     const facts = note ? readBranchNote(note.metadata) : undefined;
     if (!note || !facts?.seed || facts.seedResult) return;
     const blobs = this.session.providers.blobs;
@@ -7400,6 +7431,8 @@ interface PendingCheckpoint {
   /** The turn's first user entry. */
   entryId: string;
   repos: Array<{ repo: string; before: string; partial: boolean }>;
+  unavailable: NonNullable<TurnCheckpoint["unavailable"]>;
+  discovered: string[];
 }
 
 /** A thread entry read: the store query, plus every branch on request. */

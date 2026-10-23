@@ -175,21 +175,21 @@ export async function ensureDefaultAssistantSession(
   return ensureAssistantSession(deps, assistant, meta);
 }
 
-/** Team conversations use independent execution state with the existing reader boundary.
+/** Team conversations and isolated personal forks use independent execution state.
  * `init.title` titles the governing thread when this call creates it. */
 export async function ensureAssistantExecution(
   deps: { db: AppDb; engineHost: EngineHost },
   principal: Principal,
   meta: { actorUserId: string; orgId: string },
   conversationKey: string,
-  init?: { title?: string; metadata?: Record<string, unknown> },
+  init?: { title?: string; metadata?: Record<string, unknown>; isolated?: boolean },
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
-  if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
+  if (principal.type !== "team" && !(principal.type === "user" && init?.isolated)) return ensureDefaultAssistantSession(deps, principal, meta);
   const root = await ensureDefaultAssistantSession(deps, principal, meta);
   const [existingExecution] = await deps.db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
     .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
-  if (!existingExecution && await isLegacyAssistantConversation(deps.db, root.sessionId, conversationKey, meta.orgId)) return root;
-  if (!existingExecution) {
+  if (!existingExecution && !init?.isolated && await isLegacyAssistantConversation(deps.db, root.sessionId, conversationKey, meta.orgId)) return root;
+  if (!existingExecution && !init?.isolated) {
     const retained = await deps.db.select({ sessionId: legacyAssistantRuntimes.sessionId }).from(legacyAssistantRuntimes)
       .innerJoin(legacyAssistantConversations, eq(legacyAssistantConversations.sessionId, legacyAssistantRuntimes.sessionId))
       .where(and(eq(legacyAssistantRuntimes.orgId, meta.orgId), eq(legacyAssistantRuntimes.ownerType, principal.type),
@@ -205,7 +205,7 @@ export async function ensureAssistantExecution(
   const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
     { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId, init);
   const execution = await deps.db.transaction(async tx => {
-    await lockTeamForOwnership(tx, principal.id);
+    if (principal.type === "team") await lockTeamForOwnership(tx, principal.id);
     if (!await ownerExists(tx, meta.orgId, principal)) throw new ArchivedAssistantError();
     const candidate = { sessionId: `execution:${randomUUID()}`, assistantId: root.assistant.id,
       conversationKey, governingThreadId: governing.id, createdAt: Date.now() };
@@ -267,7 +267,7 @@ async function ensureAssistantSession(
       .insert(agentSessions)
       .values({
         id: sessionId,
-        userId: meta.actorUserId,
+        userId: principal.type === "user" ? principal.id : meta.actorUserId,
         orgId: meta.orgId,
         workspace: data.workspace,
         title: "Assistant",

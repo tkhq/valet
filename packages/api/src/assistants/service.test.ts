@@ -2,11 +2,49 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { assistants, orgs, teams, users } from "../schema/index.js";
-import { ArchivedAssistantError, findDefaultAssistant, resolveDefaultAssistant } from "./service.js";
+import { agentSessions, assistants, legacyAssistantConversations, legacyAssistantRuntimes, orgs, teams, users } from "../schema/index.js";
+import { ArchivedAssistantError, ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant } from "./service.js";
+import { bootTestApi } from "../integration/_setup.js";
 
 const ORG = "org1";
 const TEAM = { type: "team", id: "team_1" } as const;
+
+it("does not reuse a legacy shared runtime for an explicitly isolated personal execution", async () => {
+  const api = await bootTestApi();
+  try {
+    const owner = { type: "user", id: "local-user" } as const;
+    const meta = { orgId: "local-org", actorUserId: owner.id };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    const key = "web:legacy-fork";
+    const thread = await root.session.createThread(key);
+    await api.providers.db.insert(legacyAssistantRuntimes).values({ sessionId: root.sessionId, assistantId: root.assistant.id, orgId: meta.orgId, ownerType: owner.type, ownerId: owner.id });
+    await api.providers.db.insert(legacyAssistantConversations).values({ sessionId: root.sessionId, conversationKey: key, threadId: thread.id });
+    const isolated = await ensureAssistantExecution(api.providers, owner, meta, key, { isolated: true });
+    expect(isolated.sessionId).not.toBe(root.sessionId);
+    expect(isolated.session.options.workspace).not.toBe(root.session.options.workspace);
+  } finally {
+    await api.cleanup();
+  }
+});
+
+it("stamps a personal execution with its owner when another actor wakes it", async () => {
+  const api = await bootTestApi();
+  try {
+    const owner = { type: "user", id: "local-user" } as const;
+    const meta = { orgId: "local-org", actorUserId: "test-member" };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    const execution = await ensureAssistantExecution(api.providers, owner, meta, "web:owned-fork", { isolated: true });
+    expect(execution.sessionId).not.toBe(root.sessionId);
+    const rows = await api.providers.db.select().from(agentSessions);
+    for (const sessionId of [root.sessionId, execution.sessionId]) {
+      expect(rows.find(row => row.id === sessionId)).toMatchObject({ userId: owner.id, ownerType: "user", ownerId: owner.id });
+    }
+    expect(execution.session.options.userId).toBe(owner.id);
+    expect(execution.session.options.owner).toEqual(owner);
+  } finally {
+    await api.cleanup();
+  }
+});
 
 describe("resolveDefaultAssistant", () => {
   let db: AppDb;

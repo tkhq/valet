@@ -6,6 +6,7 @@
  * both from the records on the branch the thread left (tool calls, approval
  * choices, file checkpoints), with no model call.
  */
+import { WORKSPACE_FILES } from "./checkpoints.js";
 import type { SessionEntry } from "./types.js";
 
 /** Entry metadata key for the UI's copy of a note's facts. */
@@ -48,6 +49,8 @@ export interface BranchNoteRepoFiles {
 
 export interface BranchNote {
   kind: BranchNoteKind;
+  /** The first typed message on the version this note left. */
+  version?: { excerpt: string; createdAt: number };
   actions: BranchNoteAction[];
   /** Calls past `MAX_NOTE_ACTIONS` lines. */
   moreActions: number;
@@ -140,6 +143,9 @@ export function readBranchNote(metadata: Record<string, unknown> | undefined): B
   const seedResult = Array.isArray(v.seedResult) ? v.seedResult.flatMap(readSeedResult) : undefined;
   return {
     kind: v.kind,
+    ...(isRecord(v.version) && typeof v.version.excerpt === "string" && typeof v.version.createdAt === "number"
+      && Number.isFinite(v.version.createdAt)
+      ? { version: { excerpt: v.version.excerpt.slice(0, 180), createdAt: v.version.createdAt } } : {}),
     actions,
     moreActions: typeof v.moreActions === "number" ? v.moreActions : 0,
     filesChanged: v.filesChanged === true,
@@ -290,6 +296,10 @@ function nameFiles(paths: readonly string[]): string {
 }
 
 /** Sentences about a file undo or restore, for the model. */
+function repoLabel(repo: string): string {
+  return repo === WORKSPACE_FILES ? "Working directory" : repo;
+}
+
 function filesText(files: readonly BranchNoteRepoFiles[], verb: string, left: string): string[] {
   const lines: string[] = [];
   const changed = files.flatMap((repo) => [...repo.restored, ...repo.removed]);
@@ -297,8 +307,9 @@ function filesText(files: readonly BranchNoteRepoFiles[], verb: string, left: st
   if (changed.length > 0) lines.push(`File changes were ${verb}: ${nameFiles(changed)}.`);
   if (skipped.length > 0) lines.push(`These files changed after ${left}, so they were left as they are: ${nameFiles(skipped)}.`);
   for (const repo of files) {
-    if (repo.failed) lines.push(`In ${repo.repo}, the file change failed (${repo.failed}), so its files are as ${left} left them.`);
+    if (repo.failed) lines.push(`In ${repoLabel(repo.repo)}, the file change failed (${repo.failed}), so its files are as ${left} left them.`);
   }
+  if (files.length > 0) lines.push("File restore covers checkpointed paths only. Hidden files, dependencies, caches, secrets and files outside the working directory are not covered by working-directory checkpoints.");
   return lines;
 }
 
@@ -313,12 +324,12 @@ export function branchNoteText(note: BranchNote): string {
       lines.push("This thread shares its working directory with the original thread, including changes made there after the branch point.");
     } else if (note.seedResult) {
       const copied = note.seedResult.filter((repo) => !repo.failed);
-      if (copied.length > 0) lines.push(`This thread has its own working directory. Files from the original thread at the branch point were copied into ${copied.map((repo) => repo.repo).join(", ")}.`);
+      if (copied.length > 0) lines.push(`This thread has its own working directory. Files from the original thread at the branch point were copied into ${copied.map((repo) => repoLabel(repo.repo)).join(", ")}.`);
       for (const repo of note.seedResult) {
-        if (repo.failed) lines.push(`Files for ${repo.repo} could not be copied: ${repo.failed}.`);
+        if (repo.failed) lines.push(`Files for ${repoLabel(repo.repo)} could not be copied: ${repo.failed}.`);
       }
     } else if (note.seed) {
-      lines.push(`This thread has its own working directory. Files from the original thread at the branch point are copied into ${note.seed.map((repo) => repo.repo).join(", ")} before the first turn.`);
+      lines.push(`This thread has its own working directory. Files from the original thread at the branch point are copied into ${note.seed.map((repo) => repoLabel(repo.repo)).join(", ")} before the first turn.`);
     } else {
       lines.push(`This thread has its own working directory, so files from the original thread are not here${note.seedSkipped ? ` (${note.seedSkipped})` : ""}.`);
     }

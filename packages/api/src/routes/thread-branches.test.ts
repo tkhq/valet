@@ -42,15 +42,16 @@ function entry(thread: Thread, id: string, parentId: string | null, role: "user"
   };
 }
 
-async function setup() {
+async function setup(assistant = false) {
   api = await bootTestApi();
-  const response = await fetch(`${api.baseUrl}/api/sessions`, {
+  const response = assistant ? undefined : await fetch(`${api.baseUrl}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspace: "/tmp" }),
   });
-  expect(response.status).toBe(201);
-  const sessionId = ((await response.json()) as CreateSessionResponse).id;
+  if (response) expect(response.status).toBe(201);
+  const sessionId = response ? ((await response.json()) as CreateSessionResponse).id
+    : (await ensureDefaultAssistantSession(api.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" })).sessionId;
   const session = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
   const thread = await session.ensureDefaultThread();
   await thread.pause();
@@ -150,6 +151,33 @@ describe("edit preview", () => {
 });
 
 describe("thread return", () => {
+  it("previews a saved version without changing the conversation, with bounded pages", async () => {
+    const h = await setup();
+    const sent = await h.post(`/threads/${h.thread.id}/messages`, { text: "second, edited", editEntryId: "u2" });
+    const { messageId } = (await sent.json()) as SendPromptResponse;
+    await h.thread.resume();
+    await h.settled(messageId!);
+    const current = await h.messages();
+    const note = current.find((message) => message.branch?.kind === "edit")!;
+    expect(note.branch?.version).toMatchObject({ excerpt: "second", createdAt: expect.any(Number) });
+    const preview = async (query: string) => fetch(`${api!.baseUrl}/api/threads/${h.thread.id}/branch-preview?${query}`);
+    const response = await preview(`noteEntryId=${note.id}&limit=2`);
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as ListMessagesResponse;
+    expect(page.messages.map((message) => message.id)).toEqual(["u2", "a2"]);
+    expect(page.hasMore).toBe(true);
+    const older = await preview(`noteEntryId=${note.id}&limit=2&cursor=${page.nextCursor}`);
+    expect(((await older.json()) as ListMessagesResponse).messages.map((message) => message.id)).toEqual(["u1", "a1"]);
+    expect((await h.messages()).map((message) => message.id)).toEqual(current.map((message) => message.id));
+    expect((await preview("noteEntryId=a1")).status).toBe(404);
+    expect((await preview(`noteEntryId=${note.id}&cursor=not-on-path`)).status).toBe(400);
+    expect((await preview("")).status).toBe(400);
+    const otherViewer = await fetch(`${api!.baseUrl}/api/threads/${h.thread.id}/branch-preview?noteEntryId=${note.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(otherViewer.status).toBe(404);
+  });
+
   it("goes back to the version an edit left", async () => {
     const h = await setup();
     const sent = await h.post(`/threads/${h.thread.id}/messages`, { text: "second, edited", editEntryId: "u2" });
@@ -173,7 +201,7 @@ describe("thread return", () => {
 
 describe("thread fork", () => {
   it("branches through a reply into a new thread with copied history", async () => {
-    const h = await setup();
+    const h = await setup(true);
     const res = await h.post(`/threads/${h.thread.id}/fork`, { entryId: "a1" });
     expect(res.status).toBe(201);
     const body = (await res.json()) as ForkThreadResponse;
@@ -183,13 +211,14 @@ describe("thread fork", () => {
     const listed = await h.messages(body.thread.id);
     expect(listed.map((m) => m.content)).toEqual(["first", "first answer", expect.stringContaining("branch of another thread")]);
     expect(listed.some((m) => m.id === "u1")).toBe(false);
-    expect(listed[2]?.branch).toMatchObject({ kind: "fork", canReturn: false, source: { threadId: h.thread.id, sameWorkingDirectory: true } });
+    expect(body.thread.sessionId).not.toBe(h.sessionId);
+    expect(listed[2]?.branch).toMatchObject({ kind: "fork", canReturn: false, source: { threadId: h.thread.id, sameWorkingDirectory: false } });
     // The source thread is unchanged.
     expect((await h.messages()).map((m) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
   });
 
   it("branches from before a user message and returns its text for the composer", async () => {
-    const h = await setup();
+    const h = await setup(true);
     const res = await h.post(`/threads/${h.thread.id}/fork`, { entryId: "u2" });
     expect(res.status).toBe(201);
     const body = (await res.json()) as ForkThreadResponse;

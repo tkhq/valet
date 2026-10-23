@@ -985,6 +985,8 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  branchPreview: (threadId: string, noteEntryId: string, cursor?: string) =>
+    request<ListMessagesResponse>("GET", `/threads/${encodeURIComponent(threadId)}/branch-preview?noteEntryId=${encodeURIComponent(noteEntryId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   editPreview: (threadId: string, entryId: string) =>
     request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
   forkThread: (threadId: string, body: ForkThreadRequest) =>

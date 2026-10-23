@@ -16,6 +16,12 @@ import { ApiError } from "~/api/client";
 import { AppPageHintContext } from "~/lib/app-page-hint";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
+const navigate = vi.fn().mockResolvedValue(undefined);
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => navigate,
+}));
+
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
 const cancelQueuedMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -139,6 +145,7 @@ function renderComposer(
 }
 
 beforeEach(() => {
+  navigate.mockClear();
   queueStateRef.current = undefined;
   editPreviewRef.current = undefined;
   streamMessagesRef.current = [];
@@ -1422,4 +1429,24 @@ describe("Composer prompt recall", () => {
     fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
     await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "rerun the report", threadId: "thread-1" })));
   });
+});
+
+it("opens the destination returned by /fork after sending the command", async () => {
+  sendMutateAsync.mockResolvedValueOnce({ messageId: null, threadId: "thread-1", fork: { id: "fork-thread", sessionId: "fork-session" } });
+  renderComposer();
+  const input = screen.getByRole("textbox", { name: "Message" });
+  fireEvent.change(input, { target: { value: "/fork keep going" } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/threads/$threadId", params: { threadId: "fork-thread" } }));
+  expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "/fork keep going", threadId: "thread-1" }));
+});
+
+it("keeps the source open when a fork command returns no destination", async () => {
+  sendMutateAsync.mockResolvedValueOnce({ messageId: null, threadId: "thread-1" });
+  renderComposer();
+  const input = screen.getByRole("textbox", { name: "Message" });
+  fireEvent.change(input, { target: { value: "/fork" } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+  expect(navigate).not.toHaveBeenCalled();
 });

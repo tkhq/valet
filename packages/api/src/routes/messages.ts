@@ -16,7 +16,7 @@ import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef } from "../servi
 import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
-import { ensureAssistantExecution } from "../assistants/service.js";
+import { ensureAssistantExecution, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
@@ -29,7 +29,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -77,7 +77,8 @@ import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
-import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
+import { publicUrlFromEnv } from "../channels/host.js";
+import { runVisible, spawnedFromVisibleThread, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -225,6 +226,7 @@ function branchNoteToMessage(
     sequence: e.sequence,
     branch: {
       kind,
+      ...(note?.version ? { version: note.version } : {}),
       actions: (note?.actions ?? []).map(({ label, count, urls }) => ({ label, count, urls })),
       moreActions: note?.moreActions ?? 0,
       filesChanged: note?.filesChanged ?? false,
@@ -234,16 +236,16 @@ function branchNoteToMessage(
         files: {
           changed: note.files.flatMap((repo) => [...repo.restored, ...repo.removed].map((path) => repoPath(repo.repo, path))),
           skipped: note.files.flatMap((repo) => repo.skipped.map((path) => repoPath(repo.repo, path))),
-          failed: note.files.flatMap((repo) => (repo.failed ? [repo.repo] : [])),
+          failed: note.files.flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
           canBringBack: note.files.some((repo) => repo.restorePoint !== undefined && Object.keys(repo.bases ?? {}).length > 0),
         },
       } : {}),
       ...(note?.source ? { source: { threadId: note.source.threadId, sameWorkingDirectory: note.source.sameWorkingDirectory } } : {}),
       ...(note?.seed || note?.seedSkipped ? {
         seed: {
-          repos: (note.seedResult ?? note.seed ?? []).filter((repo) => !("failed" in repo) || !repo.failed).map((repo) => repo.repo),
+          repos: (note.seedResult ?? note.seed ?? []).filter((repo) => !("failed" in repo) || !repo.failed).map((repo) => checkpointLabel(repo.repo)),
           pending: note.seedResult === undefined && (note.seed?.length ?? 0) > 0,
-          failed: (note.seedResult ?? []).flatMap((repo) => (repo.failed ? [repo.repo] : [])),
+          failed: (note.seedResult ?? []).flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
           ...(note.seedSkipped ? { skipped: note.seedSkipped } : {}),
         },
       } : {}),
@@ -253,7 +255,11 @@ function branchNoteToMessage(
 
 /** A file path for people, relative to the working directory. */
 function repoPath(repo: string, path: string): string {
-  return repo === "." ? path : `${repo.replace(/\/+$/, "")}/${path}`;
+  return repo === "." || repo === WORKSPACE_FILES ? path : `${repo.replace(/\/+$/, "")}/${path}`;
+}
+
+function checkpointLabel(repo: string): string {
+  return repo === WORKSPACE_FILES ? "the working directory" : repo;
 }
 
 /**
@@ -454,7 +460,7 @@ messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
 /** Enumerate execution histories without waking their sandboxes. */
 async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect, archived?: boolean) {
   const { db, engineStore } = c.var.providers;
-  const executions = session.ownerType === "team"
+  const executions = session.ownerType === "team" || session.ownerType === "user"
     ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey,
         matchesArchive: archived === undefined ? sql<boolean>`true` : sql<boolean>`EXISTS (
           SELECT 1 FROM engine_threads t LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
@@ -1027,25 +1033,37 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
 
 /**
  * Create a thread in a loaded session: the body of `POST .../threads`, and
- * the destination of a fork. A team workspace runtime is read-only, so a
- * team thread gets its own execution session. `source` lends its model and
+ * the destination of a fork. Forks and new team conversations get their own
+ * execution sessions. `source` lends its model and
  * reasoning level when the person keeps current settings for new threads.
  */
 export async function openThread(
   c: Context<AppEnv>,
   loaded: { session: typeof agentSessions.$inferSelect; engineSession: EngineSession; meta: Awaited<ReturnType<typeof loadSessionMeta>> },
-  opts: { source?: Thread | null; title?: string },
+  opts: { source?: Thread | null; title?: string; isolated?: boolean },
 ): Promise<{ thread: Thread; summary: CreateThreadResponse }> {
   const { session, engineSession, meta } = loaded;
   const { db, engineHost } = c.var.providers;
   const { source, title } = opts;
+  const assistant = opts.isolated ? await loadAssistantBySessionId(db, session.id) : undefined;
+  if (opts.isolated && (!assistant || assistant.orgId !== session.orgId
+    || assistant.ownerType !== session.ownerType || assistant.ownerId !== (session.ownerId || session.userId)
+    || (assistant.ownerType !== "user" && assistant.ownerType !== "team"))) {
+    throw new ValidationError("This session cannot be forked into an isolated working directory while preserving its tools and persona. Start a new session instead.");
+  }
+  if (opts.isolated && assistant) {
+    const current = await findDefaultAssistant(db, session.orgId, { type: assistant.ownerType, id: assistant.ownerId });
+    if (current?.id !== assistant.id) {
+      throw new ValidationError("This retained assistant cannot be forked without changing its persona and sender. Start a new conversation in your current workspace instead.");
+    }
+  }
   const behaviorRows = await db
     .select({ newThreadBehavior: users.newThreadBehavior })
     .from(users)
     .where(eq(users.id, c.var.user.id))
     .limit(1);
   const keepCurrent = behaviorRows[0]?.newThreadBehavior !== "use_defaults";
-  const settings = keepCurrent && source
+  const settings = (opts.isolated || keepCurrent) && source
     ? {
         model: source.modelId() ?? engineSession.options.modelSpec ?? engineSession.options.model.id,
         reasoning: parseReasoningLevel(
@@ -1058,7 +1076,10 @@ export async function openThread(
   // POST creates a new thread (calling thread() with an existing key
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const target = engineSession.options.readOnlyReason && session.ownerType === "team"
+  const target = opts.isolated && assistant
+    ? (await ensureAssistantExecution(c.var.providers, { type: assistant.ownerType, id: assistant.ownerId },
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key, { isolated: true })).session
+    : engineSession.options.readOnlyReason && session.ownerType === "team"
     ? (await ensureAssistantExecution(c.var.providers, { type: "team", id: session.ownerId },
       { orgId: session.orgId, actorUserId: c.var.user.id }, key)).session
     : engineSession;
@@ -1113,6 +1134,39 @@ async function visibleThread(
 // ── Messages: list ────────────────────────────────────────────────────────
 
 messagesRouter.get("/:id/messages", (c) => listMessages(c, c.req.param("id")));
+
+/** Read an earlier path without moving the active leaf or restoring files. */
+export async function branchPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found." }, 404);
+  const noteId = c.req.query("noteEntryId");
+  if (!noteId) return c.json({ error: "Choose an earlier version to view." }, 400);
+  const snapshot = await c.var.providers.engineStore.getThreadSnapshot(sessionId, threadId);
+  const note = snapshot?.entries.find((entry) => entry.id === noteId);
+  if (!snapshot || note?.type !== "branch_summary" || !note.branchLeafId
+    || !snapshot.entries.some((entry) => entry.id === note.branchLeafId)) {
+    return c.json({ error: "This version is not here. Reload the thread and choose another version." }, 404);
+  }
+  let path = walkTranscriptDag(snapshot.entries, note.branchLeafId);
+  const cursor = c.req.query("cursor");
+  if (cursor) {
+    const index = path.findIndex((entry) => entry.id === cursor);
+    if (index < 0) return c.json({ error: "This preview changed. Open the version again." }, 400);
+    path = path.slice(0, index);
+  }
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 50;
+  const hasMore = path.length > limit;
+  const tail = path.slice(-limit);
+  const response: ListMessagesResponse = {
+    messages: tail.map((entry) => entryToMessage(entry, sessionId, threadId)).filter((message): message is Message => message !== null),
+    hasMore,
+    ...(hasMore && tail[0] ? { nextCursor: tail[0].id } : {}),
+  };
+  return c.json(response);
+}
 
 export async function listMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
   if (sessionId.startsWith("wf:")) return listWorkflowStepMessages(c, sessionId, threadId);
@@ -1215,6 +1269,8 @@ export async function submitSessionPrompt(
     inheritToolScope?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
+    /** Authorized, request-scoped fork command operation. */
+    forkThread?: (threadId: string, prompt: string) => Promise<string>;
     /** The sender's earlier user message that this text replaces (`Thread.editMessage`). */
     editEntryId?: string;
     /** With `editEntryId`: also undo the files the replaced turns changed. */
@@ -1262,6 +1318,11 @@ export async function submitSessionPrompt(
   }
   if (editEntryId !== undefined && outcome && outcome.kind !== "pass") {
     throw new ValidationError("An edited message cannot run a slash command. Send the command as a new message.");
+  }
+
+  if (outcome?.kind === "execute" && outcome.resolved.source === "builtin" && outcome.resolved.name === "fork"
+    && (attachments?.length || fileRefs?.length)) {
+    throw new ValidationError("Send /fork with an optional text prompt only. Attach files in the new thread.");
   }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
@@ -1366,6 +1427,7 @@ export async function submitSessionPrompt(
       : outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
+            ...(opts?.forkThread ? { forkThread: opts.forkThread } : {}),
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(author ? { author } : {}),
             metadata: { ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
@@ -1535,7 +1597,18 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
+    let fork: ForkThreadResponse | undefined;
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
+      forkThread: async (sourceThreadId, prompt) => {
+        const result = await forkThreadAt(c, sessionId, sourceThreadId, { latest: true, prompt });
+        if (result instanceof Response) {
+          const failure: unknown = await result.json();
+          throw new ValidationError(typeof failure === "object" && failure !== null && "error" in failure && typeof failure.error === "string"
+            ? failure.error : "Cannot branch this thread. Reload the thread and try again.");
+        }
+        fork = result;
+        return `Branched the conversation. [Open the new thread](${(publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin).replace(/\/+$/, "")}/threads/${encodeURIComponent(fork.thread.id)}).`;
+      },
       threadId: body.threadId,
       appPageHint: readAppPageHint(body.appPageHint),
       attachments: body.attachments,
@@ -1547,7 +1620,7 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId, undoFiles: body.undoFiles === true } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
-    return c.json(resp, 202);
+    return c.json({ ...resp, ...(fork ? { fork: fork.thread } : {}) }, 202);
   } catch (err) {
     if (err instanceof UnknownAttachmentError) {
       return c.json(
@@ -1689,23 +1762,46 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
   if (typeof entryId !== "string" || entryId.length === 0) {
     return c.json({ error: "entryId must name a message in this thread." }, 400);
   }
+  const result = await forkThreadAt(c, sessionId, threadId, { entryId });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
+/** Both the message command and the fork endpoint use this authorized operation. */
+async function forkThreadAt(
+  c: Context<AppEnv>, sessionId: string, threadId: string,
+  selection: { entryId: string } | { latest: true; prompt: string },
+): Promise<ForkThreadResponse | Response> {
   const loaded = await loadEngineSession(c, sessionId);
   if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") {
+    return c.json({ error: "Only the thread owner or a team member can branch this thread. Ask the owner to make a branch." }, 403);
+  }
+  const command = "latest" in selection ? selection : undefined;
+  const entryId = "entryId" in selection ? selection.entryId : undefined;
   const source = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
   if (!source) return c.json({ error: "thread not found" }, 404);
 
   // A user message branches from just before it, and its text goes to the
   // new thread's composer. Any other entry branches through itself.
   const active = await source.readEntries();
-  const index = active.findIndex((entry) => entry.id === entryId);
+  const selectedId = command
+    ? [...active].reverse().find((entry) => entry.type === "message" && entry.role === "assistant" && entry.stopReason === "end_turn")?.id
+    : entryId;
+  let index = active.findIndex((entry) => entry.id === selectedId);
+  if (command && index >= 0) {
+    // These notes remain part of the completed context. Stop before a new
+    // turn or the command echo, so unfinished work stays in the source.
+    while (active[index + 1]?.type === "branch_summary" || active[index + 1]?.type === "compaction") index++;
+  }
   const entry = active[index];
-  if (!entry) {
+  if (!entry && !command) {
     return c.json({ error: "That message is not in this version of the conversation. Reload the thread and try again." }, 404);
   }
-  const typed = entry.type === "message" && entry.role === "user" && !entry.signal;
+  const typed = !command && entry?.type === "message" && entry.role === "user" && !entry.signal;
   let path: SessionEntry[];
   try {
-    path = await source.forkPath(typed ? active[index - 1]?.id ?? null : entry.id);
+    path = await source.forkPath(typed ? active[index - 1]?.id ?? null : entry?.id ?? null);
   } catch (err) {
     if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
     throw err;
@@ -1730,7 +1826,14 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
     .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
   const title = titled?.title ? `${titled.title} (branch)`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined;
 
-  const { thread, summary } = await openThread(c, home, { source, title });
+  let opened: Awaited<ReturnType<typeof openThread>>;
+  try {
+    opened = await openThread(c, home, { source, title, isolated: true });
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  const { thread, summary } = opened;
   // Before any history is copied, so the fork is never wider than its source.
   for (const channel of audience?.channels ?? []) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
   // A fork in its own working directory (a team conversation) takes the
@@ -1739,9 +1842,17 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
   await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}) });
   const response: ForkThreadResponse = {
     thread: summary,
-    ...(typed && entry.type === "message" ? { draft: entry.content } : {}),
+    ...(typed && entry?.type === "message" ? { draft: entry.content } : {}),
   };
-  return c.json(response, 201);
+  if (command?.prompt) {
+    const destination = await loadOwnedSession(c, summary.sessionId);
+    if (!destination) return c.json({ error: "New thread not found. Open the thread list and try again." }, 404);
+    await submitSessionPrompt(c.var.providers, destination, command.prompt, {
+      threadId: thread.id,
+      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
+    });
+  }
+  return response;
 }
 
 /**

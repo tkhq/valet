@@ -1,7 +1,8 @@
 # Thread edit and fork
 
-Date: 2026-10-22. Status: built, piloted on one deployment. Revised the same
-day after a parity review of Claude Code, claude.ai, Codex, Cursor, Cline,
+Date: 2026-10-22. Status: built, piloted on one deployment. Revised on 2026-10-23
+for compact version history, the fork command, and file isolation. The design
+includes a parity review of Claude Code, claude.ai, Codex, Cursor, Cline,
 Copilot, Replit, Devin, OpenCode, Amp, and Factory (decisions 7 to 12).
 
 ## Problem
@@ -182,12 +183,14 @@ stays off.
 
 ### 9. A fork keeps its files
 
-Call: a personal fork shares the source's working directory, as personal
-threads do; its note says that later changes there show too. A team fork
-runs in a new execution session, so the fork route bundles each changed
+Call: personal assistant forks and team forks run in a new execution session.
+Each fork has its own working directory. A personal fork directory sits outside
+the source directory, so source snapshots cannot include fork files. Recorded
+paths that overlap are refused. Ordinary personal threads keep their
+existing shared directory. The fork route bundles each changed
 repository's last checkpoint at the fork point (`git bundle`, leaving out
 what the remote holds, at most 50 MB) into the blob store. The fork's first
-turn applies it before its model call: it checks out the snapshot's commit
+turn applies its own newest fork note before its model call: it checks out the snapshot's commit
 and puts the snapshot's working tree on top, unstaged. The fork note then
 says which repositories came along or why one failed. Repository paths are
 stored relative to the working directory.
@@ -398,6 +401,9 @@ left, so the compaction drops it, returns `noop`, and sets
   replaces (decision 8). Guests with reply access may call it.
 - `POST /api/threads/:threadId/branch/return` with `{ noteEntryId }`, and
   `restoreFiles: true` to bring files back.
+- `GET /api/threads/:threadId/branch-preview?noteEntryId=...` reads the saved
+  path with the thread's read permission. Cursor pages are bounded. Preview
+  never moves the leaf, writes entries, or changes files.
 - `POST /api/threads/:threadId/fork` with `{ entryId }`. Members only.
   Returns the new thread summary and, for a user message, the text for the
   composer.
@@ -425,20 +431,43 @@ left, so the compaction drops it, returns `noop`, and sets
   edited text stays in the composer with the server's reason.
 - `useThreadEdit` holds this state for the main view and for a
   shared-thread guest's view.
-- A branch note renders as a divider, like the compaction divider. It
-  expands to the tool list and the "Go back to this version" button.
-  Consecutive edit and return notes, as repeated edits of one message
-  leave, share one divider ("3 earlier versions kept"), which lists each
-  version newest first. A person who retries five times sees one row, not
-  five.
+- Consecutive branch notes share one divider ("3 earlier versions kept").
+  It opens a bounded history panel. Each row shows the original message
+  excerpt and time. Legacy notes use the note time. View selects one version
+  and loads its transcript without changing the conversation or files.
+  Only the selected version shows its lasting actions, file choice, and
+  Restore this version action. Transcript pages contain at most 100 entries.
+  Older pages load only when requested.
+- `/fork` branches at the latest completed assistant reply and opens the
+  new thread. `/fork <prompt>` also sends the prompt in that thread. Both
+  use the message action's permission checks and file seed path. The source
+  keeps a command result with a link; it makes no model call.
 - Another viewer's list refetches on `branch_switched`, and rows still
   streaming on the old branch go. Their draft does not change.
 
 ## Limits
 
-- Files outside git repositories, packages installed outside the working
-  directory, and processes do not rewind. Outside services never do.
-- A turn whose snapshot failed or timed out has no file undo.
+- File checkpoints also cover eligible regular files outside git repositories.
+  A hidden object store holds these snapshots without making the working
+  directory a git repository. Hidden paths, credentials, dependencies, caches,
+  build output, and symbolic links stay outside this coverage. The snapshot
+  has the same size and time bounds as repository checkpoints.
+- Packages installed outside the working directory and running processes do
+  not rewind. External actions do not rewind. A push, post, or deployment needs
+  its service's recovery operation. A conversation restore never invokes one.
+- A turn whose snapshot failed or timed out has no file undo. Its coverage
+  gap blocks a restore across that target and prevents a stale fork seed.
+- A repository created during a turn gets a fork snapshot afterward. Its
+  files cannot rewind across that turn, because it has no earlier repository
+  checkpoint. The note records that coverage gap.
+- Fork bundles also carry the snapshots needed to edit copied history and
+  use retained return notes. Only the copied path supplies these snapshots.
+  A missing commit, tree, or blob fails the restore before any file changes.
+- The separate object store ignores its own files. A later repository init
+  and ordinary git add cannot stage the checkpoint store.
+- Standalone sessions cannot fork into assistant execution directories without
+  changing their tools and persona. The fork is refused with a reason.
+  Personal and team assistant conversations support isolated forks.
 - A message that came from Slack cannot be edited from the web. The person
   forks instead.
 - Thread search, the auto-title, and the thread list's last-activity line
@@ -465,10 +494,48 @@ left, so the compaction drops it, returns `noop`, and sets
   the preview, and Slack edits from a DM and from a followed thread. A team
   fork of a private thread is refused, a fork keeps its source's Slack
   channels, and an attachment on a version an edit left still downloads.
-- Web: the edit bar, the hidden rows, the note divider, fork navigation.
+- Web: the edit bar, hidden rows, history panel, read-only version preview,
+  older-message pages, restore success and errors, and command navigation.
+  The history list renders 20 versions at a time.
+- Fork commands retain trailing return and compaction notes, exclude an
+  unfinished turn, preserve raw prompt text, and refuse reply guests.
+- Personal forks keep their owner, model, reasoning, and private audience.
+  Forks of forks apply the new seed. Retained assistants with a different
+  persona are refused. Root thread lists include isolated forks after reload.
 - Local check with two accounts at desktop and phone width, in docker
   sandboxes: an edit with "Also undo file changes" left the agent reading
   the earlier file content; Go back brought the changed files back; a second
   Go back undid them again; a team fork read the source's commits, its
   uncommitted change, and its untracked file. A teammate's edit preview of
   another person's message is refused.
+
+### Fork command integration
+
+`/fork` copies the source thread through its latest completed assistant reply.
+An empty thread creates a fork with no copied messages. An unfinished tail
+stays in the source thread. `/fork <prompt>` then submits the raw prompt in
+the new thread. Quotes and line breaks in that prompt stay intact.
+
+The message route supplies a request-scoped engine command hook. Both the
+hook and the fork endpoint call the same authorized fork operation. That
+operation checks membership, keeps the source audience, and uses the same
+file seed export. Personal forks use separate execution sessions, as team
+forks do. Unsupported standalone sessions return a corrective error.
+
+A successful command persists a link in the source thread and returns its
+destination as `SendPromptResponse.fork`. The web composer opens that thread.
+CLI callers can use the link. Channel hosts without the authorized hook
+return a command failure with a link to continue in the app. They do not
+copy session history through a separate engine path.
+
+### Local check on 2026-10-23
+
+The production web build showed the compact history panel at desktop and
+375-pixel phone width. Viewing a version kept the active conversation unchanged.
+Restore returned to that version and closed the panel. The command menu listed
+`/fork`. Two fresh test accounts checked the private history boundary.
+
+A live file check created and changed a text file outside Git. Edit with file
+undo restored its earlier content. `/fork <prompt>` copied that content into a
+disjoint personal directory. A change in the fork left the source file unchanged.
+The second account could read neither the personal fork nor its saved history.
