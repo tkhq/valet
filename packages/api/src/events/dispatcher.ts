@@ -115,6 +115,8 @@ export interface EventDispatcherDeps {
   retainExternalUsage?: () => Promise<void>;
   /** Drain the durable personal attention outbox on the existing event rail. */
   drainAttention?: () => Promise<void>;
+  /** Bounded classification on the existing durable retry rail. */
+  drainTagging?: () => Promise<void>;
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
@@ -363,6 +365,9 @@ export class EventDispatcher {
           .catch(err => console.error("attention outbox drain failed:", err));
       }
       void this.deps.retainExternalUsage?.().catch(() => console.warn("Intent retention failed. Check database availability."));
+      if (this.deps.drainTagging) {
+        void this.deps.drainTagging().catch(() => console.warn("Tagging batch failed. Check the model provider and queued tagging attempts."));
+      }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.

@@ -32,7 +32,7 @@ import type {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy"];
+const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy", "tagging"];
 export function isUsageUseCase(v: string): v is UsageUseCase {
   return (USE_CASES as readonly string[]).includes(v);
 }
@@ -534,7 +534,7 @@ async function queryUsageDrillItems(
   const r = (await db.execute(sql`
     SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COALESCE(SUM(turns),0) AS turns
     FROM ${proxyPeriodRows(period)} proxy_usage
-    WHERE ${whereProxy} AND total_tokens > 0
+    WHERE ${whereProxy} AND total_tokens > 0 AND ${useCase === "tagging" ? sql`provider_kind = 'tagging'` : sql`provider_kind <> 'tagging'`}
     GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
   return r.rows.map((x) => ({
     id: x.harness ?? "unknown", label: x.harness ?? "unknown", useCase, isChild: false,

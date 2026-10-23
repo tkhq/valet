@@ -1282,13 +1282,16 @@ export const api = {
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
   },
-  externalUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: "hosted" | "mcp" | "cli", signal?: AbortSignal) => {
+  editTagKey: (dimension: string, key: string, change: { label: string; definition: string }) => request<{ ok: boolean }>("PATCH", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`, change),
+  mergeTagKey: (dimension: string, key: string, into: string) => request<{ ok: boolean }>("POST", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}/merge`, { into }),
+  externalUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: "hosted" | "mcp" | "cli", signal?: AbortSignal, key?: string) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId) qs.set("teamId", teamId);
     qs.set("q", search);
     qs.set("offset", String(offset));
     if (surface) qs.set("surface", surface);
+    if (key) qs.set("key", key);
     return request<ExternalUsageResponse>("GET", `/usage/external?${qs}`, undefined, signal);
   },
   usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {

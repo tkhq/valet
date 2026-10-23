@@ -4363,7 +4363,7 @@ export interface UsageMemberSummary extends UsageWindow {
 /** A Valet activity kind, derived from the session id in `cost_entries`
  * (`use_case`): `orchestrator`, `session` (interactive chat + child sessions),
  * `workflow`, or `proxy` (external Claude Code / Codex). */
-export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
+export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy" | "tagging";
 
 /** A spend bucket with the full token-type split (input/output/cache) so cache
  * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
@@ -6208,7 +6208,7 @@ export interface ProxyRequestListItem {
   userId: string | null;
   teamId?: string | null;
   apiKeyId: string;
-  providerKind: "anthropic" | "openai";
+  providerKind: "anthropic" | "openai" | "tagging";
   model: string | null;
   harness: string | null;
   endpoint: string;
@@ -6631,6 +6631,7 @@ export interface AgentAccessResponse {
 
 /** External MCP and CLI facts. Arguments and results are never included. */
 export interface ExternalUsageResponse {
+  classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
   tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
@@ -6638,7 +6639,17 @@ export interface ExternalUsageResponse {
   recent: {
     id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
     clientVersion: string | null; userId: string | null; userName: string | null; outcome: "ok" | "error" | "denied" | "pending-approval";
-    intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
+    key?: string | null; intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
   }[];
   hasMore: boolean;
+}
+
+export interface ToolIntentKeyUsage {
+  key: string; label: string; definition: string; status: "provisional" | "active" | "merged";
+  origin: "seed" | "classifier" | "admin"; calls: number; uniqueUsers: number; errorRate: number;
+}
+export interface ToolIntentUsage {
+  unlabeledCalls?: number;
+  emergingCalls?: number;
+  keys: ToolIntentKeyUsage[]; consolidationDue: boolean; canManage: boolean;
 }

@@ -94,6 +94,7 @@ function StatCard({
 }
 
 const USE_CASE_LABELS: Record<UsageUseCase, string> = {
+  tagging: "Automatic tagging",
   orchestrator: "Assistant",
   session: "Sessions",
   workflow: "Workflows",
