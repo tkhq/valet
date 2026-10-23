@@ -113,9 +113,8 @@ Its outcome keys are `completed`, `partial`, `failed`, `blocked_on_human`, `aban
 The library also keeps its required `other` fallback for invalid classifier output.
 The card only shows that fallback when it has assignments.
 
-The subject is a session, matching the existing Usage session list.
-The renderer reads the four most recently active threads.
-It uses the latest compaction summary and up to 12 recent user/assistant messages.
+The subject is one session thread, including assistant and child-session threads.
+The renderer uses that thread's latest compaction summary and up to 12 recent user/assistant messages.
 The existing transcript formatter flattens untrusted text.
 The final input stays under the library's 1,024-byte cap.
 Raw tool results and attachments are not included in the model prompt.
@@ -123,14 +122,15 @@ Sessions with no user message, deleted sessions, and accounting sessions are exc
 A running or queued latest submission defers classification until another stop event.
 
 The existing event stream enqueues settled, idle, and human-blocked sessions.
-The generic queue and worker remain unchanged.
+The generic queue debounces these jobs for ten minutes.
+The subject cache limits each thread to three successful re-tags per UTC day.
 The input hash skips repeated unchanged states.
 A changed summary, tail, or execution state permits reclassification.
 There is no historical-session backfill.
 
 `GET /api/usage/session-outcomes` returns only outcome labels, definitions, and counts.
 It uses the existing period resolver and personal/team/org authorization.
-The card counts each session's latest label when its classification timestamp falls in the selected period.
+The card counts each thread's latest label when its classification timestamp falls in the selected period.
 It does not expose session IDs or transcript text.
 Local validation finished one session and displayed Completed: 1.
 The completion provider was deterministic, not a live model.
