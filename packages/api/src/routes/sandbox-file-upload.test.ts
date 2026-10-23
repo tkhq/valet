@@ -112,17 +112,30 @@ describe("POST /api/sessions/:id/files", () => {
     expect(provider.createCalls).toBe(2);
   });
 
-  it("does not try to restart a released attachment", async () => {
+  it("rebuilds a released cached session without restarting its terminal attachment", async () => {
     const provider = new UploadSandboxProvider();
     api = await bootTestApi({ sandboxProvider: provider });
     const sessionId = await createSession(api.baseUrl, "");
     expect((await upload(api.baseUrl, sessionId, "before.txt")).status).toBe(200);
-    await api.providers.engineHost.liveSession(sessionId)?.attachment.destroy();
+    const original = api.providers.engineHost.liveSession(sessionId);
+    if (!original) throw new Error("the upload session was not cached");
+    await original.attachment.destroy();
 
-    const released = await upload(api.baseUrl, sessionId, "after.txt");
-    expect(released.status).toBe(409);
-    expect(await released.json()).toMatchObject({ error: "sandbox was released" });
-    expect(provider.createCalls).toBe(1);
+    const recovered = await upload(api.baseUrl, sessionId, "after.txt");
+    expect(recovered.status).toBe(200);
+    const result = await recovered.json() as PostSessionFileUploadResponse;
+    const replacement = api.providers.engineHost.liveSession(sessionId);
+    expect(replacement).not.toBe(original);
+    if (!replacement) throw new Error("the replacement upload session was not cached");
+    expect(await replacement.sandbox.readFile(result.path)).toBe("after.txt");
+    expect(original.attachment.state).toBe("released");
+    await expect(original.attachment.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(provider.createCalls).toBe(2);
+
+    const deleted = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect((await upload(api.baseUrl, sessionId, "deleted.txt")).status).toBe(404);
+    expect(provider.createCalls).toBe(2);
   });
   it("accepts a plain text file and returns correct response shape", async () => {
     api = await bootTestApi();
