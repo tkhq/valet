@@ -28,9 +28,16 @@ let liveStatus: import("~/stores/stream").AgentStatus = "idle";
 let queueState: import("@valet/api/wire").WireQueueState | undefined;
 let fullProfile = false;
 let readOnlyReason: string | undefined;
-beforeEach(() => { fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; });
+let mobileLayout = false;
+let sessionOwner: { type: "user" | "team"; id: string } = { type: "user", id: "u1" };
+beforeEach(() => { fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
 
-vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined, useAnnounceThreadView: () => undefined, announceTyping: () => undefined }));
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
+vi.mock("~/components/home/tasks-panel", () => ({ TasksPanel: () => <div>Tasks across workspaces</div>, useNeedsYouCount: () => ({ count: 0, partial: false }) }));
+vi.mock("~/components/home/make-panel", () => ({ MakePanel: () => <div>Make across workspaces</div> }));
+
+const announceView = vi.hoisted(() => vi.fn());
+vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined, useAnnounceThreadView: announceView, announceTyping: () => undefined }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
@@ -40,7 +47,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSession: () => ({
       isLoading: false,
       error: null,
-      data: { readOnlyReason, owner: { type: "user", id: "u1" }, id: "sess-1", title: "fix-auth", workspace: "/workspace", profile: fullProfile ? "full" : "headless" },
+      data: { readOnlyReason, owner: sessionOwner, id: "sess-1", title: "fix-auth", workspace: "/workspace", profile: fullProfile ? "full" : "headless" },
     }),
     useThreads: () => ({ data: { threads: [{ id: "t1", createdAt: 0 }] } }),
     useMessages: () => ({ data: undefined }),
@@ -67,8 +74,8 @@ vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidate
 
 vi.mock("./session-header", () => ({
   SandboxChip: () => null,
-  SessionHeader: ({ session, summaryControl }: { session: { title?: string }; summaryControl?: ReactNode }) => (
-    <div data-testid="full-header">{session.title}{summaryControl}</div>
+  SessionHeader: ({ session, summaryControl, onOpenView }: { session: { title?: string }; summaryControl?: ReactNode; onOpenView?: (view: "browser") => void }) => (
+    <div data-testid="full-header"><button aria-label="Thread menu">Menu</button>{session.title}{summaryControl}{onOpenView && <button onClick={() => onOpenView("browser")}>Open browser</button>}</div>
   ),
 }));
 vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: () => <div>Thread summary contents</div> }));
@@ -106,6 +113,37 @@ function renderComponent(component: () => ReactNode) {
 }
 
 describe("SessionView header chrome", () => {
+  it("uses Chat, Tasks, and Make for a team thread with a sharing notice, keeping its draft mounted", async () => {
+    mobileLayout = true;
+    sessionOwner = { type: "team", id: "team-a" };
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" scopeNotice="Shared with Platform. Members can read and reply." />);
+    expect((await screen.findAllByRole("tab")).map((tab) => tab.textContent)).toEqual(["Chat", "Tasks", "Make"]);
+    const composer = screen.getByTestId("composer");
+    fireEvent.click(screen.getByRole("tab", { name: "Make" }));
+    expect(screen.getByText("Make across workspaces")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(screen.getByText("Tasks across workspaces")).toBeTruthy();
+    expect(announceView).toHaveBeenLastCalledWith("sess-1", undefined);
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    expect(screen.getByTestId("composer")).toBe(composer);
+    expect(announceView).toHaveBeenLastCalledWith("sess-1", "t1");
+    expect(screen.queryByRole("tab", { name: "Browser" })).toBeNull();
+  });
+
+  it("opens a team's browser from the menu and returns to chat without the legacy view tabs", async () => {
+    mobileLayout = true;
+    sessionOwner = { type: "team", id: "team-a" };
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" scopeNotice="Shared with Platform." />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open browser" }));
+    expect(await screen.findByRole("region", { name: "Full browser" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Browser" })).toBeNull();
+    const back = screen.getByRole("button", { name: "Back to chat" });
+    back.focus();
+    fireEvent.click(back);
+    expect(screen.getByTestId("composer")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Thread menu" }));
+  });
+
   it("suppresses summary portals for a hidden embedded chat", async () => {
     renderInRouter("sess-1", false, undefined, false);
     fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));

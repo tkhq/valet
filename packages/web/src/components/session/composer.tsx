@@ -116,11 +116,14 @@ export function Composer({
   submissionLock,
   onSent,
   guest = false,
+  active = true,
   statusLine,
 }: {
   /** A quiet one-line strip under the input box, such as the background
    * work status line. It renders as given and owns its own spacing. */
   statusLine?: ReactNode;
+  /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
+  active?: boolean;
   /** The sender opens a shared thread as a guest: no file or image intake
    * (uploads land in the owner's working directory) and no slash commands
    * (commands change the owner's thread). */
@@ -187,8 +190,8 @@ export function Composer({
     field.setSelectionRange(field.value.length, field.value.length);
   }, [text]);
   useEffect(() => {
-    if (replyTarget) inputRef.current?.focus();
-  }, [replyTarget]);
+    if (active && replyTarget) inputRef.current?.focus();
+  }, [replyTarget, active]);
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -769,6 +772,7 @@ export function Composer({
   const abortMutate = abort.mutate;
   const abortPending = abort.isPending;
   useEffect(() => {
+    if (!active) return;
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
       // Focus picks the area: the Ask Valet dock or the page beside it. A
@@ -794,12 +798,12 @@ export function Composer({
     const target: Document | Window = inAskValetDock(inputRef.current) ? window : document;
     target.addEventListener("keydown", onEscape as EventListener);
     return () => target.removeEventListener("keydown", onEscape as EventListener);
-  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
+  }, [active, working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
   useEffect(() => {
-    if (inAskValetDock(inputRef.current)) return;
+    if (!active || inAskValetDock(inputRef.current)) return;
     pageComposers += 1;
     return () => { pageComposers -= 1; };
-  }, []);
+  }, [active]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {

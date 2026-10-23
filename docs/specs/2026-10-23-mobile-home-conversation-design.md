@@ -22,6 +22,20 @@ to conversation cards, approval previews, durable plans, measured thinking
 time, or agent processing feedback. These are shared thread features.
 Quick replies are shown only in the mobile layout.
 
+The mobile conversation shell is shared by Home, `/chat`, `/threads/:id`,
+and `/sessions/:id`. Opening a team thread from the drawer must keep the
+same Chat, Tasks, and Make navigation as Home. The Chat tab returns to that
+open thread; it does not substitute the private Home conversation.
+Embedded panels retain their compact panel headers.
+
+Workspace threads use a fixed compact header on phones. It names the team
+and keeps viewer avatars visible. Model and thinking controls move into a
+dialog opened from the thread menu. That menu also opens Browser, Terminal,
+and VS Code when available. These views have a Back to chat button on a
+phone. Sharing details stay in the thread menu and do not force the old
+sandbox tab strip into a team conversation. Desktop keeps its existing
+header, model picker, and sandbox tabs.
+
 ## Home, Tasks, and Make
 
 Home uses the `home` thread in the person's personal assistant session.
@@ -112,6 +126,9 @@ Regression tests cover the exact media-query breakpoint, switching back to
 desktop, saved-task audience changes, active-work paging, requester versus
 lender approvals, and viewer and typing components. The UI stress gallery
 includes narrow-screen cards and catalog-limit fixtures.
+Team-thread regression tests also cover shared mobile navigation, draft
+retention while switching views, viewer visibility, model controls, and
+returning from Browser without the old sandbox tab strip.
 
 Channels with standing instructions, teammate mentions, and persistent allow
 choices on expired approval cards remain outside this change.

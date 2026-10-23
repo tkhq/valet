@@ -56,6 +56,7 @@ import { flattenChildWork, useChildWork } from "~/api/child-work";
 import { AgentsLine } from "./agents-line";
 import { ThreadReplyContext } from "./send-as-person";
 import { ChildTitlesContext } from "./work-group";
+import { MobileConversationLayout, type MobileConversationView } from "~/components/home/mobile-conversation-layout";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -138,6 +139,11 @@ export function SessionView({
 }) {
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const mobile = useMobileLayout();
+  const mobileNavigation = mobile && !panel;
+  const [mobileView, setMobileView] = useState<MobileConversationView>("chat");
+  useEffect(() => setMobileView("chat"), [sessionId, activeThreadId, mobileNavigation]);
+  const chatActive = active && (!mobileNavigation || mobileView === "chat");
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
@@ -157,7 +163,7 @@ export function SessionView({
   function changeTab(next: SandboxTabId) {
     const active = document.activeElement;
     restoreTabFocus.current = next !== tab && active instanceof HTMLElement
-      && active.getAttribute("role") === "tab"
+      && (active.getAttribute("role") === "tab" || (mobileNavigation && next === "chat"))
       && Boolean(viewRef.current?.contains(active));
     if (tab === "browser" && next !== "browser") browserWatch.open();
     setTab(next);
@@ -177,10 +183,11 @@ export function SessionView({
   useLayoutEffect(() => {
     if (!restoreTabFocus.current) return;
     restoreTabFocus.current = false;
-    // Chat owns the sliding strip; gateway tabs own the fixed strip.
-    // Keep keyboard focus on the selected replacement when it moves.
-    viewRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
-  }, [tab]);
+    // The compact phone back button unmounts on Chat. Return focus to
+    // its menu without opening the keyboard; desktop keeps the selected tab.
+    const selector = mobileNavigation ? '[aria-label="Thread menu"]' : '[role="tab"][aria-selected="true"]';
+    viewRef.current?.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+  }, [tab, mobileNavigation]);
   const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
   useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
 
@@ -192,7 +199,7 @@ export function SessionView({
   // member's user messages under their name instead of "You".
   const me = useMe();
   // Who else has this thread open; this view reports it on the session socket.
-  useAnnounceThreadView(sessionId, effectiveThreadId);
+  useAnnounceThreadView(sessionId, chatActive ? effectiveThreadId : undefined);
   const viewers = useActiveViewers(sessionId, effectiveThreadId, me.data?.id);
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
@@ -218,7 +225,6 @@ export function SessionView({
   const widgetReplyTarget = useMemo(() => effectiveThreadId && !session.data?.readOnlyReason
     ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
   // Quick replies are a phone affordance: tap an answer instead of typing it.
-  const mobile = useMobileLayout();
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
@@ -310,7 +316,7 @@ export function SessionView({
   }
 
   const summaryControl = effectiveThreadId ? (
-    <Popover key={`${sessionId}:${effectiveThreadId}`} open={active && summaryOpen} onOpenChange={setSummaryOpen}>
+    <Popover key={`${sessionId}:${effectiveThreadId}`} open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
           <ListTree className="h-4 w-4" aria-hidden />
@@ -351,6 +357,7 @@ export function SessionView({
       summaryControl={summaryControl}
       onOpenView={hideBrowser ? undefined : changeTab}
       viewers={viewers}
+      scopeNotice={scopeNotice}
     />
   );
   const sandboxTabs = !hideBrowser && (
@@ -362,13 +369,14 @@ export function SessionView({
       notice={scopeNotice}
       sandbox={stream.sandbox}
       viewsInMenu={!panel}
+      compact={mobileNavigation}
     />
   );
 
-  return (
+  const content = (
     <ComposerDropContext.Provider value={dropChannel}>
     <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
-      {(panel || tab !== "chat") && (
+      {(panel || tab !== "chat" || mobileNavigation) && (
         <>
           {panel ? (!hidePanelHeader && (renderPanelHeader ? renderPanelHeader(summaryControl) : <div className="flex shrink-0 items-center border-b border-line pr-3"><PanelHeader sessionId={sessionId} threadId={effectiveThreadId} title={session.data.title} onClose={onClose} />{summaryControl}</div>)) : sessionHeader}
           {sandboxTabs}
@@ -383,7 +391,7 @@ export function SessionView({
             <ChildTitlesContext.Provider value={childTitles}>
             <MessageList
               footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
-              header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+              header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
               messages={stream.messages}
               threadId={effectiveThreadId}
               onOpenChild={onOpenChild}
@@ -396,7 +404,7 @@ export function SessionView({
             />
             </ChildTitlesContext.Provider>
             </ThreadReplyContext.Provider>
-            {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
+            {chatActive && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
                 sessionId={sessionId}
@@ -438,6 +446,7 @@ export function SessionView({
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
           {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
+            active={chatActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
@@ -462,6 +471,9 @@ export function SessionView({
     </div>
     </ComposerDropContext.Provider>
   );
+  return mobileNavigation
+    ? <MobileConversationLayout view={mobileView} onViewChange={setMobileView}>{content}</MobileConversationLayout>
+    : content;
 }
 
 function PanelHeader({

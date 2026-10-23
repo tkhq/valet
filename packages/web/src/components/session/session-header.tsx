@@ -35,6 +35,8 @@ import {
   Badge,
   Button,
   ConfirmDialog,
+  Dialog,
+  DialogContent,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -46,6 +48,8 @@ import {
   Tooltip,
 } from "~/components/primitives";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { isAppAssistantThread, teamThreadNotice } from "~/lib/thread-default";
 import { cn } from "~/lib/cn";
 import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -161,6 +165,7 @@ export function SessionHeader({
   summaryControl,
   onOpenView,
   viewers = [],
+  scopeNotice,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -176,9 +181,13 @@ export function SessionHeader({
   onOpenView?: (view: Exclude<SandboxTabId, "chat">) => void;
   /** The other people with this thread open now. */
   viewers?: ActiveViewer[];
+  scopeNotice?: string;
 }) {
   const navigate = useNavigate();
-  const sessionMenu = useResponsiveOverlay("sm");
+  const mobile = useMobileLayout();
+  const sessionMenu = useResponsiveOverlay("md");
+  const modelSettings = useResponsiveOverlay("md");
+  const threadMenuTrigger = useRef<HTMLButtonElement>(null);
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const setThreadModel = useSetThreadModel(session.id);
@@ -409,6 +418,42 @@ export function SessionHeader({
   // switcher's: a team thread's place lists the team's listeners.
   const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
+  const modelPicker = canAdminister ? (
+    <Tooltip content={modelHint}>
+      <span className="min-w-0">
+        <ModelPicker
+          currentId={configuredModel}
+          displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
+          ariaDescription={modelHint}
+          onSelect={(id) => {
+            if (threadScoped) {
+              // Disabled until activeThread resolves; the guard is
+              // belt-and-braces against a race on the same render.
+              if (activeThread) {
+                setThreadModel.mutate({ threadId: activeThread.id, model: id });
+              }
+              return;
+            }
+            setModel.mutate(id);
+          }}
+          currentReasoning={
+            modelConfigurationResolved ? (configuredReasoning ?? undefined) : undefined
+          }
+          onSelectReasoning={(level) => {
+            if (threadScoped) {
+              if (activeThread) {
+                setThreadReasoning.mutate({ threadId: activeThread.id, reasoning: level });
+              }
+              return;
+            }
+            setReasoning.mutate(level);
+          }}
+          disabled={pickerDisabled}
+        />
+      </span>
+    </Tooltip>
+  ) : null;
+
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
   // slot, so the row does not jump and a failed rename still has somewhere
@@ -451,25 +496,31 @@ export function SessionHeader({
   }
 
   return (
-    <header className="border-b border-line bg-paper px-3 py-1 min-h-[--nav-height] shrink-0 flex min-w-0 flex-wrap items-center gap-1 sm:px-4 sm:py-2 sm:gap-3">
+    <header className={cn("border-b border-line bg-paper shrink-0 flex min-w-0 flex-wrap items-center",
+      mobile ? "gap-2 px-4 py-2" : "px-3 py-1 min-h-[--nav-height] gap-1 sm:px-4 sm:py-2 sm:gap-3")}>
       <Tooltip content={workspaceHint} delayDuration={400}>
-        <div className="min-w-0 flex-1 max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
+        <div className={cn("min-w-0 flex-1 max-w-full flex cursor-default", mobile ? "flex-col gap-0.5" : "flex-wrap items-baseline gap-2")}>
           {canRename ? (
             <button
               type="button"
               onClick={beginRename}
               aria-label={`Rename session: ${title}`}
-              className="max-sm:min-h-11 max-sm:text-left text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
+              className={cn("text-sm font-semibold tracking-tight truncate text-ink rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
+                mobile ? "min-h-11 text-left" : "font-display")}
             >
               {rename.isPending ? <Spinner size={14} /> : title}
             </button>
           ) : (
-            <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
+            <span className={cn("max-w-full text-sm font-semibold tracking-tight truncate text-ink", !mobile && "font-display")}>
               {title}
             </span>
           )}
           {/* The owner badge names the workspace beside the thread title. */}
-          {teamId !== null && (
+          {mobile && <span className="max-w-full truncate text-xs text-muted">
+            {teamId !== null && <><span data-testid="owning-team">{team?.name ?? "Team"}</span> · </>}
+            {activeThread?.share ? "Shared by link" : isAppAssistantThread(activeThread ?? {}) ? "Only you" : owner.type === "team" ? "Team thread" : "Only you"}
+          </span>}
+          {!mobile && teamId !== null && (
             // The test hook lets a test assert THIS element rather than the
             // team's name appearing anywhere in the header, which a title
             // regression could satisfy on its own.
@@ -477,11 +528,11 @@ export function SessionHeader({
               {team?.name ?? "Team"}
             </Badge>
           )}
-          {activeThread?.share && (
+          {!mobile && activeThread?.share && (
             <Badge variant="accent" className="max-w-full truncate" data-testid="thread-shared">Shared</Badge>
           )}
           {/* Runtime workspace paths are internal; standalone paths describe the work. */}
-          {session.workspace && !isWorkspaceRuntime && (
+          {!mobile && session.workspace && !isWorkspaceRuntime && (
             <span className="hidden sm:inline text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>
@@ -509,53 +560,19 @@ export function SessionHeader({
         />
       )}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
-        {canAdminister && (
-          <Tooltip content={modelHint}>
-            <span className="min-w-0">
-              <ModelPicker
-                currentId={configuredModel}
-                displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
-                ariaDescription={modelHint}
-                onSelect={(id) => {
-                  if (threadScoped) {
-                    // Disabled until activeThread resolves; the guard is
-                    // belt-and-braces against a race on the same render.
-                    if (activeThread) {
-                      setThreadModel.mutate({ threadId: activeThread.id, model: id });
-                    }
-                    return;
-                  }
-                  setModel.mutate(id);
-                }}
-                currentReasoning={
-                  modelConfigurationResolved ? (configuredReasoning ?? undefined) : undefined
-                }
-                onSelectReasoning={(level) => {
-                  if (threadScoped) {
-                    if (activeThread) {
-                      setThreadReasoning.mutate({ threadId: activeThread.id, reasoning: level });
-                    }
-                    return;
-                  }
-                  setReasoning.mutate(level);
-                }}
-                disabled={pickerDisabled}
-              />
-            </span>
-          </Tooltip>
-        )}
+        {!mobile && modelPicker}
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
         {/* On a phone, Share is in the thread menu with the other actions. */}
         {canShare && (
           <Tooltip content="Share this thread with your organization">
-            <Button variant="ghost" size="sm" className="max-sm:hidden" onClick={() => setSharing(true)} aria-label="Share thread">
+            <Button variant="ghost" size="sm" className="max-md:hidden" onClick={() => setSharing(true)} aria-label="Share thread">
               <Share2 className="h-4 w-4" aria-hidden />
             </Button>
           </Tooltip>
         )}
-        <div className="hidden sm:contents">
+        <div className="hidden md:contents">
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
           <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>
             <Button
@@ -574,7 +591,7 @@ export function SessionHeader({
         </div>
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "sm:hidden")} aria-label="Thread menu">
+            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "md:hidden")} aria-label="Thread menu">
               {del.isPending || replace.isPending || setProfile.isPending ? (
                 <Spinner size={14} />
               ) : (
@@ -583,10 +600,15 @@ export function SessionHeader({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <div className="sm:hidden">
+            <div className="md:hidden">
               <DropdownMenuLabel className="max-w-64 break-words">
                 {title}{teamId !== null ? ` · ${team?.name ?? "Team"}` : ""}
               </DropdownMenuLabel>
+              <DropdownMenuLabel className="max-w-64 whitespace-normal break-words text-xs font-normal text-muted">
+                {scopeNotice ?? (activeThread?.share ? "Shared by link." : owner.type === "team" ? teamThreadNotice(team?.name ?? "this team", activeThread?.key)
+                  : "Only you can see this thread.")}
+              </DropdownMenuLabel>
+              {mobile && canAdminister && <DropdownMenuItem onSelect={() => modelSettings.setOpen(true)}>Model and thinking</DropdownMenuItem>}
               <div className="flex max-w-64 flex-wrap items-center gap-2 px-2 py-1.5">
                 <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
               </div>
@@ -683,6 +705,18 @@ export function SessionHeader({
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
       {guard.dialog}
+      {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
+        <DialogContent title="Model and thinking" description="Choose the model and thinking level for this thread."
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            threadMenuTrigger.current?.focus();
+          }}>
+          {modelPicker}
+          {modelSaveError && <p role="alert" className="mt-3 break-words text-xs text-danger-500">
+            {extractActionError(modelSaveError, "Could not save the model. Choose a model and try again.")}
+          </p>}
+        </DialogContent>
+      </Dialog>}
       {moving && (
         <MoveSessionDialog
           sessionId={session.id}

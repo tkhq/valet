@@ -530,6 +530,20 @@ describe("Composer — stop button", () => {
 });
 
 describe("Composer — Escape interrupts the running turn", () => {
+  it("does not interrupt a mounted chat while Tasks or Make is active", () => {
+    queueStateRef.current = queueState("followup");
+    const client = new QueryClient();
+    const tree = (active: boolean) => <QueryClientProvider client={client}>
+      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus="streaming" active={active} />
+    </QueryClientProvider>;
+    const { rerender } = render(tree(false));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate).not.toHaveBeenCalled();
+    rerender(tree(true));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     abortMutate.mockClear();
     useComposerPrefillStore.setState({ text: null });
