@@ -3100,6 +3100,7 @@ export const channelProgressDeliveries = pgTable("channel_progress_deliveries", 
   lastError: text("last_error"),
 }, t => [
   uniqueIndex("channel_progress_scope").on(t.orgId, t.sessionId, t.threadId, t.turnId, t.channelType, t.conversationKey),
-  index("channel_progress_due").on(t.orgId, t.nextAttemptAt),
+  index("channel_progress_pending_due").on(t.orgId, t.nextAttemptAt)
+    .where(sql`${t.completedAt} IS NULL AND ${t.failedAt} IS NULL`),
 ]);
 export type ChannelProgressDeliveryRow = typeof channelProgressDeliveries.$inferSelect;
