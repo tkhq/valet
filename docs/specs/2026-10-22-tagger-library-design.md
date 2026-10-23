@@ -68,7 +68,7 @@ Spend keeps the same nullable user and team ownership.
 
 The Tool usage view shows a purpose chart and key definitions.
 Provisional keys share an Emerging bar.
-Only organization admins can read their labels and definitions.
+Only organization admins can read provisional or merged labels and definitions.
 Unlabeled calls have a separate bar.
 The key filter applies to call counts, top tools, clients, and recent intents.
 The purpose chart retains its full distribution while a key is selected.

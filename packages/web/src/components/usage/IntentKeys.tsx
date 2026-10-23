@@ -10,8 +10,8 @@ function KeyEditor({ row, keys }: { row: ToolIntentKeyUsage; keys: ToolIntentKey
       event.preventDefault(); const data = new FormData(event.currentTarget);
       edit.mutate({ key: row.key, label: String(data.get("label")), definition: String(data.get("definition")) });
     }}>
-      <label className="block text-xs text-muted">Label<Input name="label" required maxLength={100} defaultValue={row.label} /></label>
-      <label className="block text-xs text-muted">Definition<Input name="definition" required maxLength={1000} defaultValue={row.definition} /></label>
+      <label className="block text-xs text-muted">Label<Input name="label" required maxLength={60} defaultValue={row.label} /></label>
+      <label className="block text-xs text-muted">Definition<Input name="definition" required maxLength={200} defaultValue={row.definition} /></label>
       <Button type="submit" size="sm" disabled={edit.isPending}>Save key</Button>
     </form>
     {row.key !== "other" && <form className="mt-3 flex flex-wrap items-center gap-2" onSubmit={event => {

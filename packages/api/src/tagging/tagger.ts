@@ -106,7 +106,7 @@ export class Tagger {
       if (!dimension.subjectTypes.includes(source.type)) throw new Error("Unsupported tag subject. Register its subject type first.");
       const subject = { ...source, text: capSubjectText(source.text) };
       const [old] = await db.select().from(tagSubjects).where(subjectWhere(orgId, dimension.id, subject));
-      if (!subject.text.trim() && !dimension.rules?.(subject)) continue;
+      if (!subject.text.trim() && (old || !dimension.rules?.(subject))) continue;
       if (!forced.has(`${subject.type}:${subject.id}`) && old?.inputHash === hashInput(dimension.id, subject)) continue;
       subjects.push(subject);
     }
