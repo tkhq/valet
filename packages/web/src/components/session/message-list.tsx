@@ -78,7 +78,7 @@ export function MessageList({
   /** Branches a message into a new thread. */
   onBranch?: (message: StreamMessage) => void;
   /** Goes back to the version a branch note left. */
-  onReturnToBranch?: (noteEntryId: string) => Promise<void>;
+  onReturnToBranch?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
   /** Opens another thread, for a fork note's source thread. */
   onOpenThread?: (threadId: string) => void;
   /** The message being edited: it and every row after it are dimmed. */

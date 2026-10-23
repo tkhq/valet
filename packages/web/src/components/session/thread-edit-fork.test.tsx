@@ -80,7 +80,7 @@ describe("MessageList edit and branch actions", () => {
 
 describe("groupBranchNotes", () => {
   const note = (id: string, kind: "edit" | "return" | "fork") =>
-    msg(id, { role: "system", branch: { kind, actions: [], moreActions: 0, filesChanged: false, canReturn: kind !== "fork" } });
+    msg(id, { role: "system", branch: { kind, actions: [], moreActions: 0, filesChanged: false, canReturn: kind !== "fork", grants: [] } });
   it("puts repeated edits of one message in one row and keeps a fork note apart", () => {
     const rows = groupBranchNotes([note("f", "fork"), note("e1", "edit"), note("e2", "edit"), msg("u1"), note("r1", "return")]
       .map((message) => ({ kind: "message" as const, message })));
@@ -98,6 +98,7 @@ describe("BranchNoteDivider", () => {
       moreActions: 0,
       filesChanged: true,
       canReturn: true,
+      grants: ["Always allow for me: Create a pull request"],
     },
   });
 
@@ -109,7 +110,8 @@ describe("BranchNoteDivider", () => {
     expect(screen.getByRole("link", { name: "https://example.test/pr/7" })).toBeTruthy();
     expect(screen.getByText(/working directory keeps any file changes/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Go back to this version" }));
-    await waitFor(() => expect(onReturn).toHaveBeenCalledWith("note-1"));
+    expect(screen.getByText(/Approval choices from that version still apply: Always allow for me: Create a pull request/)).toBeTruthy();
+    await waitFor(() => expect(onReturn).toHaveBeenCalledWith("note-1", { restoreFiles: false }));
   });
 
   it("labels a run of edits once and lists each version, newest first", () => {
@@ -118,6 +120,18 @@ describe("BranchNoteDivider", () => {
     fireEvent.click(screen.getByRole("button", { name: "2 earlier versions kept · 1 action still stands" }));
     expect(screen.getAllByText(/version left/).map((el) => el.textContent)).toEqual(["Latest version left", "Earlier version left"]);
     expect(screen.getAllByRole("button", { name: "Go back to this version" })).toHaveLength(2);
+  });
+
+  it("lists undone files and brings them back with Go back", async () => {
+    const onReturn = vi.fn().mockResolvedValue(undefined);
+    const undone = { ...edit, branch: { ...edit.branch!, files: { changed: ["app/a.txt"], skipped: ["app/c.txt"], failed: [], canBringBack: true } } };
+    render(<BranchNoteDivider notes={[undone]} onReturn={onReturn} />);
+    fireEvent.click(screen.getByRole("button", { name: /Edited/ }));
+    expect(screen.getByText("Undid file changes: app/a.txt.")).toBeTruthy();
+    expect(screen.getByText("Left as they are, because they changed later: app/c.txt.")).toBeTruthy();
+    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Go back to this version" }));
+    await waitFor(() => expect(onReturn).toHaveBeenCalledWith("note-1", { restoreFiles: true }));
   });
 
   it("shows the server's reason when going back is refused", async () => {
@@ -132,7 +146,7 @@ describe("BranchNoteDivider", () => {
     const onOpenThread = vi.fn();
     const fork = msg("note-2", {
       role: "system",
-      branch: { kind: "fork", actions: [], moreActions: 0, filesChanged: false, canReturn: false, source: { threadId: "t0", sameWorkingDirectory: false } },
+      branch: { kind: "fork", actions: [], moreActions: 0, filesChanged: false, canReturn: false, grants: [], source: { threadId: "t0", sameWorkingDirectory: false } },
     });
     render(<BranchNoteDivider notes={[fork]} onReturn={vi.fn()} onOpenThread={onOpenThread} />);
     fireEvent.click(screen.getByRole("button", { name: /Branched from another thread/ }));

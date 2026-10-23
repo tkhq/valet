@@ -4,6 +4,7 @@ import type { MessageBranchNote } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
 import { Button, textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { FileChangeChoice } from "./file-change-choice";
 
 /**
  * Divider row for branch notes (wire messages with `branch`): where an edit,
@@ -20,7 +21,7 @@ export function BranchNoteDivider({
   /** One fork note, or a run of edit and return notes, in thread order. */
   notes: StreamMessage[];
   /** Goes back to the version a note left. Omitted where the viewer cannot. */
-  onReturn?: (noteEntryId: string) => Promise<void>;
+  onReturn?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
   /** Opens another thread of this workspace, for a fork note's source. */
   onOpenThread?: (threadId: string) => void;
 }) {
@@ -85,14 +86,22 @@ function singleLabel(branch: MessageBranchNote, calls: number): string {
 
 function ForkDetails({ branch, onOpenThread }: { branch: MessageBranchNote; onOpenThread?: (threadId: string) => void }) {
   const source = branch.source;
+  const seed = branch.seed;
   return (
     <div className="space-y-2 px-3 py-2">
       <p>The messages above are a copy. Everything in them already ran, and the original thread continues on its own.</p>
       <p className="text-muted">
         {source?.sameWorkingDirectory
-          ? "This thread shares its working directory with the original thread."
-          : "This thread has its own working directory, so files from the original thread are not here."}
+          ? "This thread shares its working directory with the original thread, including changes made there later."
+          : seed?.pending
+            ? `This thread has its own working directory. Files from the branch point come to ${seed.repos.join(", ")} when its first turn starts.`
+            : seed && seed.repos.length > 0
+              ? `This thread has its own working directory. Files from the branch point came along to ${seed.repos.join(", ")}.`
+              : `This thread has its own working directory, so files from the original thread are not here${seed?.skipped ? ` (${seed.skipped})` : ""}.`}
       </p>
+      {seed && seed.failed.length > 0 && (
+        <p className="text-danger-500">Files for {seed.failed.join(", ")} could not come along.</p>
+      )}
       {source && onOpenThread && (
         <button type="button" className={textLinkClass} onClick={() => onOpenThread(source.threadId)}>
           Open the original thread
@@ -106,17 +115,19 @@ function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
   noteEntryId: string;
   branch: MessageBranchNote;
   heading?: string;
-  onReturn?: (noteEntryId: string) => Promise<void>;
+  onReturn?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
 }) {
   const [returning, setReturning] = useState(false);
   const [error, setError] = useState<string>();
+  const [bringBack, setBringBack] = useState(true);
   const version = branch.kind === "edit" ? "earlier version" : "version you left";
+  const files = branch.files;
   async function goBack() {
     if (!onReturn) return;
     setError(undefined);
     setReturning(true);
     try {
-      await onReturn(noteEntryId);
+      await onReturn(noteEntryId, { restoreFiles: Boolean(files?.canBringBack) && bringBack });
     } catch (err) {
       setError(errorText(err, "Could not go back. Try again."));
     } finally {
@@ -130,7 +141,7 @@ function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
         <p>Nothing in the {version} ran outside the chat.</p>
       ) : (
         <>
-          <p>Nothing outside the chat was undone. These actions from the {version} still stand:</p>
+          <p>Nothing outside {files ? "the working directory" : "the chat"} was undone. These actions from the {version} still stand:</p>
           <ul className="list-disc space-y-0.5 pl-4">
             {branch.actions.map((action, index) => (
               <li key={`${action.label}-${index}`} className="[overflow-wrap:anywhere]">
@@ -145,7 +156,32 @@ function VersionDetails({ noteEntryId, branch, heading, onReturn }: {
           </ul>
         </>
       )}
-      {branch.filesChanged && <p className="text-muted">The working directory keeps any file changes from that version.</p>}
+      {branch.grants.length > 0 && (
+        <p className="[overflow-wrap:anywhere]">Approval choices from that version still apply: {branch.grants.join("; ")}.</p>
+      )}
+      {files ? (
+        <>
+          {files.changed.length > 0 && (
+            <p className="text-muted [overflow-wrap:anywhere]">
+              {branch.kind === "edit" ? "Undid file changes" : "Restored these files to that version"}: {files.changed.join(", ")}.
+            </p>
+          )}
+          {files.skipped.length > 0 && (
+            <p className="text-muted [overflow-wrap:anywhere]">Left as they are, because they changed later: {files.skipped.join(", ")}.</p>
+          )}
+          {files.failed.length > 0 && (
+            <p className="text-danger-500">The file change failed in {files.failed.join(", ")}, so those files are as that version left them.</p>
+          )}
+        </>
+      ) : branch.filesChanged && <p className="text-muted">The working directory keeps any file changes from that version.</p>}
+      {branch.canReturn && onReturn && files?.canBringBack && (
+        <FileChangeChoice
+          label={`Also bring back the file changes (${files.changed.length} ${files.changed.length === 1 ? "file" : "files"})`}
+          files={files.changed}
+          checked={bringBack}
+          onCheckedChange={setBringBack}
+        />
+      )}
       {branch.canReturn && onReturn && (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <Button variant="secondary" size="sm" disabled={returning} onClick={() => void goBack()}>

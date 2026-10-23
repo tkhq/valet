@@ -52,6 +52,7 @@ import type {
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
+  EditPreviewResponse,
   ForkThreadRequest,
   ForkThreadResponse,
   ReturnToBranchRequest,
@@ -984,6 +985,8 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  editPreview: (threadId: string, entryId: string) =>
+    request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
   forkThread: (threadId: string, body: ForkThreadRequest) =>
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
   returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>

@@ -15,7 +15,8 @@ import {
 } from "react";
 import { ArrowUp, Paperclip, Pencil, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useAbortThread, useCancelQueuedItem, useResumeThread, useSendPrompt } from "~/api/queries";
+import { useAbortThread, useCancelQueuedItem, useEditPreview, useResumeThread, useSendPrompt } from "~/api/queries";
+import { FileChangeChoice } from "./file-change-choice";
 import { ApiError } from "~/api/client";
 import {
   queueBusy,
@@ -225,6 +226,19 @@ export function Composer({
     // must not stash the edited text as the earlier draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId, key]);
+  // What the edit replaces, before Send. File undo defaults on unless the
+  // replaced turns pushed commits; a person's own choice wins.
+  const preview = useEditPreview(editingId ? threadId : undefined, editingId);
+  const [undoFiles, setUndoFiles] = useState(false);
+  const undoTouched = useRef(false);
+  useEffect(() => {
+    undoTouched.current = false;
+    setUndoFiles(false);
+  }, [editingId]);
+  useEffect(() => {
+    if (!undoTouched.current && preview.data) setUndoFiles(preview.data.files.length > 0 && !preview.data.pushed);
+  }, [preview.data]);
+  const editRefusal = editingId ? preview.data?.refusal : undefined;
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -456,6 +470,7 @@ export function Composer({
     !send.isPending &&
     !!threadId &&
     !uploadsPending &&
+    !editRefusal &&
     (action === "steer" || text.trim().length > 0 || images.length > 0 || toFileRefs(files).length > 0);
   const sendTitle = working ? ACTION_HINT[action] || undefined : uploadsPending ? "Wait for the file uploads to finish." : undefined;
 
@@ -693,7 +708,7 @@ export function Composer({
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
         ...(editTarget
-          ? { editEntryId: editTarget.messageId }
+          ? { editEntryId: editTarget.messageId, ...(preview.data?.files.length ? { undoFiles } : {}) }
           : {
               ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
               ...(working ? { queueMode: "inject" as const } : {}),
@@ -1068,9 +1083,24 @@ export function Composer({
             <div className="min-w-0 flex-1">
               <p className="font-medium text-ink">Editing your message</p>
               <p className="mt-0.5 text-muted">
-                {working ? "Send stops the current reply, then replaces" : "Send replaces"} this message and everything after it. The earlier version is kept.
+                {working ? "Send stops the current reply, then replaces" : "Send replaces"} {replacedText(preview.data?.turns)}. The earlier version is kept.
                 {editTarget.droppedFiles > 0 && ` Attach ${editTarget.droppedFiles === 1 ? "its file" : "its files"} again if the edit needs ${editTarget.droppedFiles === 1 ? "it" : "them"}.`}
               </p>
+              {editRefusal && <p role="alert" className="mt-1 text-danger-500">{editRefusal}</p>}
+              {preview.data && !editRefusal && stillStanding(preview.data).length > 0 && (
+                <p className="mt-1 text-muted [overflow-wrap:anywhere]">Still standing after the edit: {listShort(stillStanding(preview.data))}.</p>
+              )}
+              {preview.data && !editRefusal && preview.data.files.length > 0 && (
+                <div className="mt-1.5">
+                  <FileChangeChoice
+                    label={`Also undo file changes (${preview.data.files.length} ${preview.data.files.length === 1 ? "file" : "files"})`}
+                    files={preview.data.files}
+                    checked={undoFiles}
+                    onCheckedChange={(checked) => { undoTouched.current = true; setUndoFiles(checked); }}
+                    hint={preview.data.pushed ? "These turns pushed commits or opened a pull request. Undoing files here does not change those." : undefined}
+                  />
+                </div>
+              )}
             </div>
             <button
               type="button"
@@ -1371,4 +1401,20 @@ export interface ComposerEditTarget {
   images: ComposerImage[];
   /** Files the message had. An edit cannot carry them, so the bar says so. */
   droppedFiles: number;
+}
+
+/** "this message and the 2 later turns" for the edit bar. */
+function replacedText(turns: number | undefined): string {
+  if (turns === undefined) return "this message and everything after it";
+  if (turns <= 1) return "this message and its reply";
+  return `this message and the ${turns - 1} later ${turns - 1 === 1 ? "turn" : "turns"}`;
+}
+
+/** What still stands after an edit: actions outside the chat, then approval choices. */
+function stillStanding(preview: { actions: Array<{ label: string }>; moreActions: number; grants: string[] }): string[] {
+  return [...preview.actions.map((action) => action.label), ...preview.grants, ...(preview.moreActions > 0 ? [`${preview.moreActions} more calls`] : [])];
+}
+
+function listShort(items: string[]): string {
+  return items.length > 3 ? `${items.slice(0, 3).join(", ")}, and ${items.length - 3} more` : items.join(", ");
 }

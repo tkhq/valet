@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { WireQueueState } from "@valet/api/wire";
+import type { EditPreviewResponse, WireQueueState } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
@@ -33,6 +33,8 @@ const setMessageQueueItemId = vi.fn();
 const queueStateRef: { current: WireQueueState | undefined } = { current: undefined };
 // The session's live transcript, which prompt recall reads.
 const streamMessagesRef: { current: StreamMessage[] } = { current: [] };
+// What the edit bar's preview query returns.
+const editPreviewRef: { current: EditPreviewResponse | undefined } = { current: undefined };
 
 function queueState(mode: WireQueueState["mode"]): WireQueueState {
   return {
@@ -60,6 +62,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       mutateAsync: resumeMutateAsync,
     }),
     useCancelQueuedItem: () => ({ isPending: false, mutateAsync: cancelQueuedMutateAsync }),
+    useEditPreview: (threadId: string | undefined, entryId: string | undefined) => ({ data: threadId && entryId ? editPreviewRef.current : undefined }),
   };
 });
 
@@ -137,6 +140,7 @@ function renderComposer(
 
 beforeEach(() => {
   queueStateRef.current = undefined;
+  editPreviewRef.current = undefined;
   streamMessagesRef.current = [];
   sendState.pending = false;
   sendState.sessions = undefined;
@@ -1281,6 +1285,38 @@ describe("Composer — edit target", () => {
     await waitFor(() => expect(onEditResult).toHaveBeenCalledWith(false));
     expect(screen.getByText(/Teammate wrote after this message/)).toBeTruthy();
     expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("deploy to prod");
+  });
+
+  it("previews what still stands and offers to undo the files, on by default", async () => {
+    editPreviewRef.current = {
+      turns: 3, actions: [{ label: "github.create_pull_request: Open the fix", count: 1, urls: [] }], moreActions: 0,
+      grants: ["Always allow for me: Create a pull request"], files: ["app/a.txt", "app/b.txt"], pushed: false,
+    };
+    renderEditing({ editTarget: target, onEditResult: vi.fn() });
+    expect(screen.getByText(/Send replaces this message and the 2 later turns/)).toBeTruthy();
+    expect(screen.getByText(/Still standing after the edit: github.create_pull_request: Open the fix, Always allow for me: Create a pull request/)).toBeTruthy();
+    const undo = screen.getByRole("checkbox");
+    expect(undo.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("Also undo file changes (2 files)")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show files" }));
+    expect(screen.getByText("app/b.txt")).toBeTruthy();
+    fireEvent.submit(screen.getByRole("textbox", { name: "Message" }).closest("form")!);
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(sendMutateAsync.mock.calls[0]?.[0]).toMatchObject({ editEntryId: "user-3", undoFiles: true });
+  });
+
+  it("leaves file undo off when the replaced turns pushed, and says why", () => {
+    editPreviewRef.current = { turns: 1, actions: [], moreActions: 0, grants: [], files: ["app/a.txt"], pushed: true };
+    renderEditing({ editTarget: target });
+    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText(/pushed commits or opened a pull request/)).toBeTruthy();
+  });
+
+  it("shows a refusal and keeps Send off", () => {
+    editPreviewRef.current = { refusal: "Teammate wrote after this message.", turns: 0, actions: [], moreActions: 0, grants: [], files: [], pushed: false };
+    renderEditing({ editTarget: target });
+    expect(screen.getByRole("alert").textContent).toBe("Teammate wrote after this message.");
+    expect((screen.getByRole("button", { name: /Send/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("names files the edit cannot carry", () => {

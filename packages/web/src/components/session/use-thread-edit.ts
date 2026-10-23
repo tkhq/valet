@@ -55,8 +55,8 @@ export function useThreadEdit(
     cancelEdit,
     list: opts.readOnly || !threadId ? {} : {
       onEdit: startEdit,
-      onReturnToBranch: async (noteEntryId: string) => {
-        await returnToBranch.mutateAsync({ threadId, noteEntryId });
+      onReturnToBranch: async (noteEntryId: string, opts: { restoreFiles: boolean }) => {
+        await returnToBranch.mutateAsync({ threadId, noteEntryId, restoreFiles: opts.restoreFiles });
       },
       editingId: editTarget?.messageId,
       hiddenIds: hiddenFrom && hiddenFrom.threadId === threadId ? hiddenFrom.ids : undefined,
