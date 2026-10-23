@@ -2837,4 +2837,4 @@ CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "channel_progress_scope" ON "channel_progress_deliveries" ("org_id", "session_id", "thread_id", "turn_id", "channel_type", "conversation_key");
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "channel_progress_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at");
+CREATE INDEX IF NOT EXISTS "channel_progress_pending_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at") WHERE "completed_at" IS NULL AND "failed_at" IS NULL;
