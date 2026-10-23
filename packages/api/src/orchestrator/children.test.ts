@@ -4023,6 +4023,49 @@ describe("child sandbox retention", () => {
     return rows[0];
   }
 
+  it.each(["revive", "retry-failure", "unconfirmed"] as const)("bot failed-destroy repro: %s keeps the durable sandbox owned", async mode => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child } = await seedParkableChild(api, `failed-destroy-${mode}`, "parent-failed-destroy");
+    const { engineHost, engineStore: store } = api.providers;
+    const sandboxId = child.attachment.sandboxId;
+    if (!sandboxId) throw new Error("the child has no sandbox");
+    const data = await store.getSession(child.id);
+    if (!data) throw new Error("the child session is missing");
+    await store.saveSession({ ...data, sandboxId });
+    const sandbox = await provider.restore(sandboxId);
+    const destroy = vi.spyOn(sandbox, "destroy").mockRejectedValueOnce(new Error("injected provider destroy failure"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const retry = vi.spyOn(provider, "destroy");
+    try {
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1));
+      expect((await provider.status(sandboxId)).state).toBe("ready");
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      if (mode === "revive") {
+        const rebuilt = await engineHost.childSessionFor(child.id, { parentSessionId: watch.parentSessionId,
+          parentThreadId: watch.parentThreadId, actorUserId: "local-user", orgId: "local-org",
+          owner: { type: "user", id: "local-user" }, workspace: "/tmp" });
+        await expect(rebuilt.attachment.ensureReady({ timeoutMs: 1000 })).resolves.toBeDefined();
+        expect(rebuilt).not.toBe(child);
+      } else {
+        if (mode === "retry-failure") retry.mockRejectedValueOnce(new Error("provider still unavailable"));
+        else retry.mockResolvedValueOnce(undefined);
+        await watcher.sweepRetention();
+        expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+        expect((await store.getSession(child.id))?.sandboxId).toBe(sandboxId);
+        expect((await provider.status(sandboxId)).state).toBe("ready");
+        await watcher.sweepRetention();
+        expect(retry).toHaveBeenCalledTimes(2);
+        expect((await provider.status(sandboxId)).state).toBe("released");
+        expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+      }
+    } finally { destroy.mockRestore(); retry.mockRestore(); errors.mockRestore(); }
+  });
+
   it.each([0, RETENTION_MS].flatMap(retentionMs =>
     (["hold", "timer", "process", "watch"] as const).map(kind => ({ retentionMs, kind })),
   ))("human cancel retains $kind until admission with retention=$retentionMs", async ({ retentionMs, kind }) => {

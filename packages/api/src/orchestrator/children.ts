@@ -1560,6 +1560,34 @@ export class ChildWatcher {
       .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.parkedSandboxId, sandboxId)));
   }
 
+  private async destroyChildSandbox(childSessionId: string, sandboxId: string | null | undefined, reason: "child_settled" | "child_retention"): Promise<boolean> {
+    const live = this.deps.engineHost.liveSession(childSessionId);
+    const attachedId = live?.attachment.sandboxId;
+    sandboxId = attachedId ?? sandboxId;
+    if (sandboxId) await this.deps.db.update(childWatches).set({ parkedSandboxId: sandboxId })
+      .where(eq(childWatches.childSessionId, childSessionId));
+    if (attachedId && live) {
+      try {
+        if (!await live.attachment.destroy(reason)) return false;
+      } finally {
+        // A failed destroy tears down the attachment too. Revival must rebuild it.
+        if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId);
+      }
+    } else if (sandboxId) {
+      // A released attachment has lost its handle. Its destroy would be a no-op.
+      await this.deps.engineHost.destroySandbox(sandboxId);
+    }
+    if (sandboxId) {
+      if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
+        throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
+      }
+      if (!attachedId) recordSandboxDestroyed(reason);
+      await this.forgetDestroyedSandbox(childSessionId, sandboxId);
+    }
+    this.deps.engineHost.evictCache(childSessionId);
+    return true;
+  }
+
   /**
    * Park or reclaim a settled child's compute. With `child_send` in the
    * toolset a settled child is revivable, so on a hibernation-capable
@@ -1625,10 +1653,8 @@ export class ChildWatcher {
         return;
       }
 
-      const sandboxId = live.attachment.sandboxId;
-      if (!await live.attachment.destroy("child_settled")) return;
-      this.deps.engineHost.evictCache(childSessionId);
-      if (sandboxId) await this.forgetDestroyedSandbox(childSessionId, sandboxId);
+      const sandboxId = live.attachment.sandboxId ?? (await this.deps.engineStore.getSession(childSessionId))?.sandboxId;
+      if (!await this.destroyChildSandbox(childSessionId, sandboxId, "child_settled")) return;
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
       // `EngineHost.destroy` does.
@@ -1692,22 +1718,11 @@ export class ChildWatcher {
           if (recheck.length > 0) continue;
           if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
           if (await this.holdsBackgroundWork(row.childSessionId, now)) continue;
-          if (!await live.attachment.destroy("child_retention")) continue;
-          this.deps.engineHost.evictCache(row.childSessionId);
-        } else if (sandboxId) {
-          await this.deps.engineHost.destroySandbox(sandboxId);
-          recordSandboxDestroyed("child_retention");
-        } else {
-          // Nothing destroyable from here: no cached session and no
-          // recorded handle. Stamp the reclaim so the row stops sweeping,
-          // but say so — if a sandbox exists (e.g. kept by the
-          // permanent-denial path and orphaned by a restart), the idle
-          // sweep or operator owns it now.
-          console.warn(
-            `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
-          );
         }
-        if (sandboxId) await this.forgetDestroyedSandbox(row.childSessionId, sandboxId);
+        if (!live && !sandboxId) console.warn(
+          `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
+        );
+        if (!await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention")) continue;
         await revokeSandboxTokens(this.deps.db, row.childSessionId);
         await this.markReclaimed(row.childSessionId, now);
       } catch (err) {

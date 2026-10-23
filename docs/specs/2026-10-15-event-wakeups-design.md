@@ -783,7 +783,10 @@ An event waiter follows the rule for timers:
   Queued work always blocks reclaim.
   Reclaim stamps follow successful sandbox-token revocation.
   A failed revoke leaves the row eligible for retry.
-  Both the parked handle and the session handle are cleared after destroy succeeds, before revoke.
+  A failed attachment destroy evicts the cached session so later prompts can rebuild it.
+  The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
+  A retry uses that handle directly, never the released attachment's no-op destroy.
+  Both the parked handle and the session handle are cleared after confirmation, before revoke.
   Handle clearing compares the old ID so it cannot clear a replacement. A retry does not destroy or count it twice.
 - Event waiters on hidden threads are counted and never named.
 
