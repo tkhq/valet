@@ -355,19 +355,41 @@ describe("skill companion tools", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it.each(["xdg", "unwritable-home"])("uses an external cache with %s", async mode => {
+  it.each(["xdg", "relative-xdg", "unwritable-home", "unwritable-tmp"])("uses an external cache with %s", async mode => {
     const root = await mkdtemp(join(tmpdir(), "skill-cache-"));
     let path: string | undefined;
     try {
       const sandbox = new LocalSandbox("cache", root); const exec = sandbox.exec.bind(sandbox);
-      vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => exec(command, { ...opts, env: { ...opts?.env,
-        HOME: mode === "unwritable-home" ? "/proc/valet-unwritable" : root, XDG_CACHE_HOME: mode === "xdg" ? join(root, "external") : "" } }));
+      vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => {
+        const stdin = mode === "unwritable-tmp" ? opts?.stdin?.replace('private_dir() {', 'private_dir() { if [ "$1" = /tmp/valet-skills ]; then return 1; fi;') : opts?.stdin;
+        return exec(command, { ...opts, stdin, env: { ...opts?.env,
+          HOME: mode.startsWith("unwritable-") ? "/proc/valet-unwritable" : root,
+          XDG_CACHE_HOME: mode === "xdg" ? join(root, "external") : mode === "relative-xdg" ? "relative-cache" : "" } });
+      });
       const source = { ...fixture, name: `cache-${Date.now()}`, files: [file("scripts/check.py", "print('checked')")] };
       const output = await buildSkillScriptTool([source]).execute({ name: source.name, script: "scripts/check.py", timeout: 1 }, skillContext(sandbox));
       path = scriptPath(output.text);
-      expect(path).toContain(mode === "xdg" ? `${root}/external/valet/skills/` : "/tmp/valet-skills/");
+      expect(path).toContain(mode === "xdg" ? `${root}/external/valet/skills/` : mode === "relative-xdg" ? `${root}/.cache/valet/skills/`
+        : mode === "unwritable-tmp" ? `/tmp/valet-skills-${process.getuid?.()}/` : "/tmp/valet-skills/");
+      expect((await stat(join(path, "../.."))).mode & 0o777).toBe(0o700);
+      if (mode.startsWith("unwritable-")) expect((await stat(join(path, "../../.."))).mode & 0o777).toBe(0o700);
       await expect(stat(join(root, ".valet"))).rejects.toThrow();
-    } finally { if (path?.startsWith("/tmp/valet-skills/")) await rm(join(path, "../.."), { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+    } finally { if (path?.startsWith("/tmp/valet-skills")) await rm(join(path, "../.."), { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["INT", "TERM"])("exits and cleans staging on %s during publication", async signal => {
+    const root = await mkdtemp(join(tmpdir(), "skill-signal-"));
+    try {
+      const sandbox = new LocalSandbox("signal", root); const exec = sandbox.exec.bind(sandbox);
+      vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => exec(command, { ...opts,
+        stdin: opts?.stdin?.replace("printf %s", `kill -s ${signal} $$\nprintf %s`), env: { ...opts?.env, HOME: root, XDG_CACHE_HOME: "" } }));
+      const result = await buildSkillScriptTool([fixture]).execute({ name: fixture.name, script: "scripts/check.py", timeout: 1 }, skillContext(sandbox));
+      expect(result.text).toContain("[skill_script_failed]");
+      const cache = join(root, ".cache/valet/skills");
+      expect((await readdir(cache)).some(name => name.startsWith(".tmp-"))).toBe(false);
+      const directories = (await readdir(cache)).filter(name => !name.startsWith(".tmp-"));
+      for (const directory of directories) await expect(stat(join(cache, directory, "scripts/check.py"))).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("runs a shebang script in a local sandbox with literal arguments and executable bits", async () => {

@@ -86,15 +86,25 @@ mv -f -- "$stage/"${relative} "$directory/"${relative}`);
         }
         if (!scriptBytes) throw new Error("Stored script is unavailable");
         // One exec publishes the full set. The trap and host finally own temporary cleanup.
+        const preferredCache = `case "\${XDG_CACHE_HOME:-}" in
+/*) base="$XDG_CACHE_HOME/valet/skills" ;;
+*) case "\${HOME:-}" in /*) base="$HOME/.cache/valet/skills" ;; *) base="" ;; esac ;;
+esac`;
         const setup = `set -eu
-base="\${XDG_CACHE_HOME:-\${HOME:+$HOME/.cache}}"
-case "$base" in /*) ;; *) base=/tmp/valet-skills ;; esac
-if [ "$base" != /tmp/valet-skills ]; then base="$base/valet/skills"; fi
-if ! (mkdir -p -- "$base" && test -w "$base") 2>/dev/null; then base=/tmp/valet-skills; mkdir -p -- "$base"; fi
+umask 077
+${preferredCache}
+private_dir() { mkdir -p -- "$1" && test -d "$1" && test -w "$1" && chmod 700 -- "$1"; }
+if [ -z "$base" ] || ! private_dir "$base" 2>/dev/null; then
+  base=/tmp/valet-skills
+  if ! private_dir "$base" 2>/dev/null; then base="/tmp/valet-skills-$(id -u)"; private_dir "$base"; fi
+fi
 directory="$base/"${quote(key)}
 stage="$base/"${quote(temporary)}
-trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
-mkdir -p -- "$stage"
+trap 'rm -rf -- "$stage"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p -- "$stage" "$directory"
+chmod 700 -- "$stage" "$directory"
 ${writes.join("\n")}
 ${moves.join("\n")}
 printf '%s' "$directory"`;
@@ -107,7 +117,9 @@ printf '%s' "$directory"`;
         } finally {
           // A provider can stop its client before the remote shell handles the abort.
           // Remove only this call's unique stage, without the aborted signal.
-          await sandbox.exec(`base="\${XDG_CACHE_HOME:-\${HOME:+$HOME/.cache}}"; case "$base" in /*) ;; *) base=/tmp/valet-skills ;; esac; if [ "$base" != /tmp/valet-skills ]; then rm -rf -- "$base/valet/skills/"${quote(temporary)}; fi; rm -rf -- /tmp/valet-skills/${quote(temporary)}`, { timeout: 10_000 }).catch(() => {});
+          await sandbox.exec(`${preferredCache}
+if [ -n "$base" ]; then rm -rf -- "$base/"${quote(temporary)}; fi
+rm -rf -- /tmp/valet-skills/${quote(temporary)} "/tmp/valet-skills-$(id -u)/"${quote(temporary)}`, { timeout: 10_000 }).catch(() => {});
         }
         const path = `${directory}/${args.script}`;
         const command = [...interpreter(scriptBytes, path), path, ...(args.args ?? [])].map(quote).join(" ");

@@ -16,6 +16,7 @@ import {
   JOB_POLL_INTERVAL_MS,
   JOB_POLL_WARMUP_MS,
   BASH_DEFAULT_TIMEOUT_S,
+  BASH_TRUNCATION_NOTE,
 } from "../src/builtin-tools/index.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../src/errors.js";
 import type {
@@ -140,6 +141,22 @@ describe("bash tool: mode selection", () => {
 });
 
 describe("bash tool: job-mode poll loop", () => {
+  it.each(["gh pr create", "gh pr review 1031 --approve"])("does not infer success or an outcome without an exit code for %s", async command => {
+    const sandbox: FakeSandbox = { id: "unknown-exit", execJob: async () => ({ execId: "job" }), cancelJob: async () => {},
+      pollJob: async () => ({ status: "done", output: "https://github.com/tkhq/valet/pull/1031", nextOffset: 47 }) };
+    const result = await execute({ command, timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe("https://github.com/tkhq/valet/pull/1031");
+    expect(result.outcome).toBeUndefined();
+  });
+
+  it.each(["done", "failed"] as const)("preserves output, truncation, and exit-note ordering for a %s job", async status => {
+    const sandbox: FakeSandbox = { id: "exit-order", execJob: async () => ({ execId: "job" }), cancelJob: async () => {},
+      pollJob: async () => ({ status, exitCode: 3, output: "output", nextOffset: 6, truncated: true }) };
+    const result = await execute({ command: "gh pr review 1031 --approve", timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe(`output${BASH_TRUNCATION_NOTE}\n${status === "done" ? "[exit 3]" : "[job failed]"}`);
+    expect(result.outcome).toBeUndefined();
+  });
+
   it("accumulates output across multiple polls into the final text; appends [exit N] on nonzero", async () => {
     vi.useFakeTimers();
     try {

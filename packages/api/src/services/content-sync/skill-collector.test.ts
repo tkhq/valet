@@ -146,7 +146,7 @@ function serve(repo: FakeRepo): GithubFixture {
     getTree: (_owner, _repo, sha) => {
       if (denied()) return notFound;
       if (sha.startsWith("sha-")) {
-        const prefix = `${repo.root ? repo.root + "/" : ""}${sha.slice(4)}/`;
+        const prefix = `${repo.root ? repo.root + "/" : ""}${sha.slice(4).split("#")[0]}/`;
         return { body: { sha, truncated: repo.truncatedSkillTree === true, tree: [...blobsOf(repo)]
           .filter(([path]) => path.startsWith(prefix))
           .map(([path, content]) => treeEntry(path.slice(prefix.length), { sha: blobShaOf(content) })) } };
@@ -181,7 +181,7 @@ function serve(repo: FakeRepo): GithubFixture {
       if (path === root) {
         return {
           body: [
-            ...Object.keys(repo.skills).map((name) => entry(name, "dir")),
+            ...Object.keys(repo.skills).map(name => ({ ...entry(name, "dir"), sha: `sha-${name}#${blobShaOf(JSON.stringify([...blobsOf(repo)].filter(([path]) => path.startsWith(`${root ? root + "/" : ""}${name}/`))))}` })),
             ...(repo.files ?? []).map((name) => entry(name, "file")),
           ],
         };
@@ -530,6 +530,93 @@ describe("skill collector", () => {
     repo.extra!["deploy/references/c.md"] = "new";
     expect((await service.syncOnce(source.id))?.status).toBe("warning");
     expect((await db.select().from(skills).where(eq(skills.name, "deploy")))[0]?.content).toContain("Updated body.");
+  });
+
+  it("finishes a 299-skill fallback incrementally without repeating bodies or subtree listings", async () => {
+    const names = Array.from({ length: 299 }, (_, i) => `skill-${i}`);
+    const repo: FakeRepo = { sha: "walk-1", root: "skills", truncatedTree: true,
+      skills: Object.fromEntries(names.map(name => [name, skillMd(name, "A skill.")])),
+      extra: Object.fromEntries(names.flatMap(name => [0, 1].map(i => [`skills/${name}/references/${i}.md`, `${name}-${i}`]))) };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "skills" });
+    const service = serviceFor(f);
+    expect((await service.syncOnce(source.id))?.status).toBe("warning");
+    expect(await db.select().from(skills)).toHaveLength(299);
+    const firstRequests = f.calls.length;
+    const firstFiles = (await db.select().from(skillFiles)).length;
+    expect(firstFiles).toBeGreaterThan(0); expect(firstFiles).toBeLessThan(598);
+    f.calls.length = 0;
+    expect((await service.syncOnce(source.id))?.status).toBe("warning"); // Walk-mode notice remains.
+    expect(f.calls.length).toBeLessThan(firstRequests / 2);
+    expect(f.calls.filter(call => call.path.endsWith("SKILL.md"))).toHaveLength(0);
+    expect(f.calls.filter(call => call.path.includes("/git/trees/sha-"))).toHaveLength(0);
+    expect(await db.select().from(skillFiles)).toHaveLength(598);
+    expect((await db.select().from(contentSources))[0]?.lastSha).toBe("walk-1");
+    f.calls.length = 0; await service.syncOnce(source.id);
+    expect(f.calls).toHaveLength(1);
+    repo.sha = "walk-2"; repo.skills["skill-298"] = skillMd("skill-298", "Changed skill.", "Updated body.");
+    f.calls.length = 0; await service.syncOnce(source.id);
+    expect(f.calls.filter(call => call.path.endsWith("SKILL.md"))).toHaveLength(1);
+    expect((await db.select().from(skills).where(eq(skills.name, "skill-298")))[0]?.content).toContain("Updated body.");
+  });
+
+  it("keeps over 600 fallback body probes outside the companion budget", async () => {
+    const repo: FakeRepo = { sha: "walk-bodies", root: "skills", truncatedTree: true,
+      skills: { ...Object.fromEntries(Array.from({ length: 498 }, (_, i) => [`empty-${i}`, null])), deploy: skillMd("deploy", "Deploy it.") },
+      prompts: Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`prompt-${i}`, `Prompt ${i}.`])) };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "skills" });
+    const outcome = await serviceFor(f).syncOnce(source.id);
+    expect(outcome?.status, outcome?.error ?? "").toBe("warning");
+    expect(await db.select().from(skills)).toHaveLength(151);
+    expect(f.calls.filter(call => call.path.endsWith("SKILL.md"))).toHaveLength(499);
+    expect((await db.select().from(contentSources))[0]?.lastSha).toBe("walk-bodies");
+  });
+
+  it("saves walk bodies even when their elapsed time exhausts the companion deadline", async () => {
+    const repo: FakeRepo = { sha: "walk-deadline", root: "skills", truncatedTree: true,
+      skills: { deploy: skillMd("deploy", "Deploy it."), other: skillMd("other", "Other skill.") },
+      extra: { "skills/deploy/references/x.md": "reference" } };
+    const f = serve(repo); const reader = new GitHubSkillRepoReader({ apiUrl: f.url });
+    const read = reader.readFile.bind(reader);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.spyOn(reader, "readFile").mockImplementation((repo, path, ref, signal) => {
+      if (path.endsWith("SKILL.md")) { expect(signal).toBeUndefined(); now += 180_001; }
+      return read(repo, path, ref, signal);
+    });
+    try {
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "skills" });
+      const service = new ContentSyncService({ db, reader });
+      expect((await service.syncOnce(source.id))?.status).toBe("warning");
+      expect(await db.select().from(skills)).toHaveLength(2);
+      expect(await db.select().from(skillFiles)).toHaveLength(0);
+      f.calls.length = 0;
+      expect((await service.syncOnce(source.id))?.status).toBe("warning");
+      expect(f.calls.filter(call => call.path.endsWith("SKILL.md"))).toHaveLength(0);
+      expect(await db.select().from(skillFiles)).toHaveLength(1);
+      expect((await db.select().from(contentSources))[0]?.lastSha).toBe("walk-deadline");
+    } finally { clock.mockRestore(); }
+  });
+
+  it("saves successful fallback bodies after body faults and resumes without rereading them", async () => {
+    const repo: FakeRepo = { sha: "walk-error", root: "skills", truncatedTree: true,
+      skills: { deploy: skillMd("deploy", "Deploy it."), other: skillMd("other", "Other skill.") } };
+    const f = serve(repo); const reader = new GitHubSkillRepoReader({ apiUrl: f.url });
+    const read = reader.readFile.bind(reader);
+    let fail = true;
+    vi.spyOn(reader, "readFile").mockImplementation((repo, path, ref, signal) => {
+      if (fail && path === "skills/other/SKILL.md") throw new Error("180-second deadline");
+      return read(repo, path, ref, signal);
+    });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "skills" });
+    const service = new ContentSyncService({ db, reader });
+    expect((await service.syncOnce(source.id))?.status).toBe("warning");
+    expect((await db.select().from(skills)).map(row => row.name)).toEqual(["deploy"]);
+    fail = false; f.calls.length = 0;
+    expect((await service.syncOnce(source.id))?.status).toBe("warning");
+    expect(f.calls.filter(call => call.path.endsWith("SKILL.md")).map(call => call.path)).toEqual(["/repos/tkhq/skills/contents/skills/other/SKILL.md"]);
+    expect(await db.select().from(skills)).toHaveLength(2);
   });
 
   it("imports every skill directory on the first sync", async () => {

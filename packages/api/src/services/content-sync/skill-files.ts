@@ -75,7 +75,20 @@ export async function readSkillFiles(
   const skipped: string[] = [];
   let skippedCount = 0;
   let deferred = false;
-  const warnCap = (path: string) => { skippedCount++; if (skipped.length < 10) skipped.push(path); };
+  const rejected = new Set<string>();
+  const warnCap = (path: string) => {
+    if (rejected.has(path)) return;
+    rejected.add(path); skippedCount++;
+    if (skipped.length < 10) skipped.push(path);
+  };
+  const keep = (file: SkillFile) => {
+    if (files.length >= MAX_SKILL_FILES || file.size > MAX_SKILL_FILE_BYTES || total + file.size > MAX_SKILL_BYTES) {
+      warnCap(`${prefix}${file.path}`);
+      return;
+    }
+    total += file.size;
+    files.push(file);
+  };
   for (const entry of entries) {
     const old = cached.get(`${entry.path.slice(prefix.length)}:${entry.sha}`);
     const size = entry.size ?? old?.size ?? 0;
@@ -97,7 +110,7 @@ export async function readSkillFiles(
     if (!old && (!read?.bytes || read.blobSha !== entry.sha)) {
       deferred = true;
       const stored = previous.find(file => file.path === entry.path.slice(prefix.length));
-      if (stored) files.push(stored);
+      if (stored) keep(stored);
       continue;
     }
     const bytes = read?.bytes;
@@ -106,13 +119,12 @@ export async function readSkillFiles(
       warnCap(entry.path);
       continue;
     }
-    total += actualSize;
-    files.push({ path: entry.path.slice(prefix.length), blobSha: entry.sha, size: actualSize, mode: entry.mode,
+    keep({ path: entry.path.slice(prefix.length), blobSha: entry.sha, size: actualSize, mode: entry.mode,
       ...(bytes ? { bytes } : {}) });
   }
   if (deferred) {
     const kept = new Set(files.map(file => file.path));
-    for (const file of previous) if (!kept.has(file.path)) files.push(file);
+    for (const file of previous) if (!kept.has(file.path)) keep(file);
   }
   const warnings: string[] = [];
   if (skippedCount) warnings.push(`${skipped.join(", ")}${skippedCount > 10 ? ` and ${skippedCount - 10} more` : ""} exceed companion caps (${SKILL_CAPS}). Reduce these files to import them.`);

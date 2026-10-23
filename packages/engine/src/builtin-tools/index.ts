@@ -171,6 +171,8 @@ async function pollWithinDeadline(poll: () => Promise<JobPoll>, deadline: number
   }
 }
 
+type ForegroundExecResult = Omit<ExecResult, "exitCode"> & { exitCode?: number; jobFailed?: boolean };
+
 /**
  * Poll a job-mode exec to completion, accumulating output across polls
  * (spec decision 10). Deadline exceeded or `ctx.signal` abort both cancel
@@ -183,7 +185,7 @@ async function pollJobToCompletion(
   cancelJob: (execId: string) => Promise<void>,
   execId: string,
   timeoutMs: number,
-): Promise<ExecResult> {
+): Promise<ForegroundExecResult> {
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
   let output = "";
@@ -208,10 +210,10 @@ async function pollJobToCompletion(
     if (poll.truncated) truncated = true;
 
     if (poll.status === "done") {
-      return { stdout: output, stderr: "", exitCode: poll.exitCode ?? 0, truncated };
+      return { stdout: output, stderr: "", exitCode: poll.exitCode, truncated };
     }
     if (poll.status === "failed") {
-      return { stdout: output + "\n[job failed]", stderr: "", exitCode: 1, truncated };
+      return { stdout: output, stderr: "", jobFailed: true, truncated };
     }
 
     // Warm-up ramp: first poll is immediate (no sleep before it, above),
@@ -344,7 +346,7 @@ export const editTool = defineTool({
 export const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
 
 /** Run a foreground command with provider job cancellation above the bash threshold. */
-export async function runForegroundExec(ctx: ToolContext, command: string, opts: ExecOpts): Promise<ExecResult> {
+export async function runForegroundExec(ctx: ToolContext, command: string, opts: ExecOpts): Promise<ForegroundExecResult> {
   const sandbox = ctx.sandbox;
   if (!sandbox) throw new Error("No sandbox. Run this command in a session with a sandbox.");
   const timeoutMs = opts.timeout ?? BASH_DEFAULT_TIMEOUT_S * 1000;
@@ -399,9 +401,9 @@ export const bashTool = defineTool({
     const result = await runForegroundExec(ctx, args.command, { signal: ctx.signal, timeout: timeoutMs });
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
-    const exitNote = !result.timedOut && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
-    const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}`, ...(outcome ? { outcome } : {}) };
+    const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
+    const outcome = result.jobFailed || result.exitCode === undefined ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
   },
 });
 

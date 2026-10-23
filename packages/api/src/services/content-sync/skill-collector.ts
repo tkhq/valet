@@ -26,7 +26,7 @@ import {
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
-import { skills, skillFiles, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
+import { skills, skillFiles, contentSources, type SkillWalkCache, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
 import { newSkillId } from "../skills.js";
 import {
   SkillRepoListingTruncatedError,
@@ -65,8 +65,8 @@ export class SkillCollector implements ContentCollector {
     return new SkillPass(found, new Map(), entries);
   }
 
-  async walkDirectory({ source, headSha, reader }: CollectorWalkContext): Promise<CollectorPass> {
-    const listing = await reader.listDirectory(source.repoFullName, source.subpath, headSha);
+  async walkDirectory({ db, source, headSha, reader, bodyReader }: CollectorWalkContext): Promise<CollectorPass> {
+    const listing = await bodyReader.listDirectory(source.repoFullName, source.subpath, headSha);
     // A partial listing must fail before reconcile reads it as a delete list:
     // every entry past the cut would look deleted.
     if (!listing.complete) {
@@ -77,13 +77,33 @@ export class SkillCollector implements ContentCollector {
     const entries: SkillTreeEntry[] = [];
     const subtrees: { path: string; sha: string; bodySha: string; prefix: string }[] = [];
     const unavailable = new Set<string>();
+    const unreadBodies: string[] = [];
+    const walkCache: SkillWalkCache = {};
+    const rows = await db.select({ path: skills.upstreamPath, bodySha: skills.upstreamBlobSha,
+      content: skills.content, frontmatter: skills.frontmatter }).from(skills)
+      .where(and(eq(skills.sourceId, source.id), eq(skills.origin, "repo")));
+    const stored = new Map(rows.map(row => [row.path, row]));
+
+    const readBody = async (path: string, identity: string) => {
+      const cached = source.skillWalkCache[path];
+      const row = stored.get(path);
+      if (cached?.directorySha === identity && cached.bodySha === null) {
+        walkCache[path] = cached;
+        return null;
+      }
+      const file = cached?.directorySha === identity && row?.bodySha === cached.bodySha
+        ? { blobSha: row.bodySha!, text: `---\n${JSON.stringify(row.frontmatter)}\n---\n${row.content}` }
+        : await bodyReader.readFile(source.repoFullName, path, headSha);
+      walkCache[path] = { ...(cached?.directorySha === identity ? cached : {}), directorySha: identity, bodySha: file?.blobSha ?? null };
+      return file;
+    };
 
     for (const dir of listing.entries) {
       if (dir.type !== "dir") continue;
       const path = joinPath(source.subpath, dir.name, SKILL_FILE);
-      // A read fault fails the whole sync. Only null ("not there") is normal,
-      // and it means the directory is not a skill.
-      const file = await reader.readFile(source.repoFullName, path, headSha);
+      let file;
+      try { file = await readBody(path, dir.sha); }
+      catch { unreadBodies.push(path); continue; }
       if (file === null) continue;
       candidates.push({
         name: dir.name,
@@ -100,7 +120,7 @@ export class SkillCollector implements ContentCollector {
     const promptsDir = joinPath(source.subpath, PROMPTS_DIR);
     let promptListing;
     try {
-      promptListing = await reader.listDirectory(source.repoFullName, promptsDir, headSha);
+      promptListing = await bodyReader.listDirectory(source.repoFullName, promptsDir, headSha);
     } catch (err) {
       // A missing `prompts/` directory is normal and yields zero entries. Any
       // other read fault is a transport failure and must propagate.
@@ -116,7 +136,9 @@ export class SkillCollector implements ContentCollector {
         if (file.type !== "file" || !file.name.endsWith(".md")) continue;
         const name = file.name.slice(0, -".md".length);
         const path = joinPath(promptsDir, file.name);
-        const read = await reader.readFile(source.repoFullName, path, headSha);
+        let read;
+        try { read = await readBody(path, file.sha); }
+        catch { unreadBodies.push(path); continue; }
         if (read === null) continue;
         candidates.push({
           name,
@@ -133,13 +155,17 @@ export class SkillCollector implements ContentCollector {
     // Read every body before companion subtree discovery can consume the budget.
     for (const { path, sha, bodySha, prefix } of subtrees) {
       let subtree;
-      try { subtree = await reader.listTree(source.repoFullName, sha); }
+      try {
+        const cached = walkCache[path]?.entries;
+        subtree = cached ? { entries: cached, truncated: false } : await reader.listTree(source.repoFullName, sha);
+      }
       catch (err) {
         if (err instanceof SkillRepoListingTruncatedError) throw err;
         unavailable.add(path);
         continue;
       }
       if (subtree.truncated) throw new SkillRepoListingTruncatedError(source.repoFullName, path);
+      walkCache[path]!.entries = subtree.entries;
       entries.push({ path, sha: bodySha, type: "blob", mode: "100644" });
       entries.push(...subtree.entries.map(entry => ({ ...entry, path: `${prefix}/${entry.path}` })));
     }
@@ -147,11 +173,17 @@ export class SkillCollector implements ContentCollector {
     // The same collision rule as the tree path, so the two never disagree
     // about which of two same-named files is a skill.
     const resolved = resolveNameCollisions(candidates);
+    for (const path of unreadBodies) {
+      const parts = path.split("/");
+      resolved.reservedNames.add(path.endsWith("/SKILL.md") ? parts.at(-2)! : parts.at(-1)!.slice(0, -3));
+    }
     return new SkillPass(
       { ...resolved, discovered: candidates.length, excludedCandidates: [] },
       text,
       entries,
       unavailable,
+      walkCache,
+      unreadBodies,
     );
   }
 }
@@ -192,7 +224,11 @@ class SkillPass implements CollectorPass {
     readonly text: Map<string, string>,
     tree: SkillTreeEntry[],
     private readonly unavailable = new Set<string>(),
+    private readonly walkCache?: SkillWalkCache,
+    unreadBodies: string[] = [],
   ) {
+    this.deferred.push(...unreadBodies);
+    this.fileWarnings.push(...unreadBodies.map(path => `${path}: The body could not be read. Saved other bodies. Sync again to retry.`));
     const companions = indexCompanions(tree);
     const skillEntries: ContentManifestEntry[] = [];
     const promptEntries: ContentManifestEntry[] = [];
@@ -256,14 +292,13 @@ class SkillPass implements CollectorPass {
     for (const entries of this.companionFiles.values()) for (const entry of entries) remaining.set(entry.sha, (remaining.get(entry.sha) ?? 0) + 1);
     for (const [path, entries] of this.companionFiles) {
       if (!ctx.text.has(path)) continue;
-      if (this.unavailable.has(path)) {
-        this.preparedFiles.set(path, previousByPath.get(path) ?? []);
-        this.deferred.push(path);
-        this.fileWarnings.push(`${path}: Companion discovery was deferred. Saved the body. Sync again to retry the files.`);
-        continue;
-      }
+      const previousFiles = previousByPath.get(path) ?? [];
+      const unavailable = this.unavailable.has(path);
+      const listed = unavailable ? previousFiles.map(file => ({ path: path.slice(0, -"SKILL.md".length) + file.path,
+        sha: file.blobSha, size: file.size, mode: file.mode, type: "blob" })) : entries;
+      if (unavailable) this.fileWarnings.push(`${path}: Companion discovery was deferred. Saved the body. Sync again to retry the files.`);
       const result = await readSkillFiles(ctx.reader, ctx.source.repoFullName, ctx.commitSha, path,
-        entries, previousByPath.get(path) ?? [], reads);
+        listed, previousFiles, reads);
       for (const entry of entries) {
         const count = (remaining.get(entry.sha) ?? 1) - 1;
         remaining.set(entry.sha, count);
@@ -272,7 +307,7 @@ class SkillPass implements CollectorPass {
       if (result.warning) {
         this.fileWarnings.push(`${path}: ${result.warning}`);
       }
-      if (result.deferred) this.deferred.push(path);
+      if (result.deferred || unavailable) this.deferred.push(path);
       this.preparedFiles.set(path, result.files);
     }
     reads.clear();
@@ -298,6 +333,7 @@ class SkillPass implements CollectorPass {
    */
   async reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult> {
     const { db, source, text } = ctx;
+    if (this.walkCache) await db.update(contentSources).set({ skillWalkCache: this.walkCache }).where(eq(contentSources.id, source.id));
     const existing = await db
       .select()
       .from(skills)

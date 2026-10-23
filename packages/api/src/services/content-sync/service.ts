@@ -394,7 +394,8 @@ export class ContentSyncService {
 
   private async run(source: ContentSourceRow): Promise<ContentSyncOutcome> {
     // Resolved once per sync, so every read of one commit uses one identity.
-    const reader = budgetedReader(this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader);
+    const bodyReader = this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader;
+    const reader = budgetedReader(bodyReader);
 
     // Both compares below leave the row's report where it is, which is only
     // sound when that report describes a sync that finished. After a failure
@@ -425,7 +426,7 @@ export class ContentSyncService {
     }
 
     // Everything below reads at `head`, never at the moving ref.
-    const scan = await this.readManifest(source, head, reader);
+    const scan = await this.readManifest(source, head, reader, bodyReader);
 
     // Compare 2 — the files that commit holds, keyed by blob sha from the tree
     // read, so this runs before any file is read.
@@ -543,6 +544,7 @@ export class ContentSyncService {
     source: ContentSourceRow,
     head: SkillRepoHead,
     reader: SkillRepoReader,
+    bodyReader: SkillRepoReader,
   ): Promise<SyncScan> {
     const collectors = this.collectorsFor(source);
     const tree = await reader.listTree(source.repoFullName, head.treeSha);
@@ -570,7 +572,7 @@ export class ContentSyncService {
     const passes: CollectorPass[] = [];
     for (const collector of collectors) {
       if (collector.walkDirectory === undefined) continue;
-      passes.push(await collector.walkDirectory({ source, headSha: head.sha, reader }));
+      passes.push(await collector.walkDirectory({ db: this.deps.db, source, headSha: head.sha, reader, bodyReader }));
     }
     const scan: SyncScan = { passes, discovery: "directory-walk" };
     this.assertCandidateBudget(source, scan);

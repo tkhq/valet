@@ -1179,6 +1179,12 @@ export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 // The SQL name stays `skill_sources`, and so do its three indexes. The
 // release before this one repairs `skill_sources` by name at boot, so a
 // rename would crash-loop the api a rollback lands on.
+export type SkillWalkCache = Record<string, {
+  directorySha: string;
+  bodySha: string | null;
+  entries?: { path: string; type: string; mode: string; sha: string; size?: number }[];
+}>;
+
 export const contentSources = pgTable(
   "skill_sources",
   {
@@ -1215,6 +1221,7 @@ export const contentSources = pgTable(
      * the current head takes no head-commit short-circuit, which is what
      * makes the mechanism survive a release that does not write it. */
     discoveryScan: text("discovery_scan"),
+    skillWalkCache: jsonb("skill_walk_cache").notNull().default({}).$type<SkillWalkCache>(),
     /** Fences sync completion against newer passes and readiness changes. */
     syncRevision: bigint("sync_revision", { mode: "number" }).notNull().default(0),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),

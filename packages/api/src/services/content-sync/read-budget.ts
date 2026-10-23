@@ -1,6 +1,6 @@
 import type { SkillRepoReader } from "../skill-repo-reader.js";
 
-/** Shared by body reads, companion reads, and fallback discovery in one sync. */
+/** Bounds tree-mode body reads and companion work. Legacy walk body reads use the raw reader. */
 export const MAX_SYNC_READS = 600;
 const READ_WINDOW_MS = 180_000;
 

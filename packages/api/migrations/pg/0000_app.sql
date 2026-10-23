@@ -704,6 +704,7 @@ CREATE TABLE "skill_sources" (
 	"last_sha" text,
 	"last_manifest_hash" text,
 	"discovery_scan" text,
+    "skill_walk_cache" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"sync_revision" bigint DEFAULT 0 NOT NULL,
 	"last_synced_at" bigint,
 	"last_error" text,

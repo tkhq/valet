@@ -116,7 +116,7 @@ The skill's `contentSha` includes the body and these file identities.
 A script-only edit or executable-bit change therefore updates the skill.
 A complete read replaces the stored file set, including deletions.
 A companion read failure defers unfinished files without blocking the body or successful file reads.
-Deferred skills retain old files until a complete read can apply deletions.
+Deferred skills retain old files within the same count and byte caps until a complete read can apply deletions.
 A body transport failure or partial listing reconciles nothing.
 When the repository tree is truncated, sync reads a complete subtree for each skill found by the directory fallback.
 A truncated skill subtree fails the sync before any writes.
@@ -154,12 +154,16 @@ Reference reads do not write files to the sandbox.
 `skill_script({ name, script, args, timeout })` runs a stored file under `scripts/`.
 Only this call writes the skill's scripts to the sandbox.
 The directory is `${XDG_CACHE_HOME:-$HOME/.cache}/valet/skills/<name>@<sha>/scripts/`.
+A relative `XDG_CACHE_HOME` is ignored; the tool then uses `$HOME/.cache`.
 If the cache is not writable, the tool uses `/tmp/valet-skills/<name>@<sha>/scripts/`.
+If that temporary base is not writable, it uses `/tmp/valet-skills-<uid>/`.
+The temporary base and per-skill directories use mode 0700.
 No script cache is created inside the cloned repository.
 Publication uses one shell payload on exec stdin, not provider file APIs.
 The shell decodes every script into a unique temporary directory and sets its stored mode.
 It renames each complete file into place before execution.
 A shell trap removes temporary files on failure.
+INT and TERM traps exit before publication can continue.
 A second cleanup exec handles aborted provider clients without reusing their aborted signal.
 Publication takes two execs, independent of the number of files.
 Concurrent calls cannot expose truncated files.
@@ -253,9 +257,13 @@ Over-exclusion is also reported rather than silent, because the rule is a guess 
 **Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. The body costs one contents read per skill.
 Each new companion blob costs one more read.
 Unchanged companion blobs reuse stored bytes without loading them into sync memory.
-The fallback also reads one complete subtree per discovered skill.
-All these operations share a 600-read budget, including fallback directory reads.
-A whole-sync 180-second deadline aborts GitHub requests, including directory pagination.
+The fallback reads one complete subtree per discovered skill.
+Tree-mode reads and companion work share a 600-read budget and a 180-second deadline.
+Fallback body reads and directory listings use the original reader, outside that companion budget and deadline.
+The directory listing retains its 500-entry guard.
+`skill_sources.skill_walk_cache` records directory identities, body identities, and completed subtree listings, without file bytes.
+Unchanged directories reuse stored bodies and cached listings, so a deferred walk makes progress instead of restarting.
+A failed walk body read defers that body and preserves other successful work.
 The per-request timeout stays 15 seconds.
 All bodies are read before companion bytes.
 Companion budget, deadline, or rate-limit failures save bodies and successful file reads.
@@ -264,10 +272,10 @@ Only skills with deferred files need more repository file reads on the next pass
 Unchanged companion files also reuse stored metadata.
 The shared blob-read cache drops entries after their last consumer and clears before writes.
 Prepared bytes are released as each skill is persisted.
-Body-read budget exhaustion still fails before reconciliation.
+Tree-mode body-read budget exhaustion still fails before reconciliation.
 The 300-candidate cap is checked before companion indexing.
 The tree index visits each entry a constant number of times, not once per skill.
-The 180-second window leaves time to record failure before the five-minute claim lease expires.
+The companion deadline does not abort legacy fallback body reads.
 Discovery rules version 2 forces a first-deploy rescan, which uses these same bounds.
 
 That per-skill read is what the tree read does not bound. A tree that is not cut can carry 100,000 entries, so a whole-repository scan could queue an unbounded run of sequential content reads — which an anonymous read (60 requests per hour per IP) cannot finish, and which can outlast the sweep's five-minute claim lease. `MAX_SKILL_CANDIDATES` caps one sync at 300 skill files on both discovery paths, and a repository past it fails with the subdirectory named as the fix. Importing the first 300 of a longer list is not an option, for the truncation reason below.

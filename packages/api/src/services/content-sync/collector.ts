@@ -75,6 +75,9 @@ export interface CollectorDiscoverContext {
 /** The narrower fallback, for a commit whose tree GitHub cut. The reader is
  * passed in so every read of one sync carries that sync's credential. */
 export interface CollectorWalkContext {
+  db: AppDb;
+  /** Legacy body reads do not consume the companion budget or deadline. */
+  bodyReader: SkillRepoReader;
   source: ContentSourceRow;
   headSha: string;
   reader: SkillRepoReader;
