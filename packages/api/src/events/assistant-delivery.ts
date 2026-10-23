@@ -13,6 +13,7 @@ import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
  * The workspace owner determines the assistant.
  */
 import { isDeepStrictEqual } from "node:util";
+import { isInteractiveSlackSignal } from "@valet/engine";
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -465,15 +466,15 @@ async function deliverToAssistantThreadInner(
     }
     return { sessionId: session.id, threadId: thread.id };
   }
-  // `inject`, not the thread default: a personal assistant thread defaults
-  // to `steer`, which would abort the person's running turn and drop the
-  // items queued behind it. The engine admits the delivery into the running
-  // turn only when it adds no authority; otherwise it waits as a followup.
+  // Only an addressed human reply can interrupt its conversation.
+  // Passive follows and bot events retain injection and digest coalescing.
+  const interrupts = !args.unattended && isInteractiveSlackSignal(signal);
   const receipt = args.recordOnly
     ? await thread.recordSignal(signal, { dispatchId: args.dispatchId, author: args.author ?? { id: args.actorUserId } })
     : await thread.submitPrompt(signal, {
       dispatchId: args.dispatchId,
-      queueMode: "inject",
+      queueMode: interrupts ? "steer" : "inject",
+      ...(interrupts ? { steerScope: "active-origin" as const } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {}),
       author: args.author ?? { id: args.actorUserId },
     });

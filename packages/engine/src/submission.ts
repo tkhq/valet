@@ -12,6 +12,8 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
+import { UNATTENDED_DELIVERY_KEY } from "@valet/shared";
+import { RECORD_ONLY_KEY } from "./types.js";
 import { readModelResponseMetadata } from "./model-response.js";
 import { ValidationError } from "./errors.js";
 import { formatTranscriptText } from "./transcript-formatter.js";
@@ -474,4 +476,89 @@ export function originFromEntries(entries: SessionEntry[], queueItemId: string):
     }
   }
   return origin;
+}
+
+/** Only messages from the same external conversation can interrupt each other. */
+export function sameSubmissionOrigin(left: PromptContent, right: PromptContent): boolean {
+  if (!isSignalContent(left) || !isSignalContent(right)) return false;
+  const a = left.origin;
+  const b = right.origin;
+  return !!a?.threadKey && !!b?.threadKey && a.channelType === b.channelType && a.threadKey === b.threadKey;
+}
+
+/** Addressed Slack human input. Passive context and automated signals cannot steer. */
+export function isInteractiveSlackSignal(content: PromptContent): content is SignalContent {
+  return isSignalContent(content) && content.origin?.channelType === "slack" &&
+    !!content.origin.threadKey && content.origin.reply === "auto" &&
+    ["slack.message", "slack.app_mention", "app_mention"].includes(content.signalType) &&
+    content.attributes?.senderBot !== "true" && content.attributes?.rehydrated === undefined &&
+    content.attributes?.feedback === undefined;
+}
+
+/** A record-only note or unattended delivery must keep its own queue behavior. */
+export function isInteractiveSlackInput(item: QueueItem): boolean {
+  return isInteractiveSlackSignal(item.content) && item.metadata?.[UNATTENDED_DELIVERY_KEY] !== true &&
+    item.metadata?.[RECORD_ONLY_KEY] !== true;
+}
+
+/** Maximum original inputs retained by one correction. Admission fails before changing any rows. */
+export const MAX_CARRIED_INPUTS = 128;
+
+/** Durable references to original inputs, in conversation order. No authority is inherited. */
+export function carriedInputIds(item: QueueItem): string[] {
+  const ids = item.metadata?.carriedInputIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/** Select only queued human inputs on this engine thread and external conversation. */
+export function queuedOriginInputs(items: Iterable<QueueItem>, incoming: QueueItem): QueueItem[] {
+  if (!isInteractiveSlackInput(incoming)) return [];
+  return [...items].filter(candidate => candidate.threadId === incoming.threadId &&
+    candidate.status === "queued" && !candidate.supersededByItemId && isInteractiveSlackInput(candidate) &&
+    sameSubmissionOrigin(candidate.content, incoming.content))
+    .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** Called inside atomic admission. Original content stays unchanged for dispatch deduplication. */
+export function carryInputMetadata(incoming: QueueItem, queued: QueueItem[], promotionSource?: QueueItem): QueueItem["metadata"] {
+  const sourceIds = promotionSource ? carriedInputIds(promotionSource) : [];
+  if (sourceIds.length && JSON.stringify(promotionSource?.content) !== JSON.stringify(incoming.content)) {
+    throw new ValidationError("The promoted correction changed content. Promote the original queued correction, then send a new reply.");
+  }
+  const ids = [...new Set([...sourceIds, ...queued.flatMap(candidate => [...carriedInputIds(candidate), candidate.id])])];
+  const bridges = [...new Set([
+    ...queued.flatMap(carriedInputBridgeIds),
+    ...(promotionSource && sourceIds.length ? [...carriedInputBridgeIds(promotionSource), promotionSource.id] : []),
+  ])];
+  if (ids.length + bridges.length > MAX_CARRIED_INPUTS) {
+    throw new ValidationError("Too many queued Slack inputs to carry. Stop the thread, then retry the correction.");
+  }
+  for (const candidate of queued) {
+    if (!isSignalContent(candidate.content)) continue;
+    for (const attachment of candidate.content.attachments ?? []) {
+      const supported = attachment.type === "file"
+        ? typeof attachment.path === "string" && typeof attachment.bytes === "number" &&
+          typeof attachment.sha256 === "string" && typeof attachment.name === "string"
+        : attachment.type === "image" && typeof attachment.mimeType === "string" &&
+          ((typeof attachment.url === "string" && attachment.url.length > 0) || attachment.data instanceof Uint8Array);
+      if (!supported) {
+        throw new ValidationError("A queued Slack attachment cannot be carried. Stop the thread, then resend the attachment and correction.");
+      }
+    }
+  }
+  const metadata = withoutCarriedInputs(incoming).metadata;
+  return ids.length ? { ...metadata, carriedInputIds: ids, ...(bridges.length ? { carriedInputBridgeIds: bridges } : {}) } : metadata;
+}
+
+/** Validated promotion sources form provenance bridges without duplicate displayed input. */
+export function carriedInputBridgeIds(item: QueueItem): string[] {
+  const ids = item.metadata?.carriedInputBridgeIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/** Caller metadata cannot create internal carry references, including on ordinary queued items. */
+export function withoutCarriedInputs(item: QueueItem): QueueItem {
+  if (item.metadata?.carriedInputIds === undefined && item.metadata?.carriedInputBridgeIds === undefined) return item;
+  const { carriedInputIds: _ignored, carriedInputBridgeIds: _bridges, ...metadata } = item.metadata;
+  return { ...item, metadata: Object.keys(metadata).length ? metadata : undefined };
 }

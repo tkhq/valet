@@ -438,7 +438,9 @@ describe("ChannelHost.handleUpdate", () => {
     await slackHost.start();
     try {
       await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
+      const admission = vi.spyOn(engineStore, "admitSubmission");
       await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      expect(admission).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(Object), expect.objectContaining({ steer: true, steerScope: "active-origin" }));
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
       const home = await session.threadByKey(HOME_THREAD_KEY);
       expect(home).not.toBeNull();
@@ -450,7 +452,7 @@ describe("ChannelHost.handleUpdate", () => {
         entry = found?.type === "message" ? found : undefined;
         if (!entry) await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
+      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1", reply: "auto" } });
       expect(entry?.author).toMatchObject({ id: USER_ID, interactive: true, directChannel: true });
       await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
       const replies = (await engineStore.getEntries(session.id, home!.id)).filter(e => e.type === "message" && e.role === "assistant").length;

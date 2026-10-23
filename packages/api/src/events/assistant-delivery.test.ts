@@ -582,6 +582,49 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     }
   });
 
+  it("interrupts a running turn for a Slack reply without dropping queued work", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const personal = { type: "user" as const, id: USER };
+    const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
+    const thread = await session.createThread("reply-interrupt");
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which task?" }, { id: "reply-ask" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Updated."),
+      fauxAssistantMessage("Queued work done."),
+      fauxAssistantMessage("Done."),
+    ]);
+    const first = await thread.submitPrompt({ ...signal("start work"), origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" } }, { dispatchId: "reply-running" });
+    await vi.waitFor(async () => expect((await session.providers.store.getQueueItem(session.id, first.queueItemId))?.status).toBe("blocked_on_decision_gate"));
+    const queued = await thread.submitPrompt("keep this queued work", { dispatchId: "reply-queued", queueMode: "followup" });
+    const reply = await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: personal, actorUserId: USER,
+      destination: { kind: "target", sessionId: session.id, threadId: thread.id },
+      signal: { ...signal("change direction now"), origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" } }, dispatchId: "reply-interrupt", mismatchReason: "test",
+    });
+    await vi.waitFor(async () => expect((await session.providers.store.getQueueItem(session.id, first.queueItemId))?.supersededByItemId).toBe(reply.queueItemId));
+    expect((await session.providers.store.getQueueItem(session.id, queued.queueItemId))?.supersededByItemId).toBeUndefined();
+    if (!reply.queueItemId) throw new Error("Expected reply queue item");
+    expect((await thread.awaitResult(reply.queueItemId)).outcome).toBe("completed");
+    expect((await thread.awaitResult(queued.queueItemId)).outcome).toBe("completed");
+  });
+
+  it.each(["manual", "bot", "rehydrated", "unspecified"])("keeps %s Slack delivery on the injection path", async (kind) => {
+    const deps = { db: testDb.appDb, engineHost };
+    const personal = { type: "user" as const, id: USER };
+    const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
+    const thread = await session.createThread("passive-reply");
+    const submit = vi.spyOn(thread, "submitPrompt");
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: personal, actorUserId: USER,
+      destination: { kind: "target", sessionId: session.id, threadId: thread.id },
+      signal: { ...signal("side comment"), attributes: kind === "bot" ? { senderBot: "true" } : kind === "rehydrated" ? { rehydrated: "true" } : {},
+        origin: { channelType: "slack", threadKey: "slack:C1:1.2", ...(kind === "unspecified" ? {} : { reply: kind === "manual" ? "manual" as const : "auto" as const }) } },
+      dispatchId: `passive-${kind}`, mismatchReason: "test",
+    });
+    expect(submit.mock.calls[0][1]?.queueMode).toBe("inject");
+    expect(submit.mock.calls[0][1]?.steerScope).toBeUndefined();
+  });
+
   it("queues an event behind a busy personal thread instead of aborting its turn", async () => {
     // A personal assistant thread defaults to `steer`, which would withdraw the
     // open question below and abort the turn. The delivery queues instead.
