@@ -138,7 +138,7 @@ describe("GET /api/usage/breakdown", () => {
       {
         skillKey: "stored:skill-1", name: "review", origin: "local",
         invocations: 2, uniqueInvokers: 1, unassignedInvocations: 1,
-        attributedContextTokens: 45, carryingCalls: 3,
+        attributedContextTokens: 45, carryingCalls: 3, fileReads: 0, scriptRuns: 0,
       },
     ]);
   });

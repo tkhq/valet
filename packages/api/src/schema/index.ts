@@ -1,5 +1,6 @@
 import {
   pgTable,
+  customType,
   text,
   integer,
   bigint,
@@ -1069,6 +1070,8 @@ export const skills = pgTable(
     contentSha: text("content_sha").notNull(),
     /** Path of the `SKILL.md` inside its repository. Null for a local skill. */
     upstreamPath: text("upstream_path"),
+    /** Last body Git blob, for retrying companions without re-reading bodies. */
+    upstreamBlobSha: text("upstream_blob_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1077,6 +1080,21 @@ export const skills = pgTable(
     uniqueIndex("skills_owner_name").on(t.orgId, t.ownerType, t.ownerId, t.name),
   ],
 );
+
+const skillBytes = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType: () => "bytea",
+  toDriver: (value) => Buffer.from(value),
+  fromDriver: (value) => new Uint8Array(value),
+});
+
+export const skillFiles = pgTable("skill_files", {
+  skillId: text("skill_id").notNull().references(() => skills.id, { onDelete: "cascade" }),
+  path: text("path").notNull(),
+  blobSha: text("blob_sha").notNull(),
+  size: integer("size").notNull(),
+  mode: text("mode").notNull(),
+  bytes: skillBytes("bytes").notNull(),
+}, (t) => [primaryKey({ columns: [t.skillId, t.path] })]);
 
 // Immutable facts for skill adoption and marginal context telemetry.
 export const skillInvocations = pgTable(
@@ -1090,7 +1108,7 @@ export const skillInvocations = pgTable(
     invokerUserId: text("invoker_user_id"),
     invocationEntryId: text("invocation_entry_id"),
     path: text("path", {
-      enum: ["model_tool", "host_thread_skill", "slash_context", "slash_prompt"],
+      enum: ["model_tool", "file_read", "script_run", "host_thread_skill", "slash_context", "slash_prompt"],
     }).notNull(),
     skillKey: text("skill_key").notNull(),
     skillName: text("skill_name").notNull(),
@@ -1161,6 +1179,12 @@ export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 // The SQL name stays `skill_sources`, and so do its three indexes. The
 // release before this one repairs `skill_sources` by name at boot, so a
 // rename would crash-loop the api a rollback lands on.
+export type SkillWalkCache = Record<string, {
+  directorySha: string;
+  bodySha: string | null;
+  entries?: { path: string; type: string; mode: string; sha: string; size?: number }[];
+}>;
+
 export const contentSources = pgTable(
   "skill_sources",
   {
@@ -1197,6 +1221,7 @@ export const contentSources = pgTable(
      * the current head takes no head-commit short-circuit, which is what
      * makes the mechanism survive a release that does not write it. */
     discoveryScan: text("discovery_scan"),
+    skillWalkCache: jsonb("skill_walk_cache").notNull().default({}).$type<SkillWalkCache>(),
     /** Fences sync completion against newer passes and readiness changes. */
     syncRevision: bigint("sync_revision", { mode: "number" }).notNull().default(0),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),

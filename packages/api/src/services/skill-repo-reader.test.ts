@@ -176,8 +176,15 @@ describe("GitHubSkillRepoReader", () => {
     // here and the same file's tree entry produce one manifest key.
     expect(await reader.readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")).toEqual({
       text: "# Deploy\n",
+      bytes: Buffer.from("# Deploy\n"),
       blobSha: "blob-1",
     });
+  });
+
+  it("keeps shared missing-inline-body behavior for oversized entries", async () => {
+    fixture = startGithubFixture({ getContents: () => ({ body: { type: "file", encoding: "none", content: "", sha: "big", size: 2_000_000 } }) });
+    const result = await new GitHubSkillRepoReader({ apiUrl: fixture.url }).readFile("tkhq/skills", "big.json", "main");
+    expect(result).toEqual({ text: "", blobSha: "big" });
   });
 
   it("refuses a file response with no blob sha", async () => {

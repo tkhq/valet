@@ -483,7 +483,7 @@ function serviceOf(keys: readonly string[]): SentenceService | null {
  * say `in ENG-12`, though no overview row exists for an issue.
  */
 const SENTENCE_PLACE_FIELDS: Readonly<Record<SentenceService, readonly string[]>> = {
-  slack: ["channel"],
+  slack: ["channel_name", "channel"],
   github: ["repo"],
   linear: ["identifier", "team"],
 };
@@ -569,7 +569,7 @@ export function placeParts(
 /** True for a filter that names a place: `eq` or `in` on a place field.
  * Another op on a place field (`starts with`, `contains`) is a condition. */
 function isPlaceFilter(filter: EventSubscriptionFilterWire): boolean {
-  return SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in");
+  return filter.field !== "channel_name" && SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in");
 }
 
 /** A place field as a noun: `repo` → `repository`. */
@@ -588,19 +588,16 @@ function presencePlace(
   names: SentenceNames,
 ): SentencePart[] | null {
   if (service === null) return null;
-  for (const field of SENTENCE_PLACE_FIELDS[service]) {
-    const filter = filters.find((f) => f.field === field && isPlaceFilter(f));
-    if (filter && filterEntries(filter).length > 0) return placeParts(service, filter, names);
-  }
-  // A place field with another op narrows the place without naming one:
-  // `on a repository that starts with acme/`, never `on any repository`.
-  for (const field of SENTENCE_PLACE_FIELDS[service]) {
-    const filter = filters.find((f) => f.field === field);
-    if (filter && filterEntries(filter).length > 0) {
+  const groups = filters.filter((filter) => SENTENCE_PLACE_FIELDS[service].includes(filter.field))
+    .filter((filter) => filterEntries(filter).length > 0)
+    .map((filter): SentencePart[] => {
+      if (isPlaceFilter(filter)) return placeParts(service, filter, names);
       const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
-      return [text(`${article(fieldWords(field))} that ${opWords(filter.op)} ${values}`)];
-    }
-  }
+      const place = filter.field === "channel_name" ? "a channel whose name"
+        : filter.field === "channel" ? "a channel ID that" : `${article(fieldWords(filter.field))} that`;
+      return [text(`${place} ${opWords(filter.op)} ${values}`)];
+    });
+  if (groups.length > 0) return groups.flatMap((group, index) => index === 0 ? group : [text(" and "), ...group]);
   return [text(ANY_PLACE[service])];
 }
 
@@ -724,8 +721,9 @@ export function presenceWhenParts(
 ): SentencePart[] {
   const withPlace = options.place ?? true;
   if (followsSlackThread(sub)) {
-    const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
-    const where = channel === undefined || !withPlace ? [] : [text(" in "), ...placeParts("slack", channel, names)];
+    const hasChannel = sub.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name");
+    const place = hasChannel && withPlace ? presencePlace("slack", sub.filters, names) : null;
+    const where = place === null ? [] : [text(" in "), ...place];
     return tidy([text("someone replies in the Slack thread"), ...where]);
   }
   const service = serviceOf(sub.eventKeys);

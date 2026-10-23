@@ -468,3 +468,19 @@ describe("draftThread channel words", () => {
     expect(draftThread(followed)?.channelLabel).toBe("C123ABC");
   });
 });
+
+
+describe("channel-name reply setup", () => {
+  it("starts a separate team prefix rule with future-channel consent", () => {
+    const draft = newDraft({ timezone: "UTC", preselected: {
+      team: { id: "sales", name: "Sales" }, channelNamePattern: { prefix: "lead-" },
+    } });
+    expect([...draft.events]).toEqual(["slack.app_mention"]);
+    expect(draft.assistant).toBe("team");
+    expect(draft.doKind).toBe("reply");
+    expect(draft.conditions).toEqual([
+      expect.objectContaining({ field: "channel_name", op: "prefix", value: "lead-" }),
+    ]);
+    expect(draft.anyChannel).toBe(true);
+  });
+});

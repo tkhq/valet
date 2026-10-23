@@ -43,8 +43,8 @@ const SERVICE_CHOICES: readonly EditorService[] = [...EVENT_SERVICES, "schedule"
  * no label (`channelWords`), the same words the sentence shows.
  */
 export function conditionWords(row: UiFilterRow, names: SentenceNames = {}): string {
-  const field = fieldLabel(row.field).toLowerCase();
   const exactChannel = row.field === "channel" && (row.op === "eq" || isListOp(row.op));
+  const field = row.field === "channel" && !exactChannel ? "channel ID" : fieldLabel(row.field).toLowerCase();
   let value: string;
   if (isListOp(row.op)) {
     const values = row.value.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
@@ -350,11 +350,15 @@ function Conditions({ draft, mode, onChange, services, names }: {
         )}
       </div>
       <p className="mt-1.5 text-xs text-muted">
-        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : conditionHint(service)}
+        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : `All conditions must match. ${conditionHint(service)} Use separate responses for alternative channels.`}
       </p>
+      {service === "slack" && rows.some((row) => row.field === "channel" && !["eq", "in", "not_in"].includes(row.op)) && (
+        <p className="mt-1.5 text-xs text-muted">Channel ID comparisons use IDs such as C123. For channel names, use Channel name.</p>
+      )}
       {adding && (
         <AddCondition
           fields={fields}
+          slack={service === "slack"}
           rows={[...draft.conditions]}
           onAdd={(row) => {
             onChange(addCondition(draft, row));
@@ -393,8 +397,9 @@ const ADD_OPS: readonly { value: FilterOp; label: string }[] = [
 ];
 
 /** The small picker behind `+ Add a condition`: a field these events carry, how it compares, and a value. */
-function AddCondition({ fields, rows, onAdd, onCancel }: {
+function AddCondition({ fields, slack, rows, onAdd, onCancel }: {
   fields: FilterField[];
+  slack: boolean;
   rows: UiFilterRow[];
   onAdd: (row: UiFilterRow) => void;
   onCancel: () => void;
@@ -430,6 +435,7 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
           value={field}
           onChange={(e) => {
             setField(e.target.value);
+            if (slack && e.target.value === "channel" && ["prefix", "contains", "regex", "not_prefix", "not_regex"].includes(op)) setOp("eq");
             setValue("");
             setLabel(undefined);
           }}
@@ -444,6 +450,11 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
             const next = ADD_OPS.find((o) => o.value === e.target.value);
             if (!next) return;
             setOp(next.value);
+            if (slack && field === "channel" && ["prefix", "contains", "regex", "not_prefix", "not_regex"].includes(next.value)
+              && fields.some((candidate) => candidate.field === "channel_name")) {
+              setField("channel_name");
+              setValue("");
+            }
             // A picked name labels an exact value only, not a typed list or pattern.
             if (next.value !== "eq") setLabel(undefined);
           }}
