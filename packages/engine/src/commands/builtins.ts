@@ -46,7 +46,7 @@ function cell(value: string): string {
 
 /**
  * Dispatch a built-in command by name. Unknown names throw — the registry only
- * resolves the eight `BUILTIN_COMMAND_NAMES`, so a name that reaches here is a
+ * resolves `BUILTIN_COMMAND_NAMES`, so a name that reaches here is a
  * caller bug, not user input.
  */
 export async function executeBuiltin(
@@ -57,6 +57,8 @@ export async function executeBuiltin(
   thread: Thread,
 ): Promise<BuiltinResult> {
   switch (name) {
+    case "fork":
+      return { ok: false, output: `Open this thread in the Valet app to run /fork. This host does not support thread forks. [Open this thread](${ctx?.threadUrl?.(thread.id) ?? `/threads/${encodeURIComponent(thread.id)}`}).` };
     case "help":
       return helpCommand(session);
     case "status":

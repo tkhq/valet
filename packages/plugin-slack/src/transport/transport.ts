@@ -139,6 +139,10 @@ export function parseConversationKey(key: string): SlackConversationRef | null {
   return { teamId: parts[0], channelId: parts[1], threadTs: parts[2] };
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
@@ -366,6 +370,42 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
+  /**
+   * A person's edit of their own DM message (`message_changed`). The host
+   * records it for the model and starts no reply. An edit that keeps the text
+   * (Slack also sends one when a link preview loads) is not an edit.
+   */
+  private parseEdit(
+    event: Record<string, unknown>,
+    eventId: string,
+    teamId: string,
+    update: RawChannelUpdate,
+  ): InboundChannelEvent | null {
+    if (str(event.channel_type) !== "im") return null;
+    const message = isRecord(event.message) ? event.message : undefined;
+    const previous = isRecord(event.previous_message) ? event.previous_message : undefined;
+    if (!message || message.bot_id !== undefined) return null;
+    const channel = str(event.channel);
+    const user = str(message.user);
+    const ts = str(message.ts);
+    if (!channel || !user || !ts) return null;
+    if (this.botUserId !== undefined && user === this.botUserId) return null;
+    const text = cleanSlackText(str(message.text) ?? "", this.botUserId);
+    const previousText = cleanSlackText(str(previous?.text) ?? "", this.botUserId);
+    if (text === previousText) return null;
+    const threadTs = str(message.thread_ts) ?? ts;
+    return {
+      dispatchId: `slack:${eventId}`,
+      conversationKey: conversationKeyFor(teamId, channel, threadTs),
+      sender: { externalId: user },
+      kind: "edit",
+      text,
+      previousText,
+      threadTs,
+      raw: update,
+    };
+  }
+
   private parseMessage(
     event: Record<string, unknown>,
     eventId: string,
@@ -376,6 +416,7 @@ export class SlackTransport implements ChannelTransport {
     // on the same DM; without this the agent answers itself forever.
     if (event.bot_id !== undefined && event.bot_id !== null) return null;
     const subtype = str(event.subtype);
+    if (subtype === "message_changed") return this.parseEdit(event, eventId, teamId, update);
     if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     if (subtype !== undefined && subtype !== "file_share") return null;
 

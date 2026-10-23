@@ -337,6 +337,27 @@ describe("ChannelHost.handleUpdate", () => {
     expect(rows[0]?.lastUserActivityAt).toBeGreaterThanOrEqual(thread.toThreadData().createdAt);
   });
 
+  it("records a DM edit as a note on the conversation's thread, with no reply, and ignores an edit with no thread", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await host.handleUpdate("fake", inbound({ kind: "edit", text: "too early", previousText: "x", conversationKey: "fake:dm:55", dispatchId: "edit-0" }));
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    expect(await session.threadByKey("fake:55")).toBeNull();
+
+    await host.handleUpdate("fake", inbound({ text: "deploy to prod", dispatchId: "msg-1" }));
+    const thread = session.thread("fake:99");
+    const entries = () => engineStore.getEntries(session.id, thread.id);
+    await vi.waitFor(async () => expect((await entries()).some((e) => e.type === "message" && e.role === "assistant")).toBe(true));
+    const replies = (await entries()).filter((e) => e.type === "message" && e.role === "assistant").length;
+
+    await host.handleUpdate("fake", inbound({ kind: "edit", text: "deploy to staging", previousText: "deploy to prod", dispatchId: "edit-1" }));
+
+    await vi.waitFor(async () => {
+      const note = (await entries()).find((e) => e.type === "message" && e.signal?.signalType === "slack.message_changed");
+      expect(note?.type === "message" ? note.content : "").toContain("Before: deploy to prod\nAfter: deploy to staging");
+    });
+    expect((await entries()).filter((e) => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+  });
+
   it("concurrent channel and event deliveries share one durable thread", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, {

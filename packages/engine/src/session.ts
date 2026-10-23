@@ -963,7 +963,7 @@ export class Session {
         return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel, opts.forkThread);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
         const receipt = await thread.submitPrompt(content, opts);
@@ -988,7 +988,8 @@ export class Session {
    * even while a turn streams.
    *
    * `PromptOptions` other than `threadId` (resolved by the caller),
-   * `author`, and `channel` are intentionally not forwarded: they shape
+   * `author`, `channel`, and the request-scoped `forkThread` host hook are
+   * intentionally not forwarded: they shape
    * queue submissions (queueMode, model, ...) and a command takes no queue
    * item. `author` IS forwarded, onto the echo entry — the echo is a
    * persisted user message, and on a shared session an authorless echo
@@ -1005,6 +1006,7 @@ export class Session {
     raw: string,
     author?: PromptAuthor,
     channel?: ChannelTarget,
+    forkThread?: PromptOptions["forkThread"],
   ): Promise<PromptReceipt> {
     // Echo the typed command as a persisted user message BEFORE the result.
     // A command takes no queue item, so nothing else persists the user's
@@ -1037,7 +1039,9 @@ export class Session {
       // ok:false command_result next to the already-persisted echo entry,
       // not reject the whole submission into a raw HTTP 500 (TKAI-306).
       try {
-        result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+        result = name === "fork" && forkThread
+          ? { ok: true, output: await forkThread(thread.id, raw.replace(/^\/\S+[ \t\n]?/, "").trim()) }
+          : await executeBuiltin(name, args, this, this.options.commandContext, thread);
       } catch (err) {
         result = {
           ok: false,

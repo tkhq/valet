@@ -11,8 +11,8 @@ import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-acc
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, cancelQueuedItem, createThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
-  listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread,
+  abortThread, branchPreview, cancelQueuedItem, createThread, editPreview, forkThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
+  listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
 
@@ -157,6 +157,12 @@ threadsRouter.get("/:threadId/plan", c => inThread(c, async (c, sessionId, threa
   return c.json(body);
 }, "content", "read"));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));
+// A guest who may reply may go back past their own edit. A fork creates a
+// thread in the owner's workspace, so it is the owner's (and members') alone.
+threadsRouter.post("/:threadId/branch/return", c => inThread(c, returnToBranch, "content", "reply"));
+threadsRouter.get("/:threadId/edit-preview", c => inThread(c, editPreview, "content", "reply"));
+threadsRouter.get("/:threadId/branch-preview", c => inThread(c, branchPreview, "content", "read"));
+threadsRouter.post("/:threadId/fork", c => inThread(c, forkThread, "content"));
 threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));

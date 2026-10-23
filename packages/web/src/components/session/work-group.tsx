@@ -291,7 +291,7 @@ export function ReasoningLine({ part, live }: { part: ThinkingPart; live: boolea
  * call shows as its own step; two or more fold behind a summary. `live`
  * marks the run the agent is still adding to.
  */
-export function WorkGroup({ parts, live }: { parts: readonly WorkPart[]; live: boolean }) {
+export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly WorkPart[]; live: boolean; readOnly?: boolean }) {
   const childTitles = useContext(ChildTitlesContext);
   const calls = parts.filter((part): part is ToolCallPart => part.kind === "tool_call");
   if (calls.length === 0) {
@@ -305,7 +305,7 @@ export function WorkGroup({ parts, live }: { parts: readonly WorkPart[]; live: b
     };
     return <ReasoningLine part={combined} live={live} />;
   }
-  if (parts.length === 1) return <CallStep part={calls[0]!} childTitles={childTitles} single />;
+  if (parts.length === 1) return <CallStep part={calls[0]!} childTitles={childTitles} readOnly={readOnly} single />;
 
   const running = calls.find(call => call.status === "running" || call.status === "streaming");
   const failed = calls.filter(call => call.status === "error").length;
@@ -321,17 +321,17 @@ export function WorkGroup({ parts, live }: { parts: readonly WorkPart[]; live: b
         ? part.text || part.durationMs !== undefined ? <TraceStep key={`t-${i}`} icon={<Lightbulb />} title={reasoningTitle(part)} label="Show the thought process">
           {part.text ? <div className="border-l border-line pl-3 text-sm text-muted"><Markdown>{part.text}</Markdown></div> : undefined}
         </TraceStep> : null
-        : <CallStep key={part.callId} part={part} childTitles={childTitles} />)}
+        : <CallStep key={part.callId} part={part} childTitles={childTitles} readOnly={readOnly} />)}
     </TraceList>
   </TraceLine>;
 }
 
 /** One call as a step that opens into its full card. */
-function CallStep({ part, childTitles, single = false }: { part: ToolCallPart; childTitles: ReadonlyMap<string, string>; single?: boolean }) {
+function CallStep({ part, childTitles, single = false, readOnly = false }: { part: ToolCallPart; childTitles: ReadonlyMap<string, string>; single?: boolean; readOnly?: boolean }) {
   const view = stepView(part, childTitles);
   const Line = single ? TraceLine : TraceStep;
   return <Line icon={view.status === "error" ? <AlertCircle /> : view.icon} title={view.title} detail={view.detail} status={view.status}
     defaultOpen={getToolCardDefault() === "always-expanded"}>
-    <ToolCallBlock part={part} />
+    <ToolCallBlock part={part} readOnly={readOnly} />
   </Line>;
 }

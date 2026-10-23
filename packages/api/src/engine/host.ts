@@ -14,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   Engine,
   builtinTools,
@@ -2989,9 +2989,20 @@ export class EngineHost {
     const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
     // Existing scripts can depend on absolute paths. Keep the recorded working
     // directory when adopting a legacy runtime, rather than allocating a new one.
-    const workspace = legacyRuntime && existing ? existing.workspace : execution
+    let workspace = legacyRuntime && existing ? existing.workspace : execution
       ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
       : join(homedir(), ".valet", "assistants", assistantId);
+    if (execution && principal.type === "user") {
+      // The personal root mounts its whole directory. Keep fork files outside it.
+      workspace = existing?.workspace ?? join(homedir(), ".valet", "assistant-executions", assistantId, execution.sessionId);
+      const root = await this.opts.engineStore.getSession(assistant.sessionId);
+      const sourcePath = resolve(root?.workspace ?? join(homedir(), ".valet", "assistants", assistantId));
+      const executionPath = resolve(workspace);
+      if (executionPath === sourcePath || executionPath.startsWith(`${sourcePath}${sep}`) || sourcePath.startsWith(`${executionPath}${sep}`)) {
+        throw Object.assign(new Error("This personal fork overlaps its source working directory. Start a new fork from the source conversation instead."),
+          { code: "execution_workspace_overlap", statusCode: 409 });
+      }
+    }
     await mkdir(workspace, { recursive: true });
 
     const scope: MemoryScope = { owner: principal, actorUserId: runtimeUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };

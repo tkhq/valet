@@ -2,6 +2,7 @@ import type { MessagePart } from "@valet/api/wire";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { showsLiveBody } from "./tool-renderers/types";
+import { fallbackRenderer } from "./tool-renderers/fallback";
 
 export type ToolCallPart = Extract<MessagePart, { kind: "tool_call" }>;
 
@@ -10,8 +11,8 @@ export type ToolCallPart = Extract<MessagePart, { kind: "tool_call" }>;
  * `Preview` below when it has one. A `bare` renderer shows only its
  * preview once the call completes.
  */
-export function ToolCallBlock({ part }: { part: ToolCallPart }) {
-  const renderer = pickRenderer(part.toolName, part.args);
+export function ToolCallBlock({ part, readOnly = false }: { part: ToolCallPart; readOnly?: boolean }) {
+  const renderer = readOnly ? fallbackRenderer : pickRenderer(part.toolName, part.args);
   // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
   // formatTarget/formatSummary would compute from partial, jagged args
   // (truncated paths, churning line counts) the renderer never opted to see.

@@ -25,6 +25,7 @@ export function buildToolFocusTool(): ToolDef {
     });
   const tool: ToolDef<typeof parameters> = {
     name: "focus_tools",
+    sideEffect: "none",
     description: "Focus this thread's tools for workflow diagnosis, repair, or validation. Start troubleshooting with diagnose. Select repair before editing. Select validate only for an authorized test; include each integration action the run needs. General clears focus for another task. Inherited limits and approval policies always apply. Other threads keep their own focus, and a child task gets your limits, not this focus.",
     parameters,
     riskLevel: "low",

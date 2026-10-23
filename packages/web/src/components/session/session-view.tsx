@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
+  useForkThread,
   useMessages,
   useSession,
   useThreads,
@@ -21,8 +22,11 @@ import {
   useThreadLiveStatus,
   useErrorForThread,
   useCompactingForThread,
+  type StreamMessage,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
+import { useThreadEdit } from "~/components/session/use-thread-edit";
+import { errorText } from "~/lib/error-text";
 import {
   ComposerDropContext,
   type ComposerDropChannel,
@@ -88,6 +92,7 @@ export function SessionView({
   activeTab,
   onTabChange,
   enableReplies = false,
+  onOpenThread,
   scopeNotice,
   chatOnly = false,
   active = true,
@@ -136,6 +141,11 @@ export function SessionView({
   onTabChange?: (tab: SandboxTabId) => void;
   /** Enable message-level replies on an orchestrator chat surface. */
   enableReplies?: boolean;
+  /**
+   * Opens another thread of this workspace. A host that can switch threads
+   * passes it, and messages then offer "Branch into a new thread".
+   */
+  onOpenThread?: (threadId: string) => void;
 }) {
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -190,6 +200,10 @@ export function SessionView({
   }, [tab, mobileNavigation]);
   const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
   useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
+  // Fork (docs/specs/2026-10-22-thread-edit-fork-design.md).
+  const [branchError, setBranchError] = useState<string>();
+  useEffect(() => setBranchError(undefined), [effectiveThreadId]);
+  const forkThread = useForkThread(sessionId);
 
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
@@ -211,6 +225,19 @@ export function SessionView({
       messagesQ.data.hasMore,
     );
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
+  const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
+
+  async function branch(message: StreamMessage) {
+    if (!effectiveThreadId || !onOpenThread || forkThread.isPending) return;
+    setBranchError(undefined);
+    try {
+      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id });
+      if (result.draft) useComposerDraftStore.getState().setText(draftKey(result.thread.sessionId, result.thread.id), result.draft);
+      onOpenThread(result.thread.id);
+    } catch (err) {
+      setBranchError(errorText(err, "Could not branch into a new thread. Try again."));
+    }
+  }
 
   usePendingGatesSeed(sessionId);
 
@@ -398,7 +425,11 @@ export function SessionView({
               agentBusy={agentBusy}
               pendingIds={threadQueueState?.pendingIds}
               viewerId={me.data?.id}
-              onReply={enableReplies ? setReplyTarget : undefined}
+              onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
+              {...edit.list}
+              onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
+              onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+              onOpenThread={onOpenThread}
               newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
               emptyState={emptyState}
             />
@@ -421,6 +452,11 @@ export function SessionView({
           {compacting && (
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
               Compacting context…
+            </div>
+          )}
+          {branchError && (
+            <div role="alert" className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
+              {branchError}
             </div>
           )}
           {threadError && (
@@ -454,6 +490,7 @@ export function SessionView({
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
+            {...edit.composer}
             statusLine={
               <BackgroundWorkStatusLine
                 sessionId={sessionId}

@@ -8,6 +8,7 @@ export const BUILTIN_COMMAND_NAMES = [
   "model",
   "compact",
   "new-thread",
+  "fork",
   "sessions",
 ] as const;
 
@@ -38,6 +39,8 @@ export interface CommandDef {
 
 /** Host capabilities for built-ins the engine cannot answer alone. */
 export interface CommandContext {
+  /** Link to the thread for commands that must continue in the app. */
+  threadUrl?(threadId: string): string;
   listModels(): Promise<Array<{ id: string; name: string }>>;
   listChildSessions(): Promise<Array<{ id: string; title?: string; status: string }>>;
 }

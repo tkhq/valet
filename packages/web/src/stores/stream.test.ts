@@ -93,6 +93,19 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual(parts);
   });
 
+  it("drops the rows still streaming on a thread when its branch switches", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    ingest(SESSION, messageStart("old-reply", 1));
+    ingest(SESSION, { seq: 2, ts: Date.now(), offset: offset(2), type: "message_start", threadId: "thread-2", messageId: "other-thread-reply", role: "assistant" });
+    addUserMessage(SESSION, "edited text", THREAD);
+    ingest(SESSION, { seq: 3, ts: Date.now(), offset: offset(3), type: "branch_switched", threadId: THREAD, noteEntryId: "note-1" });
+
+    const rows = useStreamStore.getState().bySession[SESSION]!.messages;
+    expect(rows.map((m) => m.id)).not.toContain("old-reply");
+    expect(rows.map((m) => m.id)).toContain("other-thread-reply");
+    expect(rows.some((m) => m.content === "edited text" && m.persistence === "optimistic")).toBe(true);
+  });
+
   it("preserves store identity for an offset-free ping", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));

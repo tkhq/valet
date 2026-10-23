@@ -139,6 +139,14 @@ export type QueueMode = "followup" | "inject" | "steer" | "collect";
  * every other path still runs it in order.
  */
 export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
+
+/**
+ * Queue item metadata flag for a record-only submission: the claim appends
+ * its user entry to the transcript and runs no model call. The model reads
+ * it on the next turn. A Slack edit uses it to tell the model what changed
+ * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ */
+export const RECORD_ONLY_KEY = "recordOnly";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 
@@ -374,6 +382,8 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /** Request-scoped host operation; must enforce the source thread permissions. */
+  forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**
    * Target thread id. When set, the prompt (or command result) goes to this
    * thread instead of the session default. Throws if no thread has this id.
@@ -571,6 +581,14 @@ export interface CompactionEntry extends BaseEntry {
   fileContext?: { read: string[]; modified: string[] };
 }
 
+/**
+ * A branch note (docs/specs/2026-10-22-thread-edit-fork-design.md). An edit
+ * or a return writes one where the active leaf moves: `branchRootId` and
+ * `branchLeafId` name the first entry and the leaf of the branch the thread
+ * left, which stays in the store. A fork note ends a copied history, and both
+ * ids name the source thread's entry that the copy ends at. `summary` is the
+ * text the model reads; `metadata.branchNote` holds the same facts for the UI.
+ */
 export interface BranchSummaryEntry extends BaseEntry {
   type: "branch_summary";
   branchRootId: string;
@@ -714,6 +732,14 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
    * (`Thread.buildTools`). */
   ownerOnly?: boolean;
   riskLevel?: RiskLevel;
+  /**
+   * What a completed call leaves behind outside the conversation, for branch
+   * notes (docs/specs/2026-10-22-thread-edit-fork-design.md). "none": nothing,
+   * like a question to the person. "files": it can change files in the
+   * working directory. Unset: it may act elsewhere, and a note lists it.
+   * A read-only tool (`concurrencySafe`) counts as "none".
+   */
+  sideEffect?: "none" | "files";
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
@@ -1885,6 +1911,9 @@ export type EngineEvent =
   | { type: "queue_state"; threadId: string; state: QueueState }
   | ModelStateEvent
   | { type: "compaction_start" | "compaction_end"; threadId: string }
+  /** The active leaf moved to another branch: an edit, or a return to an
+   * earlier version. `noteEntryId` is the branch note at the new leaf. */
+  | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
@@ -2048,7 +2077,7 @@ export interface ListOpts {
 
 export interface SubmissionAdmissionOptions {
   steer?: boolean;
-  steerScope?: "all" | "active-and-source";
+  steerScope?: "all" | "active-and-source" | "active";
   maxPending?: number;
   promoteFromItemId?: string;
 }
@@ -2069,6 +2098,21 @@ export interface SessionStore {
     entries: SessionEntry[],
     fence?: WriteFence,
   ): Promise<void>;
+  /**
+   * Append entries at a branch point and move the active leaf to the last
+   * one, only while the leaf still equals `expectedLeafId` (null: the thread
+   * has no leaf yet). The first entry's `parentId` may name any entry of the
+   * thread, or null. Returns false and writes nothing when the leaf moved.
+   * The fence check is the one `appendEntries` does. This is the only call
+   * that can move the leaf anywhere but forward
+   * (docs/specs/2026-10-22-thread-edit-fork-design.md).
+   */
+  appendBranch(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    opts: { expectedLeafId: string | null; fence?: WriteFence },
+  ): Promise<boolean>;
   /**
    * Replace an existing entry in place. Required for pruning during
    * compaction to persist tool-result elision; also useful for any
@@ -2117,7 +2161,9 @@ export interface SessionStore {
    * and returns their ids. The default "all" scope supersedes every prior
    * unsettled item. "active-and-source" supersedes only the running or
    * gate-blocked item plus promoteFromItemId, preserves queued siblings, and
-   * inserts the promoted successor at the runnable head.
+   * inserts the promoted successor at the runnable head. "active" does the
+   * same without a source item: a message edit stops the running turn and
+   * runs next, and queued messages run after it.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,
