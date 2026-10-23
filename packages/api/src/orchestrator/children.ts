@@ -25,6 +25,7 @@ import { governingThreadKeySql, isOutsideReader, outsideReaderMayReach, sharedWi
 import {
   namespaceInternalDispatchId,
   PendingCapError,
+  stripNul,
   recordSandboxDestroyed,
   recordChildTerminalSignalAbandoned,
   recordChildResultRecovered,
@@ -1195,7 +1196,8 @@ export class ChildWatcher {
       listed.push({ id: entry.id, kind: entry.kind, reason: privateReason ? "Private background work" : entry.reason,
         ...(entry.deadline !== undefined ? { deadline: new Date(entry.deadline).toISOString() } : {}) });
     }
-    return listed;
+    // Sanitize before embedding this list as JSON text in event refs as well as in the payload.
+    return stripNul(listed);
   }
 
   /** Only an explicit child_send restores a cancelled subscription. */
@@ -1418,6 +1420,7 @@ export class ChildWatcher {
   }
 
   private async publish(watch: ArmArgs, event: NormalizedEvent): Promise<void> {
+    event = stripNul(event);
     await withChildDelivery(this.deps.db, watch.childSessionId, async () => {
       let waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
       if (waiter?.status === "done") {

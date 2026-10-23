@@ -1248,6 +1248,46 @@ describe("ChildWatcher", () => {
     }
 
 
+    it.each(["result", "background-work"] as const)("delivers child settlement with NUL in %s", async kind => {
+      const c = await armedChild(`nul-${kind}`);
+      const db = api!.providers.db;
+      const result = vi.spyOn(c.childThread, "awaitResult").mockResolvedValue({
+        queueItemId: c.watch.queueItemId, outcome: "completed", text: kind === "result" ? "finished\u0000work" : "finishedwork",
+      });
+      const leases = c.engineStore.listActiveLeases.bind(c.engineStore);
+      const reason = kind === "background-work" ? vi.spyOn(c.engineStore, "listActiveLeases").mockImplementation(async id => [
+        ...await leases(id), ...(id === c.child.id ? [{ id: "ls-nul-reason", sessionId: id, threadId: c.childThread.id,
+          sourceQueueItemId: c.watch.queueItemId, ownerKind: "hold" as const, reason: "watching\u0000build",
+          createdAt: 1, deadlineAt: Date.now() + 60_000 }] : []),
+      ]) : undefined;
+      // Keep the outbox pending long enough to inspect the exact jsonb record and its nested payload.
+      const delivery = vi.spyOn(c.parentThread, "submitPrompt").mockRejectedValue(new Error("hold parent admission"));
+      try {
+        c.watcher.arm(c.watch);
+        await vi.waitFor(async () => expect(await db.select().from(childEventOutbox)).toHaveLength(1));
+        const [pending] = await db.select().from(childEventOutbox);
+        expect(pending!.event.summary).toContain("finishedwork");
+        expect(JSON.stringify(pending!.event)).not.toContain("\\u0000");
+        if (kind === "background-work") {
+          expect(pending!.event.payload).toMatchObject({ backgroundWork: [{ reason: "watchingbuild" }] });
+          expect(JSON.parse(pending!.event.refs.background_work!)).toMatchObject([{ reason: "watchingbuild" }]);
+        }
+        await vi.waitFor(async () => {
+          const waiter = await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`);
+          const digest = waiter?.eventBuffer?.find(event => event.dedupeKey === pending!.id);
+          expect(digest?.summary).toContain("finishedwork");
+          expect(JSON.stringify(digest)).not.toContain("\\u0000");
+        });
+        delivery.mockRestore();
+        await c.watcher.retryOutbox();
+        await waitFor(c.settled);
+        expect((await c.settledSignal())?.body).toContain("finishedwork");
+        expect((await c.settledSignal())?.body).not.toContain("\u0000");
+        if (kind === "background-work") expect((await c.settledSignal())?.body).toContain("watchingbuild");
+        expect(await db.select().from(childEventOutbox)).toHaveLength(0);
+      } finally { result.mockRestore(); delivery.mockRestore(); reason?.mockRestore(); }
+    });
+
     it.each(["hold", "timer", "event"] as const)("counts notified children with %s work against child and org capacity", async (kind) => {
       const c = await armedChild(`capacity-${kind}`);
       const db = api!.providers.db;

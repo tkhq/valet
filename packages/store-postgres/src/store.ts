@@ -203,10 +203,6 @@ const CLAIM_SQL = `
   SET status = 'running', attempt_id = $1, owner_id = $2,
       lease_expires_at = $3, attempt_count = attempt_count + 1,
       timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
-      child_result_delivery = CASE WHEN child_result_delivery IS NULL
-        AND (content::jsonb->>'kind' = 'signal' OR jsonb_typeof(metadata::jsonb->'parentDelegation') = 'object')
-        AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $6 AND purpose = 'child')
-        THEN 'pending' ELSE child_result_delivery END,
       updated_at = $4
   WHERE id = $5 AND session_id = $6 AND thread_id = $7
     AND status = 'queued' AND superseded_by_item_id IS NULL
@@ -1051,6 +1047,17 @@ export class PgSessionStore implements SessionStore {
       const row = result.rows[0];
       if (!row) return null;
       const item = queueItemRowToItem(rawToQueueItemRow(row));
+      const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+      const delegation = item.metadata?.parentDelegation;
+      const delegated = delegation !== null && typeof delegation === "object" && !Array.isArray(delegation);
+      // Queue JSON is stored as text so user NUL characters survive. Inspect it in JS, never through a jsonb cast.
+      if (item.childResultDelivery === undefined && (signal || delegated)) {
+        const pending = await tx.query(`UPDATE engine_queue_items SET child_result_delivery = 'pending'
+          WHERE session_id = $1 AND id = $2 AND child_result_delivery IS NULL
+            AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $1 AND purpose = 'child')
+          RETURNING id`, [claim.sessionId, claim.itemId]);
+        if (pending.rows.length) item.childResultDelivery = "pending";
+      }
       if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
         const threads = await tx.query("SELECT * FROM engine_threads WHERE session_id = $1", [claim.sessionId]);
         const scope = continuationToolScope(item.metadata, threads.rows.map((thread) => rowToThread(rawToThreadRow(thread))));
@@ -1060,7 +1067,6 @@ export class PgSessionStore implements SessionStore {
       if (item.attemptCount === 1) {
         const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2", [claim.sessionId, claim.threadId]);
         const metadata = parseJson<Record<string, unknown>>(asStringOrNull(thread.rows[0]?.metadata, "thread.metadata")) ?? {};
-        const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
         if (signal) {
           item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: metadata[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
         } else {

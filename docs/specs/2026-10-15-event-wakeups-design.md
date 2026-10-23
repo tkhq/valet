@@ -878,6 +878,9 @@ A queued `child_send` cannot replace that source or widen that scope.
 Unknown legacy provenance cannot acknowledge a newer queued delegation.
 
 The internal `child_event_outbox` stores each event before ingestion.
+Publication uses the engine digest's NUL-stripping helper on all event strings, including nested payload values and keys.
+Background-work lists are stripped before encoding them as JSON text in refs.
+The same sanitized event reaches ingestion and digest construction; NUL cannot block outbox retries.
 Its child index supports replay after a buffer drain or restart.
 Publication drains older pending results before newer results.
 Creation timestamps increase per child to preserve result order.
@@ -900,6 +903,8 @@ Transient delivery errors keep the event for the next pass.
 Permanent denials write the existing drop-log reasons.
 `engine_queue_items.child_result_delivery` records `pending`, `delivered`, or `denied` for child signal results.
 The claim writes `pending` before a signal or parent-delegated turn starts.
+Queue content and metadata remain JSON-encoded text, including escaped NUL characters.
+The claim reads provenance in JavaScript and writes `pending` inside the claim transaction, without casting user JSON to `jsonb`.
 Only sessions with the durable `purpose: child` task marker receive this state.
 A parent link alone does not identify a task child.
 Team assistant conversations do not receive pending child-result markers.

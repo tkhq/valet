@@ -1317,6 +1317,35 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect((await store.getSession("without-ref"))?.startRef).toBeUndefined();
     });
 
+    it.each(["interactive", "signal", "metadata", "delegation"] as const)("claims NUL-bearing %s work and advances the thread", async kind => {
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item: QueueItem = { ...queueItem("nul-head", 100, 100),
+        content: kind === "signal" ? { kind: "signal", signalType: "event.matched", body: "paste\u0000here" }
+          : kind === "interactive" ? "paste\u0000here" : "safe content",
+        ...(kind === "interactive" ? { author: { id: "user", interactive: true } } : {}),
+        metadata: { note: "meta\u0000data", ...(kind === "delegation" ? {
+          parentDelegation: { parentSessionId: "parent", parentThreadId: "parent-thread", note: "nested\u0000data" },
+        } : {}) },
+      };
+      await store.admitSubmission("sess-1", "th-1", item);
+      await store.admitSubmission("sess-1", "th-1", queueItem("after-nul", 200, 200));
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id,
+        attemptId: "nul-attempt", ownerId: "owner" });
+      expect(claimed).toMatchObject({ status: "running", content: item.content, metadata: item.metadata });
+      expect(claimed?.childResultDelivery).toBe(kind === "signal" || kind === "delegation" ? "pending" : undefined);
+      const fence = { itemId: item.id, attemptId: "nul-attempt" };
+      await store.reserveSettlement("sess-1", "th-1", item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", item.id, fence);
+      const next = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: "after-nul",
+        attemptId: "next-attempt", ownerId: "owner" });
+      expect(next).toMatchObject({ id: "after-nul", status: "running", attemptCount: 1 });
+      const nextFence = { itemId: "after-nul", attemptId: "next-attempt" };
+      await store.reserveSettlement("sess-1", "th-1", "after-nul", { outcome: "completed" }, nextFence);
+      await store.finalizeSettlement("sess-1", "th-1", "after-nul", nextFence);
+      expect(await store.listUnsettledSubmissions("sess-1")).toEqual([]);
+    });
+
     it("marks child signal delivery pending at claim and resolves it without changing execution or activity", async () => {
       await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
       await store.saveThread("sess-1", newThread("sess-1"));

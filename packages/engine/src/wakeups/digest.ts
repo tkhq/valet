@@ -29,8 +29,14 @@ export function cutUtf8(text: string, maxBytes: number): string {
   return text.slice(0, end);
 }
 
-function stripNul(value: string): string {
-  return value.replaceAll("\u0000", "");
+/** Copy a JSON-shaped value with NUL removed from every string, including object keys. */
+export function stripNul<T>(value: T): T {
+  if (typeof value === "string") return value.replaceAll("\u0000", "") as T;
+  if (Array.isArray(value)) return value.map(entry => stripNul(entry)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [stripNul(key), stripNul(entry)])) as T;
+  }
+  return value;
 }
 
 /**

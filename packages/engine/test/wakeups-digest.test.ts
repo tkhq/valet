@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundEventDigest, cutUtf8 } from "../src/wakeups/digest.js";
+import { boundEventDigest, cutUtf8, stripNul } from "../src/wakeups/digest.js";
 import { EVENT_DIGEST_TEXT_MAX_BYTES } from "../src/wakeups/types.js";
 
 describe("cutUtf8", () => {
@@ -48,5 +48,15 @@ describe("boundEventDigest", () => {
     const out = boundEventDigest({ ...base, text: "a".repeat(EVENT_DIGEST_TEXT_MAX_BYTES + 10) });
     expect(out.text).toHaveLength(EVENT_DIGEST_TEXT_MAX_BYTES);
     expect(out.dedupeKey).toBe("d");
+  });
+});
+
+describe("stripNul", () => {
+  it("copies nested event payloads and strips string values and keys without changing scalar types", () => {
+    const input = { "nul\u0000key": [null, true, 42, { reason: "watching\u0000build" }], text: "done\u0000" };
+    expect(stripNul(input)).toEqual({ nulkey: [null, true, 42, { reason: "watchingbuild" }], text: "done" });
+    expect(input.text).toBe("done\u0000");
+    expect(input["nul\u0000key"][3]).toEqual({ reason: "watching\u0000build" });
+    expect(stripNul("a\\u0000b")).toBe("a\\u0000b");
   });
 });
