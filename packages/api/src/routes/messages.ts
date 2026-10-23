@@ -778,6 +778,11 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     nextShare = body.share === "off" ? null : body.share;
   }
 
+  // Home keeps its one name (`HOME_THREAD_TITLE`): a stored title would never
+  // show, so a rename is refused instead of silently ignored.
+  if (body.title !== undefined && thread.key === HOME_THREAD_KEY) {
+    return c.json({ error: "Home keeps its name. Rename another thread instead." }, 400);
+  }
   // Validate the title before changing any thread settings.
   let nextTitle: string | null | undefined;
   if (body.title !== undefined) {
