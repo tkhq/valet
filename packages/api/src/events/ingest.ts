@@ -10,7 +10,7 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, Principal, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
+import { FILTER_OPS, filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import {
@@ -264,7 +264,7 @@ async function logSlackBotDiagnostic(
 function failedFilterFields(filters: unknown, key: string, payload: unknown, catalog: EventCatalogEntry[], teamMention: boolean, subjects?: string[]) {
   if (!Array.isArray(filters)) return [];
   const valid = filters.filter((f): f is SubscriptionFilter => isRecord(f) && typeof f.field === "string" &&
-    (f.op === "eq" || f.op === "in" || f.op === "prefix" || f.op === "contains" || f.op === "regex") &&
+    (FILTER_OPS as readonly unknown[]).includes(f.op) &&
     (typeof f.value === "string" || Array.isArray(f.value) && f.value.every(v => typeof v === "string")));
   return valid.filter(f => !(teamMention && key === "slack.app_mention" && f.field === "user") &&
     !filtersMatch(payload, key, [f], catalog, subjects)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));

@@ -9,10 +9,14 @@
  * a button the shell no longer has, and assert the drawer still closes on
  * the backdrop, the ✕, and any link inside it (thread selection).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell, useSidebarControls } from "./app-shell";
+
+let phoneLayout = false;
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => phoneLayout }));
+afterEach(() => { phoneLayout = false; vi.unstubAllGlobals(); });
 
 /** Stands in for the real nav: the shell publishes the controls, something
  * else renders them. Also reports what it was given, so the "no sidebar"
@@ -90,20 +94,20 @@ describe("AppShell — mobile sidebar drawer", () => {
     renderShell();
     const opener = screen.getByRole("button", { name: /open threads/i });
     await userEvent.click(opener);
-    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Threads" }));
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Valet" }));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
 
-  it("shows a Threads header whose close button closes the list", async () => {
+  it("shows a Valet header whose close button closes the drawer", async () => {
     renderShell();
     await userEvent.click(screen.getByRole("button", { name: /open threads/i }));
-    const dialog = screen.getByRole("dialog", { name: "Threads" });
-    expect(within(dialog).getByText("Threads").className).not.toContain("sr-only");
+    const dialog = screen.getByRole("dialog", { name: "Valet" });
+    expect(within(dialog).getByText("Valet").className).not.toContain("sr-only");
     // One close control, in the header row; no floating corner X.
     expect(within(dialog).getAllByRole("button", { name: /close/i })).toHaveLength(1);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Close threads" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close menu" }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
@@ -155,3 +159,28 @@ describe("AppShell — mobile sidebar drawer", () => {
   expect(screen.getByRole("separator").getAttribute("aria-valuenow")).toBe("312");
   localStorage.removeItem("valet:sidebar-width");
  });
+
+
+describe("AppShell — phone visual viewport", () => {
+  it("tracks keyboard height and viewport offset, then releases the phone viewport on desktop", () => {
+    phoneLayout = true;
+    const viewport = Object.assign(new EventTarget(), { height: 520, offsetTop: 48, scale: 1 });
+    vi.stubGlobal("visualViewport", viewport);
+    const { container, rerender } = render(<AppShell topNav={<NavProbe />}>content</AppShell>);
+    const shell = container.querySelector<HTMLElement>("[data-mobile-app-shell]");
+    expect(shell).not.toBeNull();
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("520px");
+    expect(shell?.style.getPropertyValue("--app-viewport-top")).toBe("48px");
+    expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("520px");
+    viewport.height = 800;
+    viewport.offsetTop = 0;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("800px");
+    expect(shell?.style.getPropertyValue("--app-viewport-top")).toBe("0px");
+    phoneLayout = false;
+    rerender(<AppShell topNav={<NavProbe />}>content</AppShell>);
+    expect(container.querySelector("[data-mobile-app-shell]")).toBeNull();
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("");
+    expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("");
+  });
+});

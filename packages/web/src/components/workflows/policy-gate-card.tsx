@@ -30,6 +30,7 @@ import {
   DropdownMenuItem,
 } from "~/components/primitives";
 import { RiskBadge } from "./risk-badge";
+import { GatePayloadPreview, hasGatePayloadPreview, type GateTool } from "~/components/session/gate-payload";
 import { cn } from "~/lib/cn";
 
 interface PolicyGateCardProps {
@@ -48,7 +49,12 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const serviceAction = service && action ? `${service}.${action}` : gate.nodeId;
 
   const busy = resolve.isPending;
-  const paramsLabel = actionParamsLabel(gate.gateParams);
+  // Cut parameters could preview a wrong message, so only whole ones do.
+  const previewTool: GateTool | undefined = service && action && isRecord(gate.gateParams) && !gate.gateParamsTruncated
+    ? { id: `${service}.${action}`, args: gate.gateParams }
+    : undefined;
+  const preview = previewTool && hasGatePayloadPreview(previewTool) ? previewTool : undefined;
+  const paramsLabel = preview ? undefined : actionParamsLabel(gate.gateParams);
   // Only the action permission stops later runs from asking. A lender's
   // workflow consent covers their account and keeps its own copy.
   const confirmingStopAsking = confirmation?.approved === true && confirmation.scope === "workflow" && !gate.approver;
@@ -122,10 +128,11 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           <span className="font-medium text-ink">{paramsLabel.value}</span>
         </p>
       )}
+      {preview && <GatePayloadPreview tool={preview} />}
       {gate.gateParams != null && (
         <details className="text-xs text-muted">
           <summary className="min-h-11 cursor-pointer select-none py-3 font-medium sm:min-h-0 sm:py-0 text-ink">
-            Parameters
+            {preview ? "Details" : "Parameters"}
           </summary>
           <pre className="mt-1.5 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
             {JSON.stringify(gate.gateParams, null, 2)}
@@ -255,4 +262,8 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       )}
     </Callout>
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

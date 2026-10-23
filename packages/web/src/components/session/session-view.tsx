@@ -1,9 +1,13 @@
 import { ListTree } from "lucide-react";
+import { QuickReplies } from "./quick-replies";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { ResolvedGateNotice, useResolvedGateNotice } from "./gate-outcome";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
+  useForkThread,
   useMessages,
   useSession,
   useThreads,
@@ -18,8 +22,11 @@ import {
   useThreadLiveStatus,
   useErrorForThread,
   useCompactingForThread,
+  type StreamMessage,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
+import { useThreadEdit } from "~/components/session/use-thread-edit";
+import { errorText } from "~/lib/error-text";
 import {
   ComposerDropContext,
   type ComposerDropChannel,
@@ -28,6 +35,8 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
+import { PinnedPlan } from "~/components/session/thread-plan";
+import { ProcessingStatus } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
@@ -47,6 +56,11 @@ import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, LoadingRow } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
+import { flattenChildWork, useChildWork } from "~/api/child-work";
+import { AgentsLine } from "./agents-line";
+import { ThreadReplyContext } from "./send-as-person";
+import { ChildTitlesContext } from "./work-group";
+import { MobileConversationLayout, type MobileConversationView } from "~/components/home/mobile-conversation-layout";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -78,10 +92,18 @@ export function SessionView({
   activeTab,
   onTabChange,
   enableReplies = false,
+  onOpenThread,
   scopeNotice,
   chatOnly = false,
   active = true,
+  composerAccessory,
+  emptyState,
 }: {
+  /** Shown above the composer, under the thread's own pending gate. Home
+   * uses it for approvals from work in other threads. */
+  composerAccessory?: ReactNode;
+  /** Shown in place of the transcript while the thread has no messages. */
+  emptyState?: ReactNode;
   /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
   active?: boolean;
   chatOnly?: boolean;
@@ -119,9 +141,19 @@ export function SessionView({
   onTabChange?: (tab: SandboxTabId) => void;
   /** Enable message-level replies on an orchestrator chat surface. */
   enableReplies?: boolean;
+  /**
+   * Opens another thread of this workspace. A host that can switch threads
+   * passes it, and messages then offer "Branch into a new thread".
+   */
+  onOpenThread?: (threadId: string) => void;
 }) {
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const mobile = useMobileLayout();
+  const mobileNavigation = mobile && !panel;
+  const [mobileView, setMobileView] = useState<MobileConversationView>("chat");
+  useEffect(() => setMobileView("chat"), [sessionId, activeThreadId, mobileNavigation]);
+  const chatActive = active && (!mobileNavigation || mobileView === "chat");
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
@@ -141,7 +173,7 @@ export function SessionView({
   function changeTab(next: SandboxTabId) {
     const active = document.activeElement;
     restoreTabFocus.current = next !== tab && active instanceof HTMLElement
-      && active.getAttribute("role") === "tab"
+      && (active.getAttribute("role") === "tab" || (mobileNavigation && next === "chat"))
       && Boolean(viewRef.current?.contains(active));
     if (tab === "browser" && next !== "browser") browserWatch.open();
     setTab(next);
@@ -161,12 +193,17 @@ export function SessionView({
   useLayoutEffect(() => {
     if (!restoreTabFocus.current) return;
     restoreTabFocus.current = false;
-    // Chat owns the sliding strip; gateway tabs own the fixed strip.
-    // Keep keyboard focus on the selected replacement when it moves.
-    viewRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
-  }, [tab]);
+    // The compact phone back button unmounts on Chat. Return focus to
+    // its menu without opening the keyboard; desktop keeps the selected tab.
+    const selector = mobileNavigation ? '[aria-label="Thread menu"]' : '[role="tab"][aria-selected="true"]';
+    viewRef.current?.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+  }, [tab, mobileNavigation]);
   const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
   useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
+  // Fork (docs/specs/2026-10-22-thread-edit-fork-design.md).
+  const [branchError, setBranchError] = useState<string>();
+  useEffect(() => setBranchError(undefined), [effectiveThreadId]);
+  const forkThread = useForkThread(sessionId);
 
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
@@ -176,7 +213,7 @@ export function SessionView({
   // member's user messages under their name instead of "You".
   const me = useMe();
   // Who else has this thread open; this view reports it on the session socket.
-  useAnnounceThreadView(sessionId, effectiveThreadId);
+  useAnnounceThreadView(sessionId, chatActive ? effectiveThreadId : undefined);
   const viewers = useActiveViewers(sessionId, effectiveThreadId, me.data?.id);
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
@@ -188,10 +225,33 @@ export function SessionView({
       messagesQ.data.hasMore,
     );
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
+  const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
+
+  async function branch(message: StreamMessage) {
+    if (!effectiveThreadId || !onOpenThread || forkThread.isPending) return;
+    setBranchError(undefined);
+    try {
+      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id });
+      if (result.draft) useComposerDraftStore.getState().setText(draftKey(result.thread.sessionId, result.thread.id), result.draft);
+      onOpenThread(result.thread.id);
+    } catch (err) {
+      setBranchError(errorText(err, "Could not branch into a new thread. Try again."));
+    }
+  }
 
   usePendingGatesSeed(sessionId);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const resolvedGate = useResolvedGateNotice(pendingGate ?? undefined);
+  // The agents this session started: their titles name them in work lines,
+  // and the ones this thread is running show as one line under the transcript.
+  const childWorkQuery = useChildWork(sessionId);
+  const childWork = useMemo(() => flattenChildWork(childWorkQuery.data), [childWorkQuery.data]);
+  const childTitles = useMemo(() => new Map(childWork.map(child => [child.sessionId, child.title])), [childWork]);
+  // A widget's buttons reply into the thread on screen, as the person.
+  const widgetReplyTarget = useMemo(() => effectiveThreadId && !session.data?.readOnlyReason
+    ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
+  // Quick replies are a phone affordance: tap an answer instead of typing it.
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
@@ -283,7 +343,7 @@ export function SessionView({
   }
 
   const summaryControl = effectiveThreadId ? (
-    <Popover key={`${sessionId}:${effectiveThreadId}`} open={active && summaryOpen} onOpenChange={setSummaryOpen}>
+    <Popover key={`${sessionId}:${effectiveThreadId}`} open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
           <ListTree className="h-4 w-4" aria-hidden />
@@ -324,6 +384,7 @@ export function SessionView({
       summaryControl={summaryControl}
       onOpenView={hideBrowser ? undefined : changeTab}
       viewers={viewers}
+      scopeNotice={scopeNotice}
     />
   );
   const sandboxTabs = !hideBrowser && (
@@ -335,13 +396,14 @@ export function SessionView({
       notice={scopeNotice}
       sandbox={stream.sandbox}
       viewsInMenu={!panel}
+      compact={mobileNavigation}
     />
   );
 
-  return (
+  const content = (
     <ComposerDropContext.Provider value={dropChannel}>
     <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
-      {(panel || tab !== "chat") && (
+      {(panel || tab !== "chat" || mobileNavigation) && (
         <>
           {panel ? (!hidePanelHeader && (renderPanelHeader ? renderPanelHeader(summaryControl) : <div className="flex shrink-0 items-center border-b border-line pr-3"><PanelHeader sessionId={sessionId} threadId={effectiveThreadId} title={session.data.title} onClose={onClose} />{summaryControl}</div>)) : sessionHeader}
           {sandboxTabs}
@@ -352,18 +414,28 @@ export function SessionView({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PageDropTarget>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <ThreadReplyContext.Provider value={widgetReplyTarget}>
+            <ChildTitlesContext.Provider value={childTitles}>
             <MessageList
-              header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+              footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
+              header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
               messages={stream.messages}
               threadId={effectiveThreadId}
               onOpenChild={onOpenChild}
               agentBusy={agentBusy}
               pendingIds={threadQueueState?.pendingIds}
               viewerId={me.data?.id}
-              onReply={enableReplies ? setReplyTarget : undefined}
+              onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
+              {...edit.list}
+              onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
+              onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+              onOpenThread={onOpenThread}
               newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
+              emptyState={emptyState}
             />
-            {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
+            </ChildTitlesContext.Provider>
+            </ThreadReplyContext.Provider>
+            {chatActive && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
                 sessionId={sessionId}
@@ -382,6 +454,11 @@ export function SessionView({
               Compacting context…
             </div>
           )}
+          {branchError && (
+            <div role="alert" className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
+              {branchError}
+            </div>
+          )}
           {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
               <span className="font-medium">{threadError.code}:</span> {threadError.message}
@@ -391,14 +468,21 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
+          <PinnedPlan threadId={effectiveThreadId} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
+          {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} />}
+          {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
+          {composerAccessory}
           <TypingLine viewers={viewers} />
+          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
           {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
+            active={chatActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
@@ -406,6 +490,7 @@ export function SessionView({
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
+            {...edit.composer}
             statusLine={
               <BackgroundWorkStatusLine
                 sessionId={sessionId}
@@ -423,6 +508,9 @@ export function SessionView({
     </div>
     </ComposerDropContext.Provider>
   );
+  return mobileNavigation
+    ? <MobileConversationLayout view={mobileView} onViewChange={setMobileView}>{content}</MobileConversationLayout>
+    : content;
 }
 
 function PanelHeader({

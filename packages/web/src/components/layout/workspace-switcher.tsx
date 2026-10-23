@@ -86,11 +86,13 @@ export function WorkspaceSwitcher({
   onSelect,
   /** True on `/chat`, where the open conversation must follow the scope. */
   navigateOnSelect,
+  className,
 }: {
   options: WorkspaceOption[];
   activeKey: string;
   onSelect: (key: string) => void;
   navigateOnSelect: boolean;
+  className?: string;
 }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -111,7 +113,7 @@ export function WorkspaceSwitcher({
           type="button"
           variant="ghost"
           size="sm"
-          className="min-w-0 shrink gap-1.5 max-w-[11rem] md:shrink-0"
+          className={cn("min-w-0 shrink gap-1.5 max-w-[11rem] md:shrink-0", className)}
           aria-label={`Workspace: ${active.label}. Change workspace`}
         >
           {active.isTeam ? (

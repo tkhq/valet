@@ -38,6 +38,7 @@ import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/mo
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { wireHomeTaskReports } from "./home/service.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
@@ -332,6 +333,8 @@ wireAttentionRouter({
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
 wireThreadPullRequests(providers.eventStream, providers.db);
+// A task started from home reports back to home when its first run ends.
+wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
 // work can settle in the boot chain, so this subscribes before it.
 wireDeliveryTurnFailures(providers.eventStream, providers.db);

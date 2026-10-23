@@ -14,6 +14,7 @@ import { useStreamStore } from "~/stores/stream";
 import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
+import { qkThreadPlan } from "./thread-plan";
 
 const MAX_RETRY_MS = 8_000;
 /** `WebSocket.OPEN`. */
@@ -261,6 +262,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
           void qc.invalidateQueries({ queryKey: ["settings"] });
         }
+        // Only `update_plan` changes a thread's plan.
+        if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {
+          void qc.invalidateQueries({ queryKey: qkThreadPlan(wire.threadId) });
+        }
         if (wire.type === "title.updated") {
           invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
         }
@@ -274,7 +279,11 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         // rewrites the transcript, or the model (and so the budget) changes.
         // A turn_end refetch can land while the turn still holds a one-off
         // model, so the turn's settlement refreshes the reading once more.
-        if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched") {
+        // A branch switch rewrites the thread's history for every viewer.
+        if (wire.type === "branch_switched") {
+          void qc.invalidateQueries({ queryKey: qk.messages(sessionId, wire.threadId) });
+        }
+        if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched" || wire.type === "branch_switched") {
           void qc.invalidateQueries({
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
           });

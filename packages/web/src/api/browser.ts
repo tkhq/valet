@@ -93,7 +93,7 @@ export const browserApi = {
     request<SessionBrowserResponse>(sessionId, "/start", {}),
   settings: (
     sessionId: string,
-    body: Partial<Pick<BrowserSettings, "enabled" | "audience" | "grants">>,
+    body: Partial<Pick<BrowserSettings, "enabled" | "grants">>,
   ) => request<SessionBrowserResponse>(sessionId, "/settings", body, "PATCH"),
   control: (sessionId: string, body: CommandBody<"control">) =>
     command(sessionId, "/control", body),

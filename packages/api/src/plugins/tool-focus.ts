@@ -8,7 +8,7 @@ const READS = ["list_workflows", "get_workflow", "get_permissions", "get_run", "
 const REPAIRS = ["save_workflow", "patch_workflow", "update_model", "add_aggregate", "propose_trigger", "propose_schedule", "create_trigger", "update_trigger", "delete_trigger", "create_schedule", "update_schedule", "delete_schedule", "create_webhook", "delete_webhook"];
 const RUNS = ["start_run", "retry_run", "cancel_run", "resolve_approval"];
 const ORIGIN_REPLIES = ["slack.reply_to_origin", "slack.react_to_origin", "slack.reply_file_to_origin", "telegram.reply_to_origin"];
-const TOOLS = ["focus_tools", "list_tools", "call_tool", "skill", "ask_question", "ask_approval", "switch_model", "thread_read", "task", "child_read", "child_status", "mem_read", "mem_search"];
+const TOOLS = ["focus_tools", "list_tools", "call_tool", "skill", "ask_question", "ask_approval", "switch_model", "thread_read", "task", "child_read", "child_status", "mem_read", "mem_search", "update_plan"];
 export type WorkflowFocus = "diagnose" | "repair" | "validate" | "general";
 
 export function workflowToolFocus(phase: WorkflowFocus, actions: string[] = [], tools: string[] = []): ToolScope | undefined {
@@ -25,6 +25,7 @@ export function buildToolFocusTool(): ToolDef {
     });
   const tool: ToolDef<typeof parameters> = {
     name: "focus_tools",
+    sideEffect: "none",
     description: "Focus this thread's tools for workflow diagnosis, repair, or validation. Start troubleshooting with diagnose. Select repair before editing. Select validate only for an authorized test; include each integration action the run needs. General clears focus for another task. Inherited limits and approval policies always apply. Other threads keep their own focus, and a child task gets your limits, not this focus.",
     parameters,
     riskLevel: "low",

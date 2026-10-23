@@ -1,4 +1,4 @@
-import { Braces, ChevronRight, FileText, Reply } from "lucide-react";
+import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Pencil, Reply } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import type {
   MessagePart,
@@ -11,15 +11,17 @@ import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Markdown } from "~/components/markdown";
 import { CodeBlock } from "~/components/code-block";
 import { CopyButton } from "./tool-renderers/tool-shell";
-import { pickRenderer, ToolShell } from "./tool-renderers";
-import { showsLiveBody } from "./tool-renderers/types";
-import { ToolBody } from "./tool-renderers/tool-shell";
-import { Thinking } from "./tool-renderers/thinking";
+import { ToolCallBlock } from "./tool-call-block";
+import { ReasoningLine, segmentParts, withExtraWork, WorkGroup, workKey, type WorkPart } from "./work-group";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
+import { Button, Tooltip } from "~/components/primitives";
+
+/** Message actions show on hover, and always at phone width, where there is no hover. */
+const ROW_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100";
 
 /**
  * Per-message 👍/👎 (TKAI-334): finer-grained than the session-level rating
@@ -56,10 +58,32 @@ export const MessageItem = memo(function MessageItem({
   suppressEmptyPlaceholder = false,
   viewerId,
   onReply,
+  onEdit,
+  onBranch,
+  dimmed = false,
   ratings = true,
+  readOnly = false,
   continuation = false,
+  absorbedLeading = 0,
+  extraWork,
+  extraWorkLive = false,
+  workedForMs,
 }: {
   message: StreamMessage;
+  /** Leading parts the row above shows in its own work line (`MessageList`). */
+  absorbedLeading?: number;
+  /** Quiet calls from the next messages of this turn, shown in this row's last work line. */
+  extraWork?: WorkPart[];
+  /** The agent is still adding to `extraWork`. */
+  extraWorkLive?: boolean;
+  /** How long the turn ran, shown after its last reply. */
+  workedForMs?: number;
+  /** Puts this message back in the composer to edit. Set only when the viewer may edit it. */
+  onEdit?: (message: StreamMessage) => void;
+  /** Copies the conversation up to this message into a new thread. */
+  onBranch?: (message: StreamMessage) => void;
+  /** An edit in progress replaces this row. */
+  dimmed?: boolean;
   /** The same assistant turn as the row above: no repeated author, time,
    *  and model line. A reply's actions move under its text. */
   continuation?: boolean;
@@ -72,21 +96,28 @@ export const MessageItem = memo(function MessageItem({
   onReply?: (target: MessageReplyReference) => void;
   /** The per-reply rating buttons; see `MessageList`'s prop doc. */
   ratings?: boolean;
+  /** Historical previews show receipts without message actions or interactive tool renderers. */
+  readOnly?: boolean;
 }) {
   if (isEmptyInterruption(message)) return null;
+  const fyi = fyiText(message);
+  if (fyi) return <FyiLine id={message.id} text={fyi} createdAt={message.createdAt} />;
   const isUser = message.role === "user";
   const collapseStructured = message.role === "assistant" && message.completed === true &&
     message.stopReason !== "error" && !message.settledOutcome;
   const copyText = messageCopyText(message);
+  const segments = readOnly
+    ? message.parts.map(part => ({ kind: "part" as const, part }))
+    : withExtraWork(segmentParts(message.parts.slice(absorbedLeading)), extraWork);
   // Defined only for another member's message on a shared session; the
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
-  const actions = <>
+  const actions = readOnly ? null : <>
     {message.role === "assistant" && message.completed === true && copyText && onReply && (
       <button
         type="button"
         onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
-        className="inline-flex h-[22px] items-center gap-1 rounded px-1.5 text-xs leading-none text-muted/70 opacity-0 transition-opacity hover:bg-ink-wash hover:text-[--fg] group-hover:opacity-100 focus:opacity-100"
+        className="inline-flex h-[22px] items-center gap-1 rounded px-1.5 text-xs leading-none text-muted/70 opacity-0 transition-opacity hover:bg-ink-wash hover:text-[--fg] group-hover:opacity-100 focus:opacity-100 max-sm:min-h-11 max-sm:opacity-100"
         aria-label="Reply to message"
       >
         <Reply className="h-3.5 w-3.5" aria-hidden />
@@ -94,16 +125,34 @@ export const MessageItem = memo(function MessageItem({
       </button>
     )}
     {ratings && message.role === "assistant" && <MessageRating message={message} />}
+    {onEdit && (
+      <Tooltip content="Edit message">
+        <Button variant="ghost" size="icon" aria-label="Edit message" className={ROW_ACTION} onClick={() => onEdit(message)}>
+          <Pencil className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </Tooltip>
+    )}
     {copyText && (
       <CopyButton
         getText={() => copyText}
         label="Copy message"
-        className="opacity-0 group-hover:opacity-100"
+        className="inline-flex items-center justify-center opacity-0 group-hover:opacity-100 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11"
       />
+    )}
+    {onBranch && (
+      <Tooltip content="Branch into a new thread">
+        <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION} onClick={() => onBranch(message)}>
+          <GitBranch className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </Tooltip>
     )}
   </>;
   return (
-    <article data-message-id={message.id} className={cn("group min-w-0 px-5 sm:px-8", continuation ? "pb-3" : "py-3")}>
+    <article
+      data-message-id={message.id}
+      aria-disabled={dimmed || undefined}
+      className={cn("group min-w-0 px-5 sm:px-8 transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
+    >
       {/* Row background spans full width; the content column is capped at a
           readable measure and centered — prose and tool cards both benefit. */}
       <div className={cn(
@@ -118,6 +167,7 @@ export const MessageItem = memo(function MessageItem({
               </span>
               <span>•</span>
               <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+              {isUser && message.editOf && <span className="text-muted/80">edited</span>}
               {message.role === "assistant" && message.model && (
                 <span
                   className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
@@ -143,37 +193,63 @@ export const MessageItem = memo(function MessageItem({
             {message.parts.length === 0 && message.content && (
               <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} />
             )}
-            {message.parts.map((part, i) => (
-              // Tool cards hold per-mount UI state (expansion, user-touch
-              // override), so key them by their stable callId: an index key
-              // hands one call's state to a different call whenever the
-              // parts array shifts (streaming sweep, message_update
-              // replacement). Text/thinking parts are stateless and
-              // positional, so the index is fine for them.
-              <PartView
-                key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
-                part={part}
-                skillMeta={isUser ? message.skill : undefined}
-                detectSkill={isUser}
-                collapseStructured={collapseStructured}
-              />
-            ))}
-            {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
-              <p className="text-xs italic text-muted [overflow-wrap:anywhere]">
-                {emptyReplyNotice(message)}
+            {segments.map((segment, i) => segment.kind === "work"
+              // Work lines and tool cards hold per-mount state (open or
+              // closed), so key them by a stable callId: an index key hands
+              // one call's state to another whenever the parts shift.
+              // Text parts are stateless and positional.
+              ? <WorkGroup key={workKey(segment.parts, i)} parts={segment.parts}
+                  live={i === segments.length - 1 && (message.completed === false || extraWorkLive)} readOnly={readOnly} />
+              : <PartView
+                  key={segment.part.kind === "tool_call" ? `tc-${segment.part.callId}` : `${segment.part.kind}-${i}`}
+                  part={segment.part}
+                  readOnly={readOnly}
+                  skillMeta={isUser ? message.skill : undefined}
+                  detectSkill={isUser}
+                  collapseStructured={collapseStructured}
+                />)}
+            {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (message.errorMessage?.trim()
+              ? <p role="alert" className="flex items-start gap-1.5 text-sm text-danger-600 dark:text-danger-500 [overflow-wrap:anywhere]">
+                <AlertCircle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{emptyReplyNotice(message)}</span>
               </p>
-            )}
+              : <p className="text-xs italic text-muted [overflow-wrap:anywhere]">{emptyReplyNotice(message)}</p>)}
+            {workedForMs !== undefined && <p className="text-xs text-muted">Worked for {formatDuration(workedForMs)}</p>}
           </div>
           {/* A continuation has no header line, so a reply's actions sit
               under its text instead. A tool-only continuation has none. */}
+          {/* On a phone the row takes no space until focus: a phone has no
+              hover, and an invisible row left a gap under every reply. */}
           {continuation && copyText && (
-            <div className="flex items-center justify-end gap-1 text-xs text-muted">{actions}</div>
+            <div className="flex items-center justify-end gap-1 text-xs text-muted max-md:max-h-0 max-md:overflow-hidden max-md:group-hover:max-h-8 max-md:group-focus-within:max-h-8">{actions}</div>
           )}
         </div>
       </div>
     </article>
   );
 });
+
+/** The text of a one-line "FYI:" update from Valet: a note that needs nothing from the person. */
+export function fyiText(message: StreamMessage): string | undefined {
+  if (message.role !== "assistant" || message.completed !== true || message.stopReason === "error") return undefined;
+  if (message.parts.some((part) => part.kind !== "text" && part.kind !== "thinking")) return undefined;
+  const text = messageCopyText(message).trim();
+  if (!/^FYI:/i.test(text) || text.length > 400 || text.includes("\n")) return undefined;
+  return text.replace(/^FYI:\s*/i, "");
+}
+
+/** A quiet one-line update. Real replies keep the full message layout. */
+function FyiLine({ id, text, createdAt }: { id: string; text: string; createdAt: number }) {
+  return (
+    <article data-message-id={id} className="min-w-0 px-5 py-1 sm:px-8">
+      <p className="mx-auto flex w-full min-w-0 max-w-3xl items-baseline gap-2 text-sm text-muted">
+        <span className="shrink-0 text-xs font-medium uppercase tracking-wide">FYI</span>
+        <span className="min-w-0 [overflow-wrap:anywhere]">{text}</span>
+        <span className="ml-auto shrink-0 text-xs" title={new Date(createdAt).toLocaleString()}>{formatTime(createdAt)}</span>
+      </p>
+    </article>
+  );
+}
 
 export function isEmptyInterruption(message: StreamMessage): boolean {
   return message.stopReason === "abort" && isEmptyAssistantMessage(message);
@@ -205,6 +281,15 @@ function emptyReplyNotice(message: StreamMessage): string {
   if (!error) return "No response. Try again or choose another model.";
   const sentence = /[.!?…]$/.test(error) ? error : `${error}.`;
   return `This turn failed: ${sentence} Try again or choose another model.`;
+}
+
+/** "45s", "3m 12s", or "1h 4m": how long a turn ran. Exported for tests. */
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 /**
@@ -262,7 +347,9 @@ function PartView({
   skillMeta,
   detectSkill,
   collapseStructured,
+  readOnly,
 }: {
+  readOnly?: boolean;
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
@@ -272,9 +359,9 @@ function PartView({
     case "text":
       return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} />;
     case "thinking":
-      return <Thinking text={part.text} />;
+      return <ReasoningLine part={part} live={false} />;
     case "tool_call":
-      return <ToolCallBlock part={part} />;
+      return <ToolCallBlock part={part} readOnly={readOnly} />;
   }
 }
 
@@ -445,52 +532,6 @@ function UserAttachmentStrip({
         </div>
       )}
     </div>
-  );
-}
-
-function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
-  const renderer = pickRenderer(part.toolName, part.args);
-  // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
-  // formatTarget/formatSummary would compute from partial, jagged args
-  // (truncated paths, churning line counts) the renderer never opted to see.
-  const live = showsLiveBody(renderer, part.status);
-  const target = live ? renderer.formatTarget(part.args, part.toolName) : undefined;
-  const summary = live
-    ? renderer.formatSummary?.(part.args, part.result, part.status, part.toolName)
-    : undefined;
-  const Body = renderer.Body;
-  const Preview = renderer.Preview;
-
-  return (
-    <>
-      <ToolShell
-        toolName={part.toolName}
-        category={renderer.category}
-        Icon={renderer.Icon}
-        target={target}
-        summary={summary}
-        status={part.status}
-      >
-        {live ? (
-          <Body
-            args={part.args}
-            result={part.result}
-            status={part.status}
-            error={part.error}
-            toolName={part.toolName}
-          />
-        ) : (
-          // Args are still streaming and this renderer didn't opt in — hold
-          // the body until the call is complete, like before streaming existed.
-          <ToolBody className="text-[11px] text-muted italic font-mono">
-            receiving arguments…
-          </ToolBody>
-        )}
-      </ToolShell>
-      {Preview ? (
-        <Preview args={part.args} result={part.result} status={part.status} error={part.error} toolName={part.toolName} />
-      ) : null}
-    </>
   );
 }
 

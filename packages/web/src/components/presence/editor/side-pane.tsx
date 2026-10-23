@@ -205,12 +205,12 @@ export function EditorNotices(props: SidePaneProps) {
       ))}
 
       {collisions !== null && collisions !== undefined && (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 gap-2">
           {[...collisions.report.blocking, ...collisions.report.overlapping].map((c) => {
             const place = collisionPlace(c.subscription, props.names);
             return (
-              <p key={c.subscription.id} className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">
-                <Ref kind="line" text={c.subscription.name} /> also acts on {collisionWords(c.sharedKeys)}
+              <p key={c.subscription.id} className="min-w-0 border-l-2 border-accent-500 pl-3 text-[13px] text-ink [overflow-wrap:anywhere]">
+                <Ref kind="line" text={c.subscription.name} className="max-w-full whitespace-normal [overflow-wrap:anywhere] align-top" /> also acts on {collisionWords(c.sharedKeys)}
                 {place !== null ? ` for ${place}` : ""}. <span className="text-muted">Both will run.</span>
               </p>
             );

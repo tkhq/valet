@@ -437,7 +437,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   if (content.trim() === "") {
     return c.json(
       {
-        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or larger than the 1 MB GitHub serves inline. Point the path at the exported definition file.`,
+        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or exceeds GitHub’s 1 MB inline limit. Export a smaller workflow definition, then import that file.`,
       },
       400,
     );

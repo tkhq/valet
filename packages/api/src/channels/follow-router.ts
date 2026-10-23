@@ -1,4 +1,5 @@
 import { readAppearance } from "@valet/shared";
+import { slackEditSignal } from "./slack-edit.js";
 import { and, eq } from "drizzle-orm";
 import { eventSubscriptions } from "../schema/index.js";
 /**
@@ -160,14 +161,20 @@ export async function handleFollowedMessage(
   deps: FollowRouterDeps,
   args: { orgId: string; raw: unknown },
 ): Promise<void> {
+  const edit = slackEditFields(args.raw);
+  if (edit) return serialize(`${args.orgId}:${edit.channel}:${edit.threadTs}`, () => routeFollowedEdit(deps, args.orgId, edit));
   const f = slackMessageFields(args.raw);
   if (!f) return;
   // Slack emits message and app_mention envelopes for the same bot mention.
   // Reserve addressed messages for app_mention, independent of delivery order.
   if (addressesBot(deps.botUserId, f.text)) return;
-  const key = `${args.orgId}:${f.channel}:${f.threadTs}`;
+  return serialize(`${args.orgId}:${f.channel}:${f.threadTs}`, () => routeFollowedMessage(deps, args.orgId, f));
+}
+
+/** Run `work` after the earlier routing work for the same followed thread. */
+function serialize(key: string, work: () => Promise<void>): Promise<void> {
   const prior = routeChains.get(key) ?? Promise.resolve();
-  const run = prior.then(() => routeFollowedMessage(deps, args.orgId, f));
+  const run = prior.then(work);
   const tail: Promise<void> = run
     .catch(() => undefined)
     .then(() => {
@@ -175,6 +182,73 @@ export async function handleFollowedMessage(
     });
   routeChains.set(key, tail);
   return run;
+}
+
+/**
+ * The fields of a person's edit (`message_changed`) of a threaded message,
+ * or null. An edit that keeps the text (Slack sends one when a link preview
+ * loads) is not an edit. Exported for tests.
+ */
+export function slackEditFields(raw: unknown): (SlackMessageFields & { previousText: string }) | null {
+  if (typeof raw !== "object" || raw === null || !("event_id" in raw) || typeof raw.event_id !== "string" || !("event" in raw)) return null;
+  const event = raw.event;
+  if (typeof event !== "object" || event === null) return null;
+  const e = event as Record<string, unknown>; // a Slack event object; each field is narrowed below
+  if (e.type !== "message" || e.subtype !== "message_changed" || typeof e.channel !== "string") return null;
+  const message = typeof e.message === "object" && e.message !== null ? e.message as Record<string, unknown> : undefined; // narrowed below
+  const previous = typeof e.previous_message === "object" && e.previous_message !== null ? e.previous_message as Record<string, unknown> : undefined; // narrowed below
+  if (!message || typeof message.bot_id === "string") return null;
+  if (typeof message.thread_ts !== "string" || typeof message.ts !== "string") return null;
+  const text = typeof message.text === "string" ? message.text : "";
+  const previousText = typeof previous?.text === "string" ? previous.text : "";
+  if (text === previousText) return null;
+  return {
+    eventId: raw.event_id,
+    channel: e.channel,
+    threadTs: message.thread_ts,
+    ts: message.ts,
+    user: typeof message.user === "string" ? message.user : undefined,
+    text,
+    previousText,
+  };
+}
+
+/** Record an edit in a followed thread for the bound assistant, with no reply. */
+async function routeFollowedEdit(
+  deps: FollowRouterDeps,
+  orgId: string,
+  f: SlackMessageFields & { previousText: string },
+): Promise<void> {
+  const admitted = await admitFollowedMessage(deps.db, orgId, f);
+  if (!admitted || admitted.actorUserId === null) return;
+  const { follow, actorUserId } = admitted;
+  const threadKey = `slack:${f.channel}:${f.threadTs}`;
+  const normalize = async (text: string) => (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text }))?.text ?? text;
+  const sender = (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text: f.text }))?.senderName ?? f.user;
+  try {
+    await deliverToAssistantThread(deps, {
+      orgId,
+      owner: { type: follow.ownerType, id: follow.ownerId },
+      actorUserId,
+      destination: follow.sessionId !== null && follow.threadId !== null
+        ? { kind: "target", sessionId: follow.sessionId, threadId: follow.threadId, reason: "conversation_follow" }
+        : { kind: "key", key: threadKey },
+      signal: slackEditSignal({
+        previousText: await normalize(f.previousText),
+        text: await normalize(f.text),
+        attributes: { channel: f.channel, ...(sender ? { sender } : {}) },
+        origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
+      }),
+      dispatchId: `slack:follow:${f.eventId}`,
+      slackChannel: f.channel,
+      mismatchReason: "followed_target_mismatch",
+      recordOnly: true,
+    });
+  } catch (err) {
+    // A Slack retry of the same edit is a redelivery, not an error.
+    if (err instanceof ConflictError) return;
+    throw err;
+  }
 }
 
 async function routeFollowedMessage(
@@ -249,6 +323,11 @@ async function routeFollowedMessage(
         origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
       },
       ...(author ? { author } : {}),
+      // The sender's own words answer the thread's open question, when one
+      // waits. A body that carries missed messages goes in whole, so the
+      // assistant reads them; the question stays open.
+      ...(normalized.text.trim() && attributes.rehydrated !== "true"
+        ? { answer: { userId: actorUserId, text: normalized.text, channelType: "slack", channelId: threadKey } } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
       slackChannel: f.channel,
       mismatchReason: "followed_target_mismatch",

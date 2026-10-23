@@ -117,7 +117,6 @@ const inputSchema = Type.Object({
 });
 const settingsSchema = Type.Object({
   enabled: Type.Boolean(),
-  audience: Type.Union([Type.Literal("owner"), Type.Literal("team")]),
   grants: Type.Array(
     Type.Object({
       id,

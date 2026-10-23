@@ -23,6 +23,9 @@ import type {
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  EditPreviewResponse,
+  ForkThreadResponse,
+  ReturnToBranchResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
@@ -636,6 +639,10 @@ export function useSendPrompt(sessionId: string) {
       qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread => thread.id === data.threadId
         ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) } : thread));
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
+      if (data.fork) {
+        void qc.invalidateQueries(threadListFilters(sessionId));
+        if (data.fork.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(data.fork.sessionId));
+      }
     },
   });
 }
@@ -667,6 +674,42 @@ export function useAbortThread(sessionId: string) {
 export function useCancelQueuedItem() {
   return useMutation<{ ok: true }, Error, { threadId: string; itemId: string }>({
     mutationFn: ({ threadId, itemId }) => api.cancelQueuedItem(threadId, itemId),
+  });
+}
+
+/** Copies the conversation up to a message into a new thread
+ * (docs/specs/2026-10-22-thread-edit-fork-design.md). The new thread joins
+ * the thread list; the caller opens it. */
+export function useForkThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string }>({
+    mutationFn: ({ threadId, entryId }) => api.forkThread(threadId, { entryId }),
+    onSuccess: (result) => {
+      void qc.invalidateQueries(threadListFilters(sessionId));
+      if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
+    },
+  });
+}
+
+/** What an edit of `entryId` would replace, for the edit bar before Send. */
+export function useEditPreview(threadId: string | undefined, entryId: string | undefined) {
+  return useQuery<EditPreviewResponse>({
+    queryKey: ["thread-edit-preview", threadId, entryId],
+    queryFn: () => api.editPreview(threadId!, entryId!),
+    enabled: !!threadId && !!entryId,
+    staleTime: 0,
+  });
+}
+
+/** Goes back to the version a branch note left. The `branch_switched` wire
+ * event refetches the messages for every viewer. */
+export function useReturnToBranch(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ReturnToBranchResponse, Error, { threadId: string; noteEntryId: string; restoreFiles?: boolean }>({
+    mutationFn: ({ threadId, noteEntryId, restoreFiles }) => api.returnToBranch(threadId, { noteEntryId, ...(restoreFiles ? { restoreFiles } : {}) }),
+    onSuccess: (_result, { threadId }) => {
+      void qc.invalidateQueries({ queryKey: qk.messages(sessionId, threadId) });
+    },
   });
 }
 

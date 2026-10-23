@@ -2,7 +2,7 @@ import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -34,8 +34,11 @@ export interface PromptAuthor {
    * the turn runs as; `name` is the sender. Tools the sender may not use on
    * their own refuse such a turn (`ToolContext.externalSender`). */
   externalSender?: boolean;
-  /** The host verified a direct human submission, rather than a token or channel sender. */
+  /** The host verified direct human input, not a token caller or unattended event. */
   interactive?: boolean;
+  /** The host verified a linked person's direct channel message. Never set
+   * from an event payload or inherited by a background signal. */
+  directChannel?: boolean;
 }
 
 export interface ChannelTarget {
@@ -137,6 +140,14 @@ export type QueueMode = "followup" | "inject" | "steer" | "collect";
  * every other path still runs it in order.
  */
 export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
+
+/**
+ * Queue item metadata flag for a record-only submission: the claim appends
+ * its user entry to the transcript and runs no model call. The model reads
+ * it on the next turn. A Slack edit uses it to tell the model what changed
+ * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ */
+export const RECORD_ONLY_KEY = "recordOnly";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 
@@ -374,6 +385,8 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /** Request-scoped host operation; must enforce the source thread permissions. */
+  forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**
    * Target thread id. When set, the prompt (or command result) goes to this
    * thread instead of the session default. Throws if no thread has this id.
@@ -440,7 +453,7 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;
@@ -571,6 +584,14 @@ export interface CompactionEntry extends BaseEntry {
   fileContext?: { read: string[]; modified: string[] };
 }
 
+/**
+ * A branch note (docs/specs/2026-10-22-thread-edit-fork-design.md). An edit
+ * or a return writes one where the active leaf moves: `branchRootId` and
+ * `branchLeafId` name the first entry and the leaf of the branch the thread
+ * left, which stays in the store. A fork note ends a copied history, and both
+ * ids name the source thread's entry that the copy ends at. `summary` is the
+ * text the model reads; `metadata.branchNote` holds the same facts for the UI.
+ */
 export interface BranchSummaryEntry extends BaseEntry {
   type: "branch_summary";
   branchRootId: string;
@@ -714,6 +735,14 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
    * (`Thread.buildTools`). */
   ownerOnly?: boolean;
   riskLevel?: RiskLevel;
+  /**
+   * What a completed call leaves behind outside the conversation, for branch
+   * notes (docs/specs/2026-10-22-thread-edit-fork-design.md). "none": nothing,
+   * like a question to the person. "files": it can change files in the
+   * working directory. Unset: it may act elsewhere, and a note lists it.
+   * A read-only tool (`concurrencySafe`) counts as "none".
+   */
+  sideEffect?: "none" | "files";
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
@@ -760,6 +789,8 @@ export interface ToolContext {
   readonly toolScope?: ToolScope;
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
+  /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
+  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -771,8 +802,8 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
-  /** Authenticated author of a direct interactive prompt, never a signal creator
-   * or delegated workflow/child actor. Does not confer any resource role. */
+  /** Authenticated author of a direct prompt or host-verified direct channel
+   * message, never a background signal or delegated actor. Confers no role. */
   interactiveActor?: { id: string };
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */
@@ -804,7 +835,7 @@ export interface ToolContext {
   /** Record a model-tool skill invocation in the current thread. */
   recordSkillInvocation?: (
     skill: SkillSource,
-    path: "model_tool",
+    path: "model_tool" | "file_read" | "script_run",
     injectedText: string,
   ) => Promise<SkillInvocationFact>;
   /**
@@ -1122,6 +1153,9 @@ export interface DecisionGateRequest {
 }
 
 export interface DecisionResolution {
+  /** Transient engine-supplied context from the actual gate, not a caller's
+   * answer. Empty means a legacy gate had no context. Not persisted here. */
+  gateContext?: Record<string, unknown>;
   /** Inline images supplied with a question answer; persisted for restart replay. */
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;
@@ -1832,6 +1866,7 @@ export type ModelStateEvent =
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
+  | { type: "thinking_update"; threadId: string; messageId: string; index: number; part: Extract<MessagePart, { type: "thinking" }> }
   | {
       /**
        * Live-only tool-call argument streaming (same ephemeral plane as
@@ -1882,6 +1917,9 @@ export type EngineEvent =
   | { type: "queue_state"; threadId: string; state: QueueState }
   | ModelStateEvent
   | { type: "compaction_start" | "compaction_end"; threadId: string }
+  /** The active leaf moved to another branch: an edit, or a return to an
+   * earlier version. `noteEntryId` is the branch note at the new leaf. */
+  | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
@@ -2045,7 +2083,7 @@ export interface ListOpts {
 
 export interface SubmissionAdmissionOptions {
   steer?: boolean;
-  steerScope?: "all" | "active-and-source";
+  steerScope?: "all" | "active-and-source" | "active";
   maxPending?: number;
   promoteFromItemId?: string;
 }
@@ -2068,6 +2106,21 @@ export interface SessionStore {
     entries: SessionEntry[],
     fence?: WriteFence,
   ): Promise<void>;
+  /**
+   * Append entries at a branch point and move the active leaf to the last
+   * one, only while the leaf still equals `expectedLeafId` (null: the thread
+   * has no leaf yet). The first entry's `parentId` may name any entry of the
+   * thread, or null. Returns false and writes nothing when the leaf moved.
+   * The fence check is the one `appendEntries` does. This is the only call
+   * that can move the leaf anywhere but forward
+   * (docs/specs/2026-10-22-thread-edit-fork-design.md).
+   */
+  appendBranch(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    opts: { expectedLeafId: string | null; fence?: WriteFence },
+  ): Promise<boolean>;
   /**
    * Replace an existing entry in place. Required for pruning during
    * compaction to persist tool-result elision; also useful for any
@@ -2116,7 +2169,9 @@ export interface SessionStore {
    * and returns their ids. The default "all" scope supersedes every prior
    * unsettled item. "active-and-source" supersedes only the running or
    * gate-blocked item plus promoteFromItemId, preserves queued siblings, and
-   * inserts the promoted successor at the runnable head.
+   * inserts the promoted successor at the runnable head. "active" does the
+   * same without a source item: a message edit stops the running turn and
+   * runs next, and queued messages run after it.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,
@@ -2530,6 +2585,15 @@ export interface RoleSpec {
   source?: "session" | "thread" | "prompt" | "plugin" | "sandbox";
 }
 
+export interface SkillFile {
+  path: string;
+  blobSha: string;
+  size: number;
+  mode: string;
+  /** Absent in inventories. Load bytes only when a file is used. */
+  bytes?: Uint8Array;
+}
+
 /**
  * One skill, in the Agent Skills format
  * (https://agentskills.io/specification). `name`, `description`, and the
@@ -2541,6 +2605,10 @@ export interface RoleSpec {
  * them. See `docs/specs/2026-08-05-agent-skills-design.md`.
  */
 export interface SkillSource {
+  /** Companion files stored by repository sync. */
+  files?: SkillFile[];
+  /** Reads one companion by this skill's immutable stored ID and blob SHA. */
+  readFile?: (file: SkillFile) => Promise<Uint8Array | undefined>;
   name: string;
   description?: string;
   content: string;
@@ -2559,7 +2627,7 @@ export interface SkillSource {
   storedSkillId?: string;
   /** Plugin manifest name. Present only for plugin skills. */
   pluginName?: string;
-  /** SHA-256 of the injected body. */
+  /** SHA-256 of the body and stored companion file identities. */
   contentSha?: string;
   /** Product-facing source label. */
   origin?: "plugin" | "local" | "repo";
@@ -2577,6 +2645,8 @@ export interface SkillSource {
 
 export type SkillInvocationPath =
   | "model_tool"
+  | "file_read"
+  | "script_run"
   | "host_thread_skill"
   | "slash_context"
   | "slash_prompt";

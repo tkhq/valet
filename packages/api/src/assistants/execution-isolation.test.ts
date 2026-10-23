@@ -1,11 +1,14 @@
 import { afterEach, expect, it } from "vitest";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { restoreOneSession } from "../boot-restore.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { agentSessions, assistants, childWatches, assistantExecutions, workflowDefinitions, workflowRuns, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, assistantExecutions, legacyAssistantRuntimes, workflowDefinitions, workflowRuns, teamMembers, sessionThreads, users } from "../schema/index.js";
+import type { CreateSessionResponse, CreateThreadResponse, ForkThreadResponse } from "../wire/types.js";
 import { eq, sql } from "drizzle-orm";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "./service.js";
 
@@ -23,6 +26,7 @@ it("keeps team helper files and memory separate across members and cache rebuild
   expect(alice.sessionId).toBe(repeated.sessionId);
   const bob = await open("test-member");
   expect(bob.sessionId).not.toBe(alice.sessionId);
+  expect(alice.session.options.workspace).toBe(join(homedir(), ".valet", "assistants", alice.assistant.id, "executions", alice.sessionId));
   expect(bob.session.options.workspace).not.toBe(alice.session.options.workspace);
   await alice.session.sandbox.writeFile("/workspace/private.txt", "Private acquisition");
   await expect(bob.session.sandbox.readFile("/workspace/private.txt")).rejects.toThrow();
@@ -288,4 +292,202 @@ it("keeps shared team memory across web threads and private workflow memory acro
   expect((await request("wf:private-again:step", "notes/private.md")).status).toBe(404);
   await p.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
   expect((await fetch(browserPath, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+});
+
+it("isolates personal fork executions without changing ordinary personal conversations", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const owner = { type: "user", id: "local-user" } as const;
+  const meta = { orgId: "local-org", actorUserId: "local-user" };
+  const root = await ensureDefaultAssistantSession(p, owner, meta);
+  const ordinary = await ensureAssistantExecution(p, owner, meta, "web:ordinary");
+  expect(ordinary.sessionId).toBe(root.sessionId);
+  const first = await ensureAssistantExecution(p, owner, meta, "web:personal-fork", { isolated: true });
+  expect(first.sessionId).not.toBe(root.sessionId);
+  const repeated = await ensureAssistantExecution(p, owner, meta, "web:personal-fork", { isolated: true });
+  expect(repeated.sessionId).toBe(first.sessionId);
+  const second = await ensureAssistantExecution(p, owner, meta, "web:personal-fork-again", { isolated: true });
+  expect(second.sessionId).not.toBe(first.sessionId);
+  expect(new Set([root.session.options.workspace, first.session.options.workspace, second.session.options.workspace]).size).toBe(3);
+  const paths = [root.session.options.workspace, first.session.options.workspace, second.session.options.workspace].map(path => resolve(path));
+  for (const left of paths) {
+    for (const right of paths) {
+      if (left !== right) expect(left.startsWith(`${right}${sep}`)).toBe(false);
+    }
+  }
+  expect(first.session.options.workspace).toBe(join(homedir(), ".valet", "assistant-executions", root.assistant.id, first.sessionId));
+  await first.session.sandbox.writeFile("/workspace/private.txt", "fork only");
+  await expect(root.session.sandbox.readFile("/workspace/private.txt")).rejects.toThrow();
+  await expect(second.session.sandbox.readFile("/workspace/private.txt")).rejects.toThrow();
+  const thread = await first.session.createThread("web:personal-fork");
+  const listed = await fetch(`${api.baseUrl}/api/threads?workspace=user`);
+  expect(await listed.json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id, sessionId: first.sessionId })]) });
+  const [row] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, first.sessionId));
+  expect(row).toMatchObject({ userId: owner.id, ownerType: "user", ownerId: owner.id });
+  expect((await fetch(`${api.baseUrl}/api/threads/${thread.id}`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/sessions/${first.sessionId}/sandbox-jwt`, { method: "POST", headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+  p.engineHost.evictCache(first.sessionId);
+  const restored = await p.engineHost.sessionFor(first.sessionId, await loadSessionMeta(p.db, row));
+  expect(restored.options.workspace).toBe(first.session.options.workspace);
+  expect(restored.options.owner).toEqual(owner);
+  expect(restored.threadById(thread.id)?.id).toBe(thread.id);
+  expect((await restored.toData()).parentSessionId).toBe(root.sessionId);
+});
+
+it("forks a personal assistant and its fork into private discoverable executions", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const root = await ensureDefaultAssistantSession(p, { type: "user", id: "local-user" }, { orgId: "local-org", actorUserId: "local-user" });
+  const source = await root.session.createThread("web:fork-source");
+  await p.engineStore.appendEntries(root.sessionId, source.id, [
+    { id: "personal-u", sessionId: root.sessionId, threadId: source.id, parentId: null, type: "message", role: "user", content: "original", author: { id: "test-member", name: "Guest" }, createdAt: 1 },
+    { id: "personal-a", sessionId: root.sessionId, threadId: source.id, parentId: "personal-u", type: "message", role: "assistant", content: "answer", parts: [{ type: "text", text: "answer" }], stopReason: "end_turn", createdAt: 2 },
+  ]);
+  await p.db.insert(sessionThreads).values({ id: source.id, sessionId: root.sessionId, shareMode: "reply", createdAt: 1 });
+  const fork = async (threadId: string, entryId: string) => {
+    const response = await fetch(`${api.baseUrl}/api/threads/${threadId}/fork`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entryId }),
+    });
+    expect(response.status).toBe(201);
+    return await response.json() as ForkThreadResponse;
+  };
+  const first = await fork(source.id, "personal-a");
+  expect(first.thread.sessionId).not.toBe(root.sessionId);
+  const firstSession = p.engineHost.liveSession(first.thread.sessionId);
+  const firstThread = firstSession?.threadById(first.thread.id);
+  if (!firstSession || !firstThread) throw new Error("Missing fork execution");
+  const copied = await firstThread.readEntries();
+  expect(copied.find(e => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "test-member", name: "Guest" } });
+  const answer = copied.find(e => e.type === "message" && e.role === "assistant");
+  if (!answer) throw new Error("Missing copied answer");
+  const second = await fork(first.thread.id, answer.id);
+  expect(new Set([root.sessionId, first.thread.sessionId, second.thread.sessionId]).size).toBe(3);
+  const secondSession = p.engineHost.liveSession(second.thread.sessionId);
+  expect(new Set([root.session.options.workspace, firstSession.options.workspace, secondSession?.options.workspace]).size).toBe(3);
+  const detail = await fetch(`${api.baseUrl}/api/threads/${second.thread.id}`);
+  expect(await detail.json()).toMatchObject({ sessionId: second.thread.sessionId });
+  const [privateRow] = await p.db.select().from(sessionThreads).where(eq(sessionThreads.id, first.thread.id));
+  expect(privateRow?.shareMode ?? null).toBeNull();
+  const guest = await fetch(`${api.baseUrl}/api/threads/${first.thread.id}`, { headers: { "x-valet-test-user-id": "test-member" } });
+  expect(guest.status).toBe(404);
+  const guestFork = await fetch(`${api.baseUrl}/api/threads/${source.id}/fork`, {
+    method: "POST", headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" }, body: JSON.stringify({ entryId: "personal-a" }),
+  });
+  expect(guestFork.status).toBe(403);
+  p.engineHost.evictCache(first.thread.sessionId);
+  p.engineHost.evictCache(second.thread.sessionId);
+  const listed = await fetch(`${api.baseUrl}/api/threads?workspace=user`);
+  expect(await listed.json()).toMatchObject({ threads: expect.arrayContaining([
+    expect.objectContaining({ id: first.thread.id, sessionId: first.thread.sessionId }),
+    expect.objectContaining({ id: second.thread.id, sessionId: second.thread.sessionId }),
+  ]) });
+  const sourceEntries = await source.readEntries();
+  expect(sourceEntries.map(e => e.id)).toEqual(["personal-u", "personal-a"]);
+});
+
+it("refuses standalone forks without sharing files or changing runtime configuration", async () => {
+  api = await bootTestApi();
+  const created = await fetch(`${api.baseUrl}/api/sessions`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace: "/tmp" }),
+  });
+  expect(created.status).toBe(201);
+  const { id: sessionId } = await created.json() as CreateSessionResponse;
+  const p = api.providers;
+  const [row] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
+  const source = await p.engineHost.sessionFor(sessionId, await loadSessionMeta(p.db, row));
+  const thread = await source.ensureDefaultThread();
+  await p.engineStore.appendEntries(sessionId, thread.id, [{
+    id: "standalone-entry", sessionId, threadId: thread.id, parentId: null,
+    type: "message", role: "user", content: "keep my tools and persona", author: { id: "local-user" }, createdAt: 1,
+  }]);
+  const beforeSessions = await p.db.select().from(agentSessions);
+  const beforeAssistants = await p.db.select().from(assistants);
+  const beforeThreads = await p.engineStore.listThreads(sessionId);
+  const fork = await fetch(`${api.baseUrl}/api/threads/${thread.id}/fork`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entryId: "standalone-entry" }),
+  });
+  expect(fork.status).toBe(400);
+  expect(await fork.json()).toMatchObject({ error: expect.stringContaining("Start a new session instead.") });
+  expect(await p.db.select().from(agentSessions)).toEqual(beforeSessions);
+  expect(await p.db.select().from(assistants)).toEqual(beforeAssistants);
+  expect(await p.engineStore.listThreads(sessionId)).toEqual(beforeThreads);
+});
+
+it("refuses a retained assistant fork instead of changing to the owner's default identity", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const owner = { type: "user", id: "local-user" } as const;
+  const meta = { orgId: "local-org", actorUserId: owner.id };
+  const retained = await ensureDefaultAssistantSession(p, owner, meta);
+  const source = await retained.session.createThread("web:retained-source");
+  await p.engineStore.appendEntries(retained.sessionId, source.id, [{
+    id: "retained-answer", sessionId: retained.sessionId, threadId: source.id, parentId: null,
+    type: "message", role: "assistant", content: "retained identity", stopReason: "end_turn", createdAt: 1,
+  }]);
+  await p.db.update(assistants).set({ ownerId: `${owner.id}:retired:${retained.assistant.id}`, archivedAt: 2 })
+    .where(eq(assistants.id, retained.assistant.id));
+  await p.db.insert(legacyAssistantRuntimes).values({ assistantId: retained.assistant.id, sessionId: retained.sessionId,
+    orgId: meta.orgId, ownerType: owner.type, ownerId: owner.id });
+  const current = await ensureDefaultAssistantSession(p, owner, meta);
+  expect(current.assistant.id).not.toBe(retained.assistant.id);
+  expect((await fetch(`${api.baseUrl}/api/threads/${source.id}`)).status).toBe(200);
+  const before = await p.db.select().from(assistantExecutions);
+  const response = await fetch(`${api.baseUrl}/api/threads/${source.id}/fork`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entryId: "retained-answer" }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: expect.stringContaining("retained assistant") });
+  expect(await p.db.select().from(assistantExecutions)).toEqual(before);
+});
+
+it("keeps source fork settings when ordinary new threads use defaults", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const root = await ensureDefaultAssistantSession(p, { type: "user", id: "local-user" }, { orgId: "local-org", actorUserId: "local-user" });
+  const source = await root.session.createThread("web:settings-source", { model: "m", reasoning: "high" });
+  await p.engineStore.appendEntries(root.sessionId, source.id, [{
+    id: "settings-answer", sessionId: root.sessionId, threadId: source.id, parentId: null,
+    type: "message", role: "assistant", content: "custom settings", stopReason: "end_turn", createdAt: 1,
+  }]);
+  await p.db.update(users).set({ newThreadBehavior: "use_defaults", defaultModel: "l", defaultReasoning: "low" })
+    .where(eq(users.id, "local-user"));
+  const fork = await fetch(`${api.baseUrl}/api/threads/${source.id}/fork`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entryId: "settings-answer" }),
+  });
+  expect(fork.status).toBe(201);
+  const { thread } = await fork.json() as ForkThreadResponse;
+  expect(thread).toMatchObject({ model: "m", reasoning: "high" });
+  expect(await p.engineStore.getThread(thread.sessionId, thread.id)).toMatchObject({ model: "m", reasoning: "high" });
+  const ordinary = await fetch(`${api.baseUrl}/api/threads`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceThreadId: source.id }),
+  });
+  expect(ordinary.status).toBe(201);
+  expect(await ordinary.json() as CreateThreadResponse).toMatchObject({ model: "l", reasoning: "low" });
+});
+
+it("refuses to restore a personal execution whose recorded directory overlaps its root", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const owner = { type: "user", id: "local-user" } as const;
+  const meta = { orgId: "local-org", actorUserId: owner.id };
+  const root = await ensureDefaultAssistantSession(p, owner, meta);
+  const execution = await ensureAssistantExecution(p, owner, meta, "web:old-overlap", { isolated: true });
+  const workspace = join(root.session.options.workspace, "executions", execution.sessionId);
+  await p.db.execute(sql`UPDATE engine_sessions SET workspace = ${workspace} WHERE id = ${execution.sessionId}`);
+  p.engineHost.evictCache(execution.sessionId);
+  await expect(ensureAssistantExecution(p, owner, meta, "web:old-overlap", { isolated: true }))
+    .rejects.toThrow("overlaps its source working directory");
+});
+
+it("preserves a recorded disjoint personal execution directory on restore", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const owner = { type: "user", id: "local-user" } as const;
+  const meta = { orgId: "local-org", actorUserId: owner.id };
+  const execution = await ensureAssistantExecution(p, owner, meta, "web:recorded-disjoint", { isolated: true });
+  const workspace = join(homedir(), ".valet", "assistant-executions", execution.assistant.id, `retained-${execution.sessionId}`);
+  await p.db.execute(sql`UPDATE engine_sessions SET workspace = ${workspace} WHERE id = ${execution.sessionId}`);
+  p.engineHost.evictCache(execution.sessionId);
+  const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-disjoint", { isolated: true });
+  expect(restored.session.options.workspace).toBe(workspace);
 });

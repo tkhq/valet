@@ -277,6 +277,18 @@ export async function governingThreadKey(
   return result.rows[0]?.key ?? null;
 }
 
+/**
+ * The audience a copy of a team thread must keep, by the rules
+ * `threadVisibility` reads: the person the thread is private to, if any, and
+ * every Slack channel whose privacy gates it, including those of the threads
+ * above it.
+ */
+export async function threadAudience(db: Providers["db"], sessionId: string, threadId: string): Promise<{ privateTo?: string; channels: string[] }> {
+  const key = await governingThreadKey(db, sessionId, threadId);
+  const channels = gatingChannels(key, await threadSlackChannels(db, sessionId, threadId));
+  return isPersonalThreadKey(key) ? { privateTo: privateThreadOwner(key) ?? "", channels } : { channels };
+}
+
 /** The thread that started a child session, or null for any other session. */
 async function spawningThread(db: Providers["db"], sessionId: string): Promise<{ sessionId: string; threadId: string } | null> {
   const result = await db.execute(sql`SELECT parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${sessionId}`) as {

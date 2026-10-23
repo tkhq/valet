@@ -16,18 +16,19 @@ vi.mock("@tanstack/react-router", () => ({
   }, useNavigate: () => navigate,
 }));
 vi.mock("~/hooks/use-workspace-conversation", () => ({ useWorkspaceConversation: () => ({ data, error, refetch: vi.fn() }) }));
-vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ key: "team-a", teamId: "team-a" }) }));
+let scopeKey = "team-a";
+vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ key: scopeKey, teamId: scopeKey === "user" ? undefined : scopeKey }) }));
 let teamMetadata = true;
 vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: teamMetadata ? { teams: [{ id: "team-a", name: "Platform" }] } : undefined }) }));
 let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
-  useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
+  useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: scopeKey === "user" ? "personal-session" : "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
 vi.mock("~/components/session/session-view", () => ({ SessionView: ({ sessionId, activeThreadId, scopeNotice }: { sessionId: string; activeThreadId?: string; scopeNotice?: string }) => <div data-testid="conversation" data-scope-notice={scopeNotice}>{sessionId}:{activeThreadId}</div> }));
 vi.mock("~/components/session/child-panel", () => ({ ChildPanel: () => null }));
-beforeEach(() => { data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });
+beforeEach(() => { scopeKey = "team-a"; threadKey = "web:default"; data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });
 function show() { if (!capture.page) throw new Error("missing route"); const Page = capture.page; return render(<PageTitleProvider workspaceName="Platform"><Page /></PageTitleProvider>); }
 it("opens the resolved workspace thread and labels its audience", () => {
   show(); expect(document.title).toBe("Fix login · Platform · Valet"); expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
@@ -60,4 +61,10 @@ it("requests the selected thread even when it is outside the recent page", () =>
   show();
   expect(readThreads).toHaveBeenCalledWith("team-session", undefined, "thread-a");
   expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
+});
+
+it("opens a selected private Home thread on the desktop chat route", () => {
+  scopeKey = "user"; threadKey = "home"; data = { sessionId: "personal-session" }; show();
+  expect(screen.getByTestId("conversation").textContent).toBe("personal-session:thread-a");
+  expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toBeNull();
 });

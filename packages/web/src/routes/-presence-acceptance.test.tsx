@@ -63,7 +63,6 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
-import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Universe: org acme, user u-001, team sre ─────────────────────────────
@@ -89,19 +88,15 @@ vi.mock("~/api/settings", async (importOriginal) => {
 });
 
 // Chrome outside the scenario: each owns its own reads and its own suite.
-vi.mock("~/components/layout/notifications-bell", () => ({ NotificationsBell: () => null }));
+// The drawer's thread list and Tasks count read other queries; this walk
+// covers the drawer's pages and workspace switcher, not those.
+vi.mock("~/components/session/assistant-rail", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/components/session/assistant-rail")>()),
+  AssistantRail: () => null,
+}));
+vi.mock("~/components/home/tasks-panel", () => ({ useNeedsYouCount: () => ({ count: 0, partial: false }) }));
 vi.mock("~/components/product-announcement", () => ({ ProductAnnouncement: () => null }));
 vi.mock("~/lib/use-attention-ping", () => ({ useAttentionPing: () => {} }));
-vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/components/layout/workspace-assistant")>();
-  return {
-    ...actual,
-    WorkspaceAssistantProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
-    WorkspaceAssistantDock: () => null,
-    WorkspaceAssistantButton: () => null,
-    useWorkspaceAssistant: () => ({ open: () => {}, panel: null }),
-  };
-});
 
 import { routeTree } from "../routeTree.gen";
 import { BackgroundWorkSection } from "~/components/session/background-work";
@@ -585,14 +580,11 @@ async function crumbToOverview(router: ReturnType<typeof mountApp>) {
 
 describe("Presence hub acceptance (P1 to P20)", () => {
   it("walks the scenario in one run", { timeout: 90_000 }, async () => {
-    const router = mountApp("/");
+    const router = mountApp("/presence");
 
-    // P1: the nav shows Presence and Workflows, and no Events or Automation entry.
-    const nav = await screen.findByRole("navigation", { name: /primary|main/i });
-    expect(within(nav).getByRole("link", { name: "Presence" })).toBeTruthy();
-    expect(within(nav).getByRole("link", { name: "Workflows" })).toBeTruthy();
-    expect(within(nav).queryByRole("link", { name: "Events" })).toBeNull();
-    expect(within(nav).queryByRole("link", { name: "Automation" })).toBeNull();
+    // P1: Home's Make tab links Presence and Workflows, with no Events or
+    // Automation entry (`make-panel.test.tsx`). The scenario starts on the
+    // Presence URL.
 
     // P2: /presence lands on the overview. The header pairs Activity and Add.
     // Needs attention holds one item, R4's archived pin with its picker. The
@@ -600,7 +592,6 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // sentences without their place clause and with switches, R4's mark and
     // its fix under its row. The group On a schedule holds S1 with Next and
     // Fire now. No rail, no tabs, no pull request row, no card.
-    await userEvent.click(within(nav).getByRole("link", { name: "Presence" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence"));
     await screen.findByRole("heading", { level: 2, name: "On a schedule" });
     const header = within(overviewHeader());
@@ -858,7 +849,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // editor's panel lists the workflow's lines and routines as sentences,
     // and its Add opens the editor fixed on the workflow.
     await switchWorkspace("SRE", "Personal");
-    await userEvent.click(within(nav).getByRole("link", { name: "Workflows" }));
+    await act(async () => { await router.navigate({ to: "/workflows" }); });
     await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
     expect(await screen.findByRole("link", { name: "Triage failures" })).toBeTruthy();
     await userEvent.click(within(screen.getByRole("navigation", { name: "Workflows sections" })).getByRole("link", { name: "Runs" }));

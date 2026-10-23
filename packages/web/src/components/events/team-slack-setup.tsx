@@ -8,10 +8,13 @@ import { Button, type ButtonProps, Dialog, DialogContent, DialogFooter, Input } 
 import { errorText } from "~/lib/error-text";
 import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-listeners";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import { useSlackChannelListeners } from "~/lib/use-slack-channel-listeners";
+import type { EditorMode } from "~/components/presence/editor/draft";
 import { LineEditor } from "~/components/presence/editor/line-editor";
 
 /**
- * The dashboard's setup prompt, shown only until the team listens somewhere.
+ * The team dashboard's and team settings' setup prompt, shown only until the
+ * team listens somewhere.
  * Once it does, Presence carries the listening state, and each Slack row's
  * `Choose channels` opens the same dialog. Mount by team ID so a workspace
  * change discards selections.
@@ -20,7 +23,7 @@ export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
   const subscriptionsQ = useEventSubscriptions();
   if (!subscriptionsQ.data) return null;
   const listening = teamListening(subscriptionsQ.data.subscriptions, teamId);
-  if (listening.everywhere || listening.channels.length > 0) return null;
+  if (listening.everywhere || listening.channels.length > 0 || listening.patterns.length > 0) return null;
   return (
     <section className="flex min-w-0 flex-col gap-4 rounded-lg border border-moss/30 bg-moss/5 p-5 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 items-start gap-3">
@@ -85,7 +88,7 @@ export function TeamSlackSetupModal({
   onOpenChange: (open: boolean) => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
-  const [advanced, setAdvanced] = useState(false);
+  const [editor, setEditor] = useState<EditorMode | null>(null);
   const teamsQ = useTeams();
   const meQ = useMe();
   const pluginsQ = usePlugins();
@@ -129,13 +132,13 @@ export function TeamSlackSetupModal({
         )}
       </p>
     );
-  } else if (advanced) {
+  } else if (editor !== null) {
     return (
       <LineEditor
         key={teamId}
         open
         onOpenChange={onOpenChange}
-        mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }}
+        mode={editor}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );
@@ -146,7 +149,7 @@ export function TeamSlackSetupModal({
         subscriptions={subscriptionsQ.data.subscriptions}
         teamName={(id) => teamsQ.data?.teams.find((candidate) => candidate.id === id)?.name}
         onOpenChange={onOpenChange}
-        onAdvanced={() => setAdvanced(true)}
+        onAdvanced={() => setEditor({ kind: "create", preselected: { team: { id: team.id, name: team.name } } })}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );
@@ -194,7 +197,9 @@ export function TeamSlackChannelPicker({
   const create = useCreateEventSubscription();
   const patch = usePatchEventSubscription();
   const remove = useDeleteEventSubscription();
-  const listeners = useMemo(() => slackChannelListeners(subscriptions, team.id, teamName), [subscriptions, team.id, teamName]);
+  const coverage = useSlackChannelListeners(subscriptions, team.id, teamName,
+    (channelsQ.data?.options ?? []).map((channel) => ({ id: channel.id, name: channel.label.replace(/^#/, "") })));
+  const coverageUnknown = coverage.status !== "ready";
   const editableIds = useMemo(() => new Set(listening.editableChannels.map((channel) => channel.id)), [listening]);
   const channels = channelsQ.data?.options ?? [];
   const pending = create.isPending || patch.isPending || remove.isPending;
@@ -202,6 +207,7 @@ export function TeamSlackChannelPicker({
   const unchanged = picked.size === editableIds.size && [...picked.keys()].every((id) => editableIds.has(id));
 
   function toggle(id: string, label: string) {
+    if (coverageUnknown) return;
     setPicked((current) => {
       const next = new Map(current);
       if (next.has(id)) next.delete(id); else next.set(id, label);
@@ -209,6 +215,7 @@ export function TeamSlackChannelPicker({
     });
   }
   function save() {
+    if (coverageUnknown) return;
     const chosen = [...picked.entries()];
     const done = { onSuccess: () => onOpenChange(false) };
     const filters = chosen.length === 1
@@ -239,17 +246,24 @@ export function TeamSlackChannelPicker({
         className="max-w-lg"
       >
         <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search channels" aria-label="Search channels" />
+        {coverage.status === "checking" && <p role="status" className="text-sm text-muted">Checking channel coverage…</p>}
+        {coverage.status === "error" && (
+          <div role="alert" className="space-y-2 text-sm text-danger-600">
+            <p>Channel coverage could not be checked. Retry the check or edit regex responses in Advanced setup.</p>
+            <Button variant="secondary" size="sm" onClick={coverage.retry}>Retry coverage check</Button>
+          </div>
+        )}
         <ul aria-label="Slack channels" className="max-h-72 divide-y divide-line overflow-y-auto rounded-md border border-line">
           {channelsQ.isPending && <li className="px-3 py-2 text-sm text-muted">Loading channels…</li>}
           {!channelsQ.isPending && channels.length === 0 && (
             <li className="px-3 py-2 text-sm text-muted">{channelsQ.data?.reason ?? "No channels match. Invite the Valet bot to a channel, then search again."}</li>
           )}
           {channels.map((channel) => {
-            const listener = listenerFor(listeners, channel.id);
+            const listener = coverage.status === "ready" ? listenerFor(coverage.listeners, channel.id) : undefined;
             // Another Valet's channel is taken. This team's channel from an advanced
             // rule is listed as listening, but only advanced setup changes it.
             const advancedOnly = listener?.kind === "this-team" && !editableIds.has(channel.id);
-            const blocked = listener?.kind === "other" || advancedOnly;
+            const blocked = coverageUnknown || listener?.kind === "other" || advancedOnly;
             const checked = advancedOnly || picked.has(channel.id);
             return (
               <li key={channel.id}>
@@ -259,7 +273,7 @@ export function TeamSlackChannelPicker({
                   <Hash aria-hidden className="h-3.5 w-3.5 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">{channel.label.replace(/^#/, "")}</span>
                   {checked && !blocked && <span className="inline-flex items-center gap-1 text-xs text-moss"><Ear aria-hidden className="h-3 w-3" />Listening</span>}
-                  {advancedOnly && <span className="text-xs">Listening (advanced setup)</span>}
+                  {advancedOnly && <span className="text-xs">{listener?.conditional ? "May listen (advanced setup)" : "Listening (advanced setup)"}</span>}
                   {listener?.kind === "other" && <span className="text-xs">Taken by {listener.owner}</span>}
                 </label>
               </li>
@@ -270,7 +284,7 @@ export function TeamSlackChannelPicker({
         <DialogFooter>
           <Button variant="ghost" onClick={onAdvanced}>Advanced setup</Button>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} disabled={pending || unchanged || (!listening.editable && picked.size === 0)}>
+          <Button onClick={save} disabled={coverageUnknown || pending || unchanged || (!listening.editable && picked.size === 0)}>
             {pending ? "Saving…"
               : picked.size === 0 ? "Stop listening"
               : `Listen in ${picked.size} ${picked.size === 1 ? "channel" : "channels"}`}

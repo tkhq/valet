@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-/** Home selects the personal or team dashboard without profile setup. */
+/** On a wider screen, Home selects the personal or team dashboard without
+ * profile setup. A phone gets the Home conversation instead. */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -9,7 +10,9 @@ const infoMock = vi.fn();
 // The dashboard renders bare Links (Manage assistants), which need a router
 // — mock them to anchors, same as every other route test.
 vi.mock("@tanstack/react-router", () => ({
-  createFileRoute: () => (config: unknown) => config,
+  // `options` mirrors the real route, so a test reads `validateSearch` the same way.
+  createFileRoute: () => (config: object) => ({ ...config, options: config, useSearch: () => ({}) }),
+  useNavigate: () => vi.fn(),
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 
@@ -27,6 +30,10 @@ vi.mock("~/components/assistant/memory-card", () => ({
 vi.mock("~/components/assistant/usage-card", () => ({
   UsageCard: () => <div data-testid="usage-card" />,
 }));
+const mobile = vi.fn(() => false);
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobile() }));
+vi.mock("~/components/home/home-screen", () => ({ HomeScreen: ({ view }: { view: string }) => <div data-testid="home-screen" data-view={view} /> }));
+vi.mock("~/lib/page-title", () => ({ usePageTitle: () => undefined }));
 vi.mock("~/components/dashboard/team-dashboard", () => ({
   TeamDashboard: ({ teamId }: { teamId: string }) => (
     <div data-testid="team-dashboard" data-team={teamId} />
@@ -47,7 +54,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   return { ...actual, useWorkspaceScope: () => scopeMock() };
 });
 
-import { Dashboard, Home } from "./index";
+import { Dashboard, Home, Route } from "./index";
 
 function renderDashboard() {
   const queryClient = new QueryClient();
@@ -117,5 +124,41 @@ describe("Home (workspace branch)", () => {
     );
     const dash = screen.getByTestId("team-dashboard");
     expect(dash.getAttribute("data-team")).toBe("team_1");
+  });
+});
+
+describe("Home on a phone", () => {
+  it("restores the team dashboard when the viewport returns to desktop", () => {
+    scopeMock.mockReturnValue({ key: "team_1", teamId: "team_1", available: ["user", "team_1"], setKey: vi.fn() });
+    mobile.mockReturnValue(false);
+    const client = new QueryClient();
+    const view = () => <QueryClientProvider client={client}><Home /></QueryClientProvider>;
+    const { rerender } = render(view());
+    expect(screen.getByTestId("team-dashboard")).toBeTruthy();
+    expect(screen.queryByTestId("home-screen")).toBeNull();
+    mobile.mockReturnValue(true);
+    rerender(view());
+    expect(screen.getByTestId("home-screen")).toBeTruthy();
+    expect(screen.queryByTestId("team-dashboard")).toBeNull();
+    mobile.mockReturnValue(false);
+    rerender(view());
+    expect(screen.getByTestId("team-dashboard")).toBeTruthy();
+    expect(screen.queryByTestId("home-screen")).toBeNull();
+  });
+
+  it("shows the Home conversation instead of a dashboard", () => {
+    mobile.mockReturnValueOnce(true);
+    render(<QueryClientProvider client={new QueryClient()}><Home /></QueryClientProvider>);
+    expect(screen.getByTestId("home-screen").dataset.view).toBe("chat");
+    expect(screen.queryByTestId("team-dashboard")).toBeNull();
+    expect(screen.queryByText("Personal")).toBeNull();
+  });
+
+  it("reads only view=tasks and view=make from the URL", () => {
+    const validate = (Route.options as { validateSearch: (raw: Record<string, unknown>) => unknown }).validateSearch;
+    expect(validate({ view: "tasks" })).toEqual({ view: "tasks" });
+    expect(validate({ view: "make" })).toEqual({ view: "make" });
+    expect(validate({ view: "chat" })).toEqual({});
+    expect(validate({})).toEqual({});
   });
 });

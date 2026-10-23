@@ -9,12 +9,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { WireQueueState } from "@valet/api/wire";
+import type { EditPreviewResponse, WireQueueState } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
 import { AppPageHintContext } from "~/lib/app-page-hint";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
+
+const navigate = vi.fn().mockResolvedValue(undefined);
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => navigate,
+}));
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
@@ -33,6 +39,8 @@ const setMessageQueueItemId = vi.fn();
 const queueStateRef: { current: WireQueueState | undefined } = { current: undefined };
 // The session's live transcript, which prompt recall reads.
 const streamMessagesRef: { current: StreamMessage[] } = { current: [] };
+// What the edit bar's preview query returns.
+const editPreviewRef: { current: EditPreviewResponse | undefined } = { current: undefined };
 
 function queueState(mode: WireQueueState["mode"]): WireQueueState {
   return {
@@ -60,6 +68,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       mutateAsync: resumeMutateAsync,
     }),
     useCancelQueuedItem: () => ({ isPending: false, mutateAsync: cancelQueuedMutateAsync }),
+    useEditPreview: (threadId: string | undefined, entryId: string | undefined) => ({ data: threadId && entryId ? editPreviewRef.current : undefined }),
   };
 });
 
@@ -136,7 +145,9 @@ function renderComposer(
 }
 
 beforeEach(() => {
+  navigate.mockClear();
   queueStateRef.current = undefined;
+  editPreviewRef.current = undefined;
   streamMessagesRef.current = [];
   sendState.pending = false;
   sendState.sessions = undefined;
@@ -530,6 +541,20 @@ describe("Composer — stop button", () => {
 });
 
 describe("Composer — Escape interrupts the running turn", () => {
+  it("does not interrupt a mounted chat while Tasks or Make is active", () => {
+    queueStateRef.current = queueState("followup");
+    const client = new QueryClient();
+    const tree = (active: boolean) => <QueryClientProvider client={client}>
+      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus="streaming" active={active} />
+    </QueryClientProvider>;
+    const { rerender } = render(tree(false));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate).not.toHaveBeenCalled();
+    rerender(tree(true));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     abortMutate.mockClear();
     useComposerPrefillStore.setState({ text: null });
@@ -1210,6 +1235,117 @@ describe("Composer — reply target", () => {
   });
 });
 
+describe("Composer — edit target", () => {
+  const target = { messageId: "user-3", text: "deploy to prod", images: [], droppedFiles: 0 };
+  function renderEditing(props: Partial<Parameters<typeof Composer>[0]> = {}, agentStatus: "idle" | "streaming" = "idle") {
+    const queryClient = new QueryClient();
+    const tree = (extra: Partial<Parameters<typeof Composer>[0]>) => (
+      <QueryClientProvider client={queryClient}>
+        <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus={agentStatus} {...extra} />
+      </QueryClientProvider>
+    );
+    const view = render(tree(props));
+    return Object.assign(view, { rerenderWith: (extra: Partial<Parameters<typeof Composer>[0]>) => view.rerender(tree(extra)) });
+  }
+
+  it("puts the message text in the box and gives the earlier draft back on cancel", () => {
+    useComposerDraftStore.getState().setText(draftKey("orchestrator:user-1", "thread-1"), "half-typed thought");
+    const onCancelEdit = vi.fn();
+    const view = renderEditing({ editTarget: target, onCancelEdit });
+
+    const box = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    expect(box.value).toBe("deploy to prod");
+    expect(screen.getByText("Editing your message")).toBeTruthy();
+    expect(screen.getByText(/Send replaces this message and everything after it/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel edit" }));
+    expect(onCancelEdit).toHaveBeenCalledOnce();
+
+    view.rerenderWith({ onCancelEdit });
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("half-typed thought");
+  });
+
+  it("says that Send stops a running reply, and sends instead of queueing", () => {
+    renderEditing({ editTarget: target }, "streaming");
+    expect(screen.getByText(/Send stops the current reply, then replaces/)).toBeTruthy();
+    expect(screen.getByText(/Enter to send/)).toBeTruthy();
+    expect(screen.queryByText(/Enter to queue/)).toBeNull();
+  });
+
+  it("cancels the edit on Escape instead of stopping the turn", () => {
+    abortMutate.mockClear();
+    queueStateRef.current = queueState("followup");
+    const onCancelEdit = vi.fn();
+    renderEditing({ editTarget: target, onCancelEdit }, "streaming");
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Escape" });
+    expect(onCancelEdit).toHaveBeenCalledOnce();
+    expect(abortMutate).not.toHaveBeenCalled();
+  });
+
+  it("sends the edit with the edited entry id and no queue mode", async () => {
+    queueStateRef.current = queueState("followup");
+    const onEditSubmit = vi.fn();
+    const onEditResult = vi.fn();
+    renderEditing({ editTarget: target, onEditSubmit, onEditResult }, "streaming");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "deploy to staging" } });
+    fireEvent.submit(screen.getByRole("textbox", { name: "Message" }).closest("form")!);
+
+    await waitFor(() => expect(onEditResult).toHaveBeenCalledWith(true));
+    expect(onEditSubmit).toHaveBeenCalledWith("user-3");
+    const body = sendMutateAsync.mock.calls[0]?.[0];
+    expect(body).toMatchObject({ text: "deploy to staging", threadId: "thread-1", editEntryId: "user-3" });
+    expect(body).not.toHaveProperty("queueMode");
+    expect(body).not.toHaveProperty("replyToMessageId");
+  });
+
+  it("reports a refused edit and keeps the edited text", async () => {
+    sendMutateAsync.mockRejectedValueOnce(new ApiError(400, "Bad Request", { error: "Teammate wrote after this message, and an edit would remove that message. Branch into a new thread instead." }));
+    const onEditResult = vi.fn();
+    renderEditing({ editTarget: target, onEditResult });
+    fireEvent.submit(screen.getByRole("textbox", { name: "Message" }).closest("form")!);
+
+    await waitFor(() => expect(onEditResult).toHaveBeenCalledWith(false));
+    expect(screen.getByText(/Teammate wrote after this message/)).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("deploy to prod");
+  });
+
+  it("previews what still stands and offers to undo the files, on by default", async () => {
+    editPreviewRef.current = {
+      turns: 3, actions: [{ label: "github.create_pull_request: Open the fix", count: 1, urls: [] }], moreActions: 0,
+      grants: ["Always allow for me: Create a pull request"], files: ["app/a.txt", "app/b.txt"], pushed: false,
+    };
+    renderEditing({ editTarget: target, onEditResult: vi.fn() });
+    expect(screen.getByText(/Send replaces this message and the 2 later turns/)).toBeTruthy();
+    expect(screen.getByText(/Still standing after the edit: github.create_pull_request: Open the fix, Always allow for me: Create a pull request/)).toBeTruthy();
+    const undo = screen.getByRole("checkbox");
+    expect(undo.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("Also undo file changes (2 files)")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show files" }));
+    expect(screen.getByText("app/b.txt")).toBeTruthy();
+    fireEvent.submit(screen.getByRole("textbox", { name: "Message" }).closest("form")!);
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(sendMutateAsync.mock.calls[0]?.[0]).toMatchObject({ editEntryId: "user-3", undoFiles: true });
+  });
+
+  it("leaves file undo off when the replaced turns pushed, and says why", () => {
+    editPreviewRef.current = { turns: 1, actions: [], moreActions: 0, grants: [], files: ["app/a.txt"], pushed: true };
+    renderEditing({ editTarget: target });
+    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText(/pushed commits or opened a pull request/)).toBeTruthy();
+  });
+
+  it("shows a refusal and keeps Send off", () => {
+    editPreviewRef.current = { refusal: "Teammate wrote after this message.", turns: 0, actions: [], moreActions: 0, grants: [], files: [], pushed: false };
+    renderEditing({ editTarget: target });
+    expect(screen.getByRole("alert").textContent).toBe("Teammate wrote after this message.");
+    expect((screen.getByRole("button", { name: /Send/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("names files the edit cannot carry", () => {
+    renderEditing({ editTarget: { ...target, droppedFiles: 2 } });
+    expect(screen.getByText(/Attach its files again if the edit needs them/)).toBeTruthy();
+  });
+});
+
 describe("Composer prompt recall", () => {
   function sent(id: string, content: string, threadId = "thread-1"): StreamMessage {
     return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1, author: { id: "user-1", interactive: true } };
@@ -1307,4 +1443,24 @@ describe("Composer prompt recall", () => {
     fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
     await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "rerun the report", threadId: "thread-1" })));
   });
+});
+
+it("opens the destination returned by /fork after sending the command", async () => {
+  sendMutateAsync.mockResolvedValueOnce({ messageId: null, threadId: "thread-1", fork: { id: "fork-thread", sessionId: "fork-session" } });
+  renderComposer();
+  const input = screen.getByRole("textbox", { name: "Message" });
+  fireEvent.change(input, { target: { value: "/fork keep going" } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/threads/$threadId", params: { threadId: "fork-thread" } }));
+  expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "/fork keep going", threadId: "thread-1" }));
+});
+
+it("keeps the source open when a fork command returns no destination", async () => {
+  sendMutateAsync.mockResolvedValueOnce({ messageId: null, threadId: "thread-1" });
+  renderComposer();
+  const input = screen.getByRole("textbox", { name: "Message" });
+  fireEvent.change(input, { target: { value: "/fork" } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+  expect(navigate).not.toHaveBeenCalled();
 });

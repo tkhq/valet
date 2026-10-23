@@ -6,8 +6,11 @@ import type { StreamMessage } from "~/stores/stream";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
 import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
+import { endsWithToolResult } from "./transcript-cards";
+import { isContinuation, planTranscript } from "./transcript-plan";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
+import { BranchNoteDivider } from "./branch-note-divider";
 import { NewSinceDivider } from "./thread-recap";
 
 /**
@@ -37,9 +40,21 @@ export function MessageList({
   viewerId,
   header,
   onReply,
+  onEdit,
+  onBranch,
+  onReturnToBranch,
+  onOpenThread,
+  editingId,
+  hiddenIds,
   ratings = true,
   newSince,
+  emptyState,
+  footer,
 }: {
+  /** Shown after the last message, such as the agents this thread is running. */
+  footer?: ReactNode;
+  /** Shown in place of the default line when the thread has no messages. */
+  emptyState?: ReactNode;
   messages: StreamMessage[];
   threadId?: string;
   /**
@@ -66,6 +81,18 @@ export function MessageList({
   /** Full-page chat controls share the transcript sticky layer. */
   header?: ReactNode;
   onReply?: (target: MessageReplyReference) => void;
+  /** Edits one of the viewer's own messages. The list offers it only where the edit is allowed. */
+  onEdit?: (message: StreamMessage) => void;
+  /** Branches a message into a new thread. */
+  onBranch?: (message: StreamMessage) => void;
+  /** Goes back to the version a branch note left. */
+  onReturnToBranch?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
+  /** Opens another thread, for a fork note's source thread. */
+  onOpenThread?: (threadId: string) => void;
+  /** The message being edited: it and every row after it are dimmed. */
+  editingId?: string;
+  /** Rows a sent edit replaces, hidden until the server moves the thread. */
+  hiddenIds?: ReadonlySet<string>;
   /**
    * Shows the per-reply rating buttons. A shared-thread guest passes false:
    * ratings are session-addressed, so they belong to the session's viewers.
@@ -88,9 +115,18 @@ export function MessageList({
     return messages.filter(
       (message) =>
         (!threadId || message.threadId === threadId) &&
-        (!message.queueItemId || !pending.has(message.queueItemId)),
+        (!message.queueItemId || !pending.has(message.queueItemId)) &&
+        !hiddenIds?.has(message.id),
     );
-  }, [messages, pendingIds, threadId]);
+  }, [messages, pendingIds, threadId, hiddenIds]);
+  const editable = useMemo(() => editableMessageIds(visible, viewerId), [visible, viewerId]);
+  const dimFrom = editingId ? visible.findIndex((message) => message.id === editingId) : -1;
+
+  // Each turn's tool calls fold into as few work lines as its text allows.
+  const transcript = useMemo(() => {
+    const items = groupBranchNotes(groupWatchEvents(visible));
+    return { items, plans: planTranscript(items, agentBusy) };
+  }, [visible, agentBusy]);
 
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
@@ -189,16 +225,22 @@ export function MessageList({
           </div>
         )}
         {visible.length === 0 ? (
-          <div className="flex-1 grid place-items-center text-sm text-muted">
+          emptyState ?? <div className="flex-1 grid place-items-center text-sm text-muted">
             No messages yet — try sending a prompt below.
           </div>
         ) : (
           <div ref={contentRef} className="shrink-0 space-y-2 py-4">
-            {groupWatchEvents(visible).map((item, i, items) => {
+            {transcript.items.map((item, i, items) => {
+              const plan = transcript.plans[i]!;
               if (item.kind === "watch") {
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
               }
+              if (item.kind === "branch") {
+                return <BranchNoteDivider key={item.notes[0]!.id} notes={item.notes} onReturn={onReturnToBranch} onOpenThread={onOpenThread} />;
+              }
               const m = item.message;
+              // Every part of this message shows in the work line above it.
+              if (plan.hidden) return newSince?.anchorId === m.id ? <NewSinceDivider key={m.id} label={newSince.label} /> : null;
               const row = m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
@@ -210,9 +252,16 @@ export function MessageList({
                   key={m.id}
                   message={m}
                   continuation={isContinuation(m, previousMessage(items[i - 1]))}
-                  suppressEmptyPlaceholder={agentBusy && i === items.length - 1}
+                  suppressEmptyPlaceholder={(agentBusy && i === items.length - 1) || (endsWithToolResult(previousMessage(items[i - 1])) && !m.errorMessage)}
+                  absorbedLeading={plan.absorbedLeading}
+                  extraWork={plan.extraWork.length ? plan.extraWork : undefined}
+                  extraWorkLive={plan.extraWorkLive}
+                  workedForMs={plan.workedForMs}
                   viewerId={viewerId}
                   onReply={onReply}
+                  onEdit={onEdit && editable.has(m.id) ? onEdit : undefined}
+                  onBranch={onBranch && branchable(m) ? onBranch : undefined}
+                  dimmed={dimFrom >= 0 && visible.indexOf(m) >= dimFrom}
                   ratings={ratings}
                 />
               );
@@ -220,6 +269,7 @@ export function MessageList({
                 ? <Fragment key={m.id}><NewSinceDivider label={newSince.label} />{row}</Fragment>
                 : row;
             })}
+            {footer}
           </div>
         )}
       </div>
@@ -240,17 +290,59 @@ export function MessageList({
   );
 }
 
-/** The message of the transcript row before this one, if that row is a
- * message. A grouped watch card is not a message, so it ends a turn. */
-function previousMessage(item: TranscriptItem | undefined): StreamMessage | undefined {
-  return item?.kind === "message" ? item.message : undefined;
+/**
+ * The viewer's own typed messages that an edit may replace
+ * (docs/specs/2026-10-22-thread-edit-fork-design.md): persisted, not from a
+ * channel such as Slack, and with no message from another person after it.
+ * The server checks the same rules. Exported for tests.
+ */
+export function editableMessageIds(messages: readonly StreamMessage[], viewerId: string | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!viewerId) return ids;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "user") continue;
+    if (message.author && message.author.id !== viewerId) break;
+    if (message.signal || message.command || !message.author || message.author.externalSender) continue;
+    if (message.persistence === undefined && !message.channelType) ids.add(message.id);
+  }
+  return ids;
 }
 
-/** Consecutive assistant messages from one turn share the first one's
- * header: the same model, within a few minutes, with nothing between. */
-export function isContinuation(message: StreamMessage, previous: StreamMessage | undefined): boolean {
-  if (!previous || message.role !== "assistant" || previous.role !== "assistant") return false;
-  if (previous.compaction || previous.signal || previous.command || message.settledOutcome) return false;
-  if ((message.model ?? "") !== (previous.model ?? "")) return false;
-  return message.createdAt - previous.createdAt < 5 * 60_000;
+/** A persisted typed message or finished reply: a point a new thread can branch from. */
+function branchable(message: StreamMessage): boolean {
+  if (message.persistence !== undefined || message.signal || message.command) return false;
+  return message.role === "user" || (message.role === "assistant" && message.completed === true);
+}
+
+type ListRow = TranscriptItem | { kind: "branch"; notes: StreamMessage[] };
+
+/**
+ * One row per branch note, except that consecutive edit and return notes,
+ * as repeated edits of one message leave, share a row. A fork note stays
+ * on its own. Exported for tests.
+ */
+export function groupBranchNotes(items: readonly TranscriptItem[]): ListRow[] {
+  const out: ListRow[] = [];
+  for (const item of items) {
+    const branch = item.kind === "message" ? item.message.branch : undefined;
+    if (item.kind !== "message" || !branch) {
+      out.push(item);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (branch.kind !== "fork" && last?.kind === "branch" && last.notes[0]?.branch?.kind !== "fork") {
+      last.notes.push(item.message);
+    } else {
+      out.push({ kind: "branch", notes: [item.message] });
+    }
+  }
+  return out;
+}
+
+/** The message of the transcript row before this one, if that row is a
+ * message. A grouped watch card or a branch note is not a message, so it
+ * ends a turn. */
+function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
+  return item?.kind === "message" ? item.message : undefined;
 }

@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
-export type { Appearance } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
+export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -1054,6 +1054,12 @@ export interface ThreadRecapResponse {
   recap: { mode: "away" | "first"; points: ThreadRecapPoint[] } | null;
 }
 
+/** `GET /api/threads/:threadId/plan` — the checklist the model keeps with
+ * `update_plan`. `plan` is null when the thread has no plan. */
+export interface ThreadPlanResponse {
+  plan: ThreadPlan | null;
+}
+
 /** `GET /api/threads/:threadId/context` — how full the thread's model
  * context is. The engine measures it like the proactive compaction check
  * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn
@@ -1372,7 +1378,7 @@ export type MessagePart =
       result?: unknown;
       error?: string;
     }
-  | { kind: "thinking"; text: string };
+  | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
 
 /**
  * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).
@@ -1507,6 +1513,16 @@ export interface Message {
    */
   compaction?: MessageCompaction;
   /**
+   * Present when this message projects a branch note (role is `system`,
+   * `content` carries the note text). The client renders a divider, never
+   * a chat bubble (docs/specs/2026-10-22-thread-edit-fork-design.md).
+   */
+  branch?: MessageBranchNote;
+  /** On a user message that an edit wrote: the id of the message it replaced. */
+  editOf?: string;
+  /** On a user message that came in through a channel, such as `slack`. Valet cannot edit it. */
+  channelType?: string;
+  /**
    * Present on a user message that is a skill invocation (see
    * `MessageSkillInvocation`). Projected from the persisted entry's
    * `metadata.skill` / `metadata.skillArgs`.
@@ -1530,6 +1546,50 @@ export interface Message {
    * the wire projection.
    */
   attachments?: Array<PromptImageAttachment | PromptFileAttachment>;
+}
+
+/** A branch note: where an edit, a return, or a fork changed the thread's history. */
+export interface MessageBranchNote {
+  kind: "edit" | "return" | "fork";
+  /** Message excerpt and time identify an earlier version without opening it. */
+  version?: { excerpt: string; createdAt: number };
+  /** What ran on the version the thread left and still stands. Empty for a fork. */
+  actions: Array<{ label: string; count: number; urls: string[] }>;
+  /** Calls past the listed actions. */
+  moreActions: number;
+  /** A tool that can change the working directory ran on the version the thread left. */
+  filesChanged: boolean;
+  /** The version this note left is in this thread, so a person can go back to it. */
+  canReturn: boolean;
+  /** Approval choices made on the version this note left that still apply. */
+  grants: string[];
+  /**
+   * File changes the edit undid, or the return brought back. `canBringBack`
+   * is true when "Go back" can put the undone files back.
+   */
+  files?: { changed: string[]; skipped: string[]; failed: string[]; canBringBack: boolean };
+  /** Fork notes only: the thread the history was copied from. */
+  source?: { threadId: string; sameWorkingDirectory: boolean };
+  /**
+   * Fork notes only: repositories whose files come to this thread's own
+   * working directory. `pending` until the first turn copies them.
+   */
+  seed?: { repos: string[]; pending: boolean; failed: string[]; skipped?: string };
+}
+
+/** `GET /api/threads/:threadId/edit-preview?entryId=`: what an edit would replace. */
+export interface EditPreviewResponse {
+  /** Why the edit is refused, when it is. */
+  refusal?: string;
+  /** Typed messages the edit replaces: the edited one and the later ones. */
+  turns: number;
+  actions: Array<{ label: string; count: number; urls: string[] }>;
+  moreActions: number;
+  grants: string[];
+  /** Files the replaced turns changed, relative to the working directory. The edit can undo them. */
+  files: string[];
+  /** The replaced turns pushed commits or opened a pull request; a file undo does not reach those. */
+  pushed: boolean;
 }
 
 export interface ListMessagesResponse {
@@ -1556,6 +1616,35 @@ export interface PromptFileAttachment {
   extractedTo?: string;
   extractedFiles?: string[];
   name: string;
+}
+
+/** `POST /api/threads/:threadId/fork`. */
+export interface ForkThreadRequest {
+  /**
+   * The message to branch from. A reply or any other entry: the new thread
+   * copies the conversation through it. A user message: the new thread copies
+   * the conversation up to just before it, and `draft` returns its text.
+   */
+  entryId: string;
+}
+
+export interface ForkThreadResponse {
+  thread: ThreadSummary;
+  /** The branched user message's text, for the new thread's composer. */
+  draft?: string;
+}
+
+/** `POST /api/threads/:threadId/branch/return`. */
+export interface ReturnToBranchRequest {
+  /** The branch note whose earlier version to go back to. */
+  noteEntryId: string;
+  /** Also undo this version's file changes and bring back the ones the note's edit undid. */
+  restoreFiles?: boolean;
+}
+
+export interface ReturnToBranchResponse {
+  /** The note written for the version the thread left. */
+  noteEntryId: string;
 }
 
 export interface AbortThreadRequest {
@@ -1590,9 +1679,19 @@ export interface SendPromptRequest {
    * second user entry. `text` may be empty.
    */
   promoteItemId?: string;
+  /**
+   * Edit this earlier user message of the sender. The thread continues from
+   * just before it, and `text` replaces it. A running turn stops; queued
+   * messages run after the edit. The old version stays in the store.
+   */
+  editEntryId?: string;
+  /** With `editEntryId`: also undo the files the replaced turns changed. */
+  undoFiles?: boolean;
 }
 
 export interface SendPromptResponse {
+  /** Destination created by a successful /fork command. */
+  fork?: ThreadSummary;
   /**
    * Queue item id for client-side optimistic linkage. `null` when the text
    * executed as a slash command — commands never take a queue item.
@@ -1654,6 +1753,11 @@ export interface DecisionGate {
   oneShot?: true;
   /** The gated tool action's risk level, on tool approval gates only. */
   riskLevel?: "low" | "medium" | "high" | "critical";
+  /** The gated tool call, so a card can preview what it does: the Slack
+   * message, the email, the merge. Present only when `body` already shows
+   * this call's `tool_id=` and `args=` lines. A string arg longer than
+   * 4000 characters is cut and ends with "…". */
+  tool?: { id: string; args?: Record<string, unknown> };
 }
 
 export interface DecisionResolution {
@@ -1703,6 +1807,7 @@ export type WireEvent =
   // that wiped non-default-thread state on every WS reconnect.
   | { seq: number; ts: number; offset?: string; type: "init"; session: SessionDetail }
   | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
+  | { seq: number; ts: number; offset?: string; type: "thinking_update"; threadId: string; messageId: string; index: number; part: Extract<MessagePart, { kind: "thinking" }> }
   | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
   | {
       /**
@@ -1830,6 +1935,18 @@ export type WireEvent =
       ts: number; offset?: string;
       type: "compaction_start" | "compaction_end";
       threadId: string;
+    }
+  | {
+      /**
+       * The thread's active leaf moved to another branch: an edit started,
+       * or a person went back to an earlier version. Every viewer refetches
+       * the thread's messages (REST is the authority for history).
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "branch_switched";
+      threadId: string;
+      noteEntryId: string;
     }
   | { seq: number; ts: number; offset?: string; type: "decision_gate"; threadId: string; gate: DecisionGate }
   | {
@@ -4285,6 +4402,8 @@ export interface SkillUsageBreakdown {
   /** Estimated skill-body tokens carried across model requests. */
   attributedContextTokens: number;
   carryingCalls: number;
+  fileReads: number;
+  scriptRuns: number;
 }
 
 /** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
@@ -5131,10 +5250,12 @@ export interface GetEventCatalogResponse {
   services: { service: string; entries: EventCatalogEntryWire[]; readiness?: EventIngressReadiness }[];
 }
 
-/** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
+/** Mirrors `events/match.ts`'s `SubscriptionFilter`. `not_in`,
+ * `not_prefix`, and `not_regex` skip matching events; an event with no value
+ * for the field still matches them. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains" | "regex";
+  op: "eq" | "in" | "prefix" | "contains" | "regex" | "not_in" | "not_prefix" | "not_regex";
   value: string | string[];
   /**
    * Optional display label for the value — a resolved name for a raw id (a
@@ -5143,7 +5264,7 @@ export interface EventSubscriptionFilterWire {
    */
   label?: string;
   /**
-   * Optional display labels for an `in` list, aligned with `value` by index
+   * Optional display labels for an `in` or `not_in` list, aligned with `value` by index
    * (a channel id list shown as "#eng, #ops"). Matching ignores it.
    */
   labels?: string[];
@@ -6332,6 +6453,61 @@ export interface WaitingThread {
 /** `GET /api/workspaces/:workspace/waiting` */
 export interface WaitingThreadsResponse {
   threads: WaitingThread[];
+}
+
+/** `POST /api/home`: the person's one conversation with Valet across every workspace. */
+export interface HomeConversationResponse {
+  sessionId: string;
+  threadId: string;
+}
+
+/** A workspace a person can work in: `key` is "user" (personal) or a team id. */
+export interface HomeWorkspaceRef {
+  key: string;
+  name: string;
+}
+
+/** One thread in the person's Tasks list. */
+export interface HomeTaskItem {
+  /** Stable list key. */
+  id: string;
+  sessionId: string;
+  threadId: string;
+  title: string;
+  workspace: HomeWorkspaceRef;
+  /** `waiting`: Valet replied and the person has not answered. `done`: a task
+   * started from home whose first run ended and that is not marked done. */
+  state: "needs_you" | "working" | "failed" | "waiting" | "done";
+  /** Valet's question, or the last sentence of its reply, as plain text. */
+  detail?: string;
+  question?: boolean;
+  unread?: boolean;
+  updatedAt: number;
+  /** Set for work the person started from home. Only they can mark it done. */
+  homeTaskId?: string;
+  /** Progress of the thread's plan, when it has one. */
+  plan?: { done: number; total: number; current?: string };
+  /** What the thread produced, newest first, at most three. */
+  outputs?: HomeTaskOutput[];
+}
+
+/** A file or pull request a task produced. */
+export interface HomeTaskOutput {
+  kind: "file" | "pull_request";
+  title: string;
+  /** A file's share token (`/a/:token`) or a pull request's URL. */
+  href: string;
+  /** For a pull request: open, merged, or closed. */
+  state?: string;
+  updatedAt: number;
+}
+
+/** `GET /api/home/tasks`: what is in flight across all of the person's workspaces. */
+export interface HomeTasksResponse {
+  needsYou: HomeTaskItem[];
+  working: HomeTaskItem[];
+  updates: HomeTaskItem[];
+  finished: HomeTaskItem[];
 }
 
 /** A release notice with a stable identity and an internal destination. */

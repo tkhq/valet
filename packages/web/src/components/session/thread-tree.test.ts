@@ -13,6 +13,7 @@ import {
   groupChildrenByThread,
   hasGateOutsideList,
   sortThreads,
+  splitNeedsYou,
   threadIdsWithPendingGates,
   untitledThreadLabel,
 } from "./thread-tree";
@@ -175,6 +176,29 @@ describe("sortThreads", () => {
     const newer = thread("newer", 2_000, 2_000);
     expect(defaultThreadId(sortThreads([olderActive, newer], "last-user-activity"))).toBe("newer");
     expect(defaultThreadId(sortThreads([olderActive, newer], "created"))).toBe("newer");
+  });
+});
+
+describe("splitNeedsYou", () => {
+  const thread = (id: string, activity: { createdAt: number; lastUserActivityAt: number; lastAgentActivityAt?: number }): ThreadSummary => ({
+    id, sessionId: "s1", key: "web:1", ...activity,
+  });
+
+  it("puts waiting threads first by newest activity and keeps the rest in list order", () => {
+    const listed = [
+      thread("quiet-a", { createdAt: 5, lastUserActivityAt: 5 }),
+      thread("asked-old", { createdAt: 1, lastUserActivityAt: 2, lastAgentActivityAt: 3 }),
+      thread("quiet-b", { createdAt: 4, lastUserActivityAt: 4 }),
+      thread("asked-new", { createdAt: 1, lastUserActivityAt: 2, lastAgentActivityAt: 9 }),
+    ];
+    const split = splitNeedsYou(listed, (t) => t.id.startsWith("asked"));
+    expect(split.needsYou.map((t) => t.id)).toEqual(["asked-new", "asked-old"]);
+    expect(split.rest.map((t) => t.id)).toEqual(["quiet-a", "quiet-b"]);
+  });
+
+  it("returns the list unchanged when nothing waits", () => {
+    const listed = [thread("a", { createdAt: 1, lastUserActivityAt: 1 })];
+    expect(splitNeedsYou(listed, () => false)).toEqual({ needsYou: [], rest: listed });
   });
 });
 

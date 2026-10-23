@@ -1,4 +1,4 @@
-import type { GetLinearConnectionResponse } from "@valet/api/wire";
+import type { GetLinearConnectionResponse, HomeConversationResponse, HomeTasksResponse } from "@valet/api/wire";
 import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
@@ -19,6 +19,7 @@ import type {
   ThreadChannelActivity,
   ThreadContextResponse,
   ActiveViewersResponse,
+  ThreadPlanResponse,
   ThreadRecapResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -52,6 +53,11 @@ import type {
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
+  EditPreviewResponse,
+  ForkThreadRequest,
+  ForkThreadResponse,
+  ReturnToBranchRequest,
+  ReturnToBranchResponse,
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
@@ -654,6 +660,9 @@ export const api = {
     request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
+  /** The checklist the model keeps with `update_plan`. */
+  getThreadPlan: (threadId: string) =>
+    request<ThreadPlanResponse>("GET", `/threads/${encodeURIComponent(threadId)}/plan`),
   getThreadRecap: (threadId: string, since?: number) =>
     request<ThreadRecapResponse>("GET", `/threads/${encodeURIComponent(threadId)}/recap${since === undefined ? "" : `?since=${since}`}`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
@@ -814,6 +823,9 @@ export const api = {
     request<EnsureWorkspaceConversationResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`, body),
   listWorkspaceConversations: (workspace: string) =>
     request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
+  ensureHomeConversation: () => request<HomeConversationResponse>("POST", "/home"),
+  getHomeTasks: () => request<HomeTasksResponse>("GET", "/home/tasks"),
+  markHomeTaskDone: (taskId: string) => request<void>("POST", `/home/tasks/${encodeURIComponent(taskId)}/done`),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>
@@ -980,6 +992,14 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  branchPreview: (threadId: string, noteEntryId: string, cursor?: string) =>
+    request<ListMessagesResponse>("GET", `/threads/${encodeURIComponent(threadId)}/branch-preview?noteEntryId=${encodeURIComponent(noteEntryId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  editPreview: (threadId: string, entryId: string) =>
+    request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
+  forkThread: (threadId: string, body: ForkThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
+    request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>
     request<{ ok: true }>(
       "POST",

@@ -1,5 +1,5 @@
 /**
- * Bulk "Approve all" / "Deny all" for the notification bell. This module
+ * Bulk "Approve all" / "Deny all" for the approvals in Tasks. This module
  * decides which listed requests one bulk answer may cover, builds the same
  * request bodies the per-item buttons send, and runs them with limited
  * concurrency. Server authorization is unchanged: every answer goes through
@@ -59,7 +59,10 @@ function approverReason(approver: { userId: string } | undefined, meId: string |
 function decisionSkipReason({ gate }: DecisionItem, meId: string | undefined): SkipReason | undefined {
   if (gate.status !== "pending") return "not_pending";
   if (gate.type !== "approval") return gate.type === "credential_request" ? "needs_credential" : "needs_answer";
-  const approver = approverReason(gate.approver, meId);
+  // An approval that waits on the person who asked is theirs to answer like
+  // any other; a shared-account request still needs its own review.
+  const asker = gate.approver?.userId === meId && gate.provenance?.source !== "shared_account";
+  const approver = asker ? undefined : approverReason(gate.approver, meId);
   if (approver) return approver;
   // The per-item card warns that the policy may have denied this action.
   if (gate.provenance?.source === "resolver_error") return "policy_check_failed";

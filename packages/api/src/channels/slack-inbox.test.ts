@@ -1008,6 +1008,40 @@ describe("channel_name filters on Slack message events", () => {
     expect(asked).toEqual(["C_NAME_A1", "C_NAME_G1"]);
   });
 
+  it("enriches app mentions before matching a disjoint exact and channel-name reply pair", async () => {
+    serveChannelNames({ C_LEAD_PAIR: "lead-acme", C_BIZ_PAIR: "biz-dev", C_OTHER_PAIR: "general" });
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.eventDispatcher.stop();
+    const now = Date.now();
+    await api.providers.db.insert(teams).values({ id: "team-pair", orgId: "local-org", name: "Sales", createdAt: now });
+    await api.providers.db.insert(teamMembers).values({ teamId: "team-pair", userId: "local-user", role: "member" });
+    await api.providers.db.insert(userIdentityLinks).values({ id: "pair-link", provider: "slack", externalId: "U100", userId: "local-user", createdAt: now });
+    await seedSubscription(api, ["slack.app_mention"], [{ field: "channel", op: "eq", value: "C_BIZ_PAIR" }]);
+    await api.providers.db.update(eventSubscriptions).set({ ownerType: "team", ownerId: "team-pair", target: { kind: "assistant", assistant: "team", teamId: "team-pair", follow: true } })
+      .where(eq(eventSubscriptions.orgId, "local-org"));
+    const [exact] = await api.providers.db.select().from(eventSubscriptions);
+    if (!exact) throw new Error("exact subscription missing");
+    await api.providers.db.insert(eventSubscriptions).values({ ...exact, id: "sub_lead_pair", filters: [
+      { field: "channel_name", op: "prefix", value: "lead-" },
+      { field: "channel", op: "not_in", value: ["C_BIZ_PAIR"] },
+    ] });
+    for (const channel of ["C_LEAD_PAIR", "C_BIZ_PAIR"]) {
+      const id = `Ev-pair-${channel}`;
+      const body = envelope({ ...appMention(), channel }, id);
+      expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+      await drainSlackIngress(api.providers);
+      expect(await api.providers.db.select({ reason: eventDropLog.reason, detail: eventDropLog.detail }).from(eventDropLog)).toEqual([]);
+      await expect.poll(() => deliveryCount(api!, id), { timeout: 5_000 }).toBe(1);
+      expect(await storedPayload(api, id)).toMatchObject({ channel, channel_name: channel === "C_LEAD_PAIR" ? "lead-acme" : "biz-dev" });
+    }
+    const miss = envelope({ ...appMention(), channel: "C_OTHER_PAIR" }, "Ev-pair-other");
+    expect((await post(api.baseUrl, miss, sign(miss))).status).toBe(200);
+    await drainSlackIngress(api.providers);
+    await expect.poll(() => inboxDrained(api!), { timeout: 5_000 }).toBe(true);
+    expect(await deliveryCount(api, "Ev-pair-other")).toBe(0);
+  });
+
   it("stops matching a renamed channel as soon as its channel_rename arrives", async () => {
     const asked = serveChannelNames({ C_NAME_R1: "alerts-billing" });
     api = await bootTestApi({ plugins: [slackPlugin] });

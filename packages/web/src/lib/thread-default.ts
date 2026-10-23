@@ -1,7 +1,16 @@
 import type { ThreadSummary } from "@valet/api/wire";
 
+/** Helper conversations, workflow threads, and the home conversation: never
+ * the thread a workspace opens by default, and private to their person. */
 export function isAppAssistantThread(thread: Pick<ThreadSummary, "key">): boolean {
-  return Boolean(thread.key?.startsWith("app-assistant:") || thread.key?.startsWith("workflow:"));
+  return Boolean(thread.key?.startsWith("app-assistant:") || thread.key?.startsWith("workflow:") || thread.key === "home");
+}
+
+/** Threads that are not rows in the thread list: workflow threads, and the
+ * home conversation (the app's first screen). Earlier helper conversations
+ * from the side panel are rows, so they stay reachable. */
+export function isHiddenFromThreadList(thread: Pick<ThreadSummary, "key">): boolean {
+  return Boolean(thread.key?.startsWith("workflow:") || thread.key === "home");
 }
 
 /** The implicit thread is always the newest created thread, regardless of sidebar sort. */

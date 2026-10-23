@@ -8,7 +8,11 @@ const query = vi.fn();
 let teamId: string | undefined;
 let data: ListPluginsResponse | undefined;
 let error: Error | null;
+const askValet = vi.fn();
+let mobile = false;
 vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open }) }));
+vi.mock("~/components/home/use-ask-valet", () => ({ useAskValet: () => askValet }));
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobile }));
 vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ teamId }) }));
 let tools: ToolPermissionWire[] = [];
 vi.mock("~/api/policies", () => ({ useMyToolPermissions: () => ({ data: { tools } }) }));
@@ -23,7 +27,14 @@ vi.mock("@tanstack/react-router", () => ({
 import { SkillUsage } from "./skill-usage";
 const skill: SkillSummary = { name: "drive", origin: "plugin", plugin: "google-workspace", takesArgs: false };
 describe("SkillUsage", () => {
-  beforeEach(() => { open.mockReset(); query.mockReset(); teamId = undefined; data = undefined; error = null; tools = []; });
+  beforeEach(() => { open.mockReset(); askValet.mockReset(); mobile = false; query.mockReset(); teamId = undefined; data = undefined; error = null; tools = []; });
+  it("hands an editable prompt to Home on a phone", () => {
+    mobile = true;
+    render(<SkillUsage skill={skill} />);
+    fireEvent.click(screen.getByRole("button", { name: "Try in chat" }));
+    expect(askValet).toHaveBeenCalledExactlyOnceWith('Use the "drive" skill to help me with [describe your task].');
+    expect(open).not.toHaveBeenCalled();
+  });
   it("hands an editable prompt to the existing workspace draft flow", () => {
     render(<SkillUsage skill={skill} />);
     fireEvent.click(screen.getByRole("button", { name: "Try in chat" }));

@@ -4,9 +4,9 @@
  * `validateSubscription` reads and back, and the provider-populated value
  * picker. The editor's When section uses all three.
  *
- * A row's `value` is held as the raw text the user typed. The `in` operator
- * splits it into a list at submit (`toWireFilters`), so the form never needs
- * a separate list widget.
+ * A row's `value` is held as the raw text the user typed. The list
+ * operators (`in`, `not_in`) split it into a list at submit
+ * (`toWireFilters`), so the form never needs a separate list widget.
  */
 import { useMemo, useState } from "react";
 import type { EventSubscriptionFilterWire } from "@valet/api/wire";
@@ -29,7 +29,14 @@ import { Input } from "~/components/primitives";
 export const NO_CHANNEL_MATCH_HELP =
   "No matches. This lists channels the Valet app has joined. To use a private channel, invite the app to it in Slack first.";
 
-export type FilterOp = "eq" | "in" | "prefix" | "contains" | "regex";
+export type FilterOp = EventSubscriptionFilterWire["op"];
+
+const FILTER_OPS: readonly FilterOp[] = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix", "not_regex"];
+
+/** True for an op whose value is a list: `in` and `not_in`. */
+export function isListOp(op: FilterOp): op is "in" | "not_in" {
+  return op === "in" || op === "not_in";
+}
 
 export interface UiFilterRow {
   /** A stable, view-only row identity. Each row holds picker state (query,
@@ -43,7 +50,7 @@ export interface UiFilterRow {
   /** Display name for a picker value (a resolved id → "Alice"). Persisted on
    * the wire filter, ignored by matching, shown as the selected label. */
   label?: string;
-  /** A stored `in` filter's display labels, aligned with its original value
+  /** A stored list filter's display labels, aligned with its original value
    * list, plus the field they were stored under. Reattached on submit only
    * while the edited row still matches both — an edited list or a switched
    * field drops them rather than mislabel a value. */
@@ -72,6 +79,8 @@ const FIELD_LABELS: Record<string, string> = {
   user: "User",
   text: "Message text",
   channel_type: "Conversation type",
+  bot_id: "Bot",
+  app_id: "App",
   reaction: "Reaction",
   item_user: "Message author",
   creator: "Creator",
@@ -87,14 +96,14 @@ export function fieldLabel(field: string): string {
 
 /**
  * Convert form rows to the wire shape. A row with no field or no value is
- * dropped, because a half-filled row is not a filter and would 400. The `in`
- * operator splits its value on commas into a list.
+ * dropped, because a half-filled row is not a filter and would 400. A list
+ * operator (`in`, `not_in`) splits its value on commas into a list.
  */
 export function toWireFilters(rows: UiFilterRow[]): EventSubscriptionFilterWire[] {
   const out: EventSubscriptionFilterWire[] = [];
   for (const row of rows) {
     if (!row.field) continue;
-    if (row.op === "in") {
+    if (isListOp(row.op)) {
       const values = row.value
         .split(",")
         .map((v) => v.trim())
@@ -107,14 +116,14 @@ export function toWireFilters(rows: UiFilterRow[]): EventSubscriptionFilterWire[
         orig.values.length === values.length &&
         orig.values.every((v, i) => v === values[i])
       ) {
-        out.push({ field: row.field, op: "in", value: values, labels: orig.labels });
+        out.push({ field: row.field, op: row.op, value: values, labels: orig.labels });
       } else {
-        out.push({ field: row.field, op: "in", value: values });
+        out.push({ field: row.field, op: row.op, value: values });
       }
     } else {
       const value = row.value.trim();
       if (value.length === 0) continue;
-      // The label is a display name for a single picked value. The `in`
+      // The label is a display name for a single picked value. A list
       // operator is multi-value, so it carries no single label.
       const label = row.label?.trim();
       out.push(label ? { field: row.field, op: row.op, value, label } : { field: row.field, op: row.op, value });
@@ -125,8 +134,8 @@ export function toWireFilters(rows: UiFilterRow[]): EventSubscriptionFilterWire[
 
 /**
  * Rebuild form rows from stored filters when editing. Tolerant of the
- * `unknown[]` the wire hands back: an `in` list rejoins with ", " so the one
- * value input round-trips.
+ * `unknown[]` the wire hands back: a list rejoins with ", " so the one
+ * value input round-trips. An op this form does not know reads as `eq`.
  */
 export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
   const rows: UiFilterRow[] = [];
@@ -134,8 +143,7 @@ export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
     if (typeof f !== "object" || f === null) continue;
     const r = f as Record<string, unknown>;
     const field = typeof r.field === "string" ? r.field : "";
-    const op: FilterOp =
-      r.op === "in" || r.op === "prefix" || r.op === "contains" || r.op === "regex" ? r.op : "eq";
+    const op = FILTER_OPS.find((known) => known === r.op) ?? "eq";
     const value = Array.isArray(r.value)
       ? r.value.filter((v): v is string => typeof v === "string").join(", ")
       : typeof r.value === "string"
@@ -145,9 +153,9 @@ export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
     const id = newRowId();
     const row: UiFilterRow = { id, field, op, value };
     if (label !== undefined) row.label = label;
-    // Keep an `in` filter's aligned display labels so an untouched list
+    // Keep a list filter's aligned display labels so an untouched list
     // round-trips them (see `UiFilterRow.inLabels`).
-    if (op === "in" && Array.isArray(r.value) && Array.isArray(r.labels)) {
+    if (isListOp(op) && Array.isArray(r.value) && Array.isArray(r.labels)) {
       const values = r.value.filter((v): v is string => typeof v === "string");
       const labels = r.labels.filter((v): v is string => typeof v === "string");
       if (labels.length === values.length && labels.length === r.labels.length) {

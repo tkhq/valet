@@ -10,6 +10,7 @@ import { TypingLine, ViewerFaces } from "./viewer-faces";
 import { Badge, LoadingRow } from "~/components/primitives";
 import { Composer } from "~/components/session/composer";
 import { MessageList } from "~/components/session/message-list";
+import { useThreadEdit } from "~/components/session/use-thread-edit";
 import { errorText } from "~/lib/error-text";
 import { usePageTitle } from "~/lib/page-title";
 import {
@@ -53,6 +54,9 @@ export function SharedThreadView({ address, guest }: {
     if (decisionsQ.data) setPendingGates(sessionId, decisionsQ.data.gates.filter((gate) => gate.status === "pending"));
   }, [sessionId, decisionsQ.data, setPendingGates]);
 
+  // A guest who may reply may edit their own messages, under the same rule
+  // as the owner. A fork would create a thread in the owner's workspace.
+  const edit = useThreadEdit(sessionId, threadId, messagesQ, stream.messages, { readOnly: guest.mode !== "reply" });
   const pendingGate = usePendingGateForThread(sessionId, threadId);
   const queueState = useQueueStateForThread(sessionId, threadId);
   const status = useThreadLiveStatus(sessionId, threadId);
@@ -81,7 +85,7 @@ export function SharedThreadView({ address, guest }: {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <MessageList header={header} messages={stream.messages} threadId={threadId} agentBusy={busy}
-        pendingIds={queueState?.pendingIds} viewerId={me.data?.id} ratings={false} />
+        pendingIds={queueState?.pendingIds} viewerId={me.data?.id} ratings={false} {...edit.list} />
       {pendingGate && (
         <p role="status" className="border-t border-line px-4 py-2 text-xs text-muted">
           Waiting for {guest.ownerName} to answer an approval.
@@ -90,7 +94,7 @@ export function SharedThreadView({ address, guest }: {
       <TypingLine viewers={viewers} />
       {guest.mode === "reply" ? (
         <Composer sessionId={sessionId} threadId={threadId} agentStatus={status.status}
-          queuedMessages={queuedMessages} queuedItemCount={queueState?.pendingIds.length ?? 0} guest />
+          queuedMessages={queuedMessages} queuedItemCount={queueState?.pendingIds.length ?? 0} guest {...edit.composer} />
       ) : (
         <p role="status" className="border-t border-line px-4 py-3 text-sm text-muted">
           You can watch this thread. To send messages, ask {guest.ownerName} to allow replies.

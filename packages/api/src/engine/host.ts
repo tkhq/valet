@@ -1,4 +1,6 @@
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
+import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
+import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
@@ -12,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   Engine,
   builtinTools,
@@ -44,7 +46,7 @@ import {
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
-import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import type { CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
 import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
 import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
@@ -376,6 +378,12 @@ export interface EngineHostOpts {
    * session that may check on them.
    */
   childStatusReader?: ChildStatusReader;
+  /**
+   * Tools a personal assistant gets for its person's home conversation:
+   * start, list, and steer work across their workspaces (`home/tools.ts`).
+   * A getter, because the tools need providers built after this host.
+   */
+  homeTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1628,7 +1636,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -2996,7 +3004,8 @@ export class EngineHost {
     // omits the sentence.
     const publicUrl = publicUrlFromEnv(process.env);
     const assistantThreadContext = (thread: { id: string; key: string }): string | undefined => {
-      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread)].filter(
+      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread),
+        principal.type === "user" && thread.key === HOME_THREAD_KEY ? HOME_THREAD_CONTEXT : undefined].filter(
         (part): part is string => part !== undefined,
       );
       return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -3030,9 +3039,20 @@ export class EngineHost {
     const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
     // Existing scripts can depend on absolute paths. Keep the recorded working
     // directory when adopting a legacy runtime, rather than allocating a new one.
-    const workspace = legacyRuntime && existing ? existing.workspace : execution
+    let workspace = legacyRuntime && existing ? existing.workspace : execution
       ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
       : join(homedir(), ".valet", "assistants", assistantId);
+    if (execution && principal.type === "user") {
+      // The personal root mounts its whole directory. Keep fork files outside it.
+      workspace = existing?.workspace ?? join(homedir(), ".valet", "assistant-executions", assistantId, execution.sessionId);
+      const root = await this.opts.engineStore.getSession(assistant.sessionId);
+      const sourcePath = resolve(root?.workspace ?? join(homedir(), ".valet", "assistants", assistantId));
+      const executionPath = resolve(workspace);
+      if (executionPath === sourcePath || executionPath.startsWith(`${sourcePath}${sep}`) || sourcePath.startsWith(`${executionPath}${sep}`)) {
+        throw Object.assign(new Error("This personal fork overlaps its source working directory. Start a new fork from the source conversation instead."),
+          { code: "execution_workspace_overlap", statusCode: 409 });
+      }
+    }
     await mkdir(workspace, { recursive: true });
 
     const scope: MemoryScope = { owner: principal, actorUserId: runtimeUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
@@ -3090,7 +3110,7 @@ export class EngineHost {
       meta.orgId,
       pins,
       [],
-      buildMemoryTools().map((tool) => tool.name),
+      [...buildMemoryTools(), ...buildWidgetTools()].map((tool) => tool.name),
       true,
     );
 
@@ -3179,7 +3199,7 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this

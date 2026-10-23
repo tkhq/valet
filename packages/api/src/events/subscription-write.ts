@@ -12,15 +12,14 @@ import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@val
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
-import { eventKeyMatches, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
+import { eventKeyMatches, FILTER_OPS, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 import { acceptTargetWrite } from "./target-names.js";
 import { NO_SUBJECT_ERROR, subjectModeAllowed } from "./thread-policy-write.js";
 
-/** The filter operators a subscription accepts. The `event-subscriptions` skill names each one. */
-export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
+export { FILTER_OPS };
 /** The optional prompt templates an assistant target may carry. */
 const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
@@ -99,14 +98,23 @@ export function validateSubscription(
       ) {
         return `filter value invalid for op in on field ${f.field}`;
       }
+    } else if (f.op === "not_in") {
+      // An empty list excludes nothing, so it is refused as a likely mistake.
+      if (
+        !Array.isArray(f.value) ||
+        f.value.length === 0 ||
+        (f.value as unknown[]).some((v) => typeof v !== "string")
+      ) {
+        return `filter value invalid for op not_in on field ${f.field}. Give a list of one or more values to exclude.`;
+      }
     } else {
-      // eq / prefix / contains / regex — value must be a non-empty string
+      // eq / prefix / contains / regex / not_prefix / not_regex — value must be a non-empty string
       if (typeof f.value !== "string" || f.value.length === 0) {
         return `filter value invalid for op ${f.op} on field ${f.field}`;
       }
       // A regex runs on every event, so refuse an invalid, oversized, or
       // catastrophic-backtracking pattern at write time (see match.ts).
-      if (f.op === "regex") {
+      if (f.op === "regex" || f.op === "not_regex") {
         const regexError = validateRegexPattern(f.value);
         if (regexError) return regexError;
       }

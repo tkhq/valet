@@ -14,6 +14,8 @@ import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "../decision-
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
+import { updatePlanTool } from "./update-plan.js";
+export { updatePlanTool } from "./update-plan.js";
 import {
   watchTool,
   wakeAtTool,
@@ -42,6 +44,8 @@ import type {
   ChildSpawner,
   ChildStatusReader,
   ExecJobHandle,
+  ExecOpts,
+  ExecResult,
   JobPoll,
   MessagePart,
   MessageQuery,
@@ -152,6 +156,25 @@ async function bestEffortCancel(cancelJob: (execId: string) => Promise<void>, ex
   }
 }
 
+/** A stuck transport poll must not postpone cancellation past the command deadline. */
+async function pollWithinDeadline(poll: () => Promise<JobPoll>, deadline: number, signal: AbortSignal): Promise<JobPoll | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const interrupted = new Promise<undefined>(resolve => {
+    onAbort = () => resolve(undefined);
+    timer = setTimeout(onAbort, Math.max(0, deadline - Date.now()));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try { return await Promise.race([poll(), interrupted]); }
+  finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+type ForegroundExecResult = Omit<ExecResult, "exitCode"> & { exitCode?: number; jobFailed?: boolean; jobTimedOut?: boolean };
+
 /**
  * Poll a job-mode exec to completion, accumulating output across polls
  * (spec decision 10). Deadline exceeded or `ctx.signal` abort both cancel
@@ -160,12 +183,11 @@ async function bestEffortCancel(cancelJob: (execId: string) => Promise<void>, ex
  */
 async function pollJobToCompletion(
   ctx: ToolContext,
-  command: string,
   pollJob: (execId: string, offset: number) => Promise<JobPoll>,
   cancelJob: (execId: string) => Promise<void>,
   execId: string,
   timeoutMs: number,
-): Promise<ToolResult> {
+): Promise<ForegroundExecResult> {
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
   let output = "";
@@ -179,32 +201,28 @@ async function pollJobToCompletion(
     }
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n${timeoutHint(timeoutMs)}` };
+      return { stdout: output, stderr: "", exitCode: 124, timedOut: true, jobTimedOut: true, truncated };
     }
 
-    const poll = await pollJob(execId, offset);
+    const poll = await pollWithinDeadline(() => pollJob(execId, offset), deadline, ctx.signal);
+    if (!poll) continue;
     pollCount++;
     output += poll.output;
     offset = poll.nextOffset;
     if (poll.truncated) truncated = true;
 
     if (poll.status === "done") {
-      const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      const outcome = terminalOutcome(command, output, poll.exitCode);
-      return { text: `${output}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
+      return { stdout: output, stderr: "", exitCode: poll.exitCode, truncated };
     }
     if (poll.status === "failed") {
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n[job failed]` };
+      return { stdout: output, stderr: "", jobFailed: true, truncated };
     }
 
     // Warm-up ramp: first poll is immediate (no sleep before it, above),
     // successive waits climb JOB_POLL_WARMUP_MS before settling into the
     // JOB_POLL_INTERVAL_MS steady state.
     const waitMs = JOB_POLL_WARMUP_MS[pollCount - 1] ?? JOB_POLL_INTERVAL_MS;
-    await sleep(waitMs, ctx.signal);
+    await sleep(Math.min(waitMs, Math.max(0, deadline - Date.now())), ctx.signal);
   }
 }
 
@@ -254,6 +272,7 @@ export const readTool = defineTool({
 
 export const writeTool = defineTool({
   name: "write",
+  sideEffect: "files",
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
@@ -289,6 +308,7 @@ export const writeTool = defineTool({
 
 export const editTool = defineTool({
   name: "edit",
+  sideEffect: "files",
   description: "Replace exact text occurrences in a file.",
   parameters: Type.Object({
     path: Type.String(),
@@ -329,8 +349,29 @@ export const editTool = defineTool({
 
 export const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
 
+/** Run a foreground command with provider job cancellation above the bash threshold. */
+export async function runForegroundExec(ctx: ToolContext, command: string, opts: ExecOpts): Promise<ForegroundExecResult> {
+  const sandbox = ctx.sandbox;
+  if (!sandbox) throw new Error("No sandbox. Run this command in a session with a sandbox.");
+  const { timeout, ...jobOpts } = opts;
+  const timeoutMs = timeout ?? BASH_DEFAULT_TIMEOUT_S * 1000;
+  // PolicySandbox always exposes job methods. Fall back only when kickoff says unsupported.
+  // Bind the instance: policy methods use this.dispatch internally.
+  const execJob = sandbox.execJob?.bind(sandbox);
+  const pollJob = sandbox.pollJob?.bind(sandbox);
+  const cancelJob = sandbox.cancelJob?.bind(sandbox);
+  if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
+    let handle: ExecJobHandle | undefined;
+    try { handle = await execJob(command, jobOpts); }
+    catch (err) { if (!isJobUnsupported(err)) throw err; }
+    if (handle) return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
+  }
+  return sandbox.exec(command, opts);
+}
+
 export const bashTool = defineTool({
   name: "bash",
+  sideEffect: "files",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
@@ -363,46 +404,12 @@ export const bashTool = defineTool({
 
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
 
-    // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
-    // PolicySandbox, whose execJob/pollJob/cancelJob are ALWAYS defined
-    // (they throw a `[job_unsupported]` error internally when the raw
-    // sandbox lacks the capability) — so `typeof ... === "function"` can't
-    // be used to detect support. Instead: past the threshold, try job mode;
-    // if execJob itself rejects with `[job_unsupported]`, fall back to sync
-    // exec. Once execJob has succeeded (a job exists), never fall back —
-    // the poll loop's errors propagate untouched.
-    //
-    // IMPORTANT: bind these off `ctx.sandbox` rather than destructuring bare
-    // references. `ctx.sandbox` is a real `PolicySandbox` class instance in
-    // production whose methods read `this.dispatch(...)` internally — a bare
-    // destructure (`const { execJob } = ctx.sandbox`) strips that binding and
-    // every job-mode call throws `Cannot read properties of undefined
-    // (reading 'dispatch')`. Every unit test in this area stubs `ctx.sandbox`
-    // as a plain object literal (methods with no `this` dependency), which is
-    // why this went undetected until an end-to-end test exercised a real
-    // PolicySandbox.
-    const execJob = ctx.sandbox.execJob?.bind(ctx.sandbox);
-    const pollJob = ctx.sandbox.pollJob?.bind(ctx.sandbox);
-    const cancelJob = ctx.sandbox.cancelJob?.bind(ctx.sandbox);
-    if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
-      let handle: ExecJobHandle | undefined;
-      try {
-        handle = await execJob(args.command, { signal: ctx.signal });
-      } catch (err) {
-        if (!isJobUnsupported(err)) throw err;
-        // Underlying sandbox doesn't support job mode — fall through to sync exec.
-      }
-      if (handle) {
-        return pollJobToCompletion(ctx, args.command, pollJob, cancelJob, handle.execId, timeoutMs);
-      }
-    }
-
-    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
+    const result = await runForegroundExec(ctx, args.command, { signal: ctx.signal, timeout: timeoutMs });
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
-    const exitNote = !result.timedOut && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
-    const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}`, ...(outcome ? { outcome } : {}) };
+    const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
+    const outcome = result.jobTimedOut || result.jobFailed ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
   },
 });
 
@@ -780,6 +787,7 @@ export const switchModelTool = defineTool({
 
 export const askApprovalTool = defineTool({
   name: "ask_approval",
+  sideEffect: "none",
   description:
     "Ask the user for an explicit approval before proceeding with an action. " +
     "Blocks until the user approves or denies (or the gate expires). Use for " +
@@ -837,6 +845,7 @@ export const askApprovalTool = defineTool({
 
 export const askQuestionTool = defineTool({
   name: "ask_question",
+  sideEffect: "none",
   description:
     "Ask the person a question and wait for the answer. Use it when a decision or a missing " +
     "fact blocks the work, not to confirm something you can check yourself. Give `options` " +
@@ -1061,6 +1070,7 @@ export const builtinTools: ToolDef[] = [
   waitForEventTool,
   threadReadTool,
   listThreadsTool,
+  updatePlanTool,
   switchModelTool,
   askApprovalTool,
   askQuestionTool,

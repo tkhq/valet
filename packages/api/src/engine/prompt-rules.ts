@@ -127,6 +127,12 @@ This sandbox has no secrets command. Do not run one to find out. Never print a c
 export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 
 /**
+ * Multi-step work: keep a plan with `update_plan`. The engine shows the open
+ * plan at the start of each turn, so the plan survives compaction.
+ */
+export const PLAN_RULE = "For work with three or more steps, call `update_plan` before you start, and update it when each step finishes. Keep exactly one item `in_progress`, and mark an item `done` only when it is done.";
+
+/**
  * Background work (spec 2026-10-08: sandbox scratch, wakeups, and leases;
  * spec 2026-10-15: event waiters). Tells the model to use the
  * background-work tools instead of blocking a turn on a long command or
@@ -138,12 +144,12 @@ export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
  */
 export const BACKGROUND_WORK_RULES = `## Background work
 
-For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. After the start, end your turn with a one-line status. You receive a \`process.exited\` signal when it ends, and that signal starts your next turn; do not poll it. Call \`process_read\` with \`tail: true\` only when someone asks for progress. To follow a log or an external system, use \`watch\`, and print only the lines you will act on: each \`watch.event\` signal starts a turn. \`watch\` runs its own command and cannot attach to a process that \`bash\` already started. If you need a command's output lines as they arrive, start the command with \`watch\`, not with \`bash\`. For a process \`bash\` already started, read its output with \`process_read\`; do not guess a log path to tail. To pause for more than 5 minutes, call \`wake_at\` and end your turn; do not \`sleep\`. To keep the sandbox running while nothing runs in it, for example for a person in the terminal, use \`hold_sandbox\`. To stop work you started, call \`wakeup_cancel\` with its id; \`wakeup_list\` shows the ids. Your own cancel sends no signal, so do not wait for one. A child notifies its parent whenever a turn ends. The update lists outstanding background work. Later signal turns send new updates. Cancelling a child-updates waiter stops its notifications, not the child. When a signal reports a cause other than \`exit\`, tell the person before you run the work again. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`.`;
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. After the start, end your turn with a one-line status. You receive a \`process.exited\` signal when it ends, and that signal starts your next turn; do not poll it. Call \`process_read\` with \`tail: true\` only when someone asks for progress. To follow a log or an external system, use \`watch\`, and print only the lines you will act on: each \`watch.event\` signal starts a turn. \`watch\` runs its own command and cannot attach to a process that \`bash\` already started. If you need a command's output lines as they arrive, start the command with \`watch\`, not with \`bash\`. For a process \`bash\` already started, read its output with \`process_read\`; do not guess a log path to tail. To pause for more than 5 minutes, call \`wake_at\` and end your turn; do not \`sleep\`. To keep the sandbox running while nothing runs in it, for example for a person in the terminal, use \`hold_sandbox\`. To stop work you started, call \`wakeup_cancel\` with its id; \`wakeup_list\` shows the ids. Your own cancel sends no signal, so do not wait for one. A child notifies its parent whenever a turn ends. The update lists outstanding background work. Later signal turns send new updates. Cancelling a child-updates waiter stops its notifications, not the child. When a signal reports a cause other than \`exit\`, tell the person before you run the work again. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`. ${PLAN_RULE}`;
 
 /**
  * The thread link sentence (Part I of the event-wakeups spec, quoted
  * verbatim). It is per-thread, not per-session, so it cannot live in
- * {@link backgroundWorkRules} or {@link codingSystemPrompt}, both of which
+ * {@link BACKGROUND_WORK_RULES} or {@link codingSystemPrompt}, both of which
  * build once per session: `host.ts` wires it in through the engine's
  * `threadSystemContext` hook instead, which runs once per thread. Returns
  * undefined when the deployment has no public URL (`publicUrlFromEnv`),

@@ -483,6 +483,37 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
+  async appendBranch(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    opts: { expectedLeafId: string | null; fence?: WriteFence },
+  ): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      await this.checkFenceTx(tx, opts.fence);
+      // Lock the thread row first: appendEntries and getThreadSnapshot take
+      // the same row, so the leaf read here is the one this write replaces.
+      const current = await tx.query(
+        "SELECT active_leaf_entry_id FROM engine_threads WHERE session_id = $1 AND id = $2 FOR UPDATE",
+        [sessionId, threadId],
+      );
+      const raw = current.rows[0];
+      if (!raw) return false;
+      const leaf = typeof raw.active_leaf_entry_id === "string" ? raw.active_leaf_entry_id : null;
+      if (leaf !== opts.expectedLeafId) return false;
+      if (entries.length === 0) return true;
+      for (const e of entries) {
+        await tx.query(INSERT_ENTRY_SQL, entryInsertParams(entryToRow(e)));
+      }
+      await tx.query("UPDATE engine_threads SET active_leaf_entry_id = $1, updated_at = $2 WHERE id = $3", [
+        entries[entries.length - 1].id,
+        Date.now(),
+        threadId,
+      ]);
+      return true;
+    });
+  }
+
   async updateEntry(sessionId: string, threadId: string, entry: SessionEntry, fence?: WriteFence): Promise<void> {
     await this.db.transaction(async (tx) => {
       await this.checkFenceTx(tx, fence);
@@ -921,8 +952,13 @@ export class PgSessionStore implements SessionStore {
           if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
             throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
           }
+          const activeScope = opts?.steerScope === "active";
+          if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
+            throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
+          }
+          const headScope = promotionScope || activeScope;
           let lockedPending: QueueItem[] = [];
-          if (promotionScope) {
+          if (headScope) {
             // Lock every runnable candidate before inserting the promoted
             // head. A claim that won first is observed as running and gets
             // superseded; a claim that lost waits, then sees the new head.
@@ -958,15 +994,16 @@ export class PgSessionStore implements SessionStore {
             }
           }
 
-          const queuedCreatedAt = promotionScope
+          const queuedCreatedAt = headScope
             ? lockedPending
                 .filter((candidate) => candidate.status === "queued")
                 .map((candidate) => candidate.createdAt)
             : [];
           // Queue order is createdAt + id. Move the successor just ahead
-          // of the oldest queued sibling; the validated source guarantees a
-          // non-empty set.
-          const promotedCreatedAt = promotionScope
+          // of the oldest queued sibling. A promotion's validated source
+          // guarantees a non-empty set; an active steer with no queued
+          // sibling keeps its time.
+          const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
             ? Math.min(...queuedCreatedAt) - 1
             : item.createdAt;
           const itemToInsert: QueueItem = { ...item, createdAt: promotedCreatedAt };
@@ -977,7 +1014,7 @@ export class PgSessionStore implements SessionStore {
 
           const superseded: string[] = [];
           if (opts?.steer) {
-            const ids = promotionScope
+            const ids = headScope
               ? lockedPending
                   .filter(
                     (candidate) =>

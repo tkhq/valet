@@ -25,6 +25,7 @@ import type {
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches } from "../schema/index.js";
+import { publicUrlFromEnv } from "../channels/host.js";
 import { buildOrgCatalog } from "../services/model-catalog.js";
 
 /** Where repo prompt skills live inside a prepared workspace. */
@@ -160,6 +161,7 @@ export function makeCommandContext(
   sessionId: string,
 ): CommandContext {
   return {
+    threadUrl: (threadId) => `${(publicUrlFromEnv(process.env) ?? "").replace(/\/+$/, "")}/threads/${encodeURIComponent(threadId)}`,
     async listModels(): Promise<Array<{ id: string; name: string }>> {
       const entries = await buildOrgCatalog(db, credentials, orgId);
       return entries.filter((e) => e.active).map((e) => ({ id: e.id, name: e.name }));

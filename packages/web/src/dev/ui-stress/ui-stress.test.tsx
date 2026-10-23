@@ -6,7 +6,7 @@
  * put it under the real root layout too.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MutationObserver, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { TooltipProvider } from "~/components/primitives/tooltip";
@@ -75,8 +75,8 @@ describe("/dev/ui-stress", () => {
     for (const section of UI_STRESS_SECTIONS) {
       expect(await screen.findByRole("heading", { level: 2, name: section.title }, { timeout: RENDER_TIMEOUT_MS })).toBeTruthy();
     }
-    // The bell opens on load with 20 workflow items and a first decision
-    // page of 20 that has a next page.
+    // The approvals inbox lists 20 workflow items and a first decision page
+    // of 20 that has a next page.
     expect((await screen.findAllByText("40+", {}, { timeout: RENDER_TIMEOUT_MS })).length).toBeGreaterThan(0);
     await waitFor(() => expect(uiStressClient.isFetching()).toBe(0), { timeout: RENDER_TIMEOUT_MS });
     const missing = uiStressClient.getQueryCache().findAll()
@@ -102,6 +102,9 @@ describe("/dev/ui-stress", () => {
     // Gate and question buttons wrap their labels.
     const option = screen.getAllByRole("button").find((button) => /^Option 1: /.test(button.textContent ?? ""));
     expect(option?.className).toContain("whitespace-normal");
+    // The Slack approval previews its message, and the long channel id wraps.
+    const preview = [...document.querySelectorAll('[role="group"][aria-label="Preview"]')].find((group) => group.textContent?.startsWith("Slack · C"));
+    expect(preview?.querySelector("p > span")?.className).toContain("[overflow-wrap:anywhere]");
   }, TEST_TIMEOUT_MS);
 
   it("keeps the fixture account out of the real account's drafts", async () => {
@@ -144,19 +147,11 @@ describe("/dev/ui-stress", () => {
     window.sessionStorage.removeItem("valet:workspace");
   }, TEST_TIMEOUT_MS);
 
-  it("sends no request when Ask Valet opens the assistant", async () => {
-    const fetchSpy = blockFetch();
-    mount({ appShell: true });
-    fireEvent.click(await screen.findByRole("button", { name: "Ask Valet" }, { timeout: RENDER_TIMEOUT_MS }));
-    expect(await screen.findByText(MUTATIONS_DISABLED, {}, { timeout: RENDER_TIMEOUT_MS })).toBeTruthy();
-    expect(fetchSpy).not.toHaveBeenCalled();
-  }, TEST_TIMEOUT_MS);
-
   it("puts the app shell on the fixtures when the path ends in a slash", async () => {
     const fetchSpy = blockFetch();
     mount({ path: `${UI_STRESS_PATH}/`, appShell: true });
     await screen.findByRole("heading", { level: 1, name: "UI stress gallery" }, { timeout: RENDER_TIMEOUT_MS });
-    expect(screen.getByRole("button", { name: "Ask Valet" })).toBeTruthy();
+    expect(screen.getAllByRole("link", { name: /^Home/ }).length).toBeGreaterThan(0);
     expect(fetchSpy).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
 

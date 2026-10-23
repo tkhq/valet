@@ -651,6 +651,7 @@ CREATE TABLE "skills" (
 	"frontmatter" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"content_sha" text NOT NULL,
 	"upstream_path" text,
+    "upstream_blob_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -658,6 +659,16 @@ CREATE TABLE "skills" (
 CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
+--> statement-breakpoint
+CREATE TABLE "skill_files" (
+  "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
+  "path" text NOT NULL,
+  "blob_sha" text NOT NULL,
+  "size" integer NOT NULL,
+  "mode" text NOT NULL,
+  "bytes" bytea NOT NULL,
+  PRIMARY KEY ("skill_id", "path")
+);
 --> statement-breakpoint
 CREATE TABLE "skill_invocations" (
   "id" text PRIMARY KEY NOT NULL,
@@ -712,6 +723,7 @@ CREATE TABLE "skill_sources" (
 	"last_sha" text,
 	"last_manifest_hash" text,
 	"discovery_scan" text,
+    "skill_walk_cache" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"sync_revision" bigint DEFAULT 0 NOT NULL,
 	"last_synced_at" bigint,
 	"last_error" text,
@@ -2224,12 +2236,15 @@ CREATE INDEX IF NOT EXISTS usage_skill_requests_duplicates ON usage_skill_reques
 CREATE OR REPLACE FUNCTION valet_skill_invocation_fact(i skill_invocations)
 RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
  SELECT jsonb_build_array(i.id)::text,i.id,NULL::text,i.created_at,i.session_id,i.skill_key,i.skill_name,
-   i.origin,i.plugin_name,i.invoker_user_id,0::bigint,1::bigint;
+   i.origin,i.plugin_name,i.invoker_user_id,0::bigint,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN 1 ELSE 0 END::bigint;
 $function$;
 CREATE OR REPLACE FUNCTION valet_skill_context_fact(c skill_context_attributions,i skill_invocations)
 RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
- SELECT jsonb_build_array(i.id,c.llm_request_id)::text,i.id,c.llm_request_id,c.created_at,i.session_id,i.skill_key,i.skill_name,
-   i.origin,i.plugin_name,NULL::text,c.estimated_skill_tokens::bigint,0::bigint;
+ SELECT jsonb_build_array(i.id,c.llm_request_id)::text,i.id,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.llm_request_id ELSE NULL END,c.created_at,i.session_id,i.skill_key,i.skill_name,
+   i.origin,i.plugin_name,NULL::text,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.estimated_skill_tokens ELSE 0 END::bigint,0::bigint;
 $function$;
 CREATE OR REPLACE FUNCTION valet_action_hour_sync()
 RETURNS trigger LANGUAGE plpgsql AS $function$
@@ -2379,13 +2394,13 @@ BEGIN
   INSERT INTO usage_skill_facts SELECT f.* FROM new_skill_invocations i CROSS JOIN LATERAL valet_skill_invocation_fact(i::skill_invocations) f
   ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
     skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-    plugin_name=EXCLUDED.plugin_name,invoker_user_id=EXCLUDED.invoker_user_id;
+    plugin_name=EXCLUDED.plugin_name,invoker_user_id=EXCLUDED.invoker_user_id,invoked=EXCLUDED.invoked;
   INSERT INTO usage_skill_facts SELECT f.*
     FROM new_skill_invocations i JOIN skill_context_attributions c ON c.skill_invocation_id=i.id
     CROSS JOIN LATERAL valet_skill_context_fact(c,i::skill_invocations) f
   ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
     skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-    plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens;
+    plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
   RETURN NULL;
 END;
 $function$;
@@ -2427,7 +2442,7 @@ BEGIN
     ORDER BY f.fact_key
     ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
       skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-      plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens;
+      plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
   END IF;
   RETURN NULL;
 END;
@@ -2806,3 +2821,13 @@ CREATE TABLE IF NOT EXISTS "workflow_account_grants" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "workflow_account_grants_share" ON "workflow_account_grants" ("team_id", "service", "member_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "home_tasks" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "title" text NOT NULL, "queue_item_id" text, "created_at" bigint NOT NULL, "reported_at" bigint, "done_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");

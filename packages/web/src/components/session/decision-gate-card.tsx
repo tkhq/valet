@@ -10,7 +10,9 @@
  * pending in the store and the agent stays blocked until the user comes
  * back and answers — matching the engine's per-thread suspend model.
  */
-import { useLayoutEffect, useRef, useState } from "react";
+import { ExpiryCountdown } from "./expiry-countdown";
+import { rememberGateChoice } from "./gate-outcome";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
@@ -22,6 +24,7 @@ import { errorText } from "~/lib/error-text";
 
 import { acceptImages, readImage, filesFromClipboard, toPromptAttachments, IMAGE_ACCEPT_ATTRIBUTE, type ComposerImage } from "./composer-images";
 import { ComposerImageStrip } from "./composer-image-strip";
+import { GatePayloadPreview, hasGatePayloadPreview, splitGateBody } from "./gate-payload";
 
 // The gate action id the policy resolver offers on a `require_approval`
 // decision that grants an org-wide `allow` policy going forward — the API
@@ -64,6 +67,26 @@ function DecisionGateResponse({
   const readingRef = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
+  // "Not now" hides a docked approval in this view only. The gate stays
+  // pending, and a different gate shows again.
+  const canHide = placement === "thread" && gate.type === "approval";
+  const [hiddenGateId, setHiddenGateId] = useState<string | null>(null);
+  const hidden = canHide && hiddenGateId === gate.id;
+  const notNowButton = useRef<HTMLButtonElement>(null);
+  const showButton = useRef<HTMLButtonElement>(null);
+  const focusAfterToggle = useRef(false);
+
+  // The toggle removes the focused button, so move focus to its counterpart.
+  useEffect(() => {
+    if (!focusAfterToggle.current) return;
+    focusAfterToggle.current = false;
+    (hidden ? showButton : notNowButton).current?.focus();
+  }, [hidden]);
+
+  function setHidden(next: boolean) {
+    focusAfterToggle.current = true;
+    setHiddenGateId(next ? gate.id : null);
+  }
 
   const busy = resolve.isPending || withdraw.isPending || reading;
 
@@ -89,6 +112,7 @@ function DecisionGateResponse({
     if (busy) return;
     setError(null);
     try {
+      rememberGateChoice(gate.id, actionId);
       await resolve.mutateAsync({ gateId: gate.id, body: { actionId, ...imageBody } });
     } catch (err) {
       setError(errorText(err));
@@ -100,6 +124,7 @@ function DecisionGateResponse({
     if ((!v && !images.length) || busy) return;
     setError(null);
     try {
+      rememberGateChoice(gate.id, "answer");
       await resolve.mutateAsync({ gateId: gate.id, body: { value: v, ...imageBody } });
       setValue("");
       setImages([]);
@@ -139,6 +164,23 @@ function DecisionGateResponse({
     );
   }
 
+  if (hidden) {
+    return (
+      <div className={columnClass}>
+        <p role="status" className="flex min-w-0 items-center gap-1 text-xs text-muted">
+          <span className="min-w-0 truncate" title={gate.title}>Approval waiting: {gate.title}</span>
+          <span aria-hidden>·</span>
+          <Button ref={showButton} variant="ghost" size="sm" className="shrink-0" onClick={() => setHidden(false)}>Show</Button>
+        </p>
+      </div>
+    );
+  }
+
+  // A known tool call shows as a preview. Its raw tool_id/args block moves
+  // behind Details.
+  const preview = gate.tool && hasGatePayloadPreview(gate.tool) ? gate.tool : undefined;
+  const parts = preview && gate.body ? splitGateBody(gate.body) : undefined;
+
   return (
     <div className={columnClass}>
       <div
@@ -158,6 +200,7 @@ function DecisionGateResponse({
               {inNotification
                 ? <span className="text-xs font-medium text-muted">{kind.label}</span>
                 : <Badge variant={kind.variant}>{kind.label}</Badge>}
+              {gate.expiresAt !== undefined && <ExpiryCountdown expiresAt={gate.expiresAt} className="ml-auto" />}
             </div>
             <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
@@ -174,9 +217,20 @@ function DecisionGateResponse({
             role="region"
             tabIndex={0}
             aria-label="Request details"
-            className={cn(inset, "max-h-[min(14rem,25dvh)] overflow-y-auto pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]")}
+            className={cn(inset, "max-h-[min(14rem,25dvh)] overflow-y-auto pb-3 text-sm leading-relaxed text-muted break-words [overflow-wrap:anywhere]", preview ? "space-y-2" : "whitespace-pre-wrap")}
           >
-            {gate.body}
+            {preview ? (
+              <>
+                {parts?.summary && <p className="whitespace-pre-wrap">{parts.summary}</p>}
+                <GatePayloadPreview tool={preview} />
+                {parts?.call && (
+                  <details>
+                    <summary className="min-h-11 cursor-pointer select-none py-3 text-xs font-medium text-ink sm:min-h-0 sm:py-0">Details</summary>
+                    <pre className="mt-1.5 whitespace-pre-wrap rounded bg-ink-wash p-2 font-mono text-xs [overflow-wrap:anywhere]">{parts.call}</pre>
+                  </details>
+                )}
+              </>
+            ) : gate.body}
           </div>
         )}
 
@@ -243,6 +297,11 @@ function DecisionGateResponse({
           </>
         ) : (
           <div className={cn(inset, "flex flex-wrap items-center gap-2", inNotification ? "justify-start pb-4 pt-1" : "justify-end pb-3")}>
+            {canHide && (
+              <Button ref={notNowButton} variant="ghost" size="sm" onClick={() => setHidden(true)} disabled={busy}>
+                Not now
+              </Button>
+            )}
             {gate.actions.map((a) => {
               const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
               const disabled = busy || (isAlwaysAllow && !isAdmin);

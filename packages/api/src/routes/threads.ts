@@ -3,15 +3,16 @@ import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
-import type { ActiveViewersResponse, ThreadAddress } from "../wire/types.js";
+import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse } from "../wire/types.js";
+import { readStoredThreadPlan } from "../services/thread-plan.js";
 import { activeViewers } from "../services/active-viewers.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, cancelQueuedItem, createThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
-  listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread,
+  abortThread, branchPreview, cancelQueuedItem, createThread, editPreview, forkThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
+  listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
 
@@ -151,7 +152,17 @@ threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt, "content"
 threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity, "content", "read"));
 threadsRouter.get("/:threadId/context", c => inThread(c, getThreadContext));
 threadsRouter.get("/:threadId/recap", c => inThread(c, getThreadRecap, "content", "read"));
+threadsRouter.get("/:threadId/plan", c => inThread(c, async (c, sessionId, threadId) => {
+  const body: ThreadPlanResponse = { plan: await readStoredThreadPlan(c.var.providers.engineStore, sessionId, threadId) ?? null };
+  return c.json(body);
+}, "content", "read"));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));
+// A guest who may reply may go back past their own edit. A fork creates a
+// thread in the owner's workspace, so it is the owner's (and members') alone.
+threadsRouter.post("/:threadId/branch/return", c => inThread(c, returnToBranch, "content", "reply"));
+threadsRouter.get("/:threadId/edit-preview", c => inThread(c, editPreview, "content", "reply"));
+threadsRouter.get("/:threadId/branch-preview", c => inThread(c, branchPreview, "content", "read"));
+threadsRouter.post("/:threadId/fork", c => inThread(c, forkThread, "content"));
 threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));

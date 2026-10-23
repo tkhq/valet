@@ -250,9 +250,12 @@ describe("Ask Valet conversations", () => {
     expect(keys).toContain("app-assistant:local-user");
     expect(keys.filter(key => /^app-assistant:local-user:[0-9a-f-]{36}$/.test(key))).toHaveLength(1);
     expect((await list()).conversations.map(item => item.threadId)).toEqual([first.threadId]);
-    // Ask Valet conversations stay out of the Threads list.
+    // Earlier Ask Valet conversations are Threads rows, so they stay
+    // reachable, but a workspace never opens one by default.
     const threads = await (await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=10`)).json() as ListThreadsResponse;
-    expect(threads.threads.some(thread => thread.key?.startsWith("app-assistant:"))).toBe(false);
+    expect(threads.threads.some(thread => thread.key?.startsWith("app-assistant:"))).toBe(true);
+    const fallback = threads.threads.find(thread => thread.id === threads.defaultThreadId);
+    expect(fallback?.key?.startsWith("app-assistant:") ?? false).toBe(false);
   });
 
   it("reopens the latest conversation while it waits for an approval, also after New chat", async () => {

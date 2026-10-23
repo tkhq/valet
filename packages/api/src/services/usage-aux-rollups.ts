@@ -90,7 +90,22 @@ export async function getSkillBreakdown(db: AppDb, period: ResolvedUsagePeriod, 
     GROUP BY b.skill_key,b.skill_name,b.origin,b.plugin_name ORDER BY invocations DESC,b.skill_name ASC
   `) as { rows: { skill_key: string; skill_name: string; origin: 'plugin' | 'local' | 'repo'; plugin_name: string | null;
     invocations: unknown; unique_invokers: unknown; unassigned_invocations: unknown; attributed_context_tokens: unknown; carrying_calls: unknown }[] };
-  return result.rows.map(r => ({ skillKey:r.skill_key,name:r.skill_name,origin:r.origin,
+  const companions = await db.execute(sql`SELECT f.skill_key,f.skill_name,f.origin,f.plugin_name,
+    COUNT(*) FILTER (WHERE f.path='file_read') AS file_reads,
+    COUNT(*) FILTER (WHERE f.path='script_run') AS script_runs
+    FROM skill_invocations f LEFT JOIN agent_sessions s ON s.id=f.session_id
+    LEFT JOIN workflow_runs r ON f.session_id LIKE 'wf:%' AND r.id=split_part(f.session_id,':',2)
+    WHERE f.created_at >= ${period.startMs} AND f.created_at < ${period.endMs}
+      AND f.path IN ('file_read','script_run') AND ${owned(scope)}
+    GROUP BY f.skill_key,f.skill_name,f.origin,f.plugin_name`) as { rows: {
+      skill_key: string; skill_name: string; origin: string; plugin_name: string | null; file_reads: unknown; script_runs: unknown;
+    }[] };
+  return result.rows.map(r => {
+    const companion = companions.rows.find(c => c.skill_key === r.skill_key && c.skill_name === r.skill_name &&
+      c.origin === r.origin && c.plugin_name === r.plugin_name);
+    return ({ skillKey:r.skill_key,name:r.skill_name,origin:r.origin,
     ...(r.plugin_name ? {pluginName:r.plugin_name} : {}),invocations:Number(r.invocations),uniqueInvokers:Number(r.unique_invokers),
-    unassignedInvocations:Number(r.unassigned_invocations),attributedContextTokens:Number(r.attributed_context_tokens),carryingCalls:Number(r.carrying_calls) }));
+    unassignedInvocations:Number(r.unassigned_invocations),attributedContextTokens:Number(r.attributed_context_tokens),carryingCalls:Number(r.carrying_calls),
+      fileReads:Number(companion?.file_reads ?? 0),scriptRuns:Number(companion?.script_runs ?? 0) });
+  });
 }

@@ -199,3 +199,51 @@ The cooldown map holds at most 10,000 entries and suppresses new notices at capa
 Process restarts reset this cooldown. Slack does not guarantee ephemeral display.
 Receipts distinguish accepted notices, failed attempts, unavailable transport support, and throttled attempts.
 A notice failure does not retry accepted event work or change sender authorization.
+
+## Channel-name alternatives (2026-10-23)
+
+Response setup supports exact channels and channel-name rules as separate alternatives.
+Each rule still ANDs its conditions. Exact selections use channel IDs.
+Name prefixes use `channel_name`, without `#`, and include future channels.
+The setup lists each name rule with its conditions and an edit action.
+A name rule remains on the Slack workspace row. Its sentence shows the pattern.
+
+`Add channel-name response` opens the editor for a separate team mention response.
+The prefix entry explains future channels. Continue grants `Any channel` consent for that pattern.
+Conditional exact rules do not justify automatic ID exclusions, which could lose mentions.
+Later exact additions use the existing collision workflow.
+Saved ID conditions retain their original meaning until a person edits them.
+An existing exact condition and a name prefix in one rule remain an intersection.
+To create alternatives, keep the exact rule and add a separate name rule.
+
+### Channel picker coverage (2026-10-23)
+
+Match enabled channel conditions against the current channel catalog.
+Use channel IDs for ID conditions and current names for name conditions.
+Apply all channel conditions together, including exclusions.
+A matching response for this team keeps the channel selected and locked.
+A matching response for another team marks the channel as taken.
+Other conditions can limit a response, so label this coverage as conditional.
+An unrestricted response for this team takes precedence over another team's
+specific response when the picker shows ownership.
+
+Run stored regular expressions in a worker with a deadline. A slow expression
+must not stop the page. During a check, or if the check fails, block new channel
+selections and saving. Show the status and a retry action. Do not present
+unknown coverage as an available channel.
+
+### Compact channel picker (2026-10-23)
+
+The channel picker shows the channel list and its coverage only.
+Remove the condition explanation, response cards, edit buttons, and name-response creation form.
+Advanced setup remains the single editor entry from this dialog.
+Manage existing responses from their Presence entries.
+This replaces the separate name-response controls described above.
+
+### Name lookup failures
+
+The picker also checks the backend behavior when a Slack name lookup fails.
+A name exclusion can match an absent name. Reserve that potential coverage
+instead of offering the channel to another team. Keep ID restrictions and
+positive name conditions in the same check. Mark coverage as conditional
+when only the absent-name case matches.

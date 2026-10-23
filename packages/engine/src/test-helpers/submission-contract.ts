@@ -396,6 +396,44 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect((await store.getQueueItem(SESSION_ID, q2.id))?.status).toBe("queued");
     });
 
+    it("active steer supersedes only the running item and runs ahead of queued siblings", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const q1 = makeItem({ createdAt: 200, updatedAt: 200, content: "q1" });
+      const q2 = makeItem({ createdAt: 300, updatedAt: 300, content: "q2" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q1);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q2);
+      await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "att-active", ownerId: "o",
+      });
+
+      const edit = makeItem({ createdAt: 400, updatedAt: 400, content: "edited" });
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, edit, { steer: true, steerScope: "active" });
+
+      expect(admitted.supersededItemIds).toEqual([active.id]);
+      expect((await store.getQueueItem(SESSION_ID, q1.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.supersededByItemId).toBeUndefined();
+      expect(admitted.item.createdAt).toBeLessThan(q1.createdAt);
+
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, active.id, { outcome: "superseded" }, { itemId: active.id, attemptId: "att-active" });
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, active.id, { itemId: active.id, attemptId: "att-active" });
+      expect(await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: q1.id, attemptId: "att-q1", ownerId: "o",
+      })).toBeNull();
+      expect((await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: edit.id, attemptId: "att-edit", ownerId: "o",
+      }))?.id).toBe(edit.id);
+    });
+
+    it("active steer on an idle thread keeps its admission time", async () => {
+      const edit = makeItem({ createdAt: 400, updatedAt: 400 });
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, edit, { steer: true, steerScope: "active" });
+      expect(admitted.supersededItemIds).toEqual([]);
+      expect(admitted.item.createdAt).toBe(400);
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { steerScope: "active" }))
+        .rejects.toBeInstanceOf(ValidationError);
+    });
+
     it("an idempotent replay at the cap dedups instead of throwing PendingCapError", async () => {
       const first = await store.admitSubmission(
         SESSION_ID,

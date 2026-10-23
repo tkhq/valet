@@ -498,6 +498,40 @@ describe("GET /api/sessions/:id/threads/:threadId/files", () => {
     expect((await download("/workspace/uploads/stray.txt")).status).toBe(404);
     expect((await download(uploaded.path, "no-such-thread")).status).toBe(404);
   });
+
+  it("still downloads a file attached to a version an edit left", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl, "");
+    const form = new FormData();
+    form.append("file", new Blob(["draft one"], { type: "text/plain" }), "draft.txt");
+    const uploaded = (await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form })).json()) as PostSessionFileUploadResponse;
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const thread = await engineSession.ensureDefaultThread();
+    await thread.pause();
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [{
+      id: "m1", sessionId, threadId: thread.id, parentId: null, type: "message", role: "user", content: "read this", createdAt: 1,
+      author: { id: "local-user", name: "Local Dev" },
+      attachments: [{ type: "file", path: uploaded.path, bytes: uploaded.bytes, sha256: uploaded.sha256, mimeType: "text/plain", name: "draft.txt" }],
+    }]);
+    // The edit moves the thread before its turn fails at model resolution
+    // in this keyless harness, which leaves m1 on the earlier version.
+    const sent = await fetch(`${api.baseUrl}/api/threads/${thread.id}/messages`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "never mind", editEntryId: "m1" }),
+    });
+    expect(sent.status).toBe(202);
+    const { messageId } = (await sent.json()) as { messageId: string };
+    await thread.resume();
+    const deadline = Date.now() + 5000;
+    while ((await api.providers.engineStore.getQueueItem(sessionId, messageId))?.status !== "settled") {
+      if (Date.now() > deadline) throw new Error("edit did not settle");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect((await thread.readEntries()).some((e) => e.id === "m1")).toBe(false);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/files?path=${encodeURIComponent(uploaded.path)}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("draft one");
+  });
 });
 
 describe("sandboxReadyError", () => {

@@ -3,6 +3,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
+export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
 export { boundEventDigest, cutUtf8, stripNul } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
@@ -42,6 +43,7 @@ export {
   renderTemplate,
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
+  skillFileManifest,
   validateSkillFrontmatter,
   isLoadable,
   type FrontmatterValue,
@@ -136,7 +138,46 @@ export {
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
-export { Thread } from "./thread.js";
+export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, type ThreadEntryQuery } from "./thread.js";
+export {
+  BRANCH_NOTE_KEY,
+  THREAD_EDIT_KEY,
+  branchNoteText,
+  pushedFrom,
+  readBranchNote,
+  readThreadEdit,
+  summarizeBranchActions,
+  type BranchNote,
+  type BranchNoteAction,
+  type BranchNoteKind,
+  type BranchNoteRepoFiles,
+  type EditPreview,
+  type ForkSeedRecord,
+  type ThreadEdit,
+} from "./branch-note.js";
+export {
+  FILE_CHECKPOINT_KEY,
+  WORKSPACE_FILES,
+  applySeedBundle,
+  changedPaths,
+  checkpointRef,
+  exportSeedBundle,
+  findRepos,
+  planFileUndo,
+  planForkSeed,
+  planPathCount,
+  readTurnCheckpoint,
+  repoDir,
+  restorePaths,
+  returnPlan,
+  snapshotRepo,
+  type ForkSeedRepo,
+  type PathRestore,
+  type RepoCheckpoint,
+  type RepoRestore,
+  type RepoRestoreResult,
+  type TurnCheckpoint,
+} from "./checkpoints.js";
 export {
   InMemoryBlobStore,
   InMemoryEventStream,
@@ -170,7 +211,9 @@ export {
   bashTool,
   threadReadTool,
   threadReference,
+  updatePlanTool,
   JOB_MODE_THRESHOLD_MS,
+  runForegroundExec,
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,
 } from "./builtin-tools/index.js";

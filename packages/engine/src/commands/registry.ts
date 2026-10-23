@@ -26,6 +26,7 @@ interface BuiltinMeta {
 }
 
 const BUILTIN_META: Record<(typeof BUILTIN_COMMAND_NAMES)[number], BuiltinMeta> = {
+  fork: { description: "Branch from the latest completed reply", argHint: "[prompt]" },
   help: { description: "List available commands" },
   status: { description: "Show session status" },
   stop: { description: "Abort the current agent turn" },

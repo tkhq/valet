@@ -4,7 +4,9 @@ import { usePlugins } from "~/api/integrations";
 import { useMyToolPermissions } from "~/api/policies";
 import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { useAskValet } from "~/components/home/use-ask-valet";
 import { useWorkspaceAssistant } from "~/components/layout/workspace-assistant";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { displayName } from "~/components/integrations/display-name";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { hasPanel, IntegrationRow } from "~/components/integrations/integration-row";
@@ -13,6 +15,9 @@ import { Button, textLinkClass } from "~/components/primitives";
 
 /** Installation supplies instructions. Connection health belongs to the active workspace. */
 export function SkillUsage({ skill }: { skill: SkillSummary }) {
+  // A phone drafts in Home; a wider screen drafts in the Ask Valet panel.
+  const mobile = useMobileLayout();
+  const askValet = useAskValet();
   const assistant = useWorkspaceAssistant();
   const shadowed = skill.origin !== "plugin" && skill.shadowed;
   return <section aria-label="Using this skill" className="mt-6 space-y-3 rounded-lg border border-line p-4 text-sm">
@@ -24,8 +29,14 @@ export function SkillUsage({ skill }: { skill: SkillSummary }) {
         <p>Connection prerequisites are not declared for this skill. Check the playbook before you run it.</p>
       </div>}
     {skill.takesArgs && <p className="text-muted">This skill takes arguments. Include the values requested in the playbook.</p>}
-    <Button size="sm" disabled={shadowed} onClick={() => assistant.open(`Use the "${skill.name}" skill to help me with [describe your task].`)}>Try in chat</Button>
-    <p className="text-xs text-muted">Opens an editable draft in this workspace. Your existing draft stays unchanged. Nothing is sent until you send it.</p>
+    <Button size="sm" disabled={shadowed} onClick={() => {
+      const draft = `Use the "${skill.name}" skill to help me with [describe your task].`;
+      if (mobile) void askValet(draft);
+      else assistant.open(draft);
+    }}>Try in chat</Button>
+    <p className="text-xs text-muted">{mobile
+      ? "Opens an editable draft in Home. A draft you already typed stays. Nothing is sent until you send it."
+      : "Opens an editable draft in this workspace. Your existing draft stays unchanged. Nothing is sent until you send it."}</p>
     {shadowed && <p className="text-muted">Rename this skill before trying it. Another skill uses this name.</p>}
   </section>;
 }

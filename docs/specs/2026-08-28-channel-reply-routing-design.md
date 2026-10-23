@@ -672,6 +672,16 @@ The web question card accepts image uploads, clipboard images, and dropped image
 
 Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.
 
+### A reply answers an open question
+
+An open question (a question gate with no options) has no button, so its Slack card says "Reply in this thread to answer." A person's text reply answers it instead of waiting in the queue behind the turn that asked it (`channels/open-question-reply.ts`). Three paths reach it:
+
+1. A reply under the card. The reply's conversation key ends with the card's own timestamp, so the host finds the card's gate (`cardForReply`). This covers an attention DM card for a question in another thread.
+2. A reply in a bound DM conversation answers the open question its thread waits on.
+3. A reply in a followed channel thread does the same through `deliverToAssistantThread`'s `answer` argument. Only the follow router sets it; automated deliveries never answer a question. When the delivery carries missed thread messages, the router does not set it: the whole body goes in as a message, so the assistant reads the missed lines, and the question stays open.
+
+The reply needs the same right as a button click: the person may resolve the session's gates, and a gate that names an approver answers to that person only. A reply with files, or a reply when no open question waits, goes in as a message. The resolution records the inbound dispatch id as its source message. The host checks it with the queue items before it handles a message (`replyAnswered`), so a replayed delivery is recognized after a restart too, when no card reference is left, and does not also queue the reply. Resolving a gate that another answer settled first does not fail, so the reply path reads the stored resolution back: when this reply is not the answer, it goes in as a message.
+
 ### Agent configuration tools
 
 `events.list_subscriptions` lists the current personal or team workspace's subscriptions.
@@ -688,3 +698,11 @@ It preserves concurrent target edits, matching rules, ownership, and enabled sta
 Every subscription-created follow binding retains its subscription ID, including personal subscriptions. Followed replies read current presence from that rule.
 Empty presence objects behave as unset, including previously stored values. Overheard messages coalesce only when their display name and avatar overrides match.
 The digest retains those overrides. Different identities and sender authorities remain separate. Approval replay retains the blocked submission metadata across restart.
+
+## Slack processing status
+
+Processing status follows the submission lifecycle independently of reply streaming.
+Pending gates take priority over queued follow-ups. Completion, failure, cancellation, and shutdown clear the status when no work remains.
+Reply delivery restores the status if the submission still needs work.
+Startup subscribes before restoring unsettled Slack submissions and their pending gates from organization-scoped pages of 100.
+Shutdown prevents late admission or recovery callbacks from creating new status registrations.

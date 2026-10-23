@@ -10,7 +10,7 @@ import type {
   QueueState as EngineQueueState,
   SignalContent as EngineSignalContent,
 } from "@valet/engine";
-import { gateApprover } from "../services/session-access.js";
+import { gateApprover, isSharedAccountGate } from "../services/session-access.js";
 import type {
   DecisionGate as WireDecisionGate,
   DecisionGateProvenance,
@@ -33,13 +33,15 @@ import { QUEUED_TEXT_MAX } from "../wire/types.js";
  * same way, so a surface can say whose answer the gate waits on.
  * `oneShot` and `riskLevel` come from the tool approval context the engine
  * stamps (`toolApprovalGateContext`); the bell's bulk answer reads both.
+ * `tool` carries the gated call for a payload preview (see `gateTool`).
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
   const approver = gateApprover(g);
-  const tool = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
-  const oneShot = !approver && tool?.oneShot === true;
-  const riskLevel = WIRE_RISK_LEVELS.find((level) => level === tool?.riskLevel);
+  const toolContext = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
+  const oneShot = !isSharedAccountGate(g) && toolContext?.oneShot === true;
+  const riskLevel = WIRE_RISK_LEVELS.find((level) => level === toolContext?.riskLevel);
+  const tool = gateTool(g.body, toolContext);
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -56,10 +58,45 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     ...(approver ? { approver } : {}),
     ...(oneShot ? { oneShot: true as const } : {}),
     ...(riskLevel ? { riskLevel } : {}),
+    ...(tool ? { tool } : {}),
   };
 }
 
 const WIRE_RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
+
+/** A preview needs the start of a long message, not all of it. */
+const TOOL_ARG_MAX_CHARS = 4000;
+
+/** The gated call from a tool approval context. A gate whose body does not
+ * show this call's `tool_id=`/`args=` lines gets none: a shared-account gate
+ * replaces that body, and the wire must not show more than the body does. */
+function gateTool(
+  body: string | undefined,
+  context: ReturnType<typeof toolApprovalGateContext>,
+): WireDecisionGate["tool"] {
+  if (!context || !body?.includes(`tool_id=${context.toolId}\nargs=`)) return undefined;
+  return {
+    id: context.toolId,
+    ...(context.args ? { args: boundArgs(context.args) } : {}),
+  };
+}
+
+function boundArgs(args: object): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(args).map(([key, value]: [string, unknown]) => [key, boundArg(value)]));
+}
+
+/** Cuts every string at any depth to `TOOL_ARG_MAX_CHARS` code points, so a
+ * cut never splits a surrogate pair. */
+function boundArg(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= TOOL_ARG_MAX_CHARS) return value;
+    const points = [...value];
+    return points.length > TOOL_ARG_MAX_CHARS ? `${points.slice(0, TOOL_ARG_MAX_CHARS).join("")}…` : value;
+  }
+  if (Array.isArray(value)) return value.map(boundArg);
+  if (value !== null && typeof value === "object") return boundArgs(value);
+  return value;
+}
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
 
@@ -119,7 +156,7 @@ export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[
         });
         break;
       case "thinking":
-        out.push({ kind: "thinking", text: p.text });
+        out.push({ kind: "thinking", text: p.text, ...(p.startedAt !== undefined ? { startedAt: p.startedAt } : {}), ...(p.durationMs !== undefined ? { durationMs: p.durationMs } : {}) });
         break;
       // attachment, error parts: dropped on the wire (UI ignores).
       case "attachment":
@@ -277,6 +314,10 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           role: e.role === "system" ? "system" : "assistant",
         },
       ];
+
+    case "thinking_update":
+      return [{ type: "thinking_update", threadId: e.threadId, messageId: e.messageId, index: e.index,
+        part: { kind: "thinking", text: e.part.text, startedAt: e.part.startedAt, durationMs: e.part.durationMs } }];
 
     case "text_delta":
       // Wire delta carries messageId so the client can target the right row.
@@ -510,6 +551,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           threadId: e.threadId,
         },
       ];
+
+    case "branch_switched":
+      return [{ type: "branch_switched", threadId: e.threadId, noteEntryId: e.noteEntryId }];
 
     // Out of agent-loop v1 scope — silently dropped. Future plans:
     // child-task events, thread lifecycle.

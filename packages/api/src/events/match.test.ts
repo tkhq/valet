@@ -109,6 +109,20 @@ describe("Slack channel_name filter", () => {
     expect(filtersMatch(post("alerts-dev"), key, regex, catalog)).toBe(false);
   });
 
+  it("keeps the saved ID prefix and exact ID conditions as an intersection", () => {
+    const saved = [{ field: "channel", op: "prefix" as const, value: "lead-" },
+      { field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    const lead = { channel: "C0CC7CS2WHE", channel_name: "lead-acme" };
+    const biz = { channel: "C0BKL72FS93", channel_name: "biz-dev" };
+    expect(filtersMatch(lead, "slack.app_mention", saved, catalog)).toBe(false);
+    expect(filtersMatch(biz, "slack.app_mention", saved, catalog)).toBe(false);
+    const byName = [{ field: "channel_name", op: "prefix" as const, value: "lead-" }];
+    const exact = [{ field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    expect(filtersMatch(lead, "slack.app_mention", byName, catalog)).toBe(true);
+    expect(filtersMatch(biz, "slack.app_mention", exact, catalog)).toBe(true);
+    expect(filtersMatch(lead, "slack.app_mention", [...byName, ...exact], catalog)).toBe(false);
+  });
+
   it("fails closed when intake has no name for the channel", () => {
     expect(filtersMatch(post(), "slack.bot_message", prefix, catalog)).toBe(false);
     expect(filtersMatch(post(), "slack.bot_message", [{ field: "channel_name", op: "regex", value: ".*" }], catalog)).toBe(false);
@@ -118,6 +132,60 @@ describe("Slack channel_name filter", () => {
     // Intake reads the current name for each event, so the stored rule sees the rename.
     expect(filtersMatch(post("alerts-billing"), "slack.bot_message", prefix, catalog)).toBe(true);
     expect(filtersMatch(post("archive-billing"), "slack.bot_message", prefix, catalog)).toBe(false);
+  });
+});
+
+describe("exclusion filters (not_in, not_prefix, not_regex)", () => {
+  const catalog = (slackPlugin.triggers ?? []).flatMap((t) => t.catalog);
+  const post = (fields: Record<string, string>) => ({ type: "message", channel: "C1", text: "CPU high", ...fields });
+  const botIdNotIn = [{ field: "bot_id", op: "not_in" as const, value: ["B1", "B2"] }];
+  const nameNotPrefix = [{ field: "channel_name", op: "not_prefix" as const, value: "alerts-dev" }];
+  const botIdNotRegex = [{ field: "bot_id", op: "not_regex" as const, value: "^B(1|2)$" }];
+
+  // An absent value is not in the excluded set, so an exclusion passes it:
+  // the payload has no value, or the key does not declare the field at all.
+  it.each([
+    ["not_in: value in the list", "slack.bot_message", post({ bot_id: "B2" }), botIdNotIn, false],
+    ["not_in: value not in the list", "slack.bot_message", post({ bot_id: "B3" }), botIdNotIn, true],
+    ["not_in: value absent from the payload", "slack.bot_message", post({}), botIdNotIn, true],
+    ["not_in: field the key does not declare", "slack.message", post({ user: "U1" }), botIdNotIn, true],
+    ["not_prefix: value starts with it", "slack.bot_message", post({ channel_name: "alerts-dev-billing" }), nameNotPrefix, false],
+    ["not_prefix: value equals it", "slack.bot_message", post({ channel_name: "alerts-dev" }), nameNotPrefix, false],
+    ["not_prefix: value does not start with it", "slack.bot_message", post({ channel_name: "alerts-prod" }), nameNotPrefix, true],
+    ["not_prefix: value absent (no name read)", "slack.bot_message", post({}), nameNotPrefix, true],
+    ["not_prefix: field the key does not declare", "slack.reaction_added", { reaction: "eyes", channel: "C1" }, nameNotPrefix, true],
+    ["not_regex: value matches the pattern", "slack.bot_message", post({ bot_id: "B2" }), botIdNotRegex, false],
+    ["not_regex: value does not match the pattern", "slack.bot_message", post({ bot_id: "B22" }), botIdNotRegex, true],
+    ["not_regex: value absent from the payload", "slack.bot_message", post({}), botIdNotRegex, true],
+    ["not_regex: field the key does not declare", "slack.message", post({ user: "U1" }), botIdNotRegex, true],
+  ] as const)("%s", (_label, key, payload, filters, expected) => {
+    expect(filtersMatch(payload, key, [...filters], catalog)).toBe(expected);
+  });
+
+  it("fails closed on a malformed value that is present", () => {
+    expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_in", value: "B2" }], catalog)).toBe(false);
+    expect(filtersMatch(post({ channel_name: "general" }), "slack.bot_message", [{ field: "channel_name", op: "not_prefix", value: ["x"] }], catalog)).toBe(false);
+    // A pattern that does not compile never passes, for regex and not_regex alike.
+    expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "(" }], catalog)).toBe(false);
+  });
+
+  it("not_regex tests the same bounded slice of the value as regex", () => {
+    const long = `${"x".repeat(2_000)}B1`;
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "regex", value: "B1$" }], catalog)).toBe(false);
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "B1$" }], catalog)).toBe(true);
+  });
+
+  it("ANDs with the other filters: alert channels minus two bots", () => {
+    const filters = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }, ...botIdNotIn];
+    expect(filtersMatch(post({ channel_name: "alerts-prod", bot_id: "B9" }), "slack.bot_message", filters, catalog)).toBe(true);
+    expect(filtersMatch(post({ channel_name: "alerts-prod", bot_id: "B1" }), "slack.bot_message", filters, catalog)).toBe(false);
+    expect(filtersMatch(post({ channel_name: "general", bot_id: "B9" }), "slack.bot_message", filters, catalog)).toBe(false);
+  });
+
+  it("keeps a person's message on a line that listens for messages and app posts", () => {
+    const sub = { eventKeys: ["slack.message", "slack.bot_message"], filters: botIdNotIn };
+    expect(subscriptionMatchesEvent(sub, "slack.message", post({ user: "U1" }), catalog)).toBe(true);
+    expect(subscriptionMatchesEvent(sub, "slack.bot_message", post({ bot_id: "B1" }), catalog)).toBe(false);
   });
 });
 

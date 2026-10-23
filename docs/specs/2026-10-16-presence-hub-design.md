@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18; review fixes 2026-10-19.
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary), 2026-10-18 (overview landing; roster presentation), and 2026-10-22 (exclusion conditions). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18; review fixes 2026-10-19.
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -322,7 +322,7 @@ Pass criterion: all steps, in one run, from a clean start.
    `anything happens in Slack`, `github.pull_request.*` as `a pull request
    changes`. A place field with an operator other than `is` or `in` names
    no place; it reads as a condition (`on a repository that starts with
-   acme/`). When the api scopes a line to its creator, that actor applies
+   acme/`, `in a channel that is not #random`). When the api scopes a line to its creator, that actor applies
    to every clause whose key carries `user` (`When you mention Valet or you
    post a message in #incidents`). A labeled sender on a mention line is
    the actor (`When Alice mentions Valet`). A Slack channel in `<place>`
@@ -684,7 +684,15 @@ Pass criterion: all steps, in one run, from a clean start.
    event keys only under `Advanced`. Under the events, **Only when**: the
    conditions as removable pills in words (`repository is acme/api`,
    `channel is #incidents`, `author is jack`) and `+ Add a condition`,
-   which offers the fields these events carry. The hidden creator scope
+   which offers the fields these events carry. A condition compares with
+   `is`, `is one of`, `is not`, `starts with`, `doesn't start with`,
+   `contains`, `matches`, or `doesn't match`. `is not` (`not_in`),
+   `doesn't start with` (`not_prefix`), and `doesn't match` (`not_regex`)
+   skip the events they name, so the pill `bot is not B0123ABCD` keeps that
+   app's posts from starting a turn. An event with no value for the field
+   still matches an exclusion. `is one of` and `is not` take a
+   comma-separated list. Only `is` picks its value from a list such as the
+   channels or users; every other comparison takes typed text. The hidden creator scope
    (Part C step 2) shows as a pill `your own mentions` (or `mentions by
    <creator>` on another person's line) that cannot be removed. A mention
    with no channel condition offers `Any channel`; Save refuses both
@@ -886,6 +894,9 @@ Pass criterion: all steps, in one run, from a clean start.
 - The acceptance scenario as a router-level web test plus api integration
   (see Deviations).
 - A copy lint for INV-H2 and a no-navigation test for INV-H5.
+- Editor tests for the exclusion conditions: an `is not` pill renders in
+  words and saves as `not_in`, and a `doesn't match` condition on a field
+  with a picker takes typed text.
 
 ## Non-goals (normative boundary)
 
@@ -1241,6 +1252,27 @@ Revision 4 deviations:
   carries `preselected.team`. The team Slack setup and the teams panel
   open the editor on a Slack mention line for that team, with the team's
   assistant fixed.
+- **Slack channel alternatives use separate rules (2026-10-23).** Conditions
+  within one rule remain ANDed. Exact channel selections use `channel` with
+  `eq` or `in`. New Slack name comparisons use `channel_name` with `prefix`,
+  `contains`, `regex`, `not_prefix`, or `not_regex`. Selecting Channel after
+  a name comparison resets the comparison to `eq` and clears its value.
+  Other services keep their field semantics. Opening or renaming a saved
+  rule never converts its ID conditions into name conditions.
+- **Slack setup lists channel-name rules.** Exact selections and name rules
+  are separate alternatives. `Add channel-name response` opens the editor with
+  a name prefix and the team's reply target. The prefix entry explains future
+  channels; Continue grants `Any channel` consent for that pattern. The reader
+  reviews the conditions before creation. Conditional exact rules do not
+  justify automatic ID exclusions, which could lose matching mentions.
+  Future exact additions and other name rules use the existing collision
+  workflow. The setup dialog does not bypass collision checks.
+- **Pattern rules keep their place clause.** A name pattern remains on the
+  Slack workspace row, without an invented channel place. The row sentence
+  shows the pattern. A Slack workspace row containing a `channel_name` rule
+  uses the heading `Slack channel responses`, including groups with unscoped rules.
+  Groups without channel-name rules retain `Everywhere in Slack`.
+  Pattern rules have edit actions in Slack setup.
 - **A proposal's row Edit opens edit (Part D step 2).** The overview row's
   Edit on a proposal opens the editor in edit mode. Only the page's **Turn
   on** opens review mode.
@@ -1319,3 +1351,29 @@ name no place), the Activity landing, the `Activity` and `Routines` rail
 counts (replaced by the banner), the `/presence/routines?routine=<id>`
 page (now `/presence/routines/<id>`), and the ungated routine row switch
 (the roster row reads `routineReadOnly`).
+
+Presence copy uses response for these entries. A name condition reads as a channel whose name matches the condition.
+
+### Complete channel summaries (2026-10-23)
+
+Show every channel condition in the response sentence, including exclusions.
+Join separate conditions with `and`, as the event matcher does.
+An exact channel heading does not replace additional channel conditions.
+This also applies to responses that follow a Slack thread.
+Name comparisons say `channel name`. Saved non-exact ID comparisons say
+`channel ID`. The editor explains how these fields differ without changing
+saved conditions.
+
+The overlap notice must fit the side pane. Long response names wrap within
+the reference. They must not hide the rest of the notice or widen the pane.
+
+### Filtered channel groups (2026-10-23)
+
+A single exact channel keeps its channel name as the overview heading.
+Compound channel conditions list at the Slack workspace row.
+Use `Filtered channels` when every response in that row has channel conditions.
+Use `Slack responses` when the row also has an unrestricted response.
+Keep the full conditions in each response sentence.
+This changes display grouping only. Event matching and channel coverage stay the same.
+The channel picker contains no response cards or name-response creation form.
+Use Advanced setup or an existing Presence entry to edit conditions.

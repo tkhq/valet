@@ -37,10 +37,15 @@ describe("planBulkAnswers", () => {
   it("skips a gate that waits on another member and a gate that lends your own account", () => {
     const plan = planBulkAnswers([], [
       decision("other", { approver: { userId: "someone", name: "Teammate" } }),
-      decision("mine", { approver: { userId: "me" } }),
+      decision("mine", { approver: { userId: "me" }, provenance: { baseMode: "allow", source: "shared_account" } }),
     ], "me");
     expect(plan.targets).toEqual([]);
     expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([["decision:other", "waiting_on_other"], ["decision:mine", "shares_your_account"]]);
+  });
+
+  it("includes an approval that waits on you because you asked for it", () => {
+    const plan = planBulkAnswers([], [decision("asked", { approver: { userId: "me" } })], "me");
+    expect(plan.targets.map(t => t.key)).toEqual(["decision:asked"]);
   });
 
   it("never selects always_allow or approve_session, and skips a gate without a one-time approve or a deny", () => {
