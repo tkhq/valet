@@ -70,6 +70,8 @@ The Tool usage view shows a purpose chart and key definitions.
 Provisional keys share an Emerging bar.
 Only organization admins can read provisional or merged labels and definitions.
 Unlabeled calls have a separate bar.
+Top tools group by tool name and surface, not by purpose key.
+The blank CLI `status` rule maps to `other`.
 The key filter applies to call counts, top tools, clients, and recent intents.
 The purpose chart retains its full distribution while a key is selected.
 Surface, period, and personal/team/org filters still apply.

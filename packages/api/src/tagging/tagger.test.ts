@@ -112,10 +112,11 @@ describe("classifier contract", () => {
   it("runs rules first and leaves unknown blank CLI subjects unlabeled", async () => {
     const model = vi.fn<Classify>();
     const { tagger } = setup(toolIntentDimension, model);
-    await tagger.tag("tool_intent", [{ ...subject("one", ""), command: "threads list" }, { ...subject("two", ""), command: "tools search" }]);
+    await tagger.tag("tool_intent", [{ ...subject("one", ""), command: "threads list" }, { ...subject("two", ""), command: "tools search" }, { ...subject("status", ""), command: "status" }]);
     expect(model).not.toHaveBeenCalled();
     expect(await tagger.labelsFor("external_call", "one")).toEqual([expect.objectContaining({ key: "delegation", model: "rule", confidence: 1 })]);
     expect(await tagger.labelsFor("external_call", "two")).toEqual([]);
+    expect((await tagger.labelsFor("external_call", "status"))[0]?.key).toBe("other");
   });
 });
 

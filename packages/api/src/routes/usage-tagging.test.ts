@@ -56,3 +56,19 @@ describe("intent usage scope and registry administration", () => {
     expect((await change("local-user", "other/merge", { into: "code_review" }, "POST")).status).toBe(409);
   });
 });
+
+it("groups one top-tool row across purpose keys and accounts for unlabeled calls", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  await db.insert(externalCalls).values(["a", "b", "unlabeled"].map(id => ({ id, orgId: "local-org", userId: "local-user",
+    surface: "mcp" as const, ownerType: "user" as const, ownerId: "local-user", name: "call_tool",
+    intent: "Review or implement code.", outcome: "ok" as const, durationMs: 1, createdAt: Date.now() })));
+  const tagger = new Tagger({ db, orgId: "local-org", dimensions: [toolIntentDimension], renderers: new Map(),
+    classify: async () => ({ model: "fixed", text: '{"subjects":[{"index":0,"labels":[{"key":"code_review","confidence":1}]},{"index":1,"labels":[{"key":"code_change","confidence":1}]}]}' }) });
+  await tagger.tag("tool_intent", ["a", "b"].map(id => ({ type: "external_call", id, text: "Code work.", userId: "local-user", ownerType: "user", ownerId: "local-user" })));
+  const response = await fetch(`${api.baseUrl}/api/usage/external?window=7d`);
+  expect(response.status).toBe(200); const usage = await response.json() as ExternalUsageResponse;
+  expect(usage.tools).toEqual([expect.objectContaining({ name: "call_tool", surface: "mcp", calls: 3 })]);
+  expect(usage.classification?.unlabeledCalls).toBe(1);
+  expect((usage.classification?.keys.reduce((sum, key) => sum + key.calls, 0) ?? 0) + (usage.classification?.unlabeledCalls ?? 0))
+    .toBe(usage.daily.reduce((sum, day) => sum + day.calls, 0));
+});
