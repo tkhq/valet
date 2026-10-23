@@ -1,7 +1,7 @@
 import type { ThreadSummary } from "@valet/api/wire";
 
 /** The person's home conversation: the phone's first screen, the pinned Home
- * row of the web sidebar, and the thread a Slack DM continues. */
+ * row of the web sidebar, and the destination of earlier linked Slack DMs. */
 export function isHomeThread(thread: Pick<ThreadSummary, "key">): boolean {
   return thread.key === "home";
 }
