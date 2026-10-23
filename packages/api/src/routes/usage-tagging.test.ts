@@ -72,3 +72,16 @@ it("groups one top-tool row across purpose keys and accounts for unlabeled calls
   expect((usage.classification?.keys.reduce((sum, key) => sum + key.calls, 0) ?? 0) + (usage.classification?.unlabeledCalls ?? 0))
     .toBe(usage.daily.reduce((sum, day) => sum + day.calls, 0));
 });
+
+it("excludes denied and pending calls from purpose error-rate denominators", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  const outcomes = ["ok", "error", "denied", "pending-approval"] as const;
+  await db.insert(externalCalls).values(outcomes.map(outcome => ({ id: outcome, orgId: "local-org", userId: "local-user", surface: "mcp" as const,
+    ownerType: "user" as const, ownerId: "local-user", name: "call_tool", intent: "Review the code.", outcome, durationMs: 1, createdAt: Date.now() })));
+  const tagger = new Tagger({ db, orgId: "local-org", dimensions: [toolIntentDimension], renderers: new Map(),
+    classify: async req => ({ model: "fixed", text: JSON.stringify({ subjects: req.subjects.map((_subject, index) => ({ index,
+      labels: [{ key: "code_review", confidence: 1 }] })) }) }) });
+  await tagger.tag("tool_intent", outcomes.map(id => ({ type: "external_call", id, userId: "local-user", ownerType: "user", ownerId: "local-user", text: "Review the code." })));
+  const usage = await (await fetch(`${api.baseUrl}/api/usage/external?window=7d`)).json() as ExternalUsageResponse;
+  expect(usage.classification?.keys.find(key => key.key === "code_review")).toMatchObject({ calls: 4, errorRate: .5 });
+});

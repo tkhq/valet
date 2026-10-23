@@ -56,10 +56,10 @@ it("resets pagination on scope and period changes and labels retention and team 
   const rendered = show();
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
   rendered.rerender(<ToolUsage period={{ kind: "lookback", window: "7d" }} scope="team" teamId="team" />);
-  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "team", "team", "", 0, undefined);
+  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "team", "team", "", 0, undefined, undefined);
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
   rendered.rerender(<ToolUsage period={{ kind: "lookback", window: "30d" }} scope="team" teamId="team" />);
-  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "30d" }, "team", "team", "", 0, undefined);
+  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "30d" }, "team", "team", "", 0, undefined, undefined);
   hook.mockReturnValue({ data: { ...data, recent: [
     { ...data.recent[0], id: "retained", intent: null, intentCleared: true, userId: null, userName: null, teamName: "Engineering" },
     { ...data.recent[0], id: "invalid", intent: null, intentCleared: false },

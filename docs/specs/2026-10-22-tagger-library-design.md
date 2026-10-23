@@ -71,6 +71,7 @@ Provisional keys share an Emerging bar.
 Only organization admins can read provisional or merged labels and definitions.
 Unlabeled calls have a separate bar.
 Top tools group by tool name and surface, not by purpose key.
+Purpose error rates use only completed `ok` and `error` calls as their denominator.
 The blank CLI `status` rule maps to `other`.
 The key filter applies to call counts, top tools, clients, and recent intents.
 The purpose chart retains its full distribution while a key is selected.

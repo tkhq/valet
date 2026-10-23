@@ -30,7 +30,7 @@ export async function toolIntentUsage(db: AppDb, orgId: string, where: SQL | und
   const [counts, state] = await Promise.all([
     db.select({ key: intentKey, calls: sql<number>`count(*)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number),
-      errorRate: sql<number>`count(*) filter (where ${externalCalls.outcome} = 'error')::float / count(*)`.mapWith(Number) }).from(externalCalls)
+      errorRate: sql<number>`coalesce(count(*) filter (where ${externalCalls.outcome} = 'error')::float / nullif(count(*) filter (where ${externalCalls.outcome} in ('ok', 'error')), 0), 0)`.mapWith(Number) }).from(externalCalls)
       .leftJoin(join.join, join.on).where(where).groupBy(intentKey),
     db.select().from(tagDimensionState).where(and(eq(tagDimensionState.orgId, orgId), eq(tagDimensionState.dimension, "tool_intent"))),
   ]);
