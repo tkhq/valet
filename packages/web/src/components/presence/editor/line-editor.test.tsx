@@ -37,7 +37,7 @@ const catalogData = {
     {
       service: "slack",
       entries: [
-        { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel", description: "" }, { field: "user", description: "" }] },
+        { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel", description: "" }, { field: "channel_name", description: "Channel name without #" }, { field: "user", description: "" }] },
         { key: "slack.message", description: "Message", filters: [{ field: "channel", description: "" }] },
       ],
     },
@@ -277,6 +277,24 @@ describe("LineEditor", () => {
     expect((screen.getByRole("radio", { name: "Platform's assistant" }) as HTMLInputElement).checked).toBe(true);
     // The setup fixes the team's assistant: the other choices are off.
     expect((screen.getByRole("radio", { name: "Your assistant" }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("submits a dedicated prefix response with future-channel consent and no inferred exclusions", () => {
+    subscriptions = [line("conditional", { eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "text", op: "contains", value: "urgent" }],
+      target: { kind: "assistant", assistant: "team", teamId: "t_platform", follow: true },
+    })];
+    renderEditor({ kind: "create", preselected: {
+      team: { id: "t_platform", name: "Platform" }, channelNamePattern: { prefix: "lead-" },
+    } });
+    expect(screen.getByLabelText(/^Any channel/)).toHaveProperty("checked", true);
+    expect(sentence()).toContain("channel name that starts with lead-");
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(createSubscription).toHaveBeenCalledWith(expect.objectContaining({
+      eventKeys: ["slack.app_mention"], anyChannel: true, audience: "organization",
+      filters: [{ field: "channel_name", op: "prefix", value: "lead-" }],
+      target: expect.objectContaining({ kind: "assistant", assistant: "team", teamId: "t_platform", follow: true }),
+    }), expect.anything());
   });
 
   it("follows one Slack thread from a pasted link, with the old wizard's body", () => {

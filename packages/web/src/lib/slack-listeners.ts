@@ -36,7 +36,8 @@ export function slackChannelListeners(
       : { kind: "other", owner: rule.ownerType === "team" ? `${teamName(rule.ownerId) ?? "Another team"}'s Valet` : "A personal Valet" };
     const channels = rule.filters.filter(isChannelIdFilter)
       .flatMap((filter) => (Array.isArray(filter.value) ? filter.value : [filter.value]));
-    for (const channel of channels.length > 0 ? channels : [ALL_CHANNELS]) {
+    const scoped = rule.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name");
+    for (const channel of channels.length > 0 ? channels : scoped ? [] : [ALL_CHANNELS]) {
       // This team's own listener wins the label: it is the one it can edit.
       if (!listeners.has(channel) || listener.kind === "this-team") listeners.set(channel, listener);
     }
@@ -64,6 +65,7 @@ export function teamListening(subscriptions: readonly EventSubscriptionWire[], t
   editableChannels: ListeningChannel[];
   channels: ListeningChannel[];
   everywhere: boolean;
+  patterns: EventSubscriptionWire[];
 } {
   const own = subscriptions.filter((rule) => rule.enabled && selectsSlackMention(rule.eventKeys)
     && rule.target.kind === "assistant" && rule.ownerType === "team" && rule.ownerId === teamId);
@@ -74,13 +76,14 @@ export function teamListening(subscriptions: readonly EventSubscriptionWire[], t
       const labels = Array.isArray(filter.labels) ? filter.labels : filter.label ? [filter.label] : [];
       return ids.map((id, index) => ({ id, label: labels[index] ?? id }));
     });
-  const editable = own.find((rule) => rule.filters.length > 0 && rule.filters.every(isChannelIdFilter));
+  const editable = own.find((rule) => rule.filters.length === 1 && rule.filters.every(isChannelIdFilter));
   const seen = new Map<string, ListeningChannel>();
   for (const rule of own) for (const channel of channelsOf(rule)) if (!seen.has(channel.id)) seen.set(channel.id, channel);
   return {
     ...(editable ? { editable } : {}),
     editableChannels: editable ? channelsOf(editable) : [],
     channels: [...seen.values()],
-    everywhere: own.some((rule) => !rule.filters.some(isChannelIdFilter)),
+    everywhere: own.some((rule) => !rule.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name")),
+    patterns: own.filter((rule) => rule.filters.some((filter) => filter.field === "channel_name" || (filter.field === "channel" && !isChannelIdFilter(filter)))),
   };
 }

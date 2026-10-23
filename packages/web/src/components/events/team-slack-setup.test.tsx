@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { EventSubscriptionWire } from "@valet/api/wire";
 import type { ReactNode } from "react";
 
 const state = vi.hoisted(() => ({
@@ -9,6 +10,7 @@ const state = vi.hoisted(() => ({
   failed: false,
   loading: false,
   existing: false,
+  patterns: [] as EventSubscriptionWire[],
   orgAdmin: true,
 }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -62,7 +64,7 @@ function mentionRule(id: string, ownerId: string, channel: string, enabled = tru
 vi.mock("~/api/events", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/events")>(),
   useEventSubscriptions: () => ({
-    data: { subscriptions: state.existing ? [mentionRule("mine", "a", "C1"), mentionRule("theirs", "b", "C2")] : [] },
+    data: { subscriptions: [...(state.existing ? [mentionRule("mine", "a", "C1"), mentionRule("theirs", "b", "C2")] : []), ...state.patterns] },
   }),
   useFilterOptions: () => ({
     isPending: false,
@@ -82,6 +84,7 @@ beforeEach(() =>
     failed: false,
     loading: false,
     existing: false,
+    patterns: [],
     orgAdmin: true,
   }),
 );
@@ -91,6 +94,29 @@ function open() {
   fireEvent.click(screen.getByRole("button", { name: state.existing ? "Listen in channels" : "Choose channels" }));
 }
 describe("team homepage Slack setup", () => {
+  it("shows name-pattern rules alongside exact channels and opens each for editing", () => {
+    state.existing = true;
+    state.patterns = [{
+      id: "lead-rule", name: "Lead replies", enabled: true, ownerType: "team", ownerId: "a", createdBy: "u", createdAt: 1, updatedAt: 1,
+      eventKeys: ["slack.app_mention"], filters: [{ field: "channel_name", op: "prefix", value: "lead-" }],
+      target: { kind: "assistant", assistant: "team", teamId: "a", follow: true },
+    }];
+    open();
+    expect(screen.getByText(/channel name starts with lead-/i)).toBeTruthy();
+    expect(screen.getByText(/Separate rules match alternative channels/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Lead replies" }));
+    expect(screen.getByTestId("line-editor").textContent).toContain("edit Lead replies");
+  });
+
+  it("offers a separate channel-name response rule", () => {
+    state.existing = true;
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Add channel-name rule" }));
+    fireEvent.change(screen.getByLabelText("Channel name prefix"), { target: { value: "lead-" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByTestId("line-editor").textContent).toContain("create team Alpha (a)");
+  });
+
   it("hides the homepage prompt once the team listens, and adds channels to its one rule", () => {
     state.existing = true;
     patchMutate.mockClear(); createMutate.mockClear();

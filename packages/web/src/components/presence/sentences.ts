@@ -483,7 +483,7 @@ function serviceOf(keys: readonly string[]): SentenceService | null {
  * say `in ENG-12`, though no overview row exists for an issue.
  */
 const SENTENCE_PLACE_FIELDS: Readonly<Record<SentenceService, readonly string[]>> = {
-  slack: ["channel"],
+  slack: ["channel_name", "channel"],
   github: ["repo"],
   linear: ["identifier", "team"],
 };
@@ -569,7 +569,7 @@ export function placeParts(
 /** True for a filter that names a place: `eq` or `in` on a place field.
  * Another op on a place field (`starts with`, `contains`) is a condition. */
 function isPlaceFilter(filter: EventSubscriptionFilterWire): boolean {
-  return SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in");
+  return filter.field !== "channel_name" && SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in");
 }
 
 /** A place field as a noun: `repo` → `repository`. */

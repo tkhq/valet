@@ -62,6 +62,55 @@ function Harness({ initial, mode = { kind: "create" }, connected = new Set<WhenS
 }
 
 describe("WhenSection", () => {
+  it.each(["prefix", "contains", "regex", "not_prefix", "not_regex"])(
+    "uses channel names for a new Channel %s condition", (op) => {
+      const services: CatalogService[] = [{ service: "slack", entries: [{
+        key: "slack.app_mention", description: "Mention", filters: [
+          { field: "channel", description: "Slack channel id" },
+          { field: "channel_name", description: "Channel name without #" },
+        ],
+      }] }];
+      render(<Harness initial={newDraft({ preselected: { team: { id: "t1", name: "Sales" } }, timezone: "UTC" })} services={services} />);
+      fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+      fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: op } });
+      expect(screen.getByLabelText("Condition field")).toHaveProperty("value", "channel_name");
+      expect(screen.getByText("Channel name without #")).toBeTruthy();
+      fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "lead-" } });
+      fireEvent.click(screen.getByRole("button", { name: "Add" }));
+      expect(latest?.conditions).toEqual([expect.objectContaining({ field: "channel_name", op, value: "lead-" })]);
+    },
+  );
+
+  it("resets to exact ID matching when Channel is selected after a name pattern", () => {
+    const services: CatalogService[] = [{ service: "slack", entries: [{ key: "slack.app_mention", description: "Mention", filters: [{ field: "channel" }, { field: "channel_name" }] }] }];
+    render(<Harness initial={newDraft({ preselected: { team: { id: "t1", name: "Sales" } }, timezone: "UTC" })} services={services} />);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: "prefix" } });
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "channel" } });
+    expect(screen.getByLabelText("Condition comparison")).toHaveProperty("value", "eq");
+  });
+
+  it("keeps non-Slack ID pattern fields unchanged", () => {
+    const services: CatalogService[] = [{ service: "github", entries: [{ key: "github.check_run.completed", description: "Check", filters: [{ field: "channel" }, { field: "channel_name" }] }] }];
+    render(<Harness initial={newDraft({ timezone: "UTC" })} services={services} />);
+    fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+    fireEvent.click(screen.getByLabelText("A check completes"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: "prefix" } });
+    expect(screen.getByLabelText("Condition field")).toHaveProperty("value", "channel");
+  });
+
+  it("preserves an existing ID prefix and exact ID intersection when opened", () => {
+    const filters = [{ field: "channel", op: "prefix" as const, value: "lead-" },
+      { field: "channel", op: "eq" as const, value: "C0BKL72FS93", label: "#biz-dev" }];
+    const saved = line("legacy", { filters, eventKeys: ["slack.app_mention"] });
+    const draft = draftFromLine(saved);
+    render(<Harness initial={draft} mode={{ kind: "edit", line: saved }} />);
+    expect(latest?.conditions.map(({ field, op, value }) => ({ field, op, value })))
+      .toEqual(filters.map(({ field, op, value }) => ({ field, op, value })));
+    expect(screen.getByText(/All conditions must match/)).toBeTruthy();
+  });
+
   it("offers each service with its mark and disables one that is not connected", () => {
     render(<Harness initial={newDraft({ timezone: "UTC" })} />);
     const services = screen.getByRole("group", { name: "Service" });

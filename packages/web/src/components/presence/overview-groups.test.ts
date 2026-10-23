@@ -70,6 +70,20 @@ describe("overviewGroups", () => {
     expect(linear[0]!.blocks[0]).toMatchObject({ subject: "linear:*", label: "Across Linear" });
   });
 
+  it.each(["prefix-only", "unscoped-first", "prefix-first"])(
+    "uses a neutral Slack root heading for channel-name rules (%s)", (order) => {
+      const pattern = line("P", ["slack.app_mention"], [{ field: "channel_name", op: "prefix", value: "lead-" }]);
+      const lines = order === "prefix-only" ? [pattern]
+        : order === "unscoped-first" ? [mention("A"), pattern] : [pattern, mention("A")];
+      for (const places of [PLACES, []]) {
+        const blocks = overviewGroups(places, lines, new Set()).flatMap((group) => group.blocks);
+        expect(blocks).toHaveLength(1);
+        expect(blocks[0]).toMatchObject({ label: "Slack channel rules", service: "slack", serviceWide: true });
+        expect(blocks[0]?.lines).toEqual(lines);
+      }
+    },
+  );
+
   it("matches a Slack channel by its label when the filter value is not a channel id", () => {
     const byLabel = line("N", ["slack.app_mention"], [{ field: "channel", op: "eq", value: "#deploys" }]);
     expect(blockSubjectFor(byLabel, PLACES)).toBe("slack:T1/C901");

@@ -72,6 +72,7 @@ export type EditorMode = (
       fixedWorkflowId?: string;
       schedule?: boolean;
       team?: { id: string; name: string };
+      channelNamePattern?: { prefix: string };
     };
   }
   | { kind: "edit"; line: EventSubscriptionWire }
@@ -200,15 +201,19 @@ export function newDraft(options: {
   const placeRow = placeRowFor(place);
   const service: EditorService = preselected?.schedule ? "schedule" : place !== undefined && isWhen(place.service) ? place.service : "slack";
   const workflowId = preselected?.fixedWorkflowId ?? preselected?.workflowId;
+  const pattern = preselected?.channelNamePattern;
+  const conditions: UiFilterRow[] = pattern ? [
+    { id: crypto.randomUUID(), field: "channel_name", op: "prefix", value: pattern.prefix },
+  ] : placeRow !== null ? [placeRow] : [];
   return {
     service,
     schedule: defaultSchedule(timezone),
     events: team !== undefined && service === "slack" ? new Set([SLACK_APP_MENTION]) : new Set(),
-    conditions: placeRow !== null ? [placeRow] : [],
+    conditions,
     creatorScopeId: null,
     placeRow,
     placeRemoved: false,
-    anyChannel: false,
+    anyChannel: pattern !== undefined,
     threadFollow: false,
     threadLink: "",
     doKind: workflowId !== undefined ? "workflow" : service === "slack" ? "reply" : "work",

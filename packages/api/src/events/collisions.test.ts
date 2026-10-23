@@ -367,3 +367,14 @@ describe("team mention collisions", () => {
     expect(computeCollisions(existing, [candidate], CATALOG).blocking).toHaveLength(1);
   });
 });
+
+
+it("proves an exact mention rule disjoint from a prefix rule that excludes its ID", () => {
+  const catalog = [entry("slack.app_mention", ["channel", "channel_name"])];
+  const report = computeCollisions(candidate({ eventKeys: ["slack.app_mention"], filters: [
+    { field: "channel_name", op: "prefix", value: "lead-" },
+    { field: "channel", op: "not_in", value: ["C_BIZ"] },
+  ] }), [sub({ eventKeys: ["slack.app_mention"], filters: [chEq("C_BIZ")] })], catalog);
+  expect(report.blocking).toEqual([]);
+  expect(report.overlapping).toEqual([]);
+});

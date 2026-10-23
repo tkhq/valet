@@ -1252,6 +1252,27 @@ Revision 4 deviations:
   carries `preselected.team`. The team Slack setup and the teams panel
   open the editor on a Slack mention line for that team, with the team's
   assistant fixed.
+- **Slack channel alternatives use separate rules (2026-10-23).** Conditions
+  within one rule remain ANDed. Exact channel selections use `channel` with
+  `eq` or `in`. New Slack name comparisons use `channel_name` with `prefix`,
+  `contains`, `regex`, `not_prefix`, or `not_regex`. Selecting Channel after
+  a name comparison resets the comparison to `eq` and clears its value.
+  Other services keep their field semantics. Opening or renaming a saved
+  rule never converts its ID conditions into name conditions.
+- **Slack setup lists channel-name rules.** Exact selections and name rules
+  are separate alternatives. `Add channel-name rule` opens the editor with
+  a name prefix and the team's reply target. The prefix entry explains future
+  channels; Continue grants `Any channel` consent for that pattern. The reader
+  reviews the conditions before creation. Conditional exact rules do not
+  justify automatic ID exclusions, which could lose matching mentions.
+  Future exact additions and other name rules use the existing collision
+  workflow. The setup dialog does not bypass collision checks.
+- **Pattern rules keep their place clause.** A name pattern remains on the
+  Slack workspace row, without an invented channel place. The row sentence
+  shows the pattern. A Slack workspace row containing a `channel_name` rule
+  uses the heading `Slack channel rules`, including groups with unscoped rules.
+  Groups without channel-name rules retain `Everywhere in Slack`.
+  Pattern rules have edit actions in Slack setup.
 - **A proposal's row Edit opens edit (Part D step 2).** The overview row's
   Edit on a proposal opens the editor in edit mode. Only the page's **Turn
   on** opens review mode.

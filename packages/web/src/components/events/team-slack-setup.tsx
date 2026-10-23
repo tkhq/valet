@@ -8,6 +8,9 @@ import { Button, type ButtonProps, Dialog, DialogContent, DialogFooter, Input } 
 import { errorText } from "~/lib/error-text";
 import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-listeners";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import type { EditorMode } from "~/components/presence/editor/draft";
+import { conditionWords } from "~/components/presence/editor/when-section";
+import { fromWireFilters } from "./filter-editor";
 import { LineEditor } from "~/components/presence/editor/line-editor";
 
 /**
@@ -20,7 +23,7 @@ export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
   const subscriptionsQ = useEventSubscriptions();
   if (!subscriptionsQ.data) return null;
   const listening = teamListening(subscriptionsQ.data.subscriptions, teamId);
-  if (listening.everywhere || listening.channels.length > 0) return null;
+  if (listening.everywhere || listening.channels.length > 0 || listening.patterns.length > 0) return null;
   return (
     <section className="flex min-w-0 flex-col gap-4 rounded-lg border border-moss/30 bg-moss/5 p-5 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 items-start gap-3">
@@ -85,7 +88,7 @@ export function TeamSlackSetupModal({
   onOpenChange: (open: boolean) => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
-  const [advanced, setAdvanced] = useState(false);
+  const [editor, setEditor] = useState<EditorMode | null>(null);
   const teamsQ = useTeams();
   const meQ = useMe();
   const pluginsQ = usePlugins();
@@ -129,13 +132,13 @@ export function TeamSlackSetupModal({
         )}
       </p>
     );
-  } else if (advanced) {
+  } else if (editor !== null) {
     return (
       <LineEditor
         key={teamId}
         open
         onOpenChange={onOpenChange}
-        mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }}
+        mode={editor}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );
@@ -146,7 +149,12 @@ export function TeamSlackSetupModal({
         subscriptions={subscriptionsQ.data.subscriptions}
         teamName={(id) => teamsQ.data?.teams.find((candidate) => candidate.id === id)?.name}
         onOpenChange={onOpenChange}
-        onAdvanced={() => setAdvanced(true)}
+        onAdvanced={() => setEditor({ kind: "create", preselected: { team: { id: team.id, name: team.name } } })}
+        onEditPattern={(line) => setEditor({ kind: "edit", line })}
+        onAddPattern={(prefix) => setEditor({ kind: "create", preselected: {
+          team: { id: team.id, name: team.name },
+          channelNamePattern: { prefix },
+        } })}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );
@@ -177,6 +185,8 @@ export function TeamSlackChannelPicker({
   teamName,
   onOpenChange,
   onAdvanced,
+  onAddPattern,
+  onEditPattern,
   onCloseAutoFocus,
 }: {
   team: { id: string; name: string };
@@ -184,9 +194,13 @@ export function TeamSlackChannelPicker({
   teamName: (id: string) => string | undefined;
   onOpenChange: (open: boolean) => void;
   onAdvanced: () => void;
+  onAddPattern: (prefix: string) => void;
+  onEditPattern: (line: Parameters<typeof slackChannelListeners>[0][number]) => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [addingPattern, setAddingPattern] = useState(false);
+  const [prefix, setPrefix] = useState("");
   // The picker edits this team's one channel rule. Its channels start checked.
   const listening = useMemo(() => teamListening(subscriptions, team.id), [subscriptions, team.id]);
   const [picked, setPicked] = useState<Map<string, string>>(() => new Map(listening.editableChannels.map((channel) => [channel.id, channel.label])));
@@ -266,6 +280,29 @@ export function TeamSlackChannelPicker({
             );
           })}
         </ul>
+        <section aria-label="Channel-name rules" className="space-y-2">
+          <p className="text-sm text-muted">Separate rules match alternative channels. All conditions within a rule must match.</p>
+          {listening.patterns.map((rule) => (
+            <div key={rule.id} className="rounded-md border border-line p-3 text-sm">
+              <p className="font-medium">{rule.name}</p>
+              <p className="text-muted">{fromWireFilters(rule.filters).map((row) => conditionWords(row)).join(" AND ")}</p>
+              <Button variant="ghost" size="sm" aria-label={`Edit ${rule.name}`} onClick={() => onEditPattern(rule)}>Edit</Button>
+            </div>
+          ))}
+          {!addingPattern ? (
+            <Button variant="secondary" size="sm" onClick={() => setAddingPattern(true)}>Add channel-name rule</Button>
+          ) : (
+            <div className="space-y-2 rounded-md border border-line p-3">
+              <label className="text-sm" htmlFor="slack-channel-prefix">Channel name prefix</label>
+              <Input id="slack-channel-prefix" value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="lead-" />
+              <p className="text-xs text-muted">Use the name without #. This creates a separate reply rule, including future channels. Review overlaps with exact channels and other name rules before saving.</p>
+              {!unchanged && <p role="status" className="text-sm text-muted">Save or discard your channel changes before adding a rule.</p>}
+              <Button size="sm" disabled={pending || !unchanged || prefix.trim().replace(/^#/, "").length === 0}
+                onClick={() => onAddPattern(prefix.trim().replace(/^#/, ""))}>Continue</Button>
+              <Button variant="ghost" size="sm" onClick={() => setAddingPattern(false)}>Cancel name rule</Button>
+            </div>
+          )}
+        </section>
         {error && <p role="alert" className="text-sm text-danger-600">{errorText(error)}</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={onAdvanced}>Advanced setup</Button>

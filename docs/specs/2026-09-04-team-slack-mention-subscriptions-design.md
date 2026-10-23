@@ -199,3 +199,19 @@ The cooldown map holds at most 10,000 entries and suppresses new notices at capa
 Process restarts reset this cooldown. Slack does not guarantee ephemeral display.
 Receipts distinguish accepted notices, failed attempts, unavailable transport support, and throttled attempts.
 A notice failure does not retry accepted event work or change sender authorization.
+
+## Channel-name alternatives (2026-10-23)
+
+Response setup supports exact channels and channel-name rules as separate alternatives.
+Each rule still ANDs its conditions. Exact selections use channel IDs.
+Name prefixes use `channel_name`, without `#`, and include future channels.
+The setup lists each name rule with its conditions and an edit action.
+A name rule remains on the Slack workspace row. Its sentence shows the pattern.
+
+`Add channel-name rule` opens the editor for a separate team mention response.
+The prefix entry explains future channels. Continue grants `Any channel` consent for that pattern.
+Conditional exact rules do not justify automatic ID exclusions, which could lose mentions.
+Later exact additions use the existing collision workflow.
+Saved ID conditions retain their original meaning until a person edits them.
+An existing exact condition and a name prefix in one rule remain an intersection.
+To create alternatives, keep the exact rule and add a separate name rule.

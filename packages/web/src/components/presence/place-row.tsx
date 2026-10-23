@@ -60,7 +60,7 @@ export const PLACE_META_CLASS = "mt-1.5 grid gap-0.5 text-xs tabular-nums text-m
  * there that names places (`in #a or #b`) keeps them.
  */
 export function keepsPlaceClause(block: Pick<PlaceBlockData, "serviceWide">, line: Pick<EventSubscriptionWire, "filters">): boolean {
-  return block.serviceWide && line.filters.some((filter) => SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in"));
+  return block.serviceWide && line.filters.some((filter) => SENTENCE_PLACE_FIELD_SET.has(filter.field));
 }
 
 /** The service row for Slack with no Slack row in the places list has no page to open. */
