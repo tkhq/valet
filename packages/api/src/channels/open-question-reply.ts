@@ -10,7 +10,6 @@ import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { agentSessions } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
-import { HOME_THREAD_KEY } from "../home/context.js";
 
 export interface OpenQuestionReply {
   session: Session;
@@ -47,16 +46,8 @@ export async function answerOpenQuestion(db: AppDb, reply: OpenQuestionReply): P
   if (await replyAnswered(db, reply.dispatchId)) return true;
   // A question with options keeps its buttons. A gate that names one approver
   // (a shared account) answers to that person on their own card.
-  let gate: ReturnType<Thread["pendingDecisionGates"]>[number] | undefined;
-  for (const candidate of reply.thread.pendingDecisionGates()) {
-    if (candidate.type !== "question" || candidate.actions.length !== 0 || gateApprover(candidate)) continue;
-    if (reply.thread.key === HOME_THREAD_KEY) {
-      const source = await reply.session.providers.store.getQueueItem(reply.session.id, candidate.queueItemId);
-      if (source?.channel?.channelType !== reply.channelType || source.channel.channelId !== reply.channelId) continue;
-    }
-    gate = candidate;
-    break;
-  }
+  const gate = reply.thread.pendingDecisionGates()
+    .find((candidate) => candidate.type === "question" && candidate.actions.length === 0 && !gateApprover(candidate));
   if (!gate) return false;
   const [row] = await db.select().from(agentSessions).where(eq(agentSessions.id, reply.session.id)).limit(1);
   if (!row || !(await canResolveSessionGate(db, row, userPrincipal(reply.userId)))) return false;
