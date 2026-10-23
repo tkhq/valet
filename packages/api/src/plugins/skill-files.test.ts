@@ -121,7 +121,7 @@ describe("skill companion tools", () => {
       });
       faux.setResponses([fauxAssistantMessage([
         fauxToolCall("bash", { command: "echo checked", timeout: 1 }),
-        fauxToolCall("skill_script", { name: fixture.name, script: "scripts/check.py", timeout: 1 }),
+        fauxToolCall("skill_script", { intent: "Run the packaged check script to verify the change.", name: fixture.name, script: "scripts/check.py", timeout: 1 }),
       ], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
       const receipt = await session.prompt("Run the two native tools", { author: {
         id: actor === "guest" ? "other" : "u1", ...(actor === "external" ? { externalSender: true } : {}),

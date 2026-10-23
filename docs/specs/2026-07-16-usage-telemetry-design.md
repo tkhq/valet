@@ -520,3 +520,10 @@ The Usage page adds a Tool usage view with the same scope and period controls.
 
 Classification is not part of this change.
 The telemetry table has no `intent_category` or `taxonomy_version` columns.
+
+## Upstream thread editing and tool integration
+
+File tools retain their `sideEffect: files` checkpoint markers and remain intent-exempt.
+Planning and skill-file tools use the same required intent contract as other non-exempt tools.
+Replay restores channel and reply-target data from the original durable queue item, alongside its author and metadata.
+Branch editing tests use intent-aware model fixtures so completed external actions remain visible in branch notes.

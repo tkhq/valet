@@ -4,13 +4,13 @@
  * branch note; the old branch stays in the store. A return moves the leaf
  * back. A fork copies the active path into an empty thread.
  */
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as checkpoints from "../src/checkpoints.js";
 afterEach(() => vi.restoreAllMocks());
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
   registerFauxProvider,
   Type,
   type FauxResponseStep,
@@ -85,6 +85,7 @@ const peekTool: ToolDef = {
 
 const actionTool: ToolDef = {
   name: "call_tool",
+  intent: "summary",
   description: "runs a plugin action",
   parameters: Type.Object({ tool_id: Type.String(), summary: Type.Optional(Type.String()) }),
   policyChecked: true,
