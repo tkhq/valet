@@ -765,6 +765,14 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     );
   }
 
+  // Home is a place: one name, never archived, never shared. Model and
+  // reasoning still change, and clearing a share or an archive is allowed.
+  if (thread.key === HOME_THREAD_KEY) {
+    if (body.title !== undefined) return c.json({ error: "Home keeps its name. Rename another thread instead." }, 400);
+    if (body.archived === true) return c.json({ error: "Home cannot be archived. Archive another thread instead." }, 400);
+    if (body.share !== undefined && body.share !== "off") return c.json({ error: "Home is private to you and cannot be shared. Share another thread instead." }, 400);
+  }
+
   // Only the owner shares a personal thread. A team thread is already open to
   // its team, so it has no share (`services/thread-share.ts`).
   let nextShare: ThreadShareMode | null | undefined;
@@ -778,11 +786,6 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     nextShare = body.share === "off" ? null : body.share;
   }
 
-  // Home keeps its one name (`HOME_THREAD_TITLE`): a stored title would never
-  // show, so a rename is refused instead of silently ignored.
-  if (body.title !== undefined && thread.key === HOME_THREAD_KEY) {
-    return c.json({ error: "Home keeps its name. Rename another thread instead." }, 400);
-  }
   // Validate the title before changing any thread settings.
   let nextTitle: string | null | undefined;
   if (body.title !== undefined) {

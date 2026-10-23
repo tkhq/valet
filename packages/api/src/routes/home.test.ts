@@ -54,6 +54,30 @@ describe("home conversation", () => {
     expect(all.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
   });
 
+  it("refuses to archive or share the home thread, and still clears either", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    const patch = (body: unknown) => fetch(`${test.baseUrl}/api/threads/${home.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const archived = await patch({ archived: true });
+    expect(archived.status).toBe(400);
+    expect(((await archived.json()) as { error: string }).error).toContain("cannot be archived");
+    for (const share of ["view", "reply"]) {
+      const shared = await patch({ share });
+      expect(shared.status).toBe(400);
+      expect(((await shared.json()) as { error: string }).error).toContain("cannot be shared");
+    }
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { archivedAt: number | null; share?: string };
+    expect(detail.archivedAt).toBeNull();
+    expect(detail.share).toBeUndefined();
+    // A guest link never opens: the home thread has no share to admit through.
+    expect((await fetch(`${test.baseUrl}/api/threads/${home.threadId}/messages`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+    // Clearing is harmless and stays allowed, so an older archived or shared row can be repaired.
+    expect((await patch({ archived: false })).status).toBe(200);
+    expect((await patch({ share: "off" })).status).toBe(200);
+  });
+
   it("refuses to rename the home thread and keeps other settings editable", async () => {
     const test = await boot();
     const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
