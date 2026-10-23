@@ -1005,6 +1005,22 @@ describe("EngineHost model resolution wiring", () => {
       expect((await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).model).toBe("m");
     });
 
+    it("reports which default a save can reach when the assistant carries settings", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "m", defaultReasoning: "medium" }).where(eq(users.id, "local-user"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+      await db.execute(sql`ALTER TABLE assistants ADD COLUMN IF NOT EXISTS model text, ADD COLUMN IF NOT EXISTS reasoning text`);
+      // A carried model that no longer resolves leaves the model default writable; the carried reasoning still wins.
+      await db.execute(sql`UPDATE assistants SET model = 'prov_gone/m1', reasoning = 'high' WHERE id = ${assistant.id}`);
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "local-user", orgId: "local-org" });
+      expect(await engineHost.newThreadDefaults(session.id, meta, "local-user")).toEqual({ model: "m", reasoning: "high", scope: "personal", reasoningScope: null });
+      // A carried model that resolves outranks the model default too.
+      await db.execute(sql`UPDATE assistants SET model = 'l' WHERE id = ${assistant.id}`);
+      expect(await engineHost.newThreadDefaults(session.id, meta, "local-user")).toEqual({ model: "l", reasoning: "high", scope: null, reasoningScope: null });
+    });
+
     it("an explicit session override wins over the personal owner default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;

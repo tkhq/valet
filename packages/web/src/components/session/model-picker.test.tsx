@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -536,5 +536,40 @@ describe("ModelPicker — reasoning row", () => {
   it("appends the reasoning level to the trigger label", () => {
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("· High");
+  });
+});
+
+describe("ModelPicker — new-thread default", () => {
+  it("shows the default and saves the current choice as the default when they differ", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
+
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3 · Medium/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+  });
+
+  it("offers no save without a save handler", async () => {
+    const user = userEvent.setup();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+  });
+
+  it("saves the default on Enter instead of picking the highlighted model", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMakeDefault = vi.fn();
+    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    // The menu focuses its search box on the next frame; move focus after that.
+    await waitFor(() => expect(document.activeElement?.tagName).toBe("INPUT"));
+    screen.getByRole("button", { name: "Make default" }).focus();
+    await user.keyboard("{Enter}");
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

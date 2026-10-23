@@ -30,7 +30,8 @@ import {
   useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
-import { useMe, useOrg, useTeams } from "~/api/settings";
+import { useMe, useOrg, usePatchMe, usePatchTeam, useTeams } from "~/api/settings";
+import { defaultSaveBody, useThreadDefaults } from "~/api/thread-defaults";
 import {
   Badge,
   Button,
@@ -60,7 +61,7 @@ import {
 } from "~/stores/stream";
 import { canAdministerSession } from "./use-can-administer-session";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
-import { ModelPicker } from "./model-picker";
+import { ModelPicker, type NewThreadDefault } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import type { SandboxTabId } from "./sandbox-tabs";
 import { ShareThreadDialog } from "./share-thread-dialog";
@@ -222,6 +223,11 @@ export function SessionHeader({
   const me = useMe();
   const org = useOrg();
   const teams = useTeams();
+  // A workspace conversation starts new threads from a default. The picker
+  // shows it and can save the thread's choice as that default.
+  const threadDefaults = useThreadDefaults(session.id, session.isWorkspaceRuntime === true);
+  const patchMe = usePatchMe();
+  const patchTeam = usePatchTeam();
   // One error slot for the header actions that fire straight from their
   // control: pause, replace, and rename. Delete and the Terminal/VS Code
   // switch confirm first, and their modal covers this row, so each reports
@@ -364,6 +370,22 @@ export function SessionHeader({
   const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
   const isWorkspaceRuntime = session.isWorkspaceRuntime === true;
+  // The server says where each saved field goes; a field the assistant
+  // carries outranks both defaults, so a save never offers it.
+  const defaults = threadDefaults.data;
+  const saveBody = defaults ? defaultSaveBody(defaults, { model: configuredModel, reasoning: configuredReasoning }) : undefined;
+  const saveTo = defaults?.scope ?? defaults?.reasoningScope ?? null;
+  const makeDefault = saveBody && saveTo ? () => {
+    if (saveTo === "personal") patchMe.mutate(saveBody);
+    else if (owner.type === "team") patchTeam.mutate({ id: owner.id, body: saveBody });
+  } : undefined;
+  const newThreadDefault: NewThreadDefault | undefined = defaults ? {
+    model: defaults.model,
+    reasoning: defaults.reasoning,
+    ...(makeDefault ? { onMakeDefault: makeDefault } : {}),
+    saving: patchMe.isPending || patchTeam.isPending,
+  } : undefined;
+
   const title = activeThread?.title || (isWorkspaceRuntime ? "New thread" : session.title || "Untitled thread");
 
   // Lifecycle controls (model, pause, delete) act on a session the whole
@@ -540,6 +562,7 @@ export function SessionHeader({
                   setReasoning.mutate(level);
                 }}
                 disabled={pickerDisabled}
+                newThreadDefault={newThreadDefault}
               />
             </span>
           </Tooltip>

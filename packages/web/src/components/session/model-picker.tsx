@@ -93,6 +93,18 @@ export interface ModelPickerProps {
   onSelectReasoning?: (level: string | null) => void;
   /** Disable interactions (e.g. while a mutation is in flight). */
   disabled?: boolean;
+  /** The model and reasoning a new thread starts with. The footer shows it,
+   * and offers `onMakeDefault` when the current choice differs. */
+  newThreadDefault?: NewThreadDefault;
+}
+
+export interface NewThreadDefault {
+  model: string;
+  reasoning?: string;
+  /** Saves the thread's choice as the default. Present only when the viewer
+   * may change the default and the save would change what new threads get. */
+  onMakeDefault?: () => void;
+  saving?: boolean;
 }
 
 function isAnthropic(id: string): boolean {
@@ -160,6 +172,7 @@ export function ModelPicker({
   currentReasoning,
   onSelectReasoning,
   disabled,
+  newThreadDefault,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -293,6 +306,8 @@ export function ModelPicker({
       e.preventDefault();
       setHighlightIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
+      // A footer button handles its own Enter; only the list commits a row.
+      if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       commitHighlighted();
     } else if (e.key === "/" && document.activeElement !== searchRef.current) {
@@ -512,6 +527,26 @@ export function ModelPicker({
                   </button>
                 );
               })}
+            </div>
+          )}
+          {newThreadDefault && (
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-line text-[10px] text-muted">
+              <span className="min-w-0 flex-1 truncate">
+                New threads: {selectionLabel(newThreadDefault.model, tierMapQ.data, models)}
+                {newThreadDefault.reasoning ? ` · ${reasoningLabelFor(newThreadDefault.reasoning)}` : ""}
+              </span>
+              {newThreadDefault.onMakeDefault && (
+                <button
+                  type="button"
+                  disabled={newThreadDefault.saving}
+                  className="shrink-0 max-sm:min-h-11 rounded-full border border-line px-2 py-0.5 text-ink hover:bg-moss-wash disabled:opacity-50"
+                  // Keep focus in the menu on click; Enter and Space still activate it.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => newThreadDefault.onMakeDefault?.()}
+                >
+                  {newThreadDefault.saving ? "Saving…" : "Make default"}
+                </button>
+              )}
             </div>
           )}
           <div className="px-3 py-1.5 text-[10px] text-muted">
