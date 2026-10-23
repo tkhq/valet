@@ -131,6 +131,8 @@ export interface Wakeup {
   terminalSignalStartedAt?: number;
   /** Terminal timestamp of the expectation whose loss was already counted. */
   terminalSignalLossReportedAt?: number;
+  /** The submission that created this work, captured before its first asynchronous side effect. */
+  sourceQueueItemId?: string;
   /** The channel origin of the turn that created it. Signals carry it with `reply: "manual"`. */
   origin?: ChannelOrigin;
   /** `watch`: start of the current rate window (ms). */
@@ -170,6 +172,8 @@ export interface Lease {
   ownerId?: string;
   /** The thread that created it. `lease.expired` goes there. */
   threadId?: string;
+  /** The submission that created this work, captured before its first asynchronous side effect. */
+  sourceQueueItemId?: string;
   /** The channel origin of the turn that created it. */
   origin?: ChannelOrigin;
   reason: string;
@@ -247,6 +251,8 @@ export type WakeupCreateInput = (
   | { kind: "timer"; prompt: string; fireAt: number }
   | { kind: "event"; subjects: string[]; match: EventMatchSpec; reason: string; maxHours: number }
 ) & {
+  /** Stable creator from ToolContext, not the session's currently running submission. */
+  sourceQueueItemId?: string;
   /** The calling turn's channel origin (`ToolContext.origin`). */
   origin?: ChannelOrigin;
 };
@@ -256,6 +262,7 @@ export interface HoldInput {
   reason: string;
   /** The thread that asked. `lease.expired` goes there. */
   threadId?: string;
+  sourceQueueItemId?: string;
   origin?: ChannelOrigin;
 }
 
@@ -318,5 +325,6 @@ export interface WakeupsSeam {
     req: ArmEventRequest,
     origin?: ChannelOrigin,
     credentials?: CredentialProvider,
+    sourceQueueItemId?: string,
   ): Promise<ArmEventResult>;
 }

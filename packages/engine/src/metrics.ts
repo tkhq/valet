@@ -63,6 +63,7 @@ interface Instruments {
   tokens: Counter;
   costUsd: Counter;
   settlements: Counter;
+  childResultsRecovered: Counter;
   queueWait: Histogram;
   toolDuration: Histogram;
   sandboxExecDuration: Histogram;
@@ -117,6 +118,9 @@ function inst(): Instruments {
     }),
     costUsd: meter.createCounter("valet.cost.usd", {
       description: "LLM spend in USD (priced models only — unpriced turns record nothing)",
+    }),
+    childResultsRecovered: meter.createCounter("valet.child.results_recovered", {
+      description: "Pending child settlements recovered at runtime after a missed observer event",
     }),
     settlements: meter.createCounter("valet.submissions.settled", {
       description: "Settled submissions, by outcome",
@@ -263,6 +267,10 @@ function inst(): Instruments {
   observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
   observeGauge(instruments.wakeupSweepOkAt, wakeupSweepOkState);
   return instruments;
+}
+
+export function recordChildResultRecovered(): void {
+  inst().childResultsRecovered.add(1);
 }
 
 export function recordTurn(args: {

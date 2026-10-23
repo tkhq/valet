@@ -2052,7 +2052,7 @@ export interface SubmissionAdmissionOptions {
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
   /** Forget a destroyed sandbox only if the session still names that handle. */
-  clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<void>;
+  clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
   /** Read a thread row and its entries from one coherent store snapshot. */
   getThreadSnapshot(
@@ -2172,6 +2172,8 @@ export interface SessionStore {
   listSessionIdsWithUnsettledSubmissions(): Promise<string[]>;
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
+  /** Indexed runtime repair candidates; excludes delivered history and active submissions. */
+  listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Resolve idempotent admission after a caller loses the returned receipt. */
   getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;

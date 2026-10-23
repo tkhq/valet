@@ -257,6 +257,7 @@ CREATE TABLE "engine_wakeups" (
 	"event_buffer" text,
 	"event_seen" text,
 	"event_source_seen" text,
+	"source_queue_item_id" text,
 	"terminal_signal_started_at" bigint,
 	"terminal_signal_loss_reported_at" bigint,
 	"terminal_signal_expected" boolean NOT NULL DEFAULT false
@@ -281,6 +282,7 @@ CREATE TABLE "engine_leases" (
 	"deadline_at" bigint NOT NULL,
 	"released_at" bigint,
 	"release_cause" text,
+	"source_queue_item_id" text,
 	"terminal_signal_started_at" bigint,
 	"terminal_signal_loss_reported_at" bigint,
 	"terminal_signal_expected" boolean NOT NULL DEFAULT false,

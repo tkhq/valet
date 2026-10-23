@@ -273,7 +273,7 @@ describe("waitForEventTool", () => {
     const wakeup = eventWakeup();
     const armEvent = vi.fn(async (_threadId: string, _req: ArmEventRequest) => ({ wakeup }));
     const origin = { channelType: "slack", threadKey: "slack:C001:1.2", reply: "manual" as const };
-    const ctx = makeCtx({ armEvent }, { origin });
+    const ctx = makeCtx({ armEvent }, { origin, queueItemId: "creator" });
     const result = await waitForEventTool.execute(
       {
         subject: "https://github.com/acme/lean-proofs/pull/42",
@@ -295,6 +295,7 @@ describe("waitForEventTool", () => {
       },
       origin,
       stubCredentials,
+      "creator",
     );
     expect(result.text).toBe(
       `waiting wk_ev1 on github:acme/lean-proofs#42 for github.check_run.completed (status failure), ` +

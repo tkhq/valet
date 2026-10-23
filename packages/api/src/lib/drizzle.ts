@@ -1880,6 +1880,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: `CREATE INDEX IF NOT EXISTS "engine_queue_items_child_delivery" ON "engine_queue_items" ("session_id") WHERE "child_result_delivery" = 'pending'`,
   },
   {
+    describe: "engine_leases.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_leases", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
+    describe: "engine_wakeups.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_wakeups", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
     describe: "engine_leases.terminal_signal_loss_reported_at column",
     probe: { kind: "column", table: "engine_leases", column: "terminal_signal_loss_reported_at" },
     sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_loss_reported_at" bigint',

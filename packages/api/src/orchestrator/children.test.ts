@@ -1325,7 +1325,7 @@ describe("ChildWatcher", () => {
       const c = await armedChild("recovery-isolation");
       const db = api!.providers.db;
       await db.insert(childWatches).values(Array.from({ length: 200 }, (_, n) => ({ ...c.watch, childSessionId: `history-${n}`,
-        settled: true, deliveryActive: false, sandboxReclaimedAt: 1, createdAt: 1 })));
+        settled: true, deliveryActive: false, eventsStartedAt: 1, sandboxReclaimedAt: 1, createdAt: 1 })));
       await db.insert(childWatches).values({ ...c.watch, childSessionId: "a-broken", deliveryActive: true, createdAt: 1 });
       const get = c.engineStore.getSession.bind(c.engineStore);
       const spy = vi.spyOn(c.engineStore, "getSession").mockImplementation(async (id) => {
@@ -1333,13 +1333,16 @@ describe("ChildWatcher", () => {
         if (id.startsWith("history-")) throw new Error("historical row was read");
         return get(id);
       });
+      const pending = vi.spyOn(c.engineStore, "listPendingChildResultsBefore");
       const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
         await c.watcher.rearm();
         await waitFor(c.settled);
+        await c.watcher.retryOutbox();
+        expect(pending.mock.calls.some(([id]) => id.startsWith("history-"))).toBe(false);
         expect(errors.mock.calls.some(args => String(args[0]).includes("a-broken"))).toBe(true);
         expect(spy.mock.calls.some(([id]) => id.startsWith("history-"))).toBe(false);
-      } finally { spy.mockRestore(); errors.mockRestore(); }
+      } finally { spy.mockRestore(); pending.mockRestore(); errors.mockRestore(); }
     });
 
     it("serializes idle close with publication and checks the empty-buffer CAS", async () => {
@@ -1857,11 +1860,13 @@ describe("ChildWatcher", () => {
       "notifies with outstanding %s work and keeps the sandbox",
       async (kind) => {
         const c = await armedChild(`background-${kind}`);
-        const now = Date.now();
+        const now = (await c.engineStore.getQueueItem(c.child.id, c.watch.queueItemId))!.updatedAt;
+        // This work was created by the completed turn, not after its settlement.
+        const sourceQueueItemId = c.watch.queueItemId;
         const deadline = now + 7 * 24 * 3_600_000;
         if (kind === "timer" || kind === "event") {
           await c.engineStore.createWakeup({
-            id: "outstanding", sessionId: c.watch.childSessionId, threadId: c.childThread.id,
+            id: "outstanding", sourceQueueItemId, sessionId: c.watch.childSessionId, threadId: c.childThread.id,
             kind, status: kind === "timer" ? "pending" : "running", reason: "CI result",
             ...(kind === "timer" ? { fireAt: deadline, prompt: "check CI" } : {
               deadlineAt: deadline, subjects: ["github:acme/repo#42"],
@@ -1870,10 +1875,10 @@ describe("ChildWatcher", () => {
             logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
           });
         } else {
-          await c.engineStore.createLease({ id: "outstanding", sessionId: c.watch.childSessionId,
+          await c.engineStore.createLease({ id: "outstanding", sourceQueueItemId, sessionId: c.watch.childSessionId,
             ownerKind: kind, ...(kind !== "hold" ? { ownerId: "lease-owner" } : {}), reason: "CI result", deadlineAt: deadline, createdAt: now });
           if (kind !== "hold") await c.engineStore.createWakeup({
-            id: "lease-owner", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind,
+            id: "lease-owner", sourceQueueItemId, sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind,
             status: "pending", reason: "CI result", leaseId: "outstanding", deadlineAt: deadline,
             logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
           });
@@ -1963,6 +1968,150 @@ describe("ChildWatcher", () => {
       expect((await c.engineStore.getQueueItem(c.child.id, "later-result"))?.childResultDelivery).toBe("delivered");
       expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:denied-signal`)).toBeNull();
       expect((await db.select().from(childReplyDeliveries)).find(row => row.childQueueItemId === "later-result")?.queueItemId).toBeTruthy();
+    });
+
+    it.each(["observer", "recovery", "retry"] as const)("review boundary repro: %s excludes later private background work", async via => {
+      const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" };
+      const c = await armedChild(`private-work-${via}`, {}, origin);
+      const db = api!.providers.db;
+      await db.update(childWatches).set({ originJson: JSON.stringify(origin), replyRoute: "origin" })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const id = "public-turn";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, "public task"),
+        metadata: parentDelegationMetadata(c.parent.id, c.parentThread.id, origin) });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: "public", ownerId: "test" });
+      await c.engineStore.appendEntries(c.child.id, c.childThread.id, [{ id: "public-entry", type: "message", role: "user", content: "public task",
+        sessionId: c.child.id, threadId: c.childThread.id, queueItemId: id, parentId: null, createdAt: Date.now() }]);
+      const fence = { itemId: id, attemptId: "public" };
+      await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "failed", error: "Public result" }, fence);
+      await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      const boundary = (await c.engineStore.getQueueItem(c.child.id, id))!.updatedAt;
+      let claimed = false;
+      const privateWork = async () => {
+        if (claimed) return;
+        claimed = true;
+        const privateId = "private-web-turn";
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(privateId, c.childThread.id, "private request"), author: { id: "local-user" } });
+        await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: privateId, attemptId: "private", ownerId: "test" });
+        await c.engineStore.appendEntries(c.child.id, c.childThread.id, [{ id: "private-entry", type: "message", role: "user", content: "private request",
+          sessionId: c.child.id, threadId: c.childThread.id, queueItemId: privateId, parentId: null, createdAt: boundary + 1 }]);
+        await c.engineStore.createLease({ id: "ls_confidential", sessionId: c.child.id, threadId: c.childThread.id, ownerKind: "hold",
+          reason: "CONFIDENTIAL acquisition price: $42 million", createdAt: boundary + 1, deadlineAt: boundary + 60_000 });
+      };
+      const list = c.engineStore.listActiveLeases.bind(c.engineStore);
+      const racingClaim = via === "observer" ? vi.spyOn(c.engineStore, "listActiveLeases").mockImplementation(async child => {
+        if (child === c.child.id) await privateWork();
+        return list(child);
+      }) : undefined;
+      const prompt = via === "retry" ? vi.spyOn(c.parentThread, "submitPrompt").mockRejectedValue(new Error("temporary parent admission failure")) : undefined;
+      try {
+        if (via !== "observer") await privateWork();
+        if (via === "recovery") await testChildWatcher(c.deps).rearm();
+        else await c.watcher.observeTurn(c.child.id, id);
+        const dispatchId = `${c.child.id}:settled:${c.child.id}:${id}`;
+        if (via === "retry") {
+          await vi.waitFor(async () => {
+            await childDelivery!.sweep();
+            expect(prompt).toHaveBeenCalled();
+          });
+          prompt?.mockRestore();
+          await c.watcher.retryOutbox();
+        }
+        await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatchId) !== null);
+        const result = await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatchId);
+        expect(result?.content).toMatchObject({ origin: { reply: "auto" } });
+        expect(JSON.stringify(result?.content)).not.toContain("CONFIDENTIAL");
+        expect(JSON.stringify(result?.content)).not.toContain("ls_confidential");
+        const gate = { id: "public-gate", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: id,
+          resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Public approval", actions: [], status: "pending" as const,
+          createdAt: boundary, updatedAt: boundary };
+        await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+        await c.watcher.reportGateOpened(c.child.id, gate);
+        const gateDispatch = `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`;
+        await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, gateDispatch) !== null);
+        const gateSignal = await c.engineStore.getQueueItemByDispatchId(c.parent.id, gateDispatch);
+        expect(JSON.stringify(gateSignal?.content)).not.toContain("CONFIDENTIAL");
+        expect(JSON.stringify(gateSignal?.content)).not.toContain("ls_confidential");
+      } finally { racingClaim?.mockRestore(); prompt?.mockRestore(); }
+    });
+
+    it("redacts an earlier private creator's reason from a later public result", async () => {
+      const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" };
+      const c = await armedChild("private-work-reason", {}, origin);
+      await api!.providers.db.update(childWatches).set({ originJson: JSON.stringify(origin), replyRoute: "origin" })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const privateId = "earlier-private";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(privateId, c.childThread.id, "private work"), author: { id: "local-user" } });
+      await c.engineStore.appendEntries(c.child.id, c.childThread.id, [{ id: "private-work-entry", type: "message", role: "user", content: "private work",
+        sessionId: c.child.id, threadId: c.childThread.id, queueItemId: privateId, parentId: null, createdAt: Date.now() }]);
+      await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, privateId, { outcome: "failed", error: "private result" });
+      const createdAt = (await c.engineStore.getQueueItem(c.child.id, privateId))!.updatedAt;
+      await c.engineStore.createLease({ id: "earlier-private-hold", sessionId: c.child.id, threadId: c.childThread.id, sourceQueueItemId: privateId,
+        ownerKind: "hold", reason: "CONFIDENTIAL price", createdAt, deadlineAt: createdAt + 60_000 });
+      const publicThread = c.child.thread("public-followup");
+      const id = "later-public";
+      await c.engineStore.admitSubmission(c.child.id, publicThread.id, { ...queuedItem(id, publicThread.id, "public work"),
+        metadata: parentDelegationMetadata(c.parent.id, c.parentThread.id, origin) });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: publicThread.id, itemId: id, attemptId: "public", ownerId: "test" });
+      const fence = { itemId: id, attemptId: "public" };
+      await c.engineStore.reserveSettlement(c.child.id, publicThread.id, id, { outcome: "failed", error: "public result" }, fence);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(createdAt + 10);
+      try { await c.engineStore.finalizeSettlement(c.child.id, publicThread.id, id, fence); }
+      finally { clock.mockRestore(); }
+      // Unknown legacy work can still be listed, but never with a channel-visible reason.
+      await c.engineStore.createLease({ id: "legacy-private-hold", sessionId: c.child.id, ownerKind: "hold", reason: "CONFIDENTIAL legacy reason",
+        createdAt: createdAt - 1, deadlineAt: createdAt + 60_000 });
+      await c.watcher.observeTurn(c.child.id, id);
+      const dispatch = `${c.child.id}:settled:${c.child.id}:${id}`;
+      await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch) !== null);
+      const result = await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch);
+      expect(JSON.stringify(result?.content)).not.toContain("CONFIDENTIAL");
+      expect(JSON.stringify(result?.content)).toContain("Private background work");
+      expect(JSON.stringify(result?.content)).toContain("legacy-private-hold");
+      expect(JSON.stringify(result?.content)).toContain("earlier-private-hold");
+    });
+
+    it("review runtime repro: a failed settlement event append is recovered without rearm", async () => {
+      const c = await armedChild("missed-runtime-event");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const id = "missed-signal";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, ""),
+        content: { kind: "signal", signalType: "timer.fired", body: "Continue" } });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: "signal", ownerId: "test" });
+      const fence = { itemId: id, attemptId: "signal" };
+      await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "failed", error: "Recovered at runtime" }, fence);
+      await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      const recoveredMetric = vi.spyOn(engineMetrics, "recordChildResultRecovered").mockImplementation(() => undefined);
+      const append = vi.spyOn(api!.providers.eventStream, "append").mockRejectedValueOnce(new Error("connection reset"));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await c.child.emit({ type: "submission_settled", sessionId: c.child.id, threadId: c.childThread.id,
+          queueItemId: id, outcome: { outcome: "failed", error: "Recovered at runtime" } }, { eventKey: `settled:${id}`, queueItemId: id });
+        expect(append).toHaveBeenCalled();
+        append.mockRestore();
+        expect((await c.engineStore.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("pending");
+        expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+        await c.watcher.retryOutbox();
+        expect((await c.engineStore.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("pending");
+        const pending = vi.spyOn(c.engineStore, "listPendingChildResultsBefore");
+        const later = Date.now() + 60_000;
+        const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+        try { await c.watcher.retryOutbox(); } finally { clock.mockRestore(); }
+        expect(pending).toHaveBeenCalledWith(c.child.id, later - 30_000);
+        pending.mockRestore();
+        await childDelivery!.sweep();
+        const recovered = await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${id}`);
+        expect(recovered?.content).toMatchObject({ body: "Recovered at runtime" });
+        expect((await c.engineStore.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("delivered");
+        await c.watcher.retryOutbox();
+        expect((await c.engineStore.listUnsettledSubmissions(c.parent.id)).filter(item => item.dispatchId === `${c.child.id}:settled:${c.child.id}:${id}`)).toHaveLength(1);
+        expect(recoveredMetric).toHaveBeenCalledTimes(1);
+      } finally { append.mockRestore(); errors.mockRestore(); recoveredMetric.mockRestore(); }
     });
 
     it("recovers a claimed signal that settles after idle close but crashes before publication", async () => {
@@ -4023,6 +4172,81 @@ describe("child sandbox retention", () => {
       .limit(1);
     return rows[0];
   }
+
+  it("review reclaim repro: a stale status confirmation cannot reclaim a revived replacement", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: RETENTION_MS });
+    const watcher = testChildWatcher(deps);
+    const { watch, child, childThread } = await seedParkableChild(api, "stale-reclaim", "parent-stale-reclaim");
+    await child.pause();
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await vi.waitFor(() => expect(provider.suspendCalls).toHaveLength(1));
+    const oldId = provider.suspendCalls[0]!;
+    let entered!: () => void;
+    const statusEntered = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void;
+    const statusRelease = new Promise<void>(resolve => { release = resolve; });
+    const status = api.providers.engineHost.sandboxStatus.bind(api.providers.engineHost);
+    const blocked = vi.spyOn(api.providers.engineHost, "sandboxStatus").mockImplementation(async id => {
+      if (id === oldId) { entered(); await statusRelease; }
+      return status(id);
+    });
+    const sweep = watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+    try {
+      await statusEntered;
+      const sent = await buildChildSender(deps, watcher)({ childSessionId: child.id, message: "revive" },
+        { parentSessionId: watch.parentSessionId, parentThreadId: watch.parentThreadId, actorUserId: "local-user" });
+      if (!sent) throw new Error("the child send did not revive the child");
+      const replacement = api.providers.engineHost.liveSession(child.id);
+      if (!replacement) throw new Error("the replacement is not cached");
+      await replacement.attachment.ensureReady({ timeoutMs: 5000 });
+      const newId = replacement.attachment.sandboxId;
+      expect(newId).not.toBe(oldId);
+      await api.providers.db.insert(sandboxTokens).values({ id: "replacement-token", tokenHash: "replacement-hash", sessionId: child.id,
+        userId: "local-user", orgId: "local-org", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000) });
+      const data = await api.providers.engineStore.getSession(child.id);
+      if (!data) throw new Error("the replacement session is missing");
+      await api.providers.engineStore.saveSession({ ...data, sandboxId: newId });
+      release();
+      await sweep;
+      expect(api.providers.engineHost.liveSession(child.id)).toBe(replacement);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      expect((await api.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.id, "replacement-token")))[0]?.revokedAt).toBeNull();
+      expect((await api.providers.engineStore.getSession(child.id))?.sandboxId).toBe(newId);
+      await api.providers.engineStore.settleUnclaimed(child.id, childThread.id, sent.queueItemId, { outcome: "completed" });
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await watcher.sweepRetention(Date.now() + RETENTION_MS + 60_000);
+      expect((await provider.status(newId!)).state).toBe("released");
+    } finally { release(); await sweep; blocked.mockRestore(); }
+  });
+
+  it("does not recount a destroyed sandbox after its status confirmation failed", async () => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { child, watch } = await seedParkableChild(api, "reclaim-metric", "parent-reclaim-metric");
+    const oldId = child.attachment.sandboxId!;
+    const status = vi.spyOn(api.providers.engineHost, "sandboxStatus").mockRejectedValueOnce(new Error("status confirmation unavailable"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let restoreRecord: (() => void) | undefined;
+    try {
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+      expect((await provider.status(oldId)).state).toBe("released");
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      const record = vi.spyOn(engineMetrics, "recordSandboxDestroyed").mockImplementation(() => undefined);
+      restoreRecord = () => record.mockRestore();
+      const destroy = vi.spyOn(provider, "destroy");
+      await watcher.sweepRetention(Date.now() + 1);
+      expect(destroy).toHaveBeenCalledWith(oldId);
+      expect(record).not.toHaveBeenCalled();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { restoreRecord?.(); status.mockRestore(); errors.mockRestore(); }
+  });
 
   it.each(["revive", "retry-failure", "unconfirmed"] as const)("bot failed-destroy repro: %s keeps the durable sandbox owned", async mode => {
     const provider = new HibernatingChildProvider();

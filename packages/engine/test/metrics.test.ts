@@ -51,6 +51,7 @@ vi.mock("@opentelemetry/api", () => ({
 
 import {
   recordChildSettleOverDeadline,
+  recordChildResultRecovered,
   recordCompactionCoverageGap,
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
@@ -100,6 +101,13 @@ describe("compaction coverage metrics", () => {
       value: 1,
       attributes: { mode: "reactive" },
     });
+  });
+});
+
+describe("child result recovery metrics", () => {
+  it("counts a pending result recovered by the runtime sweep", () => {
+    recordChildResultRecovered();
+    expect(metricState.points).toContainEqual({ name: "valet.child.results_recovered", value: 1, attributes: undefined });
   });
 });
 

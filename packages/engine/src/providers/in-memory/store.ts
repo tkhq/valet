@@ -191,9 +191,11 @@ export class InMemorySessionStore implements SessionStore {
     r.data = { ...r.data, ...metadata, status, updatedAt: Date.now() };
   }
 
-  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<void> {
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean> {
     const row = this.rows.get(sessionId);
-    if (row?.data.sandboxId === sandboxId) row.data = { ...row.data, sandboxId: undefined };
+    if (row?.data.sandboxId !== sandboxId) return false;
+    row.data = { ...row.data, sandboxId: undefined };
+    return true;
   }
 
   async getSession(id: string): Promise<SessionData | null> {
@@ -787,6 +789,13 @@ export class InMemorySessionStore implements SessionStore {
     return [...r.queueItems.values()]
       .filter((i) => i.status === "settled" && i.updatedAt < cutoff)
       .map((i) => ({ ...i }));
+  }
+
+  async listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const row = this.rows.get(sessionId);
+    if (!row) return [];
+    return [...row.queueItems.values()].filter(item => item.childResultDelivery === "pending" && item.status === "settled"
+      && item.updatedAt < cutoff).sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)).map(item => ({ ...item }));
   }
 
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {

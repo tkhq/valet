@@ -1286,7 +1286,11 @@ with an earlier entry, the entry below wins.
   Retries call the provider with that handle, not the released attachment.
   Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
   Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.
-  A retry does not destroy the same handle twice or clear a replacement.
+  Final cleanup compares the current attachment, durable handle, watched item, and settlement timestamp with the destroyed cycle.
+  A replacement or newer cycle skips eviction, token revocation, and the reclaim stamp.
+  New session builds wait only for the final cleanup writes, not for provider destruction or status checks.
+  The child delivery lock serializes those writes with sender repoints.
+  Retries still call provider destroy, but do not count resources that status already reports absent.
 - **Claim lock order.** `claimSubmission` locks the thread row before the
   item CAS, the same order steer admission uses, so claim and steer cannot
   deadlock. A real-Postgres stress test races one claim against two steers

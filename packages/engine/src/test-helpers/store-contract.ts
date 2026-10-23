@@ -103,11 +103,11 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
 
     it("clears only the destroyed sandbox handle without overwriting a replacement", async () => {
       await store.saveSession(newSession({ sandboxId: "replacement" }));
-      await store.clearSessionSandboxId("sess-1", "destroyed");
+      expect(await store.clearSessionSandboxId("sess-1", "destroyed")).toBe(false);
       expect((await store.getSession("sess-1"))?.sandboxId).toBe("replacement");
-      await store.clearSessionSandboxId("sess-1", "replacement");
+      expect(await store.clearSessionSandboxId("sess-1", "replacement")).toBe(true);
       expect((await store.getSession("sess-1"))?.sandboxId).toBeUndefined();
-      await store.clearSessionSandboxId("missing", "destroyed");
+      expect(await store.clearSessionSandboxId("missing", "destroyed")).toBe(false);
     });
 
     it("saveSession round-trips the reasoning level", async () => {
@@ -1132,8 +1132,8 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       });
 
       it("round-trips every wakeup and lease field, origin and rate window included", async () => {
-        const w = wakeup({ origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
-        const l = lease({ threadId: "th-1", origin });
+        const w = wakeup({ sourceQueueItemId: "creating-turn", origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
+        const l = lease({ threadId: "th-1", sourceQueueItemId: "creating-turn", origin });
         await store.createWakeupWithLease(w, l);
         expect(await store.getWakeup("wk_a")).toEqual(w);
         expect(await store.listActiveLeases("sess-1")).toEqual([l]);
@@ -1326,16 +1326,21 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBeUndefined();
       const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id, attemptId: "att-1", ownerId: "owner" });
       expect(claimed?.childResultDelivery).toBe("pending");
+      expect(await store.listPendingChildResultsBefore("sess-1", Date.now() + 1)).toEqual([]);
       const fence = { itemId: item.id, attemptId: "att-1" };
       await store.reserveSettlement("sess-1", "th-1", item.id, { outcome: "completed" }, fence);
       await store.finalizeSettlement("sess-1", "th-1", item.id, fence);
       const settled = await store.getQueueItem("sess-1", item.id);
       expect(settled?.childResultDelivery).toBe("pending");
+      expect(await store.listPendingChildResultsBefore("sess-1", settled!.updatedAt)).toEqual([]);
+      expect(await store.listPendingChildResultsBefore("sess-1", settled!.updatedAt + 1)).toEqual([settled]);
+      expect(await store.listPendingChildResultsBefore("another-session", Date.now() + 1)).toEqual([]);
       await store.resolveChildResultDelivery("other-session", item.id, "delivered");
       expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBe("pending");
       await store.resolveChildResultDelivery("sess-1", item.id, "denied");
       await store.resolveChildResultDelivery("sess-1", item.id, "delivered");
       expect(await store.getQueueItem("sess-1", item.id)).toEqual({ ...settled, childResultDelivery: "denied" });
+      expect(await store.listPendingChildResultsBefore("sess-1", Date.now() + 1)).toEqual([]);
       await store.resolveChildResultDelivery("sess-1", "missing", "denied");
     });
 

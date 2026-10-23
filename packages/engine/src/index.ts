@@ -115,6 +115,7 @@ export {
   recordWakeupEnded,
   recordWakeupSignalLost,
   recordChildTerminalSignalAbandoned,
+  recordChildResultRecovered,
   recordWakeupKillFailed,
   recordWakeupsActive,
   recordChildSettleOverDeadline,

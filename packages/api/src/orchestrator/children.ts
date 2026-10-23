@@ -27,6 +27,7 @@ import {
   PendingCapError,
   recordSandboxDestroyed,
   recordChildTerminalSignalAbandoned,
+  recordChildResultRecovered,
   recordScratchRefused,
   recordScratchRequested,
   ValidationError as EngineValidationError,
@@ -69,6 +70,7 @@ import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATO
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
+const CHILD_RESULT_RECOVERY_GRACE_MS = 30_000;
 /** Max in-process attempts for a retryable failure before falling back to the boot `rearm()` backstop. */
 const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 /** Cadence of the parked-sandbox retention sweep. Coarse on purpose — retention windows are hours. */
@@ -1038,7 +1040,8 @@ export class ChildWatcher {
     if (result.outcome === "superseded" || result.outcome === "merged") return;
 
     if (!digest) {
-      const work = await this.backgroundWork(watch.childSessionId);
+      const work = await this.backgroundWork(watch.childSessionId, itemId, row.originJson !== null,
+        { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey });
       const body = resultBody(result, watch.childSessionId,
         result.outcome === "failed" || result.outcome === "aborted"
           ? await this.latestContinuationCheckpoint(watch.childSessionId, childSession.thread().id) : undefined);
@@ -1122,7 +1125,7 @@ export class ChildWatcher {
       }).where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
     }
     await this.markSettled(watch.childSessionId, watch.queueItemId);
-    await this.parkChildSandbox(watch.childSessionId);
+    await this.parkChildSandbox(watch.childSessionId, digest !== undefined);
   }
 
   /**
@@ -1167,22 +1170,37 @@ export class ChildWatcher {
     });
   }
 
-  /** Snapshot of work owed after this turn. Settlement does not wait for it. */
-  private async backgroundWork(childSessionId: string): Promise<Array<{ id: string; kind: string; reason: string; deadline?: string }>> {
-    const leases = await this.deps.engineStore.listActiveLeases(childSessionId);
-    const wakeups = await this.deps.engineStore.listWakeups(childSessionId, ["pending", "running"]);
-    return [
-      ...leases.map((lease) => ({ id: lease.id, kind: lease.ownerKind, reason: lease.reason,
-        deadline: new Date(lease.deadlineAt).toISOString() })),
-      ...wakeups.filter((w) => w.eventMatch?.childSessionId === undefined && (w.kind === "timer" || w.kind === "event")).map((w) => ({
-        id: w.id, kind: w.kind, reason: w.reason,
-        ...((w.fireAt ?? w.deadlineAt) !== undefined ? { deadline: new Date(w.fireAt ?? w.deadlineAt ?? 0).toISOString() } : {}),
-      })),
+  /** Work from this result's turn or earlier history, never a later claim's session-wide snapshot. */
+  private async backgroundWork(childSessionId: string, itemId: string, channelAudience: boolean,
+    watch: { parentThreadId: string; originThreadKey?: string },
+  ): Promise<Array<{ id: string; kind: string; reason: string; deadline?: string }>> {
+    const store = this.deps.engineStore;
+    const result = await store.getQueueItem(childSessionId, itemId);
+    if (!result) return [];
+    const leases = await store.listActiveLeases(childSessionId);
+    const wakeups = await store.listWakeups(childSessionId, ["pending", "running"]);
+    const work = [
+      ...leases.map(lease => ({ ...lease, kind: lease.ownerKind, deadline: lease.deadlineAt })),
+      ...wakeups.filter(w => w.eventMatch?.childSessionId === undefined && (w.kind === "timer" || w.kind === "event"))
+        .map(w => ({ ...w, deadline: w.fireAt ?? w.deadlineAt })),
     ];
+    const listed: Array<{ id: string; kind: string; reason: string; deadline?: string }> = [];
+    for (const entry of work) {
+      const source = entry.sourceQueueItemId ? await store.getQueueItem(childSessionId, entry.sourceQueueItemId) : null;
+      // Legacy work has no creator. Exclude same-millisecond ties because they can belong to the next claim.
+      if (entry.createdAt > result.updatedAt || (!source && entry.createdAt >= result.updatedAt)) continue;
+      if (source && source.id !== result.id && source.mergedIntoItemId !== result.id
+        && (source.status !== "settled" || source.updatedAt >= result.updatedAt)) continue;
+      const privateReason = channelAudience && (!source || await privateInputThrough(store, childSessionId, source.id, watch));
+      listed.push({ id: entry.id, kind: entry.kind, reason: privateReason ? "Private background work" : entry.reason,
+        ...(entry.deadline !== undefined ? { deadline: new Date(entry.deadline).toISOString() } : {}) });
+    }
+    return listed;
   }
 
   /** Only an explicit child_send restores a cancelled subscription. */
   async ensureSubscription(watch: Pick<ArmArgs, "childSessionId" | "parentSessionId" | "parentThreadId">, reactivate = false): Promise<void> {
+    this.startDeliveryRetries();
     // An explicit send to a running subscription changes no delivery state.
     // Do not block new child work behind an in-flight parent admission.
     if (reactivate && (await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`))?.status === "running") return;
@@ -1319,6 +1337,23 @@ export class ChildWatcher {
 
   /** Retries only durable pending children, including failures before the first buffer append. */
   async retryOutbox(): Promise<void> {
+    const cutoff = Date.now() - CHILD_RESULT_RECOVERY_GRACE_MS;
+    let recoveredThrough: string | undefined;
+    while (!this.stopping) {
+      const watches = await this.deps.db.select().from(childWatches).where(and(
+        isNotNull(childWatches.eventsStartedAt),
+        recoveredThrough === undefined ? undefined : gt(childWatches.childSessionId, recoveredThrough),
+        sql`${childWatches.childSessionId} IN (SELECT session_id FROM engine_queue_items
+          WHERE child_result_delivery = 'pending' AND status = 'settled' AND updated_at < ${cutoff})`,
+      )).orderBy(childWatches.childSessionId).limit(100);
+      if (!watches.length) break;
+      for (const watch of watches) {
+        recoveredThrough = watch.childSessionId;
+        if (this.stopping) return;
+        try { await this.recoverTurns(watch, cutoff); }
+        catch (error) { console.error(`ChildWatcher: runtime result recovery failed for ${watch.childSessionId}:`, error); }
+      }
+    }
     let after: string | undefined;
     while (!this.stopping) {
       const rows = await this.deps.db.selectDistinct({ child: childEventOutbox.childSessionId }).from(childEventOutbox)
@@ -1351,10 +1386,12 @@ export class ChildWatcher {
     }
   }
 
-  /** Recovers turns that stopped before their observer persisted an event. Boot only. */
-  private async recoverTurns(row: ChildWatchRow): Promise<void> {
+  /** Boot also repairs legacy rows. Runtime queries only the durable pending index after grace. */
+  private async recoverTurns(row: ChildWatchRow, runtimeCutoff?: number): Promise<void> {
     if (row.eventsStartedAt === null) return;
-    const turns = await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1);
+    const turns = runtimeCutoff === undefined
+      ? await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1)
+      : await this.deps.engineStore.listPendingChildResultsBefore(row.childSessionId, runtimeCutoff);
     for (const turn of turns) {
       if (turn.childResultDelivery === "denied" || turn.childResultDelivery === "delivered") continue;
       if (turn.updatedAt < row.eventsStartedAt || (!isSignalSubmission(turn) && !isParentDelegation(turn))
@@ -1371,6 +1408,12 @@ export class ChildWatcher {
       if (pending) continue;
       await this.ensureSubscription(watchRowToArgs(row));
       await this.attempt(await this.turnWatch(row, turn.id));
+      if (runtimeCutoff !== undefined) {
+        const current = await this.deps.engineStore.getQueueItem(row.childSessionId, turn.id);
+        const [event] = await this.deps.db.select({ id: childEventOutbox.id }).from(childEventOutbox)
+          .where(eq(childEventOutbox.id, `settled:${row.childSessionId}:${turn.id}`)).limit(1);
+        if (event || current?.childResultDelivery === "delivered") recordChildResultRecovered();
+      }
     }
   }
 
@@ -1545,47 +1588,77 @@ export class ChildWatcher {
       .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId), eq(childWatches.settled, false)));
   }
 
-  private async markReclaimed(childSessionId: string, now: number): Promise<void> {
+  private async markReclaimed(childSessionId: string, now: number, cycle: Pick<ChildWatchRow, "queueItemId" | "settledAt">): Promise<void> {
     await this.deps.db
       .update(childWatches)
       .set({ sandboxReclaimedAt: now, parkedSandboxId: null })
-      .where(eq(childWatches.childSessionId, childSessionId));
+      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, cycle.queueItemId),
+        cycle.settledAt === null ? isNull(childWatches.settledAt) : eq(childWatches.settledAt, cycle.settledAt),
+        eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)));
   }
 
-  private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<void> {
+  private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<boolean> {
     // Clear both durable handles before revoke. Its retry must not destroy
     // or count the same sandbox again, even after restart.
-    await this.deps.engineStore.clearSessionSandboxId(childSessionId, sandboxId);
+    if (!await this.deps.engineStore.clearSessionSandboxId(childSessionId, sandboxId)
+      && (await this.deps.engineStore.getSession(childSessionId))?.sandboxId !== undefined) return false;
     await this.deps.db.update(childWatches).set({ parkedSandboxId: null })
       .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.parkedSandboxId, sandboxId)));
+    return true;
   }
 
-  private async destroyChildSandbox(childSessionId: string, sandboxId: string | null | undefined, reason: "child_settled" | "child_retention"): Promise<boolean> {
+  private async destroyChildSandbox(childSessionId: string, sandboxId: string | null | undefined, reason: "child_settled" | "child_retention", cycle: ChildWatchRow, now = Date.now(), deliveryLocked = false): Promise<boolean> {
     const live = this.deps.engineHost.liveSession(childSessionId);
     const attachedId = live?.attachment.sandboxId;
+    const [currentCycle] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
+    if (!currentCycle?.settled || currentCycle.queueItemId !== cycle.queueItemId || currentCycle.settledAt !== cycle.settledAt
+      || currentCycle.sandboxReclaimedAt !== null) return false;
     sandboxId = attachedId ?? sandboxId;
-    if (sandboxId) await this.deps.db.update(childWatches).set({ parkedSandboxId: sandboxId })
-      .where(eq(childWatches.childSessionId, childSessionId));
+    if (sandboxId) {
+      const saved = await this.deps.db.update(childWatches).set({ parkedSandboxId: sandboxId })
+        .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, cycle.queueItemId),
+          cycle.settledAt === null ? isNull(childWatches.settledAt) : eq(childWatches.settledAt, cycle.settledAt),
+          eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)))
+        .returning({ id: childWatches.childSessionId });
+      if (!saved.length) return false;
+    }
     if (attachedId && live) {
       try {
         if (!await live.attachment.destroy(reason)) return false;
       } finally {
         // A failed destroy tears down the attachment too. Revival must rebuild it.
-        if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId);
+        if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId, live);
       }
     } else if (sandboxId) {
-      // A released attachment has lost its handle. Its destroy would be a no-op.
+      // Always retry the provider destroy. The pre-check only avoids counting a previously completed destroy twice.
+      const present = (await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released";
       await this.deps.engineHost.destroySandbox(sandboxId);
+      if (present) recordSandboxDestroyed(reason);
     }
     if (sandboxId) {
       if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
         throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
       }
-      if (!attachedId) recordSandboxDestroyed(reason);
-      await this.forgetDestroyedSandbox(childSessionId, sandboxId);
     }
-    this.deps.engineHost.evictCache(childSessionId);
-    return true;
+    const destroyedId = sandboxId;
+    const cleanup = () => this.deps.engineHost.withSandboxCleanup(childSessionId, async () => {
+      const current = this.deps.engineHost.liveSession(childSessionId);
+      if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || (current !== null && current !== live)
+        || (current?.attachment.sandboxId !== undefined && current.attachment.sandboxId !== destroyedId)
+        || current?.attachment.state === "provisioning") return false;
+      const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
+      if (!watch?.settled || watch.queueItemId !== cycle.queueItemId || watch.settledAt !== cycle.settledAt
+        || watch.sandboxReclaimedAt !== null) return false;
+      const durable = await this.deps.engineStore.getSession(childSessionId);
+      if (durable?.sandboxId !== undefined && durable.sandboxId !== destroyedId) return false;
+      if ((await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length > 0) return false;
+      if (destroyedId && !await this.forgetDestroyedSandbox(childSessionId, destroyedId)) return false;
+      await revokeSandboxTokens(this.deps.db, childSessionId);
+      await this.markReclaimed(childSessionId, now, cycle);
+      this.deps.engineHost.evictCache(childSessionId, current);
+      return true;
+    });
+    return deliveryLocked ? cleanup() : withChildDelivery(this.deps.db, childSessionId, cleanup);
   }
 
   /**
@@ -1599,7 +1672,7 @@ export class ChildWatcher {
    * either way: `child_read` and the Sessions page keep working.
    * Best-effort — a failure here never un-settles the watch.
    */
-  private async parkChildSandbox(childSessionId: string): Promise<void> {
+  private async parkChildSandbox(childSessionId: string, deliveryLocked = false): Promise<void> {
     try {
       const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1);
       if (watch?.sandboxReclaimedAt != null) return;
@@ -1654,12 +1727,7 @@ export class ChildWatcher {
       }
 
       const sandboxId = live.attachment.sandboxId ?? (await this.deps.engineStore.getSession(childSessionId))?.sandboxId;
-      if (!await this.destroyChildSandbox(childSessionId, sandboxId, "child_settled")) return;
-      // The sandbox bearer token outlives the container on backends whose
-      // creds live outside it (docker host-dir mount) — revoke like
-      // `EngineHost.destroy` does.
-      await revokeSandboxTokens(this.deps.db, childSessionId);
-      await this.markReclaimed(childSessionId, Date.now());
+      if (watch) await this.destroyChildSandbox(childSessionId, sandboxId, "child_settled", watch, Date.now(), deliveryLocked);
     } catch (err) {
       console.error(`ChildWatcher: sandbox park failed for settled child ${childSessionId}:`, err);
     }
@@ -1722,9 +1790,7 @@ export class ChildWatcher {
         if (!live && !sandboxId) console.warn(
           `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
         );
-        if (!await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention")) continue;
-        await revokeSandboxTokens(this.deps.db, row.childSessionId);
-        await this.markReclaimed(row.childSessionId, now);
+        await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention", row, now);
       } catch (err) {
         console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
       }

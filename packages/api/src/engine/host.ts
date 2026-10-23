@@ -810,6 +810,19 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private sandboxCleanups = new Map<string, Promise<unknown>>();
+
+  /** Final reclaim writes exclude new session builds. Provider destroy and status checks run outside this barrier. */
+  async withSandboxCleanup<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.sandboxCleanups.get(sessionId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(work);
+    this.sandboxCleanups.set(sessionId, next);
+    try { return await next; }
+    finally { if (this.sandboxCleanups.get(sessionId) === next) this.sandboxCleanups.delete(sessionId); }
+  }
+
+  sessionBuildInFlight(sessionId: string): boolean { return this.inflight.has(sessionId); }
+
   private teardown = new Map<string, Promise<void>>();
   private lifecycleEpoch = new Map<string, number>();
 
@@ -1032,6 +1045,7 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     const lifecycleEpoch = this.assertSessionBuildAllowed(sessionId);
     // Assistant ids must always wake through `assistantSessionFor` so they
     // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
@@ -1068,6 +1082,8 @@ export class EngineHost {
     // lands in the same maps under the same key.
     if (this.opts.db) {
       const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      // The assistant lookup precedes the build's inflight registration.
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
       this.assertSessionBuildAllowed(sessionId, lifecycleEpoch);
       if (assistant) {
         return this.assistantSessionFor(
@@ -3337,7 +3353,8 @@ export class EngineHost {
    * them first means the evicted instance is a normal orphan, collected
    * once its last reference (this method's local `entry`) goes away.
    */
-  evictCache(sessionId: string): void {
+  evictCache(sessionId: string, expected?: Session | null): void {
+    if (expected !== undefined && (this.inflight.has(sessionId) || (this.cache.get(sessionId)?.session ?? null) !== expected)) return;
     // Invalidate any in-flight build too: it read the row before this
     // eviction's cause committed, and would otherwise re-populate the cache
     // with the stale config (`buildAssistantSession` checks the epoch before
@@ -4061,6 +4078,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(childSessionId)) await this.sandboxCleanups.get(childSessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(childSessionId);
     const cached = this.cache.get(childSessionId);
     if (cached) return cached.session;

@@ -757,7 +757,14 @@ An event waiter follows the rule for timers:
 - Owner move and thread archive stop it through the 409 and `force`
   contract, with the human-cancel signal: neither filters by lease.
 - A child publishes `child.settled` after each completed turn.
-  The event lists its outstanding leases, timers, and event waiters.
+  The event lists outstanding leases, timers, and event waiters created no later than that result's settlement boundary.
+  Durable `sourceQueueItemId` provenance identifies the creating turn, including across recovery and retry.
+  Tools pass the stable creator ID from `ToolContext`, rather than looking up the current running item after asynchronous checks.
+  Work from later turns is excluded, even if the next claim races publication.
+  A different creator must have settled strictly before the result, or merged into its turn.
+  Legacy work has no creator, so same-millisecond boundary ties are excluded.
+  Channel-facing work reasons are redacted when their creator used private input or its provenance is unknown.
+  Gate signals do not include a session-wide background-work list.
   A later signal turn publishes another event when it ends.
   Parent notification does not wait for background work.
 - Sandbox retention checks background work separately from parent notification.
@@ -793,7 +800,12 @@ An event waiter follows the rule for timers:
   The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
   A retry uses that handle directly, never the released attachment's no-op destroy.
   Both the parked handle and the session handle are cleared after confirmation, before revoke.
-  Handle clearing compares the old ID so it cannot clear a replacement. A retry does not destroy or count it twice.
+  Handle clearing uses a compare-and-set against the destroyed ID.
+  Final cleanup checks the attachment identity, durable handle, watched item, and settlement timestamp.
+  It skips cache eviction, session-token revocation, and the reclaim stamp when a replacement or newer cycle exists.
+  A per-session cleanup barrier excludes new builds during these final writes, not during provider destruction or status checks.
+  The child delivery lock serializes cleanup with sender repoints.
+  A retry calls provider destroy again but does not recount a resource already confirmed absent.
 - Event waiters on hidden threads are counted and never named.
 
 ### F3. Internal child events (TKAI-657)
@@ -901,6 +913,10 @@ The indexed `child_watches.delivery_active` marker identifies subscriptions that
 Recovery pages unsettled rows, delivery-active rows, and children with outbox entries.
 An indexed pending-result marker also selects child turns that started after an idle close.
 A crash before publication cannot hide those turns from recovery.
+The periodic outbox retry sweep also queries indexed, settled `pending` results after a 30-second grace.
+It publishes missing results without `rearm` or a restart, including when the settlement-event append failed before observer delivery.
+Delivered history is excluded from this selector. Existing privacy and activity checks retain their own transcript reads.
+The `valet.child.results_recovered` counter records results restored to the outbox or admitted during runtime recovery.
 Idle close refuses while such a result remains pending.
 Fully-done historical rows require no engine-store reads.
 Each recovery row has its own error handler.

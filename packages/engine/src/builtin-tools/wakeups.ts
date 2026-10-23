@@ -35,9 +35,10 @@ async function assertUnderLimit(seam: WakeupsSeam, threadId: string): Promise<st
   return n >= seam.limits.perSession ? wakeupsLimitRefusal(n, seam.limits.perSession) : null;
 }
 
-/** The calling turn's channel origin, when it has one. */
-function originOf(ctx: ToolContext): { origin?: NonNullable<ToolContext["origin"]> } {
-  return ctx.origin !== undefined ? { origin: ctx.origin } : {};
+/** Creator provenance stays with the tool call across validation awaits and later claims. */
+function workSource(ctx: ToolContext): { origin?: NonNullable<ToolContext["origin"]>; sourceQueueItemId?: string } {
+  return { ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+    ...(ctx.queueItemId !== undefined ? { sourceQueueItemId: ctx.queueItemId } : {}) };
 }
 
 function isoOrUndefined(ms: number | undefined): string | undefined {
@@ -135,7 +136,7 @@ export const watchTool = defineTool({
         command: args.command,
         reason: validation.value.reason,
         maxHours: validation.value.maxHours,
-        ...originOf(ctx),
+        ...workSource(ctx),
       }));
     } catch (err) {
       const text = refusalText(err, "[bash_background]");
@@ -179,7 +180,7 @@ export const wakeAtTool = defineTool({
         kind: "timer",
         prompt: validation.value.prompt,
         fireAt: validation.value.fireAt,
-        ...originOf(ctx),
+        ...workSource(ctx),
       }));
     } catch (err) {
       const text = refusalText(err, "[wake_at]");
@@ -220,7 +221,7 @@ export const holdSandboxTool = defineTool({
         hours: validation.value.hours,
         reason: validation.value.reason,
         threadId: ctx.threadId,
-        ...originOf(ctx),
+        ...workSource(ctx),
       });
     } catch (err) {
       // A refusal the seam names for the model (no sandbox), not a crash.
@@ -326,7 +327,7 @@ export const waitForEventTool = defineTool({
     if (!validation.ok) return { text: validation.text };
     const limitRefusal = await assertUnderLimit(seam, ctx.threadId);
     if (limitRefusal) return { text: limitRefusal };
-    const result = await seam.armEvent(ctx.threadId, validation.value, ctx.origin, ctx.credentials);
+    const result = await seam.armEvent(ctx.threadId, validation.value, ctx.origin, ctx.credentials, ctx.queueItemId);
     if ("refused" in result) return { text: result.refused };
     const { wakeup } = result;
     const subject = waiterSubject(wakeup);
@@ -400,7 +401,7 @@ export async function startBackgroundProcess(
       command,
       reason: value.reason,
       deadlineHours: value.deadlineHours,
-      ...originOf(ctx),
+      ...workSource(ctx),
     }));
   } catch (err) {
     // A start the seam refused or stopped is a result the model acts on,

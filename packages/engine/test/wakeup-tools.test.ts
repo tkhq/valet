@@ -183,11 +183,15 @@ describe("fix wave 2 tool changes", () => {
   it("passes the turn's origin to create and the thread and origin to hold (H3, M17)", async () => {
     const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
     const hold = vi.fn(async () => ({ ...baseLease, id: "ls_h" }));
-    const ctx = { ...makeCtx({ create, hold }), origin };
+    const ctx = { ...makeCtx({ create, hold }), origin, queueItemId: "creator" };
     await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx);
-    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin });
+    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin, sourceQueueItemId: "creator" });
     await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx);
-    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin });
+    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin, sourceQueueItemId: "creator" });
+    await startBackgroundProcess(ctx, "sleep 1", { deadlineHours: 1, reason: "work" });
+    expect(create.mock.calls.at(-1)?.[1]).toMatchObject({ kind: "process", sourceQueueItemId: "creator" });
+    await watchTool.execute({ command: "logs", reason: "work", max_hours: 1 }, ctx);
+    expect(create.mock.calls.at(-1)?.[1]).toMatchObject({ kind: "watch", sourceQueueItemId: "creator" });
   });
 
   it("returns the seam's hold refusal as text (M10)", async () => {

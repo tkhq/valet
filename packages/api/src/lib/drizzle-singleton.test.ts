@@ -60,6 +60,18 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM child_watches WHERE child_session_id IN ('repair-child', 'repair-done')");
   });
 
+  it("repairs background work provenance without assigning legacy work to a turn", async () => {
+    for (const table of ["engine_leases", "engine_wakeups"]) await db.query(`ALTER TABLE ${table} DROP COLUMN source_queue_item_id`);
+    await db.query(`INSERT INTO engine_leases (id, session_id, owner_kind, reason, created_at, deadline_at)
+      VALUES ('legacy-work', 'child', 'hold', 'private legacy work', 1, 2)`);
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT source_queue_item_id FROM engine_leases WHERE id = 'legacy-work'")).rows)
+      .toEqual([{ source_queue_item_id: null }]);
+    await db.query("DELETE FROM engine_leases WHERE id = 'legacy-work'");
+  });
+
   it("repairs hold terminal expectations without retaining legacy released leases", async () => {
     await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_expected");
     await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_started_at");
