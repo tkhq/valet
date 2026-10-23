@@ -469,7 +469,7 @@ describe("ChannelHost.handleUpdate", () => {
 
   it("keeps another Slack DM queued without answering or cancelling the first DM's question", async () => {
     faux.setResponses([
-      fauxAssistantMessage([{ type: "toolCall", id: "home-question", name: "ask_question", arguments: { question: "Which repo?" } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "home-question", name: "ask_question", arguments: { question: "Which repo?", intent: "Ask which repository to use before starting the task." } }], { stopReason: "toolUse" }),
       fauxAssistantMessage("First reply"), fauxAssistantMessage("Second reply"),
     ]);
     const slack: ChannelTransport = {
