@@ -972,7 +972,8 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.queryByRole("button", { name: /model:/i })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));
-    expect(await screen.findByRole("dialog", { name: "Model and thinking" })).toBeTruthy();
+    const modelDialog = await screen.findByRole("dialog", { name: "Model and thinking" });
+    expect(document.activeElement).toBe(modelDialog);
   });
 
   function teamSession(): SessionDetail {

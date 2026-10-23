@@ -188,6 +188,7 @@ export function SessionHeader({
   const sessionMenu = useResponsiveOverlay("md");
   const modelSettings = useResponsiveOverlay("md");
   const threadMenuTrigger = useRef<HTMLButtonElement>(null);
+  const modelDialog = useRef<HTMLDivElement>(null);
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const setThreadModel = useSetThreadModel(session.id);
@@ -419,7 +420,7 @@ export function SessionHeader({
   const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
   const modelPicker = canAdminister ? (
-    <span className={cn("min-w-0", mobile && "flex min-h-0 flex-1 flex-col")}>
+    <span className={cn("min-w-0", mobile && "block")}>
         <ModelPicker
           presentation={mobile ? "panel" : "menu"}
           currentId={configuredModel}
@@ -705,7 +706,11 @@ export function SessionHeader({
       )}
       {guard.dialog}
       {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
-        <DialogContent data-mobile-model-settings className="flex flex-col overflow-hidden [&>header]:shrink-0" title="Model and thinking" description="Choose the model and thinking level for this thread."
+        <DialogContent ref={modelDialog} data-mobile-model-settings title="Model and thinking" description="Choose the model and thinking level for this thread."
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            modelDialog.current?.focus();
+          }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             threadMenuTrigger.current?.focus();

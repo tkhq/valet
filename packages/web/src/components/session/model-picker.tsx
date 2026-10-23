@@ -322,7 +322,8 @@ export function ModelPicker({
             />
           </div>
         </div>
-        <div ref={listRef} className={cn("min-h-0 max-h-[440px] overflow-y-auto overscroll-contain", panel && "flex-1 max-h-none")}>
+        <div ref={listRef} className="min-h-0 max-h-[440px] overflow-y-auto overscroll-contain"
+          style={panel ? { maxHeight: "min(calc(var(--app-viewport-height, 100dvh) * 0.4), 20rem)" } : undefined}>
           {modelsQ.isLoading && (
             <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
           )}
@@ -548,9 +549,9 @@ export function ModelPicker({
           </div>
         </div>
   </>;
-  if (panel) return <div className="flex min-h-0 flex-1 flex-col" role="group" aria-label="Model and thinking settings">
+  if (panel) return <div className="min-w-0" role="group" aria-label="Model and thinking settings">
     <p className="mb-3 shrink-0 text-sm text-muted">{triggerLabel}{triggerReasoning}</p>
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line" onKeyDown={onKeyDown}>{content}</div>
+    <div className="overflow-hidden rounded-lg border border-line" onKeyDown={onKeyDown}>{content}</div>
   </div>;
 
   return (

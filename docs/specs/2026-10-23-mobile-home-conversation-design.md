@@ -145,3 +145,7 @@ The signed-in phone shell fixes the document viewport and contains scroll gestur
 Only content regions scroll. The visual viewport sets shell and model-dialog bounds
 when Safari opens the keyboard or pans a focused field. Public pages and desktop
 retain normal document behavior. Viewport listeners and variables clear on desktop.
+
+The model dialog initially focuses its container, so opening settings does not
+open the phone keyboard. The model list has a bounded scroll region. On short
+viewports, the dialog also scrolls so the list and thinking controls stay reachable.
