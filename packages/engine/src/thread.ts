@@ -62,13 +62,32 @@ import {
   BRANCH_NOTE_KEY,
   THREAD_EDIT_KEY,
   branchNoteText,
+  pushedFrom,
   readBranchNote,
   readThreadEdit,
   summarizeBranchActions,
   type BranchNote,
   type BranchNoteKind,
+  type BranchNoteRepoFiles,
+  type EditPreview,
+  type ForkSeedRecord,
   type ThreadEdit,
 } from "./branch-note.js";
+import {
+  FILE_CHECKPOINT_KEY,
+  applySeedBundle,
+  changedPaths,
+  checkpointRef,
+  findRepos,
+  planFileUndo,
+  repoDir,
+  restorePaths,
+  returnPlan,
+  snapshotRepo,
+  type RepoCheckpoint,
+  type RepoRestore,
+  type TurnCheckpoint,
+} from "./checkpoints.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
@@ -167,7 +186,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -600,6 +619,12 @@ export class Thread {
   private readonly activeSkillInvocations = new Map<string, SkillInvocationFact>();
   /** Previous turn's cache snapshot for break classification (TKAI-320). */
   private prevCacheSnapshot: CacheTurnSnapshot | undefined;
+  /** This turn's first user entry, which names its file checkpoint. */
+  private turnUserEntryId: string | undefined;
+  /** This turn's snapshots from before its first file change (`beginTurnCheckpoint`). */
+  private turnCheckpoint: Promise<PendingCheckpoint | undefined> | undefined;
+  /** The leaf moved; the next model call logs how much of the prompt the cache served. */
+  private branchSwitchCachePending = false;
   /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
@@ -2249,14 +2274,13 @@ export class Thread {
   // ── Branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──────
 
   /**
-   * Queue an edit of one of the author's own earlier messages. The edited
-   * text runs next: it stops the running turn the way steer does, and queued
-   * messages run after it. The leaf moves when the edit is claimed
-   * (`applyEdit`), after the stopped turn settled.
+   * Refuse an edit the rules forbid (spec decision 6): the message must be
+   * on the active path, typed by `editorId`, not from a channel, and not
+   * followed by another person's message. One edit waits at a time.
+   * Returns the active path and the message's place on it.
    */
-  async editMessage(entryId: string, content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+  private async checkEdit(entryId: string, editorId: string | undefined): Promise<{ active: SessionEntry[]; index: number }> {
     if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
-    const editorId = opts.author?.id;
     if (!editorId) throw new ValidationError("Only a person can edit a message. Send the text as a new message.");
     const store = this.session.providers.store;
     const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
@@ -2284,8 +2308,51 @@ export class Thread {
     if (unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata))) {
       throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
     }
+    return { active, index };
+  }
 
-    const edit: ThreadEdit = { entryId };
+  /**
+   * What an edit of `entryId` would replace, from the same records as the
+   * branch note, so the edit bar can show it before Send. A refused edit
+   * returns the reason instead.
+   */
+  async previewEdit(entryId: string, editorId: string | undefined): Promise<EditPreview> {
+    let checked: { active: SessionEntry[]; index: number };
+    try {
+      checked = await this.checkEdit(entryId, editorId);
+    } catch (err) {
+      if (err instanceof ValidationError) return { refusal: err.message, turns: 0, actions: [], moreActions: 0, grants: [], files: [], pushed: false };
+      throw err;
+    }
+    const left = checked.active.slice(checked.index);
+    const ran = summarizeBranchActions(left, this.branchNoteTools());
+    const files = planFileUndo(left).flatMap((repo) => repo.paths.map((p) => ({ repo: repo.repo, path: p.path })));
+    return {
+      turns: left.filter((entry) => entry.type === "message" && entry.role === "user" && !entry.signal).length,
+      actions: ran.actions,
+      moreActions: ran.moreActions,
+      grants: ran.grants,
+      files,
+      pushed: pushedFrom(left),
+    };
+  }
+
+  /**
+   * Queue an edit of one of the author's own earlier messages. The edited
+   * text runs next: it stops the running turn the way steer does, and queued
+   * messages run after it. The leaf moves when the edit is claimed
+   * (`applyEdit`), after the stopped turn settled.
+   */
+  async editMessage(
+    entryId: string,
+    content: PromptContent,
+    opts: PromptOptions,
+    choices: { undoFiles?: boolean } = {},
+  ): Promise<PromptReceipt> {
+    const store = this.session.providers.store;
+    await this.checkEdit(entryId, opts.author?.id);
+
+    const edit: ThreadEdit = { entryId, ...(choices.undoFiles ? { undoFiles: true } : {}) };
     const prepared = this.prepareSubmissionContent(content, {
       ...opts,
       metadata: { ...opts.metadata, [THREAD_EDIT_KEY]: edit },
@@ -2349,19 +2416,27 @@ export class Thread {
       if (index < 0) {
         throw new ValidationError("The message you edited is no longer in this conversation. Edit it again from the current version.");
       }
+      const left = active.slice(index);
+      const noteId = uid("e");
+      // Files go back before the note is written, so the note says what
+      // happened. The leaf has not moved yet; the claim holds the thread.
+      const files = edit.undoFiles ? await this.undoFileChanges(planFileUndo(left), noteId) : undefined;
       // The entry before it on the path, not its parentId: in a transcript
       // from before TKAI-211, the edited message's parent is null.
       const note = this.buildBranchNote("edit", {
+        id: noteId,
         parentId: active[index - 1]?.id ?? null,
-        left: active.slice(index),
+        left,
         actorId: item.author?.id,
         queueItemId: item.id,
+        files,
       });
       if (!(await store.appendBranch(this.session.id, this.id, [note], { expectedLeafId: leaf, fence }))) {
         throw new ConflictError("The thread changed while the edit started. Edit the message again.");
       }
       this.activeLeafEntryId = note.id;
       this.rehydrateTranscript([...snapshot.entries, note]);
+      this.branchSwitchCachePending = true;
       return note.id;
     });
     this.entryAppendTail = move.then(() => undefined, () => undefined);
@@ -2383,7 +2458,11 @@ export class Thread {
    * turn writes to the current branch. Writes a note for the branch it
    * leaves, so the person can return again.
    */
-  async returnToBranch(noteEntryId: string, actor: { id: string }): Promise<{ noteEntryId: string }> {
+  async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
     if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
     const store = this.session.providers.store;
     const busy = "Valet is working in this thread. Stop it, then go back to the earlier version.";
@@ -2412,11 +2491,18 @@ export class Thread {
       if (other) {
         throw new ValidationError(`${other} wrote in this version, and going back would remove that message. Branch into a new thread instead.`);
       }
-      const fresh = this.buildBranchNote("return", { parentId: target.id, left, actorId: actor.id });
+      const freshId = uid("e");
+      // Bringing files back undoes this version's own file changes, then
+      // puts back what the note's undo took away.
+      const files = choices.restoreFiles
+        ? await this.undoFileChanges(returnPlan(planFileUndo(left), readBranchNote(note.metadata)?.files ?? []), freshId)
+        : undefined;
+      const fresh = this.buildBranchNote("return", { id: freshId, parentId: target.id, left, actorId: actor.id, files });
       if (!(await store.appendBranch(this.session.id, this.id, [fresh], { expectedLeafId: leaf }))) {
         throw new ConflictError("The thread changed. Reload it and try again.");
       }
       this.activeLeafEntryId = fresh.id;
+      this.branchSwitchCachePending = true;
       if (this.transcriptPending) return fresh.id;
       this.rehydrateTranscript([...snapshot.entries, fresh]);
       return fresh.id;
@@ -2457,7 +2543,12 @@ export class Thread {
    */
   async copyPath(
     path: readonly SessionEntry[],
-    opts: { source: { sessionId: string; threadId: string }; actorId?: string },
+    opts: {
+      source: { sessionId: string; threadId: string };
+      actorId?: string;
+      /** Repositories whose files come along to this thread's own working directory (`exportForkSeed`). */
+      seed?: { repos: ForkSeedRecord[] } | { skipped: string };
+    },
   ): Promise<void> {
     const store = this.session.providers.store;
     const ids = new Map<string, string>();
@@ -2478,6 +2569,8 @@ export class Thread {
       source: { ...opts.source, sameWorkingDirectory: opts.source.sessionId === this.session.id },
       branchRootId: lastEntryId,
       branchLeafId: lastEntryId,
+      ...(opts.seed && "repos" in opts.seed ? { seed: opts.seed.repos } : {}),
+      ...(opts.seed && "skipped" in opts.seed ? { seedSkipped: opts.seed.skipped } : {}),
     });
     const append = this.entryAppendTail.then(async () => {
       if (!(await store.appendBranch(this.session.id, this.id, [...copies, note], { expectedLeafId: null }))) {
@@ -2502,6 +2595,7 @@ export class Thread {
   }
 
   private buildBranchNote(kind: BranchNoteKind, args: {
+    id?: string;
     parentId: string | null;
     left: readonly SessionEntry[];
     actorId?: string;
@@ -2509,18 +2603,24 @@ export class Thread {
     source?: BranchNote["source"];
     branchRootId?: string;
     branchLeafId?: string;
+    files?: BranchNoteRepoFiles[];
+    seed?: ForkSeedRecord[];
+    seedSkipped?: string;
   }): BranchSummaryEntry {
     const ran = kind === "fork"
-      ? { actions: [], moreActions: 0, filesChanged: false }
+      ? { actions: [], moreActions: 0, filesChanged: false, grants: [] }
       : summarizeBranchActions(args.left, this.branchNoteTools());
     const note: BranchNote = {
       kind,
       ...ran,
+      ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
       ...(args.actorId ? { actorId: args.actorId } : {}),
       ...(args.source ? { source: args.source } : {}),
+      ...(args.seed && args.seed.length > 0 ? { seed: args.seed } : {}),
+      ...(args.seedSkipped ? { seedSkipped: args.seedSkipped } : {}),
     };
     return {
-      id: uid("e"),
+      id: args.id ?? uid("e"),
       sessionId: this.session.id,
       threadId: this.id,
       parentId: args.parentId,
@@ -2532,6 +2632,157 @@ export class Thread {
       queueItemId: args.queueItemId,
       createdAt: Date.now(),
     };
+  }
+
+  /**
+   * Add a signal to the transcript without a model call, after any running
+   * turn (`RECORD_ONLY_KEY`). Slack edits use it: the model reads what
+   * changed on its next turn and does not reply to the edit itself.
+   */
+  async recordSignal(content: SignalContent, opts: Pick<PromptOptions, "author" | "channel" | "dispatchId">): Promise<PromptReceipt> {
+    return this.submitPrompt(content, { ...opts, queueMode: "followup", metadata: { [RECORD_ONLY_KEY]: true } });
+  }
+
+  // ── File checkpoints (spec: "File checkpoints") ─────────────────────
+
+  /** A tool whose calls can change files snapshots the repositories before the turn's first such call. */
+  private withFileCheckpoint(def: ToolDef): ToolDef {
+    return {
+      ...def,
+      execute: async (args, ctx) => {
+        await this.beginTurnCheckpoint();
+        return def.execute(args, ctx);
+      },
+    };
+  }
+
+  /** Once per turn. A failed snapshot never blocks the tool: the turn just has no checkpoint. */
+  private beginTurnCheckpoint(): Promise<PendingCheckpoint | undefined> {
+    this.turnCheckpoint ??= this.takeBeforeSnapshots().catch((err: unknown) => {
+      console.error(`[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    });
+    return this.turnCheckpoint;
+  }
+
+  private async takeBeforeSnapshots(): Promise<PendingCheckpoint | undefined> {
+    const entryId = this.turnUserEntryId;
+    if (!entryId) return undefined;
+    const sandbox = this.session.sandbox;
+    const workspace = this.session.options.workspace;
+    const repos: PendingCheckpoint["repos"] = [];
+    for (const repo of await findRepos(sandbox, workspace)) {
+      try {
+        const snapshot = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, entryId, "before"));
+        repos.push({ repo, before: snapshot.commit, partial: snapshot.partial });
+      } catch (err) {
+        console.error(`[engine] file checkpoint skipped repo=${repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { entryId, repos };
+  }
+
+  /**
+   * Snapshot the turn's repositories again and record what changed on the
+   * turn's user entry (`FILE_CHECKPOINT_KEY`). Never throws: a turn's
+   * result does not depend on its checkpoint.
+   */
+  private async finishTurnCheckpoint(): Promise<void> {
+    const pending = this.turnCheckpoint;
+    this.turnCheckpoint = undefined;
+    try {
+      const taken = pending ? await pending : undefined;
+      if (!taken || taken.repos.length === 0) return;
+      const sandbox = this.session.sandbox;
+      const workspace = this.session.options.workspace;
+      const repos: RepoCheckpoint[] = [];
+      for (const repo of taken.repos) {
+        const dir = repoDir(workspace, repo.repo);
+        const after = await snapshotRepo(sandbox, dir, checkpointRef(this.id, taken.entryId, "after"));
+        const changed = await changedPaths(sandbox, dir, repo.before, after.commit);
+        if (changed.length === 0) continue;
+        repos.push({
+          repo: repo.repo,
+          before: repo.before,
+          after: after.commit,
+          changed,
+          ...(after.branch ? { branch: after.branch } : {}),
+          ...(repo.partial || after.partial ? { partial: true } : {}),
+        });
+      }
+      if (repos.length === 0) return;
+      const store = this.session.providers.store;
+      const entries = await store.getEntries(this.session.id, this.id, this.runningItem ? { queueItemId: this.runningItem.id } : undefined);
+      const entry = entries.find((candidate) => candidate.id === taken.entryId);
+      if (entry?.type !== "message") return;
+      const checkpoint: TurnCheckpoint = { repos };
+      const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [FILE_CHECKPOINT_KEY]: checkpoint } };
+      await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
+    } catch (err) {
+      console.error(`[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Run a file plan with a restore point per repository, named for the note that records it. */
+  private async undoFileChanges(plan: readonly RepoRestore[], noteId: string): Promise<BranchNoteRepoFiles[] | undefined> {
+    if (plan.length === 0) return undefined;
+    const results = await restorePaths(
+      this.session.sandbox,
+      this.session.options.workspace,
+      plan,
+      (repo) => checkpointRef(this.id, noteId, `restore-${plan.findIndex((r) => r.repo === repo)}`),
+    );
+    return results.map((result) => {
+      const sources = new Map(plan.find((r) => r.repo === result.repo)?.paths.map((p) => [p.path, p.source]) ?? []);
+      const bases = Object.fromEntries([...result.restored, ...result.removed].flatMap((path) => {
+        const source = sources.get(path);
+        return source ? [[path, source]] : [];
+      }));
+      return {
+        repo: result.repo,
+        restored: result.restored,
+        removed: result.removed,
+        skipped: result.skipped,
+        ...(result.failed ? { failed: result.failed } : {}),
+        ...(result.restorePoint ? { restorePoint: result.restorePoint } : {}),
+        ...(Object.keys(bases).length > 0 ? { bases } : {}),
+      };
+    });
+  }
+
+  /**
+   * Copy a fork seed's files into this thread's own working directory once,
+   * before its first model call, and rewrite the fork note to say what came
+   * along. Returns without work when there is no pending seed.
+   */
+  private async applyForkSeed(): Promise<void> {
+    if (this.threadMetadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    const store = this.session.providers.store;
+    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) return;
+    const note = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId)
+      .find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
+    const facts = note ? readBranchNote(note.metadata) : undefined;
+    if (!note || !facts?.seed || facts.seedResult) return;
+    const blobs = this.session.providers.blobs;
+    const seedResult: NonNullable<BranchNote["seedResult"]> = [];
+    for (const seed of facts.seed) {
+      try {
+        if (!blobs) throw new Error("this deployment has no blob store");
+        const blob = await blobs.get(seed.blobKey);
+        if (!blob) throw new Error("the saved files are gone");
+        const bundle = new Uint8Array(await new Response(blob.data).arrayBuffer());
+        const paths = await applySeedBundle(this.session.sandbox, this.session.options.workspace, seed, bundle);
+        seedResult.push({ repo: seed.repo, paths });
+      } catch (err) {
+        seedResult.push({ repo: seed.repo, paths: [], failed: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const updatedFacts: BranchNote = { ...facts, seedResult };
+    const updated: BranchSummaryEntry = { ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts } };
+    await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
+    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true }), "before-save");
+    this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
   private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
@@ -3501,8 +3752,9 @@ export class Thread {
     if (current.status === "settled" || current.status === "terminalizing") return;
 
     const decided = this.decideTurnOutcome(current, turnFailure);
-    // Validate after the agent stops, outside its retry loop. Never replay a failed result.
-    const outcome = decided.outcome === "completed"
+    // Validate after the agent stops, outside its retry loop. Never replay a
+    // failed result. A record-only item made no model call to validate.
+    const outcome = decided.outcome === "completed" && item.metadata?.[RECORD_ONLY_KEY] !== true
       ? completedSubmissionOutcome(await store.getEntries(this.session.id, this.id, { queueItemId: item.id }), item.id)
       : decided;
     span.setAttribute("valet.submission.outcome", outcome.outcome);
@@ -4129,6 +4381,7 @@ export class Thread {
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
     );
     if (existingUserEntry) {
+      this.turnUserEntryId ??= existingUserEntry.id;
       // A spilled entry keeps the FULL paste in `content` (durable, REST-
       // visible) and carries the file path in metadata. Reconstruct the
       // pointer for the LLM so a replayed turn re-prompts what fits the window,
@@ -4210,6 +4463,7 @@ export class Thread {
     await this.fencedWrite(() =>
       this.appendEntry(userEntry, this.fence),
     );
+    this.turnUserEntryId ??= userEntry.id;
     return { text, attachments };
   }
 
@@ -4304,10 +4558,21 @@ export class Thread {
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
+    this.turnUserEntryId = undefined;
+    this.turnCheckpoint = undefined;
     if (!(await this.canRunCurrentSubmission())) return;
     // An edit moves the leaf before anything else in the turn reads or
     // writes the transcript (model state, compaction, the user entry).
     if (!(await this.applyEdit(item))) return;
+    await this.applyForkSeed();
+    // A record-only submission (a Slack edit note) joins the transcript in
+    // queue order and starts no reply. The next turn rebuilds the agent
+    // transcript from the store, so the model reads it then.
+    if (item.metadata?.[RECORD_ONLY_KEY] === true) {
+      await this.appendUserEntry(item);
+      this.transcriptPending = true;
+      return;
+    }
 
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
@@ -4489,6 +4754,9 @@ export class Thread {
         await this.runProactiveCompaction();
       }
     } finally {
+      // The end-of-turn snapshot lands before the next claim, so an edit
+      // that stopped this turn can undo its file changes too.
+      await this.finishTurnCheckpoint();
       this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardApplied);
       this.restoreColdHintAfterTurn(coldHintApplied);
       this.restoreRoleAfterTurn(roleOverlay);
@@ -6011,7 +6279,9 @@ export class Thread {
   }
 
   private buildTools(includeRestricted = false): AgentTool[] {
-    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])]
+      .map(refuseOutsideAuthors)
+      .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def);
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
@@ -6557,6 +6827,14 @@ export class Thread {
           turnUsage = call.usage;
           turnCost = call.cost;
           turnModel = event.message.model;
+          // Cache-safe rewind (spec P1): the first model call after a branch
+          // switch shows how much of the shared prefix the cache served.
+          if (this.branchSwitchCachePending) {
+            this.branchSwitchCachePending = false;
+            console.warn(`[engine] first model call after a branch switch session=${this.session.id} thread=${this.id} cache_read=${u.cacheRead} cache_write=${u.cacheWrite} input=${u.input}`);
+            this.turnSpan?.setAttribute("valet.turn.after_branch_switch", true);
+            this.turnSpan?.setAttribute("valet.turn.branch_switch_cache_read_tokens", u.cacheRead);
+          }
           // Cache-break telemetry (TKAI-320): compare against the previous
           // turn's snapshot and count breaks by cause. Alert-only — nothing
           // here changes behavior.
@@ -7079,6 +7357,16 @@ function buildSignalMeta(
  * active path from the bounded store read.
  */
 export const THREAD_BRANCHED_KEY = "branched";
+
+/** Thread metadata key set once a fork's files were copied into its working directory. */
+export const FORK_SEED_APPLIED_KEY = "forkSeedApplied";
+
+/** A turn's snapshots from before its first file change. */
+interface PendingCheckpoint {
+  /** The turn's first user entry. */
+  entryId: string;
+  repos: Array<{ repo: string; before: string; partial: boolean }>;
+}
 
 /** A thread entry read: the store query, plus every branch on request. */
 export type ThreadEntryQuery = MessageQuery & { allBranches?: boolean };

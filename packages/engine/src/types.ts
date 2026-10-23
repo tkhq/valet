@@ -136,6 +136,14 @@ export type QueueMode = "followup" | "inject" | "steer" | "collect";
  * every other path still runs it in order.
  */
 export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
+
+/**
+ * Queue item metadata flag for a record-only submission: the claim appends
+ * its user entry to the transcript and runs no model call. The model reads
+ * it on the next turn. A Slack edit uses it to tell the model what changed
+ * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ */
+export const RECORD_ONLY_KEY = "recordOnly";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 

@@ -134,19 +134,45 @@ export {
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
-export { Thread, THREAD_BRANCHED_KEY, type ThreadEntryQuery } from "./thread.js";
+export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, type ThreadEntryQuery } from "./thread.js";
 export {
   BRANCH_NOTE_KEY,
   THREAD_EDIT_KEY,
   branchNoteText,
+  pushedFrom,
   readBranchNote,
   readThreadEdit,
   summarizeBranchActions,
   type BranchNote,
   type BranchNoteAction,
   type BranchNoteKind,
+  type BranchNoteRepoFiles,
+  type EditPreview,
+  type ForkSeedRecord,
   type ThreadEdit,
 } from "./branch-note.js";
+export {
+  FILE_CHECKPOINT_KEY,
+  applySeedBundle,
+  changedPaths,
+  checkpointRef,
+  exportSeedBundle,
+  findRepos,
+  planFileUndo,
+  planForkSeed,
+  planPathCount,
+  readTurnCheckpoint,
+  repoDir,
+  restorePaths,
+  returnPlan,
+  snapshotRepo,
+  type ForkSeedRepo,
+  type PathRestore,
+  type RepoCheckpoint,
+  type RepoRestore,
+  type RepoRestoreResult,
+  type TurnCheckpoint,
+} from "./checkpoints.js";
 export {
   InMemoryBlobStore,
   InMemoryEventStream,

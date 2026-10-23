@@ -1,6 +1,8 @@
 # Thread edit and fork
 
-Date: 2026-10-22. Status: built, piloted on one deployment.
+Date: 2026-10-22. Status: built, piloted on one deployment. Revised the same
+day after a parity review of Claude Code, claude.ai, Codex, Cursor, Cline,
+Copilot, Replit, Devin, OpenCode, Amp, and Factory (decisions 7 to 12).
 
 ## Problem
 
@@ -53,8 +55,9 @@ answers stay in `engine_entries` on the old branch. Nothing is deleted.
 Call: every leaf move writes a `branch_summary` entry, the branch note. The
 note lists the tools that ran on the branch you left and the confirmed
 outcomes they reported (for example a pull request URL). Nothing outside the
-chat is undone. If a tool that can change files ran, the note says that the
-working directory keeps any changes, because the sandbox cannot rewind.
+working directory is undone. Files in the working directory come back only
+when the person chooses to undo them (decision 7); otherwise the note says
+that the working directory keeps the changes.
 
 The engine builds the note from the left branch's tool calls. It makes no
 model call. The note text enters the model's context as a
@@ -92,9 +95,8 @@ coverage. Copies drop `queueItemId`, `usage`, and `cost`, so usage views
 never count one model call twice. Decision-gate entries stay behind. Their
 gate rows belong to the source thread. The fork ends with a fork note. The
 note names the source thread, and it says the copied actions already ran. A
-team thread runs in its own execution session and sandbox. For a team thread,
-the note also says that the source thread's files are not in this
-thread's working directory.
+team thread runs in its own execution session and sandbox, so its fork gets
+the source's files at the fork point (decision 9).
 
 The fork keeps the source thread's model and reasoning level.
 
@@ -118,6 +120,134 @@ fork instead. "Go back" follows the same rule for the branch it leaves.
 A shared-thread guest with reply access may edit their own messages under
 the same rule. A guest cannot fork, because a fork creates a thread in the
 owner's workspace.
+
+### 7. File checkpoints per turn, undone with the edit
+
+Every other hosted and IDE agent that restores files lost data at some
+point: missed shell edits, wiped staging, prunes that deleted files. Codex
+and Amp gave up on it. Valet's agent works in its own server-side sandbox,
+which removes the worst failure (touching a person's own checkout), and it
+keeps exact records. So Valet restores files, under these rules.
+
+- A turn that calls a tool marked `sideEffect: "files"` (`bash`, `write`,
+  `edit`) snapshots each git repository under the working directory before
+  its first such call, and again when the turn ends. A snapshot commits the
+  whole working tree (tracked and untracked files, not ignored ones) through
+  a temporary index. The person's index and files never change. The commits
+  live under `refs/valet/checkpoints/<thread>/<entry>/`, so git keeps them for
+  the life of the repository.
+- The temporary index is a copy made with `cp -p`. A plain copy gets a new
+  file time, and then git trusts stale stat data for a file rewritten in the
+  same second at the same size ("racy git"). The first build had this bug;
+  a test now holds the rule.
+- The turn's user entry records each repository's two snapshots and the
+  changed paths (`metadata.fileCheckpoint`).
+- The edit bar offers "Also undo file changes (N files)", with the file
+  list. It defaults on, and off when the replaced turns ran `git push` or
+  opened a pull request: a local undo does not reach those.
+- The undo touches only the paths the replaced turns changed. Each path goes
+  back to its content before the first replaced turn that changed it, and
+  only while it still holds what the last of them left. A path that someone
+  else changed after them is left alone and listed. A personal assistant's
+  threads share one sandbox, so a whole-tree restore would wipe another
+  thread's work.
+- A path that did not exist before is removed. That removal is an undo of
+  a recorded creation, and it is recoverable: the undo takes a restore point
+  of the working tree first, and the note records it.
+- "Go back to this version" can bring the files back: it undoes the current
+  version's own changes, then restores the undone paths from the restore
+  point.
+- A snapshot skips untracked files when they total over 50 MB, and gives up
+  after 20 seconds. A failed snapshot never blocks the tool; that turn has
+  no checkpoint, and nothing undoes its files. Directories that are not git
+  repositories are not restored.
+
+Rejected: a whole-tree restore (Cline's reset and clean). It is wrong for a
+shared sandbox, and it destroys work that the records do not cover.
+
+### 8. The edit bar previews the edit before Send
+
+Call: `GET /api/threads/:id/edit-preview` returns what the branch note would
+say: how many turns Send replaces, the actions and approval choices that
+still stand, and the files that the undo can put back. A refusal (for
+example, someone wrote after the message since) shows in the bar, and Send
+stays off.
+
+### 9. A fork keeps its files
+
+Call: a personal fork shares the source's working directory, as personal
+threads do; its note says that later changes there show too. A team fork
+runs in a new execution session, so the fork route bundles each changed
+repository's last checkpoint at the fork point (`git bundle`, leaving out
+what the remote holds, at most 50 MB) into the blob store. The fork's first
+turn applies it before its model call: it checks out the snapshot's commit
+and puts the snapshot's working tree on top, unstaged. The fork note then
+says which repositories came along or why one failed. Repository paths are
+stored relative to the working directory.
+
+The bundle file sits in the repository's git directory while it is written
+or read (`git rev-parse --git-path`). The sandbox file calls reach only the
+working directory, and a file there never shows as an untracked change. A
+repository that the source thread made itself has no remote, so workspace
+prep does not clone it into the fork, and its bundle holds its whole
+history. If nothing is at that path in the fork, the first turn starts an
+empty repository there and applies the bundle. If the bundle needs commits
+that the fork's copy does not have, the apply fails, the empty repository
+is removed, and the note gives that reason.
+
+### 10. Rewind is cache-safe
+
+Call: a rewind keeps the system prompt and every message before the edit
+point byte-identical, and the note follows that prefix. A test compares the
+system prompt and the message list that the provider receives before and
+after an edit. The first model call after a branch switch logs its
+`cache_read` tokens and sets `valet.turn.after_branch_switch` on the turn
+span.
+
+### 11. A Slack edit becomes a note, with no reply
+
+Call: Valet cannot rewrite a thread for a Slack edit, because the Slack copy
+of the reply stays. A Slack `message_changed` event for a DM conversation or
+a followed thread becomes a record-only signal: "edited in Slack, before,
+after". A record-only queue item (`metadata.recordOnly`) appends its entry
+in queue order and makes no model call; the next turn reads it. A link
+preview that loads sends `message_changed` with the same text, which is not
+an edit. A message from Slack still cannot be edited from the web; it can be
+forked.
+
+### 12. The note lists approval choices that still apply
+
+Call: an approval choice beyond the engine's one-time approval (for example
+"Always allow for me", "Approve for this session") outlives the branch it
+was made on. The note lists each one, from the left branch's decision-gate
+entries, so neither the person nor the model assumes the edit took it back.
+
+### Later
+
+- Compare two versions: a files diff between two leaves' checkpoints, and
+  each version's outside results.
+- Try N ways: fork one message into parallel threads with separate sandboxes.
+  It costs N times as much, so it needs an explicit choice.
+
+Rejected: a model-written summary of the abandoned branch (Claude Code's
+"summarize from here"). The record-based note is exact and costs no model
+call.
+
+## Parity
+
+| Capability | Best elsewhere | Valet |
+|---|---|---|
+| Edit any earlier own message, prompt back in the composer | Claude Code, OpenCode, Copilot | Parity |
+| Edit while a turn runs | Codex refuses; others stop first | Better: Send stops the turn |
+| Old version kept and reachable | Replit, Copilot Redo | Better: "Go back", nothing deleted |
+| Says what still stands outside | Nobody | Better: note, in model context |
+| Undo files with the conversation | Claude Code, Cline, Copilot, Replit | Parity, path-scoped and recoverable |
+| Preview before the rewind | Copilot CLI, Factory | Parity |
+| Fork from any message, with files | Codex, Claude Code `/fork` | Parity |
+| Cache-safe rewind | Claude Code, Codex | Parity, tested |
+| Shared-thread rules | Factory, Amp, Claude in Slack | Parity |
+| Slack edits | Claude in Slack | Parity |
+| Compare versions, try N ways | Codex cloud, Cline | Later |
 
 ## Engine
 
@@ -242,13 +372,18 @@ the same moment.
   `editEntryId`. It keeps the send route's checks, attachments, and guest
   rules. An edit cannot run a slash command, reply, promote, or set a queue
   mode.
-- `POST /api/threads/:threadId/branch/return` with `{ noteEntryId }`.
+- `undoFiles: true` on an edit also undoes the replaced turns' files.
+- `GET /api/threads/:threadId/edit-preview?entryId=` returns what the edit
+  replaces (decision 8). Guests with reply access may call it.
+- `POST /api/threads/:threadId/branch/return` with `{ noteEntryId }`, and
+  `restoreFiles: true` to bring files back.
 - `POST /api/threads/:threadId/fork` with `{ entryId }`. Members only.
   Returns the new thread summary and, for a user message, the text for the
   composer.
 - The REST message list projects a note as a system message with a
   `branch` field: `kind` (`edit`, `return`, or `fork`), the tool list, a
-  files-changed flag, and `canReturn`. A user message that an edit wrote
+  files-changed flag, `canReturn`, the approval choices that still apply,
+  the file undo's results, and a fork's file seed. A user message that an edit wrote
   carries `editOf`, and the UI marks it "edited". A user message that came
   in through a channel carries `channelType`, and the UI offers no Edit.
 - A `branch_switched` wire event tells every viewer of the thread to refetch
@@ -261,8 +396,9 @@ the same moment.
   targets.
 - Edit uses the existing composer with an "Editing your message" bar, like
   the reply bar. While editing, the list dims the message and everything
-  after it. If the message had files, the bar says to attach them again: an
-  edit carries the text and images only.
+  after it. The bar shows the preview and the file undo choice. If the
+  message had files, the bar says to attach them again: an edit carries the
+  text and images only.
 - After Send, the list hides those rows until REST no longer lists the
   edited message. If the server refuses the edit, the rows come back and the
   edited text stays in the composer with the server's reason.
@@ -279,18 +415,36 @@ the same moment.
 
 ## Limits
 
-- The sandbox does not rewind. The note says so.
-- A message that came from Slack cannot be edited. The person forks instead.
+- Files outside git repositories, packages installed outside the working
+  directory, and processes do not rewind. Outside services never do.
+- A turn whose snapshot failed or timed out has no file undo.
+- A message that came from Slack cannot be edited from the web. The person
+  forks instead.
 - Thread search, the auto-title, and the thread list's last-activity line
   still read every branch.
-- A fork of a team thread starts with an empty working directory.
+- A team fork copies files only for repositories that its working directory
+  also has from the same remote, or that the source thread made itself with
+  no remote.
 
 ## Validation
 
 - Store contract: `appendBranch` moves the leaf from a non-leaf parent,
   refuses a stale `expectedLeafId`, and checks the fence.
 - Engine: edit while idle, while running, while gate-blocked, with queued
-  messages, of the first message, across a compaction, and go back.
-- API: authorship rules, guests, Slack messages, fork of each message kind.
+  messages, of the first message, across a compaction, and go back. File
+  checkpoints with real git: the index stays unchanged, the undo is
+  path-scoped, a later change is skipped, the racy-git rewrite, a return
+  brings files back, a team fork's files arrive, and a fork makes a
+  repository that the source thread created. The test sandbox refuses file
+  paths outside the working directory, as docker does. The rendered prefix is
+  the same before and after an edit. A record-only signal makes no model
+  call. Approval choices appear in the note.
+- API: authorship rules, guests, Slack messages, fork of each message kind,
+  the preview, and Slack edits from a DM and from a followed thread.
 - Web: the edit bar, the hidden rows, the note divider, fork navigation.
-- Local check with two accounts at desktop and phone width.
+- Local check with two accounts at desktop and phone width, in docker
+  sandboxes: an edit with "Also undo file changes" left the agent reading
+  the earlier file content; Go back brought the changed files back; a second
+  Go back undid them again; a team fork read the source's commits, its
+  uncommitted change, and its untracked file. A teammate's edit preview of
+  another person's message is refused.

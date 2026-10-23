@@ -5,6 +5,7 @@
  * back. A fork copies the active path into an empty thread.
  */
 import { describe, it, expect } from "vitest";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -305,6 +306,69 @@ describe("thread edit", () => {
     expect(branchNote.summary).not.toContain("peek");
   });
 
+  it("lists lasting approval choices from the replaced turns, and not one-time approvals", async () => {
+    const approval: ToolDef = {
+      name: "open_pr",
+      description: "gated",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "Create a pull request",
+          body: "",
+          resumeKey: "open_pr",
+          actions: [
+            { id: "approve", label: "Approve once", style: "primary", approves: true },
+            { id: "always_allow_owner", label: "Always allow for me", approves: true },
+            { id: "deny", label: "Deny", style: "danger" },
+          ],
+        });
+        return { text: resolution.actionId === "deny" ? "denied" : "opened" };
+      },
+    };
+    const h = await setup("edit-grants", [
+      fauxAssistantMessage([fauxToolCall("open_pr", {}, { id: "g1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("opened it"),
+      fauxAssistantMessage("again"),
+    ], [approval]);
+    const first = await h.thread.submitPrompt("open the pr", { author: PERSON });
+    await waitFor(() => h.thread.pendingDecisionGates().length > 0);
+    const gate = h.thread.pendingDecisionGates()[0]!;
+    h.thread.resolveDecision(gate.id, { actionId: "always_allow_owner", resolvedBy: PERSON.id, resolvedAt: Date.now() });
+    await waitFor(() => h.settled(first.queueItemId));
+
+    await h.edit("open the pr", "open a draft pr");
+
+    const branchNote = await h.note();
+    expect(readBranchNote(branchNote.metadata)?.grants).toEqual(["Always allow for me: Create a pull request"]);
+    expect(branchNote.summary).toContain("Approval choices made in the earlier version still apply: Always allow for me: Create a pull request.");
+  });
+
+  it("keeps the system prompt and the rendered prefix up to the edit point the same, so the prompt cache can serve it", async () => {
+    type Context = { messages: Array<{ role: string; content: unknown }> };
+    // The provider folds system messages into its system prompt; the rest is the message list.
+    const system = (context: Context) => JSON.stringify(getCurrentSystemMessage(context.messages as Parameters<typeof getCurrentSystemMessage>[0]));
+    const list = (context: Context) => context.messages.filter((m) => m.role !== "system").map((m) => JSON.stringify({ role: m.role, content: m.content }));
+    let beforeEdit: { system: string; list: string[] } = { system: "", list: [] };
+    let afterEdit: { system: string; list: string[] } = { system: "", list: [] };
+    const h = await setup("edit-cache-prefix", [
+      fauxAssistantMessage([fauxToolCall("peek", {}, { id: "p1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("a"),
+      (context) => { beforeEdit = { system: system(context), list: list(context) }; return fauxAssistantMessage("b"); },
+      (context) => { afterEdit = { system: system(context), list: list(context) }; return fauxAssistantMessage("b2"); },
+    ], [peekTool]);
+    await h.send("first");
+    await h.send("second");
+
+    await h.edit("second", "second, edited");
+
+    expect(afterEdit.system).toBe(beforeEdit.system);
+    // [first, tool call, tool result, a] is shared; the note and the edited text follow it.
+    expect(afterEdit.list.slice(0, 4)).toEqual(beforeEdit.list.slice(0, 4));
+    expect(beforeEdit.list[4]).toContain("second");
+    expect(afterEdit.list[4]).toContain("branch-note");
+  });
+
   it("lists a tool that acts elsewhere without claiming files changed, and leaves out a question", async () => {
     const remember: ToolDef = { name: "remember", description: "saves memory", parameters: Type.Object({}), execute: async () => ({ text: "saved" }) };
     const ask: ToolDef = { name: "ask", description: "asks", parameters: Type.Object({}), sideEffect: "none", execute: async () => ({ text: "yes" }) };
@@ -355,6 +419,30 @@ describe("thread edit", () => {
     const busy = await h.userEntry("busy");
     await h.thread.editMessage(busy.id, "busy, edited", { author: PERSON });
     await expect(h.thread.editMessage(busy.id, "busy, again", { author: PERSON })).rejects.toThrow(/Another edit is waiting/);
+  });
+});
+
+describe("record-only signals", () => {
+  it("adds a Slack edit note without a model call, and the next turn reads it", async () => {
+    let seen: string[] = [];
+    const h = await setup("record-only", [
+      fauxAssistantMessage("a"),
+      (context) => { seen = userTexts(context); return fauxAssistantMessage("b"); },
+    ]);
+    await h.send("first");
+    const calls = h.faux.state.callCount;
+
+    const noted = await h.thread.recordSignal(
+      { kind: "signal", signalType: "slack.message_changed", tagName: "slack-edit", body: "Edited in Slack. Before: first. After: first, fixed." },
+      { author: PERSON },
+    );
+    await waitFor(() => h.settled(noted.queueItemId));
+
+    expect(await h.outcome(noted.queueItemId)).toBe("completed");
+    expect(h.faux.state.callCount).toBe(calls);
+    await h.send("next");
+    expect(seen.join("\n")).toContain("Edited in Slack. Before: first. After: first, fixed.");
+    expect(seen.at(-1)).toBe("next");
   });
 });
 

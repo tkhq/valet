@@ -301,8 +301,15 @@ export interface InboundChannelEvent {
    * carries no text. The host answers it with suggested prompts, so an
    * empty conversation offers a way in.
    */
-  kind: "message" | "command" | "gate_callback" | "surface_opened";
+  kind: "message" | "command" | "gate_callback" | "surface_opened" | "edit";
+  /** The new text when kind === "edit". */
   text?: string;
+  /**
+   * Set when kind === "edit": the person changed an earlier message, and this
+   * was its text before. The host records the change for the model without
+   * starting a reply.
+   */
+  previousText?: string;
   /** Set when kind === "command" (e.g. /start <code>). */
   command?: { name: string; args?: string };
   media?: InboundChannelMedia[];
