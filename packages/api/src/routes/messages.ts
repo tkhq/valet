@@ -12,23 +12,24 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
-import { threadRef } from "../services/thread-access.js";
+import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
-import { ensureAssistantExecution } from "../assistants/service.js";
+import { ensureAssistantExecution, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
+  ConflictError,
   dispatchCommand,
   MESSAGE_TURN_ERROR_KEY,
   NotFoundError,
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -37,6 +38,8 @@ import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  EditPreviewResponse,
+  ForkThreadResponse,
   ListCommandsResponse,
   WireCommandInfo,
   ListDecisionsResponse,
@@ -57,6 +60,7 @@ import type {
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
+  ReturnToBranchResponse,
   AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -73,7 +77,8 @@ import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
-import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
+import { publicUrlFromEnv } from "../channels/host.js";
+import { runVisible, spawnedFromVisibleThread, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -161,6 +166,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       },
     };
   }
+  if (e.type === "branch_summary") return branchNoteToMessage(e, sessionId, threadId);
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -172,6 +178,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   const skill = skillInvocationFromMetadata(e.metadata, role);
   const author = authorFromEntry(e.author, role);
   const errorMessage = turnErrorFromMetadata(e.metadata, role);
+  const editOf = role === "user" ? readThreadEdit(e.metadata)?.entryId : undefined;
   return {
     id: e.id,
     sessionId,
@@ -188,9 +195,71 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     model: e.model,
     ...(skill ? { skill } : {}),
     ...(author ? { author } : {}),
+    ...(editOf ? { editOf } : {}),
+    ...(role === "user" && e.channel ? { channelType: e.channel.channelType } : {}),
     ...(errorMessage ? { errorMessage } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of a branch note (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * `content` carries the note text, so a client without a divider renderer
+ * still shows readable text. A fork copies notes with an empty
+ * `branchLeafId` when the version they left was not copied.
+ */
+function branchNoteToMessage(
+  e: Extract<SessionEntry, { type: "branch_summary" }>,
+  sessionId: string,
+  threadId: string,
+): Message {
+  const note = readBranchNote(e.metadata);
+  const kind = note?.kind ?? "edit";
+  return {
+    id: e.id,
+    sessionId,
+    threadId,
+    role: "system",
+    content: e.summary,
+    parts: [],
+    createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
+    branch: {
+      kind,
+      ...(note?.version ? { version: note.version } : {}),
+      actions: (note?.actions ?? []).map(({ label, count, urls }) => ({ label, count, urls })),
+      moreActions: note?.moreActions ?? 0,
+      filesChanged: note?.filesChanged ?? false,
+      canReturn: kind !== "fork" && e.branchLeafId !== "",
+      grants: note?.grants ?? [],
+      ...(note?.files ? {
+        files: {
+          changed: note.files.flatMap((repo) => [...repo.restored, ...repo.removed].map((path) => repoPath(repo.repo, path))),
+          skipped: note.files.flatMap((repo) => repo.skipped.map((path) => repoPath(repo.repo, path))),
+          failed: note.files.flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
+          canBringBack: note.files.some((repo) => repo.restorePoint !== undefined && Object.keys(repo.bases ?? {}).length > 0),
+        },
+      } : {}),
+      ...(note?.source ? { source: { threadId: note.source.threadId, sameWorkingDirectory: note.source.sameWorkingDirectory } } : {}),
+      ...(note?.seed || note?.seedSkipped ? {
+        seed: {
+          repos: (note.seedResult ?? note.seed ?? []).filter((repo) => !("failed" in repo) || !repo.failed).map((repo) => checkpointLabel(repo.repo)),
+          pending: note.seedResult === undefined && (note.seed?.length ?? 0) > 0,
+          failed: (note.seedResult ?? []).flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
+          ...(note.seedSkipped ? { skipped: note.seedSkipped } : {}),
+        },
+      } : {}),
+    },
+  };
+}
+
+/** A file path for people, relative to the working directory. */
+function repoPath(repo: string, path: string): string {
+  return repo === "." || repo === WORKSPACE_FILES ? path : `${repo.replace(/\/+$/, "")}/${path}`;
+}
+
+function checkpointLabel(repo: string): string {
+  return repo === WORKSPACE_FILES ? "the working directory" : repo;
 }
 
 /**
@@ -391,7 +460,7 @@ messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
 /** Enumerate execution histories without waking their sandboxes. */
 async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect, archived?: boolean) {
   const { db, engineStore } = c.var.providers;
-  const executions = session.ownerType === "team"
+  const executions = session.ownerType === "team" || session.ownerType === "user"
     ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey,
         matchesArchive: archived === undefined ? sql<boolean>`true` : sql<boolean>`EXISTS (
           SELECT 1 FROM engine_threads t LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
@@ -915,8 +984,8 @@ messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
 export async function createThread(c: Context<AppEnv>, sessionId: string) {
   const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
-  const { session, engineSession, meta } = result;
-  const { db, engineHost } = c.var.providers;
+  const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   let parsed: unknown = {};
   try {
@@ -958,13 +1027,43 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
 
+  const { summary } = await openThread(c, result, { source, title });
+  return c.json(summary, 201);
+}
+
+/**
+ * Create a thread in a loaded session: the body of `POST .../threads`, and
+ * the destination of a fork. Forks and new team conversations get their own
+ * execution sessions. `source` lends its model and
+ * reasoning level when the person keeps current settings for new threads.
+ */
+export async function openThread(
+  c: Context<AppEnv>,
+  loaded: { session: typeof agentSessions.$inferSelect; engineSession: EngineSession; meta: Awaited<ReturnType<typeof loadSessionMeta>> },
+  opts: { source?: Thread | null; title?: string; isolated?: boolean; channels?: string[] },
+): Promise<{ thread: Thread; summary: CreateThreadResponse }> {
+  const { session, engineSession, meta } = loaded;
+  const { db, engineHost } = c.var.providers;
+  const { source, title } = opts;
+  const assistant = opts.isolated ? await loadAssistantBySessionId(db, session.id) : undefined;
+  if (opts.isolated && (!assistant || assistant.orgId !== session.orgId
+    || assistant.ownerType !== session.ownerType || assistant.ownerId !== (session.ownerId || session.userId)
+    || (assistant.ownerType !== "user" && assistant.ownerType !== "team"))) {
+    throw new ValidationError("This session cannot be forked into an isolated working directory while preserving its tools and persona. Start a new session instead.");
+  }
+  if (opts.isolated && assistant) {
+    const current = await findDefaultAssistant(db, session.orgId, { type: assistant.ownerType, id: assistant.ownerId });
+    if (current?.id !== assistant.id) {
+      throw new ValidationError("This retained assistant cannot be forked without changing its persona and sender. Start a new conversation in your current workspace instead.");
+    }
+  }
   const behaviorRows = await db
     .select({ newThreadBehavior: users.newThreadBehavior })
     .from(users)
     .where(eq(users.id, c.var.user.id))
     .limit(1);
   const keepCurrent = behaviorRows[0]?.newThreadBehavior !== "use_defaults";
-  const settings = keepCurrent && source
+  const settings = (opts.isolated || keepCurrent) && source
     ? {
         model: source.modelId() ?? engineSession.options.modelSpec ?? engineSession.options.model.id,
         reasoning: parseReasoningLevel(
@@ -977,7 +1076,10 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
   // POST creates a new thread (calling thread() with an existing key
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const target = engineSession.options.readOnlyReason && session.ownerType === "team"
+  const target = opts.isolated && assistant
+    ? (await ensureAssistantExecution(c.var.providers, { type: assistant.ownerType, id: assistant.ownerId },
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key, { isolated: true, metadata: { [SLACK_CHANNELS_METADATA_KEY]: opts.channels ?? [] } })).session
+    : engineSession.options.readOnlyReason && session.ownerType === "team"
     ? (await ensureAssistantExecution(c.var.providers, { type: "team", id: session.ownerId },
       { orgId: session.orgId, actorUserId: c.var.user.id }, key)).session
     : engineSession;
@@ -999,7 +1101,7 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
     undefined,
     thread.reasoning() ?? null,
   );
-  return c.json(summary, 201);
+  return { thread, summary };
 }
 
 /**
@@ -1032,6 +1134,39 @@ async function visibleThread(
 // ── Messages: list ────────────────────────────────────────────────────────
 
 messagesRouter.get("/:id/messages", (c) => listMessages(c, c.req.param("id")));
+
+/** Read an earlier path without moving the active leaf or restoring files. */
+export async function branchPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found." }, 404);
+  const noteId = c.req.query("noteEntryId");
+  if (!noteId) return c.json({ error: "Choose an earlier version to view." }, 400);
+  const snapshot = await c.var.providers.engineStore.getThreadSnapshot(sessionId, threadId);
+  const note = snapshot?.entries.find((entry) => entry.id === noteId);
+  if (!snapshot || note?.type !== "branch_summary" || !note.branchLeafId
+    || !snapshot.entries.some((entry) => entry.id === note.branchLeafId)) {
+    return c.json({ error: "This version is not here. Reload the thread and choose another version." }, 404);
+  }
+  let path = walkTranscriptDag(snapshot.entries, note.branchLeafId);
+  const cursor = c.req.query("cursor");
+  if (cursor) {
+    const index = path.findIndex((entry) => entry.id === cursor);
+    if (index < 0) return c.json({ error: "This preview changed. Open the version again." }, 400);
+    path = path.slice(0, index);
+  }
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 50;
+  const hasMore = path.length > limit;
+  const tail = path.slice(-limit);
+  const response: ListMessagesResponse = {
+    messages: tail.map((entry) => entryToMessage(entry, sessionId, threadId)).filter((message): message is Message => message !== null),
+    hasMore,
+    ...(hasMore && tail[0] ? { nextCursor: tail[0].id } : {}),
+  };
+  return c.json(response);
+}
 
 export async function listMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
   if (sessionId.startsWith("wf:")) return listWorkflowStepMessages(c, sessionId, threadId);
@@ -1134,9 +1269,15 @@ export async function submitSessionPrompt(
     inheritToolScope?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
+    /** Authorized, request-scoped fork command operation. */
+    forkThread?: (threadId: string, prompt: string) => Promise<string>;
+    /** The sender's earlier user message that this text replaces (`Thread.editMessage`). */
+    editEntryId?: string;
+    /** With `editEntryId`: also undo the files the replaced turns changed. */
+    undoFiles?: boolean;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId, undoFiles } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -1174,6 +1315,14 @@ export async function submitSessionPrompt(
   const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
   if (replyTo && outcome?.kind === "execute") {
     throw new ValidationError("A reply must include a message. Cancel the reply before you run a slash command.");
+  }
+  if (editEntryId !== undefined && outcome && outcome.kind !== "pass") {
+    throw new ValidationError("An edited message cannot run a slash command. Send the command as a new message.");
+  }
+
+  if (outcome?.kind === "execute" && outcome.resolved.source === "builtin" && outcome.resolved.name === "fork"
+    && (attachments?.length || fileRefs?.length)) {
+    throw new ValidationError("Send /fork with an optional text prompt only. Attach files in the new thread.");
   }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
@@ -1270,10 +1419,15 @@ export async function submitSessionPrompt(
   const activityAt = Date.now();
   let receipt;
   try {
-    receipt =
-      outcome && outcome.kind === "execute"
+    receipt = editEntryId !== undefined
+      ? await thread.editMessage(editEntryId, withAttachments(promptText), {
+          metadata: continuationMetadata,
+          ...(author ? { author } : {}),
+        }, { undoFiles: undoFiles === true })
+      : outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
+            ...(opts?.forkThread ? { forkThread: opts.forkThread } : {}),
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(author ? { author } : {}),
             metadata: { ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
@@ -1382,6 +1536,17 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
     return c.json({ error: "Add a message or an attachment." }, 400);
   }
+  if (body.editEntryId !== undefined) {
+    if (typeof body.editEntryId !== "string" || body.editEntryId.length === 0) {
+      return c.json({ error: "editEntryId must name one of your messages in this thread." }, 400);
+    }
+    if (promoteItemId || body.replyToMessageId !== undefined || body.queueMode !== undefined) {
+      return c.json({ error: "An edit cannot also reply, promote, or set a queue mode. Send the edit alone." }, 400);
+    }
+  }
+  if (body.undoFiles !== undefined && (typeof body.undoFiles !== "boolean" || body.editEntryId === undefined)) {
+    return c.json({ error: "undoFiles must be true or false, and only with editEntryId." }, 400);
+  }
   if (row.ownerType === "team" && body.threadId !== undefined) {
     const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
@@ -1432,7 +1597,18 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
+    let fork: ForkThreadResponse | undefined;
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
+      forkThread: async (sourceThreadId, prompt) => {
+        const result = await forkThreadAt(c, sessionId, sourceThreadId, { latest: true, prompt });
+        if (result instanceof Response) {
+          const failure: unknown = await result.json();
+          throw new ValidationError(typeof failure === "object" && failure !== null && "error" in failure && typeof failure.error === "string"
+            ? failure.error : "Cannot branch this thread. Reload the thread and try again.");
+        }
+        fork = result;
+        return `Branched the conversation. [Open the new thread](${(publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin).replace(/\/+$/, "")}/threads/${encodeURIComponent(fork.thread.id)}).`;
+      },
       threadId: body.threadId,
       appPageHint: readAppPageHint(body.appPageHint),
       attachments: body.attachments,
@@ -1441,9 +1617,10 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       ...(promoteItemId ? { promoteItemId } : {}),
       author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
       ...(replyTo ? { replyTo } : {}),
+      ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId, undoFiles: body.undoFiles === true } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
-    return c.json(resp, 202);
+    return c.json({ ...resp, ...(fork ? { fork: fork.thread } : {}) }, 202);
   } catch (err) {
     if (err instanceof UnknownAttachmentError) {
       return c.json(
@@ -1529,6 +1706,183 @@ export async function abortThread(c: Context<AppEnv>, sessionId: string, threadI
 
 // One queued message the person no longer wants. Only a message that has not
 // started is canceled here; a started turn ends with Stop (`abortThread`).
+// ── Thread branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──
+//
+// An edit is a send with `editEntryId` (`sendPrompt`). A return moves the
+// leaf back to the version a branch note left. A fork copies the active path
+// into a new thread in the same workspace.
+
+export async function editPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const entryId = c.req.query("entryId");
+  if (!entryId) return c.json({ error: "entryId must name one of your messages in this thread." }, 400);
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  const preview = await thread.previewEdit(entryId, promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia).id);
+  const body: EditPreviewResponse = {
+    ...(preview.refusal ? { refusal: preview.refusal } : {}),
+    turns: preview.turns,
+    actions: preview.actions.map(({ label, count, urls }) => ({ label, count, urls })),
+    moreActions: preview.moreActions,
+    grants: preview.grants,
+    files: preview.files.map((file) => repoPath(file.repo, file.path)),
+    pushed: preview.pushed,
+  };
+  return c.json(body);
+}
+
+export async function returnToBranch(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const noteEntryId = body?.noteEntryId;
+  if (typeof noteEntryId !== "string" || noteEntryId.length === 0) {
+    return c.json({ error: "noteEntryId must name a version note in this thread." }, 400);
+  }
+  const restoreFiles = body?.restoreFiles;
+  if (restoreFiles !== undefined && typeof restoreFiles !== "boolean") {
+    return c.json({ error: "restoreFiles must be true or false." }, 400);
+  }
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  try {
+    const result: ReturnToBranchResponse = await thread.returnToBranch(noteEntryId, { id: c.var.user.id }, { restoreFiles: restoreFiles === true });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    if (err instanceof ConflictError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+}
+
+export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const entryId = body?.entryId;
+  if (typeof entryId !== "string" || entryId.length === 0) {
+    return c.json({ error: "entryId must name a message in this thread." }, 400);
+  }
+  const result = await forkThreadAt(c, sessionId, threadId, { entryId });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
+/** Both the message command and the fork endpoint use this authorized operation. */
+async function forkThreadAt(
+  c: Context<AppEnv>, sessionId: string, threadId: string,
+  selection: { entryId: string } | { latest: true; prompt: string },
+): Promise<ForkThreadResponse | Response> {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") {
+    return c.json({ error: "Only the thread owner or a team member can branch this thread. Ask the owner to make a branch." }, 403);
+  }
+  const command = "latest" in selection ? selection : undefined;
+  const entryId = "entryId" in selection ? selection.entryId : undefined;
+  const source = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!source) return c.json({ error: "thread not found" }, 404);
+
+  // A user message branches from just before it, and its text goes to the
+  // new thread's composer. Any other entry branches through itself.
+  const active = await source.readEntries();
+  const selectedId = command
+    ? [...active].reverse().find((entry) => entry.type === "message" && entry.role === "assistant" && entry.stopReason === "end_turn")?.id
+    : entryId;
+  let index = active.findIndex((entry) => entry.id === selectedId);
+  if (command && index >= 0) {
+    // These notes remain part of the completed context. Stop before a new
+    // turn or the command echo, so unfinished work stays in the source.
+    while (active[index + 1]?.type === "branch_summary" || active[index + 1]?.type === "compaction") index++;
+  }
+  const entry = active[index];
+  if (!entry && !command) {
+    return c.json({ error: "That message is not in this version of the conversation. Reload the thread and try again." }, 404);
+  }
+  const typed = !command && entry?.type === "message" && entry.role === "user" && !entry.signal;
+  let path: SessionEntry[];
+  try {
+    path = await source.forkPath(typed ? active[index - 1]?.id ?? null : entry?.id ?? null);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+
+  // A team fork keeps the source's audience. A private thread cannot keep
+  // it in a new thread, so it is refused; Slack channel gates are copied.
+  const { db } = c.var.providers;
+  const audience = loaded.session.ownerType === "team" ? await threadAudience(db, sessionId, threadId) : undefined;
+  if (audience?.privateTo !== undefined) {
+    return c.json({ error: "This thread is private to you, and a branch would show its history to your team. Copy what you need into a new thread instead." }, 400);
+  }
+
+  // A team conversation runs in its own execution session. Its fork starts
+  // from the team runtime, as a new team thread does.
+  const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
+    .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
+  const home = execution && execution.runtimeId !== sessionId ? await loadEngineSession(c, execution.runtimeId) : loaded;
+  if ("error" in home) return home.error;
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  const title = titled?.title ? `${titled.title} (branch)`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined;
+
+  let opened: Awaited<ReturnType<typeof openThread>>;
+  try {
+    opened = await openThread(c, home, { source, title, isolated: true, channels: audience?.channels });
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  const { thread, summary } = opened;
+  // The governing thread receives these gates at execution creation. Keep
+  // them on the visible thread too, before any history or files are copied.
+  for (const channel of audience?.channels ?? []) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+  // A fork in its own working directory (a team conversation) takes the
+  // source's files at the fork point along, as git bundles in the blob store.
+  const seed = summary.sessionId !== sessionId ? await exportForkSeed(c, loaded.engineSession, path, thread.id) : undefined;
+  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}) });
+  const response: ForkThreadResponse = {
+    thread: summary,
+    ...(typed && entry?.type === "message" ? { draft: entry.content } : {}),
+  };
+  if (command?.prompt) {
+    const destination = await loadOwnedSession(c, summary.sessionId);
+    if (!destination) return c.json({ error: "New thread not found. Open the thread list and try again." }, 404);
+    await submitSessionPrompt(c.var.providers, destination, command.prompt, {
+      threadId: thread.id,
+      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
+    });
+  }
+  return response;
+}
+
+/**
+ * The source thread's files at a fork point, one git bundle per repository
+ * that the copied turns changed, saved under the fork's id. Undefined when no
+ * copied turn changed files; a reason when the files cannot come along.
+ */
+async function exportForkSeed(
+  c: Context<AppEnv>,
+  source: EngineSession,
+  path: readonly SessionEntry[],
+  forkThreadId: string,
+): Promise<{ repos: ForkSeedRecord[] } | { skipped: string } | undefined> {
+  const plan = planForkSeed(path);
+  if (plan.length === 0) return undefined;
+  try {
+    const repos: ForkSeedRecord[] = [];
+    for (const [index, repo] of plan.entries()) {
+      const bundle = await exportSeedBundle(source.sandbox, source.options.workspace, repo);
+      const blobKey = `fork-seed/${forkThreadId}/${index}`;
+      await c.var.providers.blobs.put(blobKey, bundle, { contentType: "application/x-git-bundle" });
+      repos.push({ repo: repo.repo, snapshot: repo.snapshot, blobKey, ...(repo.branch ? { branch: repo.branch } : {}) });
+    }
+    return { repos };
+  } catch (err) {
+    return { skipped: `the files could not be read from the original thread: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 messagesRouter.post("/:id/threads/:threadId/queue/:itemId/cancel", (c) => cancelQueuedItem(c, c.req.param("id"), c.req.param("threadId")));
 
 export async function cancelQueuedItem(c: Context<AppEnv>, sessionId: string, threadId: string) {

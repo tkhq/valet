@@ -1507,6 +1507,16 @@ export interface Message {
    */
   compaction?: MessageCompaction;
   /**
+   * Present when this message projects a branch note (role is `system`,
+   * `content` carries the note text). The client renders a divider, never
+   * a chat bubble (docs/specs/2026-10-22-thread-edit-fork-design.md).
+   */
+  branch?: MessageBranchNote;
+  /** On a user message that an edit wrote: the id of the message it replaced. */
+  editOf?: string;
+  /** On a user message that came in through a channel, such as `slack`. Valet cannot edit it. */
+  channelType?: string;
+  /**
    * Present on a user message that is a skill invocation (see
    * `MessageSkillInvocation`). Projected from the persisted entry's
    * `metadata.skill` / `metadata.skillArgs`.
@@ -1530,6 +1540,50 @@ export interface Message {
    * the wire projection.
    */
   attachments?: Array<PromptImageAttachment | PromptFileAttachment>;
+}
+
+/** A branch note: where an edit, a return, or a fork changed the thread's history. */
+export interface MessageBranchNote {
+  kind: "edit" | "return" | "fork";
+  /** Message excerpt and time identify an earlier version without opening it. */
+  version?: { excerpt: string; createdAt: number };
+  /** What ran on the version the thread left and still stands. Empty for a fork. */
+  actions: Array<{ label: string; count: number; urls: string[] }>;
+  /** Calls past the listed actions. */
+  moreActions: number;
+  /** A tool that can change the working directory ran on the version the thread left. */
+  filesChanged: boolean;
+  /** The version this note left is in this thread, so a person can go back to it. */
+  canReturn: boolean;
+  /** Approval choices made on the version this note left that still apply. */
+  grants: string[];
+  /**
+   * File changes the edit undid, or the return brought back. `canBringBack`
+   * is true when "Go back" can put the undone files back.
+   */
+  files?: { changed: string[]; skipped: string[]; failed: string[]; canBringBack: boolean };
+  /** Fork notes only: the thread the history was copied from. */
+  source?: { threadId: string; sameWorkingDirectory: boolean };
+  /**
+   * Fork notes only: repositories whose files come to this thread's own
+   * working directory. `pending` until the first turn copies them.
+   */
+  seed?: { repos: string[]; pending: boolean; failed: string[]; skipped?: string };
+}
+
+/** `GET /api/threads/:threadId/edit-preview?entryId=`: what an edit would replace. */
+export interface EditPreviewResponse {
+  /** Why the edit is refused, when it is. */
+  refusal?: string;
+  /** Typed messages the edit replaces: the edited one and the later ones. */
+  turns: number;
+  actions: Array<{ label: string; count: number; urls: string[] }>;
+  moreActions: number;
+  grants: string[];
+  /** Files the replaced turns changed, relative to the working directory. The edit can undo them. */
+  files: string[];
+  /** The replaced turns pushed commits or opened a pull request; a file undo does not reach those. */
+  pushed: boolean;
 }
 
 export interface ListMessagesResponse {
@@ -1556,6 +1610,35 @@ export interface PromptFileAttachment {
   extractedTo?: string;
   extractedFiles?: string[];
   name: string;
+}
+
+/** `POST /api/threads/:threadId/fork`. */
+export interface ForkThreadRequest {
+  /**
+   * The message to branch from. A reply or any other entry: the new thread
+   * copies the conversation through it. A user message: the new thread copies
+   * the conversation up to just before it, and `draft` returns its text.
+   */
+  entryId: string;
+}
+
+export interface ForkThreadResponse {
+  thread: ThreadSummary;
+  /** The branched user message's text, for the new thread's composer. */
+  draft?: string;
+}
+
+/** `POST /api/threads/:threadId/branch/return`. */
+export interface ReturnToBranchRequest {
+  /** The branch note whose earlier version to go back to. */
+  noteEntryId: string;
+  /** Also undo this version's file changes and bring back the ones the note's edit undid. */
+  restoreFiles?: boolean;
+}
+
+export interface ReturnToBranchResponse {
+  /** The note written for the version the thread left. */
+  noteEntryId: string;
 }
 
 export interface AbortThreadRequest {
@@ -1590,9 +1673,19 @@ export interface SendPromptRequest {
    * second user entry. `text` may be empty.
    */
   promoteItemId?: string;
+  /**
+   * Edit this earlier user message of the sender. The thread continues from
+   * just before it, and `text` replaces it. A running turn stops; queued
+   * messages run after the edit. The old version stays in the store.
+   */
+  editEntryId?: string;
+  /** With `editEntryId`: also undo the files the replaced turns changed. */
+  undoFiles?: boolean;
 }
 
 export interface SendPromptResponse {
+  /** Destination created by a successful /fork command. */
+  fork?: ThreadSummary;
   /**
    * Queue item id for client-side optimistic linkage. `null` when the text
    * executed as a slash command — commands never take a queue item.
@@ -1830,6 +1923,18 @@ export type WireEvent =
       ts: number; offset?: string;
       type: "compaction_start" | "compaction_end";
       threadId: string;
+    }
+  | {
+      /**
+       * The thread's active leaf moved to another branch: an edit started,
+       * or a person went back to an earlier version. Every viewer refetches
+       * the thread's messages (REST is the authority for history).
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "branch_switched";
+      threadId: string;
+      noteEntryId: string;
     }
   | { seq: number; ts: number; offset?: string; type: "decision_gate"; threadId: string; gate: DecisionGate }
   | {

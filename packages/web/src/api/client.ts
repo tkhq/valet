@@ -52,6 +52,11 @@ import type {
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
+  EditPreviewResponse,
+  ForkThreadRequest,
+  ForkThreadResponse,
+  ReturnToBranchRequest,
+  ReturnToBranchResponse,
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
@@ -980,6 +985,14 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  branchPreview: (threadId: string, noteEntryId: string, cursor?: string) =>
+    request<ListMessagesResponse>("GET", `/threads/${encodeURIComponent(threadId)}/branch-preview?noteEntryId=${encodeURIComponent(noteEntryId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  editPreview: (threadId: string, entryId: string) =>
+    request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
+  forkThread: (threadId: string, body: ForkThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
+    request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>
     request<{ ok: true }>(
       "POST",

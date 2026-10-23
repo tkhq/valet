@@ -171,6 +171,70 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       });
     });
 
+    it("appendBranch moves the leaf to a new branch and keeps the old one", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const one = msg("e-1", "user", "one", 1);
+      const two = { ...msg("e-2", "assistant", "two", 2), parentId: "e-1" };
+      const three = { ...msg("e-3", "user", "three", 3), parentId: "e-2" };
+      await store.appendEntries("sess-1", "th-1", [one, two, three]);
+
+      const edited = { ...msg("e-4", "user", "three, edited", 4), parentId: "e-2" };
+      const reply = { ...msg("e-5", "assistant", "five", 5), parentId: "e-4" };
+      expect(await store.appendBranch("sess-1", "th-1", [edited, reply], { expectedLeafId: "e-3" })).toBe(true);
+
+      const snapshot = await store.getThreadSnapshot("sess-1", "th-1");
+      expect(snapshot?.thread.activeLeafEntryId).toBe("e-5");
+      expect(snapshot?.entries.map((e) => e.id)).toEqual(["e-1", "e-2", "e-3", "e-4", "e-5"]);
+      expect(snapshot?.entries.find((e) => e.id === "e-4")?.parentId).toBe("e-2");
+    });
+
+    it("appendBranch can start a second root with a null parent", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [msg("e-1", "user", "one", 1)]);
+      expect(await store.appendBranch("sess-1", "th-1", [msg("e-2", "user", "again", 2)], { expectedLeafId: "e-1" })).toBe(true);
+      expect((await store.getThread("sess-1", "th-1"))?.activeLeafEntryId).toBe("e-2");
+    });
+
+    it("appendBranch writes nothing when the leaf moved since the caller read it", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [msg("e-1", "user", "one", 1)]);
+      await store.appendEntries("sess-1", "th-1", [{ ...msg("e-2", "assistant", "two", 2), parentId: "e-1" }]);
+
+      const stale = { ...msg("e-3", "user", "edited", 3), parentId: null };
+      expect(await store.appendBranch("sess-1", "th-1", [stale], { expectedLeafId: "e-1" })).toBe(false);
+
+      expect((await store.getThread("sess-1", "th-1"))?.activeLeafEntryId).toBe("e-2");
+      expect((await store.getEntries("sess-1", "th-1")).map((e) => e.id)).toEqual(["e-1", "e-2"]);
+    });
+
+    it("appendBranch with a null expected leaf fills an empty thread only", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      expect(await store.appendBranch("sess-1", "th-1", [msg("e-1", "user", "one", 1)], { expectedLeafId: null })).toBe(true);
+      expect(await store.appendBranch("sess-1", "th-1", [msg("e-2", "user", "two", 2)], { expectedLeafId: null })).toBe(false);
+      expect((await store.getThread("sess-1", "th-1"))?.activeLeafEntryId).toBe("e-1");
+    });
+
+    it("appendBranch rejects a stale fence", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [msg("e-1", "user", "one", 1)]);
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-1", 1, 1));
+      await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: "q-1", attemptId: "att-1", ownerId: "o" });
+      await expect(store.appendBranch("sess-1", "th-1", [msg("e-2", "user", "two", 2)], {
+        expectedLeafId: "e-1",
+        fence: { itemId: "q-1", attemptId: "att-stale" },
+      })).rejects.toThrow();
+      expect((await store.getThread("sess-1", "th-1"))?.activeLeafEntryId).toBe("e-1");
+      expect(await store.appendBranch("sess-1", "th-1", [msg("e-2", "user", "two", 2)], {
+        expectedLeafId: "e-1",
+        fence: { itemId: "q-1", attemptId: "att-1" },
+      })).toBe(true);
+    });
+
     it("appendEntries + getEntries returns entries in insertion order", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

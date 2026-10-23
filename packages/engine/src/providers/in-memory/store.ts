@@ -118,6 +118,25 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
+  async appendBranch(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    opts: { expectedLeafId: string | null; fence?: WriteFence },
+  ): Promise<boolean> {
+    this.checkFence(sessionId, opts.fence);
+    const r = this.row(sessionId);
+    const t = r.threads.get(threadId);
+    if (!t || (t.activeLeafEntryId ?? null) !== opts.expectedLeafId) return false;
+    if (entries.length === 0) return true;
+    const list = r.entriesByThread.get(threadId) ?? [];
+    list.push(...entries);
+    r.entriesByThread.set(threadId, list);
+    t.activeLeafEntryId = entries[entries.length - 1].id;
+    t.updatedAt = Date.now();
+    return true;
+  }
+
   async updateEntry(
     sessionId: string,
     threadId: string,
@@ -544,7 +563,12 @@ export class InMemorySessionStore implements SessionStore {
     if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
       throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
     }
-    const queuedCreatedAt = promotionScope
+    const activeScope = opts?.steerScope === "active";
+    if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
+      throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
+    }
+    const headScope = promotionScope || activeScope;
+    const queuedCreatedAt = headScope
       ? [...r.queueItems.values()]
           .filter(
             (candidate) =>
@@ -555,8 +579,11 @@ export class InMemorySessionStore implements SessionStore {
           .map((candidate) => candidate.createdAt)
       : [];
     // Queue order is createdAt + id. Move the successor just ahead of the
-    // oldest queued sibling; the validated source guarantees a non-empty set.
-    const promotedCreatedAt = promotionScope ? Math.min(...queuedCreatedAt) - 1 : item.createdAt;
+    // oldest queued sibling. A promotion's validated source guarantees a
+    // non-empty set; an active steer with no queued sibling keeps its time.
+    const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
+      ? Math.min(...queuedCreatedAt) - 1
+      : item.createdAt;
     const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt };
     r.queueItems.set(stored.id, stored);
     if (stored.dispatchId) {
@@ -571,7 +598,7 @@ export class InMemorySessionStore implements SessionStore {
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
         if (
-          promotionScope &&
+          headScope &&
           other.id !== opts.promoteFromItemId &&
           other.status !== "running" &&
           other.status !== "blocked_on_decision_gate"
@@ -582,7 +609,7 @@ export class InMemorySessionStore implements SessionStore {
         // callers construct items with monotonic timestamps in practice, and
         // Map insertion order (== admission order) breaks any tie the same
         // way the SQL backends' insertion-ordered scan will.
-        if (!promotionScope && other.createdAt > stored.createdAt) continue;
+        if (!headScope && other.createdAt > stored.createdAt) continue;
         other.supersededByItemId = stored.id;
         other.updatedAt = Date.now();
         supersededItemIds.push(other.id);

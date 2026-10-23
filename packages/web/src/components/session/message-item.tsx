@@ -1,4 +1,4 @@
-import { Braces, ChevronRight, FileText, Reply } from "lucide-react";
+import { Braces, ChevronRight, FileText, GitBranch, Pencil, Reply } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import type {
   MessagePart,
@@ -13,6 +13,7 @@ import { CodeBlock } from "~/components/code-block";
 import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
+import { fallbackRenderer } from "./tool-renderers/fallback";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
@@ -20,6 +21,10 @@ import { cn } from "~/lib/cn";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
+import { Button, Tooltip } from "~/components/primitives";
+
+/** Message actions show on hover, and always at phone width, where there is no hover. */
+const ROW_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100";
 
 /**
  * Per-message 👍/👎 (TKAI-334): finer-grained than the session-level rating
@@ -56,10 +61,20 @@ export const MessageItem = memo(function MessageItem({
   suppressEmptyPlaceholder = false,
   viewerId,
   onReply,
+  onEdit,
+  onBranch,
+  dimmed = false,
   ratings = true,
+  readOnly = false,
   continuation = false,
 }: {
   message: StreamMessage;
+  /** Puts this message back in the composer to edit. Set only when the viewer may edit it. */
+  onEdit?: (message: StreamMessage) => void;
+  /** Copies the conversation up to this message into a new thread. */
+  onBranch?: (message: StreamMessage) => void;
+  /** An edit in progress replaces this row. */
+  dimmed?: boolean;
   /** The same assistant turn as the row above: no repeated author, time,
    *  and model line. A reply's actions move under its text. */
   continuation?: boolean;
@@ -72,6 +87,8 @@ export const MessageItem = memo(function MessageItem({
   onReply?: (target: MessageReplyReference) => void;
   /** The per-reply rating buttons; see `MessageList`'s prop doc. */
   ratings?: boolean;
+  /** Historical previews show receipts without message actions or interactive tool renderers. */
+  readOnly?: boolean;
 }) {
   if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
@@ -81,12 +98,12 @@ export const MessageItem = memo(function MessageItem({
   // Defined only for another member's message on a shared session; the
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
-  const actions = <>
+  const actions = readOnly ? null : <>
     {message.role === "assistant" && message.completed === true && copyText && onReply && (
       <button
         type="button"
         onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
-        className="inline-flex h-[22px] items-center gap-1 rounded px-1.5 text-xs leading-none text-muted/70 opacity-0 transition-opacity hover:bg-ink-wash hover:text-[--fg] group-hover:opacity-100 focus:opacity-100"
+        className="inline-flex h-[22px] items-center gap-1 rounded px-1.5 text-xs leading-none text-muted/70 opacity-0 transition-opacity hover:bg-ink-wash hover:text-[--fg] group-hover:opacity-100 focus:opacity-100 max-sm:min-h-11 max-sm:opacity-100"
         aria-label="Reply to message"
       >
         <Reply className="h-3.5 w-3.5" aria-hidden />
@@ -94,16 +111,34 @@ export const MessageItem = memo(function MessageItem({
       </button>
     )}
     {ratings && message.role === "assistant" && <MessageRating message={message} />}
+    {onEdit && (
+      <Tooltip content="Edit message">
+        <Button variant="ghost" size="icon" aria-label="Edit message" className={ROW_ACTION} onClick={() => onEdit(message)}>
+          <Pencil className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </Tooltip>
+    )}
     {copyText && (
       <CopyButton
         getText={() => copyText}
         label="Copy message"
-        className="opacity-0 group-hover:opacity-100"
+        className="inline-flex items-center justify-center opacity-0 group-hover:opacity-100 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11"
       />
+    )}
+    {onBranch && (
+      <Tooltip content="Branch into a new thread">
+        <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION} onClick={() => onBranch(message)}>
+          <GitBranch className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </Tooltip>
     )}
   </>;
   return (
-    <article data-message-id={message.id} className={cn("group min-w-0 px-5 sm:px-8", continuation ? "pb-3" : "py-3")}>
+    <article
+      data-message-id={message.id}
+      aria-disabled={dimmed || undefined}
+      className={cn("group min-w-0 px-5 sm:px-8 transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
+    >
       {/* Row background spans full width; the content column is capped at a
           readable measure and centered — prose and tool cards both benefit. */}
       <div className={cn(
@@ -118,6 +153,7 @@ export const MessageItem = memo(function MessageItem({
               </span>
               <span>•</span>
               <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+              {isUser && message.editOf && <span className="text-muted/80">edited</span>}
               {message.role === "assistant" && message.model && (
                 <span
                   className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
@@ -153,6 +189,7 @@ export const MessageItem = memo(function MessageItem({
               <PartView
                 key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
                 part={part}
+                readOnly={readOnly}
                 skillMeta={isUser ? message.skill : undefined}
                 detectSkill={isUser}
                 collapseStructured={collapseStructured}
@@ -262,7 +299,9 @@ function PartView({
   skillMeta,
   detectSkill,
   collapseStructured,
+  readOnly,
 }: {
+  readOnly?: boolean;
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
@@ -274,7 +313,7 @@ function PartView({
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
-      return <ToolCallBlock part={part} />;
+      return <ToolCallBlock part={part} readOnly={readOnly} />;
   }
 }
 
@@ -448,8 +487,8 @@ function UserAttachmentStrip({
   );
 }
 
-function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
-  const renderer = pickRenderer(part.toolName, part.args);
+function ToolCallBlock({ part, readOnly = false }: { part: Extract<MessagePart, { kind: "tool_call" }>; readOnly?: boolean }) {
+  const renderer = readOnly ? fallbackRenderer : pickRenderer(part.toolName, part.args);
   // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
   // formatTarget/formatSummary would compute from partial, jagged args
   // (truncated paths, churning line counts) the renderer never opted to see.
