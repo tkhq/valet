@@ -85,3 +85,12 @@ describe("browser watch lifecycle", () => {
     expect(hook.result.current.mode).toBe("auto");
   });
 });
+
+
+it("offers a mobile entry point for completed browser work when reopening a conversation", () => {
+  const hook = renderHook(useBrowserWatch, { initialProps: { ...props, agentBusy: false, messages: [message("browser.execute", "completed")] } });
+  expect(hook.result.current.hasActivity).toBe(true);
+  expect(hook.result.current.mode).toBe("auto");
+  hook.rerender({ ...props, agentBusy: false, messages: [message("browser.describe", "completed")] });
+  expect(hook.result.current.hasActivity).toBe(false);
+});

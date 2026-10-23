@@ -5,6 +5,7 @@ import {
   Camera,
   Globe,
   LockKeyhole,
+  MoreHorizontal,
   Plus,
   RotateCw,
   X,
@@ -21,9 +22,9 @@ import {
   useBrowserFrame,
   useBrowserStatus,
 } from "~/api/browser";
-import { Button, Input, Spinner, TabBar } from "~/components/primitives";
+import { Button, Input, Select, Spinner, TabBar } from "~/components/primitives";
 import { cn } from "~/lib/cn";
-import { BrowserViewport } from "./browser-viewport";
+import { BrowserViewport, type BrowserReaderState } from "./browser-viewport";
 import { EvidenceAnnotations } from "./evidence-annotations";
 import { normalizeBrowserAddress } from "./input";
 
@@ -37,7 +38,7 @@ const STATE_LABEL: Record<BrowserRuntimeStatus["state"], string> = {
   disabled: "Browser disabled",
 };
 
-export function BrowserPane({ sessionId }: { sessionId: string }) {
+export function BrowserPane({ sessionId, compact = false }: { sessionId: string; compact?: boolean }) {
   const query = useBrowserStatus(sessionId);
   const actions = useBrowserActions(sessionId);
   const data = query.data;
@@ -47,6 +48,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
     runtime?.tabs.find((tab) => tab.id === chosenTab) ??
     runtime?.tabs.find((tab) => tab.id === runtime.selectedTabId) ??
     runtime?.tabs[0];
+  const readerTarget = `${sessionId}:${runtime?.runtimeId}:${selected?.id}`;
+  // Keep reader state while document changes dispose the input surface.
+  const readerState = useRef<{ target: string; value: BrowserReaderState } | null>(null);
   const [address, setAddress] = useState("");
   const touchedAddress = useRef(false);
   const addressTab = useRef<string | undefined>(undefined);
@@ -188,7 +192,13 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
       aria-label="Sandbox browser"
       className="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
+      <details open={compact ? undefined : true} className="shrink-0 border-b border-line">
+        <summary className={compact ? "flex h-11 cursor-pointer list-none items-center gap-2 px-3 text-sm [&::-webkit-details-marker]:hidden" : "hidden"}>
+          <Globe aria-hidden className="h-4 w-4 text-moss" />
+          <span className="min-w-0 flex-1 truncate">{lease ? (ownsLease ? "You have control" : "Another person has control") : "Shared control"}</span>
+          <span className="sr-only">Browser actions</span><MoreHorizontal aria-hidden className="h-5 w-5" />
+        </summary>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2 text-xs">
         <Globe aria-hidden className="h-4 w-4 text-moss" />
         <span role="status" className="mr-auto text-muted">
           {runtime ? STATE_LABEL[runtime.state] : "Browser has not started"}
@@ -318,6 +328,22 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
         </Button>
       </div>
 
+        {compact && runtime?.state === "ready" && <div className="flex gap-2 px-3 pb-2">
+          <Button variant="ghost" disabled={!canControl || !selected} onClick={() => void run(() => send({ type: "forward" }))}>Forward</Button>
+          <Button variant="ghost" disabled={!canControl || !selected} onClick={() => void run(() => send({ type: "reload" }))}>Reload page</Button>
+        </div>}
+        {compact && <p className="px-3 pb-3 text-xs text-muted">You and the agent can use the page. Pause the agent for exclusive control. Everyone with thread access can use this browser and its sign-ins.</p>}
+        {compact && runtime?.state === "ready" && <div className="flex items-center gap-2 px-3 pb-3">
+          <Select aria-label="Browser pages" value={selected?.id ?? ""} onChange={(event) => selectTab(event.target.value)} className="min-w-0 flex-1">
+            {runtime.tabs.map((tab) => <option key={tab.id} value={tab.id}>{tab.title || tab.url || "New page"}</option>)}
+          </Select>
+          <Button variant="ghost" disabled={!canControl || changing} aria-label="New browser page" onClick={() => void run(async () => {
+            const response = await actions.tab.mutateAsync({ action: "new", runtimeId: runtime.runtimeId, ...(lease ? { leaseId: lease.id } : {}), url: "about:blank" });
+            setChosenTab(response.status?.selectedTabId ?? null);
+          })}><Plus aria-hidden className="h-4 w-4" /></Button>
+          <Button variant="ghost" disabled={!canControl || !selected} aria-label="Close browser page" onClick={() => void run(() => actions.tab.mutateAsync({ action: "close", runtimeId: runtime.runtimeId, ...(lease ? { leaseId: lease.id } : {}), tabId: selected?.id }))}><X aria-hidden className="h-4 w-4" /></Button>
+        </div>}
+      </details>
       {error || data.error ? (
         <div
           role="alert"
@@ -359,7 +385,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                   : "Agent browser actions are paused. You can still use the page. Resume the agent when ready."
             : "Another user paused shared interaction. Wait for them to resume shared use."}
         </div>
-      ) : runtime?.state === "ready" ? (
+      ) : runtime?.state === "ready" && !compact ? (
         <p className="shrink-0 border-b border-line px-3 py-2 text-xs text-muted">
           You and the agent can use this browser. Pause the agent when you need
           exclusive control. Everyone who can use this thread can use this
@@ -407,7 +433,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
         </div>
       ) : (
         <>
-          <div className="flex shrink-0 items-center gap-1 border-b border-line px-2">
+          {!compact && <div className="flex shrink-0 items-center gap-1 border-b border-line px-2">
             <TabBar
               label="Browser pages"
               size="sm"
@@ -459,7 +485,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             >
               <Plus aria-hidden className="h-4 w-4" />
             </Button>
-          </div>
+          </div>}
           <form
             className="flex shrink-0 items-center gap-1 border-b border-line p-2"
             onSubmit={(event) => {
@@ -483,6 +509,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             <Button
               variant="ghost"
               size="sm"
+              className={compact ? "hidden" : undefined}
               aria-label="Forward"
               disabled={!canControl || !selected}
               onClick={() => void run(() => send({ type: "forward" }))}
@@ -492,6 +519,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             <Button
               variant="ghost"
               size="sm"
+              className={compact ? "hidden" : undefined}
               aria-label="Reload page"
               disabled={!canControl || !selected}
               onClick={() => void run(() => send({ type: "reload" }))}
@@ -507,11 +535,13 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 touchedAddress.current = true;
                 setAddress(event.target.value);
               }}
-              className="min-w-0 flex-1 font-mono"
+              className={compact ? "min-w-0 flex-1" : "min-w-0 flex-1 font-mono"}
+              onFocus={(event) => { if (compact) event.currentTarget.select(); }}
               placeholder="https://example.com"
             />
             <Button
               type="submit"
+              className={compact ? "hidden" : undefined}
               size="sm"
               disabled={!canControl || !selected || !address.trim()}
             >
@@ -545,8 +575,11 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             </div>
           ) : viewing.frame ? (
             <BrowserViewport
-              key={`${runtime.runtimeId}:${selected?.id}:${viewing.frame.documentId}`}
+              key={`${readerTarget}:${viewing.frame.documentId}`}
               frame={viewing.frame}
+              mobile={compact}
+              initialReaderState={readerState.current?.target === readerTarget ? readerState.current.value : undefined}
+              onReaderStateChange={(value) => { readerState.current = { target: readerTarget, value }; }}
               controlEpoch={`${lease?.id}:${lease?.state}`}
               showAgentCursor={!lease?.privateMode}
               canControl={canControl && !error}
@@ -607,7 +640,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
         </div>
       ) : null}
 
-      <details className="max-h-48 shrink-0 overflow-auto border-t border-line px-3 py-2 text-xs text-muted">
+      <details className={cn(compact && "hidden", "max-h-48 shrink-0 overflow-auto border-t border-line px-3 py-2 text-xs text-muted")}>
         <summary className="cursor-pointer">
           Browser access and capabilities
         </summary>

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { BrowserAgentCursor, BrowserRuntimeStatus } from "@valet/shared";
 import { BrowserPane } from "./browser-pane";
 
@@ -65,8 +65,8 @@ vi.mock("~/api/browser", () => ({
     ),
   useBrowserFrame: (
     _session: string,
-    _runtime: string,
-    _tab: string,
+    runtime: string,
+    tab: string,
     enabled: boolean,
   ) => {
     state.frameEnabled(enabled);
@@ -74,8 +74,8 @@ vi.mock("~/api/browser", () => ({
       frame: state.frameDocument
         ? {
             url: "blob:frame",
-            runtimeId: "runtime",
-            tabId: "tab",
+            runtimeId: runtime,
+            tabId: tab,
             documentId: state.frameDocument,
             viewport: { width: 1280, height: 720 },
             agentCursor: state.agentCursor,
@@ -120,6 +120,7 @@ afterEach(() => {
   state.settingsEnabled = true;
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("browser pane control", () => {
@@ -519,5 +520,130 @@ describe("browser pane control", () => {
           .getAttribute("aria-selected"),
       ).toBe("true"),
     );
+  });
+});
+
+it("puts secondary mobile actions behind a menu and removes desktop tab chrome", () => {
+  state.status = ready();
+  render(<BrowserPane sessionId="session" compact />);
+  expect(screen.getByText("Browser actions")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Save screenshot" }).closest("details")?.hasAttribute("open")).toBe(false);
+  expect(screen.queryByRole("tablist", { name: "Browser pages" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Browser address" })).toBeTruthy();
+});
+
+describe("browser reader navigation", () => {
+  it.each(["fit", "zoom"])("preserves %s, page scroll mode, and local scroll across navigation", (mode) => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(640);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(240);
+    state.status = ready();
+    state.frameDocument = "doc";
+    const view = render(<BrowserPane sessionId="session" compact />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    fireEvent.click(screen.getByRole("button", { name: mode === "fit" ? "Fit page" : "Zoom in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Page scroll" }));
+    const canvas = screen.getByLabelText("Remote page canvas");
+    const scroller = canvas.parentElement;
+    if (!scroller) throw new Error("Missing browser scroller");
+    scroller.scrollLeft = mode === "fit" ? 0 : 230;
+    scroller.scrollTop = mode === "fit" ? 64 : 180;
+    fireEvent.scroll(scroller);
+
+    state.status = { ...ready(), tabs: [{ ...ready().tabs[0]!, documentId: "next-doc" }] };
+    // The frame hook clears its frame while it fetches the new document.
+    if (mode === "fit") {
+      state.frameDocument = null;
+      view.rerender(<BrowserPane sessionId="session" compact />);
+      expect(screen.queryByLabelText("Remote page canvas")).toBeNull();
+    }
+    state.frameDocument = "next-doc";
+    view.rerender(<BrowserPane sessionId="session" compact />);
+    expect(screen.getByRole("textbox", { name: "Browser page input" }).hasAttribute("readonly")).toBe(true);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    expect(screen.getByText(mode === "fit" ? "50%" : "125%")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Page scroll" }).getAttribute("aria-pressed")).toBe("true");
+    const nextCanvas = screen.getByLabelText("Remote page canvas");
+    expect(nextCanvas.style.width).toBe(mode === "fit" ? "640px" : "1600px");
+    expect(nextCanvas.parentElement?.scrollLeft).toBe(mode === "fit" ? 0 : 230);
+    expect(nextCanvas.parentElement?.scrollTop).toBe(mode === "fit" ? 64 : 180);
+    const wheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 120 });
+    fireEvent(screen.getByRole("textbox", { name: "Browser page input" }), wheel);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(state.input).toHaveBeenCalledWith({
+      runtimeId: "runtime", tabId: "tab", documentId: "next-doc",
+      input: { type: "wheel", deltaX: 0, deltaY: 120 },
+    });
+  });
+
+  it.each(["session", "runtime", "tab"])("resets reader state for a different %s", (scope) => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(640);
+    state.status = ready();
+    state.frameDocument = "doc";
+    const view = render(<BrowserPane sessionId="session" compact />);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Page scroll" }));
+    const scroller = screen.getByLabelText("Remote page canvas").parentElement;
+    if (!scroller) throw new Error("Missing browser scroller");
+    scroller.scrollTop = 180;
+    fireEvent.scroll(scroller);
+    state.status = {
+      ...ready(), runtimeId: scope === "runtime" ? "other-runtime" : "runtime",
+      tabs: [{ ...ready().tabs[0]!, id: scope === "tab" ? "other-tab" : "tab" }],
+    };
+    view.rerender(<BrowserPane sessionId={scope === "session" ? "other-session" : "session"} compact />);
+    expect(screen.getByText("100%")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Page scroll" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByLabelText("Remote page canvas").parentElement?.scrollTop).toBe(0);
+  });
+
+  it.each(["resolve", "reject"])("cancels old queued input and held gestures when an old request later %ss", async (outcome) => {
+    class TouchPointer extends MouseEvent { pointerType = "touch"; pointerId = 1; }
+    vi.stubGlobal("PointerEvent", TouchPointer);
+    let finish = () => {};
+    let fail = (_error: Error) => {};
+    const pending = new Promise<object>((resolve, reject) => {
+      finish = () => resolve({});
+      fail = reject;
+    });
+    state.input.mockImplementationOnce(() => pending);
+    state.status = ready();
+    state.frameDocument = "doc";
+    const view = render(<BrowserPane sessionId="session" compact />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const oldSurface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(oldSurface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1280, 720));
+    oldSurface.focus();
+    fireEvent.keyDown(oldSurface, { key: "Shift" });
+    fireEvent.keyDown(oldSurface, { key: "x" });
+    fireEvent.pointerDown(oldSurface, { clientX: 200, clientY: 100 });
+    fireEvent.compositionStart(oldSurface);
+    fireEvent.change(oldSurface, { target: { value: "unfinished composition" } });
+    expect(state.input).toHaveBeenCalledTimes(1);
+
+    state.status = { ...ready(), tabs: [{ ...ready().tabs[0]!, documentId: "next-doc" }] };
+    state.frameDocument = "next-doc";
+    view.rerender(<BrowserPane sessionId="session" compact />);
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    expect(surface).not.toBe(oldSurface);
+    expect(document.activeElement).not.toBe(surface);
+    expect(surface).toHaveProperty("value", "");
+    fireEvent.keyDown(surface, { key: "Enter" });
+    expect(state.input).toHaveBeenCalledTimes(1);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1280, 720));
+    fireEvent.keyUp(surface, { key: "Shift" });
+    fireEvent.pointerUp(surface, { clientX: 200, clientY: 100 });
+    fireEvent.blur(surface);
+    fireEvent.change(surface, { target: { value: "fresh text" } });
+    await act(async () => {
+      if (outcome === "resolve") finish();
+      else fail(new Error("Old document input failed"));
+      await pending.catch(() => {});
+    });
+    expect(state.input.mock.calls).toEqual([
+      [{ runtimeId: "runtime", tabId: "tab", documentId: "doc", input: { type: "key", key: "Shift", phase: "down" } }],
+      [{ runtimeId: "runtime", tabId: "tab", documentId: "next-doc", input: { type: "text", text: "fresh text" } }],
+    ]);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

@@ -9,7 +9,7 @@
  *
  * All data hooks are mocked so this stays a pure rendering/branching test.
  */
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -24,13 +24,17 @@ import { SessionView } from "./session-view";
 import { ChildPanel } from "./child-panel";
 import { useThreadReplyTarget } from "./send-as-person";
 
+
+let browserActivity = false;
 let liveStatus: import("~/stores/stream").AgentStatus = "idle";
 let queueState: import("@valet/api/wire").WireQueueState | undefined;
 let fullProfile = false;
 let readOnlyReason: string | undefined;
 let mobileLayout = false;
+let pendingGate: import("@valet/api/wire").DecisionGate | undefined;
 let sessionOwner: { type: "user" | "team"; id: string } = { type: "user", id: "u1" };
-beforeEach(() => { fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
+beforeEach(() => { pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
+
 
 vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
 vi.mock("~/components/home/tasks-panel", () => ({ TasksPanel: () => <div>Tasks across workspaces</div>, useNeedsYouCount: () => ({ count: 0, partial: false }) }));
@@ -59,10 +63,10 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
     ...actual,
-    useSessionStream: () => ({ messages: [], statusByThread: {}, conn: "open" }),
+    useSessionStream: () => ({ messages: browserActivity ? [{ id: "browser-call", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [{kind: "tool_call", callId: "browser", toolName: "browser.execute", status: "completed"}] }] : [], statusByThread: {}, conn: "open" }),
     useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
       selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
-    usePendingGateForThread: () => undefined,
+    usePendingGateForThread: () => pendingGate,
     useQueueStateForThread: () => queueState,
     useThreadLiveStatus: () => ({ status: liveStatus }),
   };
@@ -90,7 +94,11 @@ vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMi
 }) => <section aria-label="Browser preview"><span>{minimized ? "minimized feed" : "visible feed"}</span>
   <button onClick={onMinimize}>minimize preview</button><button onClick={onRestore}>restore preview</button>
   <button onClick={onClose}>close preview</button><button onClick={onExpand}>expand preview</button></section> }));
-vi.mock("./browser/browser-pane", () => ({ BrowserPane: () => <section aria-label="Full browser" /> }));
+vi.mock("./browser/mobile-browser", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./browser/mobile-browser")>(),
+  MobileBrowser: () => <section aria-label="Mobile browser card" />,
+}));
+vi.mock("./browser/browser-pane", () => ({ BrowserPane: ({ compact }: { compact?: boolean }) => <section aria-label="Full browser" data-compact={compact} /> }));
 
 function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void, active = true) {
   return renderComponent(() => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />);
@@ -135,13 +143,69 @@ describe("SessionView header chrome", () => {
     sessionOwner = { type: "team", id: "team-a" };
     renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" scopeNotice="Shared with Platform." />);
     fireEvent.click(await screen.findByRole("button", { name: "Open browser" }));
-    expect(await screen.findByRole("region", { name: "Full browser" })).toBeTruthy();
+    expect((await screen.findByRole("region", { name: "Full browser" })).getAttribute("data-compact")).toBe("true");
     expect(screen.queryByRole("tab", { name: "Browser" })).toBeNull();
     const back = screen.getByRole("button", { name: "Back to chat" });
     back.focus();
     fireEvent.click(back);
     expect(screen.getByTestId("composer")).toBeTruthy();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Thread menu" }));
+  });
+
+  it("keeps the draft mounted but hides the phone composer while answering", async () => {
+    mobileLayout = true;
+    pendingGate = { id: "g1", sessionId: "sess-1", threadId: "t1", type: "question", title: "Choose", actions: [], status: "pending", createdAt: 0, updatedAt: 0 };
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" composerAccessory={<div data-testid="other-request" />} />);
+    expect((await screen.findByTestId("other-request")).closest('[aria-hidden="true"]')).toBeTruthy();
+    const composer = await screen.findByTestId("composer");
+    expect(composer.closest('[aria-hidden="true"]')?.className).toContain("hidden");
+  });
+
+  it("keeps the composer visible for a question assigned to someone else", async () => {
+    mobileLayout = true;
+    pendingGate = { id: "g2", sessionId: "sess-1", threadId: "t1", type: "question", title: "Choose", actions: [], status: "pending", createdAt: 0, updatedAt: 0, approver: { userId: "other", name: "Another member" } };
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />);
+    const composer = await screen.findByTestId("composer");
+    expect(composer.closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it("retains a cross-thread answer when an own-thread question arrives", async () => {
+    mobileLayout = true;
+    function Preview() {
+      const [waiting, setWaiting] = useState(false);
+      pendingGate = waiting ? { id: "own-question", sessionId: "sess-1", threadId: "t1", type: "question", title: "Choose", actions: [], status: "pending", createdAt: 0, updatedAt: 0 } : undefined;
+      return <><button onClick={() => setWaiting(!waiting)}>Toggle own question</button><SessionView sessionId="sess-1" activeThreadId="t1" suppressComposer composerAccessory={<textarea aria-label="Cross-thread answer" />} /></>;
+    }
+    renderComponent(() => <Preview />);
+    const answer = await screen.findByRole("textbox", { name: "Cross-thread answer" });
+    fireEvent.change(answer, { target: { value: "Draft with important details" } });
+    fireEvent.click(screen.getByRole("button", { name: "Toggle own question" }));
+    expect(answer.closest('[aria-hidden="true"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle own question" }));
+    expect(screen.getByRole("textbox", { name: "Cross-thread answer" })).toBe(answer);
+    expect(answer).toHaveProperty("value", "Draft with important details");
+  });
+
+  it("opens Home's browser even when its desktop view is chat-only", async () => {
+    mobileLayout = true;
+    const { MobileConversationLayout } = await import("~/components/home/mobile-conversation-layout");
+    renderComponent(() => <MobileConversationLayout view="chat" onViewChange={() => {}}><SessionView sessionId="sess-1" activeThreadId="t1" panel hidePanelHeader chatOnly sharedConversationChrome /></MobileConversationLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "Open browser" }));
+    expect((await screen.findByRole("region", { name: "Full browser" })).getAttribute("data-compact")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("keeps embedded panel close controls on a phone", async () => {
+    mobileLayout = true;
+    renderInRouter("sess-1", true, () => {});
+    expect(await screen.findByRole("button", { name: "Close panel" })).toBeTruthy();
+  });
+
+  it("preserves custom controls in a chat-only assistant panel on a phone", async () => {
+    mobileLayout = true;
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" panel chatOnly renderPanelHeader={() => <button>Close assistant</button>} />);
+    expect(await screen.findByRole("button", { name: "Close assistant" })).toBeTruthy();
   });
 
   it("suppresses summary portals for a hidden embedded chat", async () => {
@@ -272,6 +336,18 @@ describe("SessionView: background work status line", () => {
 });
 
 
+
+it("shows completed browser work in mobile chat-only conversations", async () => {
+  browserActivity = true;
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: () => {}, removeEventListener: () => {} }));
+  try {
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" chatOnly />);
+    expect(await screen.findByRole("region", { name: "Mobile browser card" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Browser preview" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Browser" })).toBeNull();
+  } finally { vi.unstubAllGlobals(); }
+});
+
 describe("SessionView processing visibility", () => {
   it.each([
     ["queued", "Valet is queued"],
@@ -298,4 +374,5 @@ describe("SessionView processing visibility", () => {
     await screen.findByTestId("composer");
     expect(screen.queryByText(/Valet is/)).toBeNull();
   });
+
 });

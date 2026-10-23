@@ -345,7 +345,7 @@ describe("DecisionGateCard — long request layout", () => {
     });
   }
 
-  it("bounds only the named request-details region so actions remain reachable", () => {
+  it("bounds request details and makes the whole card scrollable on short phones", () => {
     mockTitleLayout({ scrollHeight: 204, clientHeight: 68 });
     const body = "https://example.com/" + "a".repeat(10_000);
     const title = "A title ".repeat(100);
@@ -354,7 +354,8 @@ describe("DecisionGateCard — long request layout", () => {
     const card = container.querySelector('[role="dialog"]');
     const heading = screen.getByRole("heading");
     const request = screen.getByRole("region", { name: "Request details" });
-    expect(card?.className).not.toContain("max-h-");
+    expect(card?.className).toContain("max-md:max-h-");
+    expect(card?.className).toContain("max-md:overflow-y-auto");
     expect(heading.className).toContain("line-clamp-3");
     expect(heading.className).toContain("[overflow-wrap:anywhere]");
     expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBe(heading.id);

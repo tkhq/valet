@@ -14,6 +14,7 @@ import type { StreamMessage } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
 import { AppPageHintContext } from "~/lib/app-page-hint";
+import { qkThreadContext } from "~/api/thread-context";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const navigate = vi.fn().mockResolvedValue(undefined);
@@ -180,6 +181,23 @@ it("sends the current Ask Valet page on each message while the panel stays mount
   fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Help on this page." } });
   fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter", code: "Enter" });
   await waitFor(() => expect(sendMutateAsync).toHaveBeenLastCalledWith(expect.objectContaining({ appPageHint: { pathname: "/integrations", workspace: "user" } })));
+});
+
+it("dismisses the context popover when the composer becomes inactive without losing its draft", async () => {
+  const client = new QueryClient();
+  client.setQueryData(qkThreadContext.thread("session-context", "thread-context"), {
+    context: { tokens: 84000, limit: 200000, contextWindow: 220000, model: "anthropic/claude-sonnet-4-6", autoCompact: true },
+  });
+  const tree = (active: boolean) => <QueryClientProvider client={client}><Composer sessionId="session-context" threadId="thread-context" agentStatus="idle" active={active} /></QueryClientProvider>;
+  const { rerender } = render(tree(true));
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Preserve this draft" } });
+  fireEvent.click(await screen.findByRole("button", { name: "Context 42% full" }));
+  expect(screen.getByRole("button", { name: "Compact now" })).toBeTruthy();
+  rerender(tree(false));
+  expect(screen.queryByRole("button", { name: "Compact now" })).toBeNull();
+  rerender(tree(true));
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveProperty("value", "Preserve this draft");
+  expect(screen.queryByRole("button", { name: "Compact now" })).toBeNull();
 });
 
 describe("Composer queued-message stack", () => {
