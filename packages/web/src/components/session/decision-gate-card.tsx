@@ -40,7 +40,7 @@ const WRAPPING_BUTTON = "h-auto min-h-8 max-w-full whitespace-normal py-1.5 text
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
-export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate; placement?: "thread" | "notification" }) {
+export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate; placement?: "thread" | "notification"; mobileScroll?: boolean }) {
   return <DecisionGateResponse key={`${props.sessionId}:${props.gate.id}`} {...props} />;
 }
 
@@ -48,14 +48,16 @@ function DecisionGateResponse({
   sessionId,
   gate,
   placement = "thread",
+  mobileScroll = false,
 }: {
   sessionId: string;
   gate: DecisionGate;
   placement?: "thread" | "notification";
+  mobileScroll?: boolean;
 }) {
   const inNotification = placement === "notification";
   const columnClass = inNotification ? "min-w-0 w-full" : gateColumnClass;
-  const surfaceClass = inNotification ? "min-w-0" : cardClass;
+  const surfaceClass = cn(inNotification ? "min-w-0" : cardClass, !inNotification && "max-md:max-h-[min(65dvh,calc(var(--app-viewport-height,100dvh)-8rem))] max-md:overflow-y-auto max-md:overscroll-contain");
   const inset = inNotification ? "px-4" : "px-5";
   const resolve = useResolveDecision(sessionId);
   const withdraw = useWithdrawDecision(sessionId);
@@ -217,7 +219,7 @@ function DecisionGateResponse({
             role="region"
             tabIndex={0}
             aria-label="Request details"
-            className={cn(inset, "max-h-[min(14rem,25dvh)] overflow-y-auto pb-3 text-sm leading-relaxed text-muted break-words [overflow-wrap:anywhere]", preview ? "space-y-2" : "whitespace-pre-wrap")}
+            className={cn(inset, "max-h-[min(14rem,25dvh)] overflow-y-auto pb-3 text-sm leading-relaxed text-muted break-words [overflow-wrap:anywhere]", preview ? "space-y-2" : "whitespace-pre-wrap", (!inNotification || mobileScroll) && "max-md:max-h-none max-md:overflow-visible")}
           >
             {preview ? (
               <>
@@ -245,9 +247,9 @@ function DecisionGateResponse({
         {gate.type === "question" ? (
           <>
           {gate.actions.length > 0 && (
-            <div className={cn(inset, "pb-2 flex flex-wrap gap-2")}>
+            <div className={cn(inset, "pb-2 flex flex-wrap gap-2 max-md:grid max-md:grid-cols-1")}>
               {gate.actions.map((a) => (
-                <Button key={a.id} variant="secondary" size="sm" className={WRAPPING_BUTTON} onClick={() => pickAction(a.id)} disabled={busy}>
+                <Button key={a.id} variant="secondary" size="sm" className={cn(WRAPPING_BUTTON, "max-md:w-full max-md:justify-start")} onClick={() => pickAction(a.id)} disabled={busy}>
                   <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
                 </Button>
               ))}

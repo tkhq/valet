@@ -11,7 +11,7 @@ const frame: BrowserFrame = {
   documentId: "document",
   viewport: { width: 1280, height: 720 },
 };
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("browser viewport", () => {
   it("requires control and a decoded frame before sending keys", async () => {
@@ -219,4 +219,145 @@ describe("browser viewport", () => {
     expect(surface.style.cursor).toBe("default");
   });
 
+});
+
+
+describe("touch browser input", () => {
+  it("focuses the full-pane textarea on a non-mobile tap and accepts touch keyboard text", async () => {
+    class TouchPointer extends MouseEvent { pointerType = "touch"; pointerId = 1; }
+    vi.stubGlobal("PointerEvent", TouchPointer);
+    const send = vi.fn().mockResolvedValue(undefined);
+    render(<BrowserViewport frame={frame} mobile={false} canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+    fireEvent.pointerDown(surface, { clientX: 200, clientY: 100 });
+    fireEvent.pointerUp(surface, { clientX: 200, clientY: 100 });
+    expect(document.activeElement).toBe(surface);
+    fireEvent.change(surface, { target: { value: "touch typing" } });
+    await waitFor(() => expect(send.mock.calls).toEqual([
+      [{ type: "pointer", phase: "down", x: 400, y: 200, button: "left" }],
+      [{ type: "pointer", phase: "up", x: 400, y: 200, button: "left" }],
+      [{ type: "text", text: "touch typing" }],
+    ]));
+  });
+
+  it("preserves non-mobile touch pointer dragging instead of sending remote wheel input", async () => {
+    class TouchPointer extends MouseEvent { pointerType = "touch"; pointerId = 1; }
+    vi.stubGlobal("PointerEvent", TouchPointer);
+    const send = vi.fn().mockResolvedValue(undefined);
+    render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+    fireEvent.pointerDown(surface, { clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(surface, { clientX: 250, clientY: 150 });
+    fireEvent.pointerUp(surface, { clientX: 250, clientY: 150 });
+    await waitFor(() => expect(send.mock.calls).toEqual([
+      [{ type: "pointer", phase: "down", x: 400, y: 400, button: "left" }],
+      [{ type: "pointer", phase: "move", x: 500, y: 300 }],
+      [{ type: "pointer", phase: "up", x: 500, y: 300, button: "left" }],
+    ]));
+  });
+
+  it("turns a swipe into remote scrolling without dragging or focusing the keyboard", async () => {
+    class TouchPointer extends MouseEvent {
+      pointerType = "touch";
+      pointerId = 1;
+    }
+    vi.stubGlobal("PointerEvent", TouchPointer);
+    const send = vi.fn().mockResolvedValue(undefined);
+    render(<BrowserViewport frame={frame} mobile canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    fireEvent.click(screen.getByRole("button", { name: "Page scroll" }));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+    fireEvent.pointerDown(surface, { clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(surface, { clientX: 200, clientY: 150 });
+    fireEvent.pointerUp(surface, { clientX: 200, clientY: 150 });
+    await waitFor(() => expect(send.mock.calls).toEqual([[{ type: "move", x: 400, y: 400 }], [{ type: "wheel", deltaX: 0, deltaY: 100 }]]));
+    expect(document.activeElement).not.toBe(surface);
+    vi.unstubAllGlobals();
+  });
+  it("offers an explicit keyboard button for mobile typing", () => {
+    render(<BrowserViewport frame={frame} mobile canControl send={async () => {}} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    fireEvent.click(screen.getByRole("button", { name: "Show browser keyboard" }));
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Browser page input" }));
+  });
+});
+
+
+it("clicks on touch release and sends nothing for a cancelled touch", async () => {
+  class TouchPointer extends MouseEvent { pointerType = "touch"; pointerId = 1; }
+  vi.stubGlobal("PointerEvent", TouchPointer);
+  const send = vi.fn().mockResolvedValue(undefined);
+  render(<BrowserViewport frame={frame} mobile canControl send={send} onError={() => {}} />);
+  fireEvent.load(screen.getByAltText("Browser page"));
+  const surface = screen.getByRole("textbox", { name: "Browser page input" });
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+  fireEvent.pointerDown(surface, { clientX: 200, clientY: 100 });
+  expect(send).not.toHaveBeenCalled();
+  fireEvent.pointerCancel(surface);
+  fireEvent.pointerUp(surface, { clientX: 200, clientY: 100 });
+  expect(send).not.toHaveBeenCalled();
+  fireEvent.pointerDown(surface, { clientX: 200, clientY: 100 });
+  fireEvent.pointerUp(surface, { clientX: 200, clientY: 100 });
+  await waitFor(() => expect(send.mock.calls).toEqual([[{ type: "click", x: 400, y: 200, button: "left" }]]));
+});
+
+it("forwards mobile delete and return when the keyboard supplies no usable key event", async () => {
+  const send = vi.fn().mockResolvedValue(undefined);
+  render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+  fireEvent.load(screen.getByAltText("Browser page"));
+  const surface = screen.getByRole("textbox", { name: "Browser page input" });
+  fireEvent(surface, new InputEvent("beforeinput", { inputType: "deleteContentBackward", bubbles: true, cancelable: true }));
+  fireEvent(surface, new InputEvent("beforeinput", { inputType: "insertLineBreak", bubbles: true, cancelable: true }));
+  await waitFor(() => expect(send.mock.calls).toEqual([
+    [{ type: "key", key: "Backspace", phase: "press" }],
+    [{ type: "key", key: "Enter", phase: "press" }],
+  ]));
+});
+
+it("does not duplicate held keys or forward composing mobile input", async () => {
+  const send = vi.fn().mockResolvedValue(undefined);
+  render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+  fireEvent.load(screen.getByAltText("Browser page"));
+  const surface = screen.getByRole("textbox", { name: "Browser page input" });
+  fireEvent.keyDown(surface, { key: "Backspace" });
+  fireEvent(surface, new InputEvent("beforeinput", { inputType: "deleteContentBackward", bubbles: true, cancelable: true }));
+  fireEvent.keyUp(surface, { key: "Backspace" });
+  fireEvent.compositionStart(surface);
+  fireEvent(surface, new InputEvent("beforeinput", { inputType: "deleteContentBackward", bubbles: true, cancelable: true }));
+  await waitFor(() => expect(send.mock.calls).toEqual([
+    [{ type: "key", key: "Backspace", phase: "down" }],
+    [{ type: "key", key: "Backspace", phase: "up" }],
+  ]));
+});
+
+it("starts mobile viewing at readable size and offers fit and pan controls", () => {
+  render(<BrowserViewport frame={frame} canControl mobile send={async () => {}} onError={() => {}} />);
+  expect(screen.getByRole("button", { name: "Page scroll" })).toBeTruthy();
+  expect(screen.getByText("100%")).toBeTruthy();
+  expect(screen.getByLabelText("Remote page canvas").style.width).toBe("1280px");
+  fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  expect(screen.getByText("125%")).toBeTruthy();
+});
+
+it("maps mobile taps through zoom without clicking after a pan gesture", async () => {
+  class TouchPointer extends MouseEvent { pointerType = "touch"; pointerId = 1; }
+  vi.stubGlobal("PointerEvent", TouchPointer);
+  const send = vi.fn().mockResolvedValue(undefined);
+  render(<BrowserViewport frame={frame} mobile canControl send={send} onError={() => {}} />);
+  fireEvent.load(screen.getByAltText("Browser page"));
+  fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  const surface = screen.getByRole("textbox", { name: "Browser page input" });
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(-200, -100, 1600, 900));
+  fireEvent.pointerDown(surface, { clientX: 300, clientY: 150 });
+  fireEvent.pointerMove(surface, { clientX: 350, clientY: 150 });
+  fireEvent.pointerUp(surface, { clientX: 350, clientY: 150 });
+  expect(send).not.toHaveBeenCalled();
+  fireEvent.pointerDown(surface, { clientX: 300, clientY: 150 });
+  fireEvent.pointerUp(surface, { clientX: 300, clientY: 150 });
+  await waitFor(() => expect(send.mock.calls).toEqual([[{ type: "click", x: 400, y: 200, button: "left" }]]));
 });

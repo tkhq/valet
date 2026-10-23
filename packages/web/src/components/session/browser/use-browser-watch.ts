@@ -28,6 +28,10 @@ export function useBrowserWatch({
   const scope = JSON.stringify([sessionId, threadId]);
   const [choices, setChoices] = useState<Record<string, WatchMode>>({});
   const mode = choices[scope] ?? "auto";
+  const hasActivity = !!threadId && messages.some((message) =>
+    message.sessionId === sessionId && message.threadId === threadId &&
+    message.parts.some((part) => part.kind === "tool_call" && isExecution(part.toolName, part.args)),
+  );
   const working =
     agentBusy &&
     !!threadId &&
@@ -52,6 +56,7 @@ export function useBrowserWatch({
   return {
     mode,
     working,
+    hasActivity,
     open: () => choose("open"),
     close: () => choose("closed"),
     minimize: () => choose("minimized"),

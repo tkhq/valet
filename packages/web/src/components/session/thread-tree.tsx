@@ -878,7 +878,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               </button>
                 <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending || !projects.isReady || projects.isSaving}
                   onClick={() => void createAndNavigate(project.id)}
-                  className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50", PHONE_HIDDEN)}>
+                  className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 max-md:min-h-11 max-md:min-w-11")}>
                   <Plus className="h-4 w-4" aria-hidden />
                 </button>
                 <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>

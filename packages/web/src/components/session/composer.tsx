@@ -123,6 +123,7 @@ export function Composer({
   onSent,
   guest = false,
   active = true,
+  modelControlRef,
   statusLine,
 }: {
   /** A quiet one-line strip under the input box, such as the background
@@ -130,6 +131,8 @@ export function Composer({
   statusLine?: ReactNode;
   /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
   active?: boolean;
+  /** The shared thread header renders its model control in this phone slot. */
+  modelControlRef?: (target: HTMLDivElement | null) => void;
   /** The sender opens a shared thread as a guest: no file or image intake
    * (uploads land in the owner's working directory) and no slash commands
    * (commands change the owner's thread). */
@@ -1159,7 +1162,7 @@ export function Composer({
         {working && ACTION_HINT[action] && <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{ACTION_HINT[action]}</p>}
         {/* `relative` anchors the command popup to the input row, so the hint
             above it never moves the popup. */}
-        <div className={cn("relative flex min-h-0", expanded ? "flex-col" : "items-end")}>
+        <div className={cn("relative flex min-h-0 max-md:flex-col max-md:items-stretch", expanded ? "flex-col" : "items-end")}>
           {(popupOpen || noticeOpen) && (
             <CommandPopup
               items={popupOpen ? popupItems : []}
@@ -1193,12 +1196,12 @@ export function Composer({
             className={cn(
               "block w-full min-w-0 resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:shadow-none max-sm:focus-visible:ring-0",
               expanded
-                ? "min-h-20 max-h-[min(14rem,35dvh)] py-3 max-sm:py-3"
-                : "min-h-11 max-h-11 flex-1 py-2.5 max-sm:py-2.5",
+                ? "min-h-20 max-md:min-h-11 max-h-[min(14rem,35dvh)] py-3 max-sm:py-3"
+                : "min-h-11 max-h-11 flex-1 py-2.5 max-sm:py-2.5 max-md:flex-none",
             )}
             disabled={preparing || send.isPending || !threadId}
           />
-          <div className={cn("flex shrink-0 items-center gap-2", expanded && "px-1 pb-1 pt-1")}>
+          <div className={cn("flex shrink-0 items-center gap-2 max-md:px-1 max-md:pb-1 max-md:pt-1", expanded && "px-1 pb-1 pt-1")}>
             {!guest && (IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
@@ -1226,13 +1229,14 @@ export function Composer({
                 </Button>
               </>
             )}
-            <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden")}>
+            {modelControlRef && <div ref={modelControlRef} className="hidden min-w-0 flex-1 md:hidden max-md:block" />}
+            <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden max-md:block", modelControlRef && "max-md:hidden")}>
               <span className="hidden sm:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
                 {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
-            {!guest && threadId && <ContextMeter sessionId={sessionId} threadId={threadId} working={working} />}
+            {active && !guest && threadId && <div className={modelControlRef ? "max-md:hidden" : "contents"}><ContextMeter sessionId={sessionId} threadId={threadId} working={working} /></div>}
             {working && queueState?.activeItemId && (
               <Button
                 type="button"
@@ -1240,7 +1244,7 @@ export function Composer({
                 size="lg"
                 className={cn(
                   "h-11 shrink-0 rounded-full text-danger-600 hover:text-danger-500 dark:text-danger-500",
-                  expanded ? "px-3" : "w-11 p-0",
+                  expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0",
                 )}
                 onClick={() => void stop()}
                 disabled={!threadId || abort.isPending}
@@ -1248,7 +1252,7 @@ export function Composer({
                 title="Stop (Esc)"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-                <span className={cn(!expanded && "sr-only")}>Stop</span>
+                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Stop</span>
               </Button>
             )}
             {working && !queueState?.activeItemId && (queueState?.pendingIds.length ?? 0) > 0 && (
@@ -1256,14 +1260,14 @@ export function Composer({
                 type="button"
                 variant="secondary"
                 size="lg"
-                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3" : "w-11 p-0")}
+                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0")}
                 onClick={() => void runQueue()}
                 disabled={!threadId || resume.isPending}
                 aria-label="Run queued messages"
                 title="Run queued messages"
               >
                 <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
-                <span className={cn(!expanded && "sr-only")}>Run queue</span>
+                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Run queue</span>
               </Button>
             )}
             <Button
@@ -1273,12 +1277,12 @@ export function Composer({
               title={sendTitle}
               className={cn(
                 "h-11 shrink-0 rounded-full transition-colors motion-reduce:transition-none",
-                expanded ? "px-4" : "w-11 p-0",
+                expanded ? "px-4 max-md:w-11 max-md:p-0" : "w-11 p-0",
                 !canSend && "bg-ink-wash text-muted disabled:opacity-100",
               )}
             >
               <ArrowUp className="h-4 w-4" aria-hidden />
-              <span className={cn(!expanded && "sr-only")}>{ACTION_LABEL[action]}</span>
+              <span className={cn("max-md:sr-only", !expanded && "sr-only")}>{ACTION_LABEL[action]}</span>
             </Button>
           </div>
         </div>
