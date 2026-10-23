@@ -447,6 +447,17 @@ export class InMemorySessionStore implements SessionStore {
     this.leases.set(lease.id, { ...lease });
   }
 
+  async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
+    const wakeup = this.wakeups.get(id);
+    if (wakeup?.sessionId === sessionId && wakeup.status === "cancelled" && wakeup.terminalSignalExpected && (wakeup.terminalSignalStartedAt === undefined || wakeup.terminalSignalStartedAt < (wakeup.endedAt ?? 0))) {
+      this.wakeups.set(id, { ...wakeup, terminalSignalStartedAt: startedAt });
+    }
+    const lease = this.leases.get(id);
+    if (lease?.sessionId === sessionId && lease.releasedAt !== undefined && lease.releaseCause === "cancelled" && lease.terminalSignalExpected && lease.terminalSignalStartedAt === undefined) {
+      this.leases.set(id, { ...lease, terminalSignalStartedAt: startedAt });
+    }
+  }
+
   async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
     const l = this.leases.get(id);
     if (!l || l.releasedAt !== undefined) return null;

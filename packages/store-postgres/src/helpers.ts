@@ -751,6 +751,7 @@ export interface WakeupRow {
   updated_at: number;
   ended_at: number | null;
   terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
   origin_json: string | null;
   window_start_at: number | null;
   window_count: number | null;
@@ -813,6 +814,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     updated_at: toNum(raw.updated_at, "updated_at"),
     ended_at: toNumOrNull(raw.ended_at, "ended_at"),
     terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
     window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
     window_count: toNumOrNull(raw.window_count, "window_count"),
@@ -990,6 +992,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
     ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
     ...withOrigin(row.origin_json),
     ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
     ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
@@ -1021,6 +1024,7 @@ export interface LeaseRow {
   released_at: number | null;
   release_cause: string | null;
   terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
   thread_id: string | null;
   origin_json: string | null;
 }
@@ -1038,6 +1042,7 @@ export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
     released_at: toNumOrNull(raw.released_at, "released_at"),
     release_cause: asStringOrNull(raw.release_cause, "release_cause"),
     terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
     thread_id: asStringOrNull(raw.thread_id, "thread_id"),
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
   };
@@ -1072,5 +1077,6 @@ export function rowToLease(row: LeaseRow): Lease {
     ...(row.released_at !== null ? { releasedAt: row.released_at } : {}),
     ...(row.release_cause !== null ? { releaseCause: row.release_cause } : {}),
     ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
   };
 }

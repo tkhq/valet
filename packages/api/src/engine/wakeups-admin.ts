@@ -351,6 +351,7 @@ async function deliverCancelSignal(
   target: { threadId: string | undefined; origin: Wakeup["origin"]; dispatchId: string; kind: WakeupKind | "hold" },
   build: (ownThread: boolean) => SignalContent,
   opts: HumanCancelOptions,
+  beforeSubmit: () => Promise<void>,
 ): Promise<void> {
   const { origin, dispatchId, kind } = target;
   const wanted = opts.deliverTo === "main" ? undefined : target.threadId;
@@ -362,6 +363,7 @@ async function deliverCancelSignal(
     ownThread && origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
   const base: PromptOptions = { dispatchId, queueMode: "followup" };
   try {
+    await beforeSubmit();
     if (threadId !== undefined) {
       await session.prompt(signal, { threadId, ...base });
     } else {
@@ -398,7 +400,7 @@ export async function cancelWorkAsHuman(
     if (lease.ownerKind !== "hold") {
       return lease.ownerId ? cancelWorkAsHuman(engineStore, session, sessionId, lease.ownerId, opts) : { kind: "not_found" };
     }
-    const outcome = await seam.cancel(id);
+    const outcome = await seam.cancel(id, opts.signal === "suppress" ? undefined : { terminalSignalExpected: true });
     if (outcome?.kind !== "lease") return { kind: "not_found" };
     const signal = holdReleasedSignal(lease, opts, now());
     const routed = await routeSignal(opts, (target) =>
@@ -407,6 +409,7 @@ export async function cancelWorkAsHuman(
         { threadId: lease.threadId, origin: lease.origin, dispatchId: `lease:${lease.id}:released`, kind: "hold" },
         () => signal,
         opts,
+        () => engineStore.startTerminalSignalAdmission(sessionId, lease.id, now()),
       ),
     );
     return {
@@ -420,7 +423,7 @@ export async function cancelWorkAsHuman(
   if (!row || row.sessionId !== sessionId || (row.status !== "pending" && row.status !== "running")) {
     return { kind: "not_found" };
   }
-  const outcome = await seam.cancel(id);
+  const outcome = await seam.cancel(id, opts.signal === "suppress" ? undefined : { terminalSignalExpected: true });
   // A lost CAS means the WakeWatcher ended the row first. Its own signal stands.
   if (outcome?.kind !== "wakeup") return { kind: "not_found" };
   const at = now();
@@ -430,6 +433,7 @@ export async function cancelWorkAsHuman(
       { threadId: row.threadId, origin: row.origin, dispatchId: `wakeup:${row.id}:terminal`, kind: row.kind },
       (ownThread) => wakeupCancelledSignal(row, opts, at, ownThread),
       opts,
+      () => engineStore.startTerminalSignalAdmission(sessionId, row.id, now()),
     ),
   );
   return { kind: "cancelled", work: { id, kind: row.kind, reason: row.reason, threadId: row.threadId }, ...routed };

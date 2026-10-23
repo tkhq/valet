@@ -767,9 +767,14 @@ An event waiter follows the rule for timers:
   An ended wakeup or released hold owes work until its deterministic terminal dispatch ID exists.
   This guard survives a restart between the terminal transition and signal admission.
   The guard is bounded: four WakeWatcher ticks from `endedAt` or the hold's `releasedAt`.
-  Hold expiry commits `terminalSignalExpected` with release, using the clock at release rather than pass start.
-  Silent hold release never sets that flag. Lease snapshots include both active and released rows.
-  Past that bound, the sweep logs the lost signal, counts it under `valet.wakeups.signals_lost` with reason `child_terminal_grace`, and proceeds.
+  Human cancel commits `terminalSignalExpected` with cancellation or hold release, unless signal delivery is suppressed.
+  Cancelled wakeups use `wakeup:<id>:terminal`. Cancelled holds use `lease:<id>:released`; expired holds use `lease:<id>:expired`.
+  Before human admission, `startTerminalSignalAdmission` persists `terminalSignalStartedAt` once per cancellation. This timestamp starts the human signal's grace.
+  Deferred replacement, profile-change, and owner-move signals receive a full grace after provisioning, regardless of provisioning duration.
+  A provisioning attachment also blocks reclaim. Silent agent cancellation sets no expectation or admission timestamp.
+  Lease snapshots include both active and released rows. Historical expectations outside grace do not trigger dispatch reads.
+  The sweep logs observed admission gaps that exceed grace and counts `valet.wakeups.signals_lost` with reason `child_terminal_grace`.
+  Historical rows unseen within grace do not produce that diagnostic.
   The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal.
   Failed or refused starts, bad rows, and silent cancellation never set it and never count.
   Existing rows without this flag do not promise a terminal signal.

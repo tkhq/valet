@@ -18,10 +18,10 @@ export async function withChildDelivery<T>(db: AppDb, child: string, work: () =>
 }
 
 /** Records abandoned delivery before removing its durable retry state. Caller holds the delivery lock. */
-export async function discardChildDelivery(db: AppDb, store: Pick<SessionStore, "getWakeup" | "transitionWakeup">, child: string, reason: string): Promise<void> {
+export async function discardChildDelivery(db: AppDb, store: Pick<SessionStore, "getWakeup" | "transitionWakeup">, child: string, reason: string, opts?: { terminalSignalExpected: true }): Promise<void> {
   const waiter = await store.getWakeup(`wk_child_events:${child}`);
   await store.transitionWakeup(`wk_child_events:${child}`, ["running", "done"], "cancelled",
-    { endedAt: Date.now(), eventBuffer: [] }, Date.now());
+    { endedAt: Date.now(), eventBuffer: [], terminalSignalExpected: opts?.terminalSignalExpected ?? false }, Date.now());
   await db.transaction(async (tx) => {
     await tx.execute(sql`UPDATE engine_queue_items SET child_result_delivery = 'denied'
       WHERE session_id = ${child} AND child_result_delivery = 'pending'`);
@@ -39,6 +39,6 @@ export async function discardChildDelivery(db: AppDb, store: Pick<SessionStore, 
   });
 }
 
-export async function cancelChildDelivery(db: AppDb, store: Pick<SessionStore, "getWakeup" | "transitionWakeup">, child: string, reason: string): Promise<void> {
-  await withChildDelivery(db, child, () => discardChildDelivery(db, store, child, reason));
+export async function cancelChildDelivery(db: AppDb, store: Pick<SessionStore, "getWakeup" | "transitionWakeup">, child: string, reason: string, opts?: { terminalSignalExpected: true }): Promise<void> {
+  await withChildDelivery(db, child, () => discardChildDelivery(db, store, child, reason, opts));
 }

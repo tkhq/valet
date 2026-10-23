@@ -1077,6 +1077,29 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect((await store.getLease("ls_silent"))?.terminalSignalExpected).not.toBe(true);
       });
 
+      it("starts human terminal admission grace once, without changing terminal times or silent/foreign rows", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled", terminalSignalExpected: true }));
+        await store.createWakeup(wakeup({ id: "wk_silent", status: "cancelled", endedAt: 10 }));
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled" }));
+        for (const id of ["wk_a", "ls_hold", "wk_silent", "ls_silent"]) {
+          await store.startTerminalSignalAdmission("sess-2", id, 50);
+          const foreign = id.startsWith("wk_") ? await store.getWakeup(id) : await store.getLease(id);
+          expect(foreign?.terminalSignalStartedAt).toBeUndefined();
+          await store.startTerminalSignalAdmission("sess-1", id, 100);
+          await store.startTerminalSignalAdmission("sess-1", id, 200);
+        }
+        expect(await store.getWakeup("wk_a")).toMatchObject({ endedAt: 10, terminalSignalStartedAt: 100 });
+        expect(await store.getLease("ls_hold")).toMatchObject({ releasedAt: 10, terminalSignalStartedAt: 100 });
+        expect((await store.getWakeup("wk_silent"))?.terminalSignalStartedAt).toBeUndefined();
+        expect((await store.getLease("ls_silent"))?.terminalSignalStartedAt).toBeUndefined();
+        await store.transitionWakeup("wk_a", ["cancelled"], "running", {}, 300);
+        await store.transitionWakeup("wk_a", ["running"], "cancelled", { endedAt: 400, terminalSignalExpected: true }, 400);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 500);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 600);
+        expect(await store.getWakeup("wk_a")).toMatchObject({ endedAt: 400, terminalSignalStartedAt: 500 });
+      });
+
       it("round-trips every wakeup and lease field, origin and rate window included", async () => {
         const w = wakeup({ origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
         const l = lease({ threadId: "th-1", origin });

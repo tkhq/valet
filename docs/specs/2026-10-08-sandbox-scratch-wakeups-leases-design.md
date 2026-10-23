@@ -1255,19 +1255,25 @@ with an earlier entry, the entry below wins.
   pass start time was minutes old. The ChildWatcher awaits the terminal turn of a wakeup that ended
   after the watched submission was admitted or was created after it, and
   measures its admission grace from when it first saw the row ended. It
-  awaits a `cancelled` row's turn too, because a human cancel sends one;
-  an agent cancel sends none and costs one grace wait. The lease bound is
-  the latest deadline plus two WakeWatcher ticks plus one poll.
+  awaits a `cancelled` row's turn only when `terminalSignalExpected` is true.
+  A human cancel that delivers or defers a signal records this flag atomically.
+  An agent cancel or suppressed human cancel sends none and adds no grace wait.
+  The lease bound is the latest deadline plus two WakeWatcher ticks plus one poll.
 - **A3: child retention and leases.** The retention sweep skips a child
   while it holds an active lease or a pending timer, at both checks, and
   logs once per child (INV-8).
   An ended wakeup without its terminal dispatch ID also keeps the child sandbox,
-  for at most four WakeWatcher ticks after `endedAt`. Past that the sweep logs
-  and counts the lost signal, then reclaims. The terminal CAS sets
-  `terminalSignalExpected` only if its decision emits a signal. Failed starts,
+  for at most four WakeWatcher ticks after `endedAt`.
+  The sweep filters historical expectations before reading dispatch IDs.
+  It logs and counts observed admission gaps that exceed this bound.
+  The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal. Failed starts,
   bad rows, and silent cancellation never count.
-  Released holds use the same four-tick bound from `releasedAt` for `lease:<id>:expired` admission.
-  Their expectation survives reboot. Past the bound, the sweep logs and counts the lost hold signal.
+  Released holds use the same bound from `releasedAt`.
+  Expiry expects `lease:<id>:expired`. Human cancellation expects `lease:<id>:released`.
+  Before a human signal send, `startTerminalSignalAdmission` persists `terminalSignalStartedAt` once per cancellation, without changing the terminal time.
+  Human admission grace starts at this timestamp, including after deferred replacement, profile change, or owner move.
+  A provisioning attachment also blocks reclaim, even when provisioning exceeds the initial grace.
+  Expectations and admission timestamps survive reboot. Silent agent cancellation sets neither field.
   With warm retention off, recent human turns defer reclaim for the platform
   idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.

@@ -2421,6 +2421,8 @@ export interface SessionStore {
     updatedAt: number,
     releaseCause: LeaseReleaseCause,
   ): Promise<Wakeup | null>;
+  /** Starts human terminal admission grace once per cancellation, only for this session's expected signal. */
+  startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void>;
   createLease(lease: Lease): Promise<void>;
   /** CAS release: commits any terminal signal expectation with the release. Null when already released. */
   releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null>;

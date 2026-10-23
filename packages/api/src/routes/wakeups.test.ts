@@ -747,7 +747,9 @@ describe("owner move stops background work only on force (H11, fix wave 3 H2)", 
     expect(moved.cancelledWorkCount).toBe(2);
     expect(moved.cancelledWork?.sort()).toEqual(["ls_hold1", "wk_timer1"]);
 
-    expect(await store.getWakeup("wk_timer1")).toMatchObject({ status: "cancelled" });
+    expect(await store.getWakeup("wk_timer1")).toMatchObject({ status: "cancelled", terminalSignalExpected: true,
+      terminalSignalStartedAt: expect.any(Number) });
+    expect(await store.getLease("ls_hold1")).toMatchObject({ terminalSignalExpected: true, terminalSignalStartedAt: expect.any(Number) });
     expect(await store.countActiveLeases("wk-move")).toBe(0);
     // The agent learns a person stopped the work, attributed to the mover.
     const item = await store.getQueueItemByDispatchId("wk-move", "wakeup:wk_timer1:terminal");

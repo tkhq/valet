@@ -62,25 +62,27 @@ describe("workspace singleton repair on an already migrated database", () => {
 
   it("repairs hold terminal expectations without retaining legacy released leases", async () => {
     await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_expected");
+    await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_started_at");
     await db.query(`INSERT INTO engine_leases (id, session_id, owner_kind, reason, created_at, deadline_at, released_at, release_cause)
       VALUES ('repair-hold', 'child', 'hold', 'silent release', 1, 2, 2, 'cancelled')`);
     await applyAppMigrations(db);
     await applyAppMigrations(db);
     expect(await missingSchemaRepairs(db)).toEqual([]);
-    expect((await db.query("SELECT terminal_signal_expected FROM engine_leases WHERE id = 'repair-hold'")).rows)
-      .toEqual([{ terminal_signal_expected: false }]);
+    expect((await db.query("SELECT terminal_signal_expected, terminal_signal_started_at FROM engine_leases WHERE id = 'repair-hold'")).rows)
+      .toEqual([{ terminal_signal_expected: false, terminal_signal_started_at: null }]);
     await db.query("DELETE FROM engine_leases WHERE id = 'repair-hold'");
   });
 
   it("repairs terminal signal expectations without marking legacy ended rows as owed", async () => {
     await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_expected");
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_started_at");
     await db.query(`INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, created_at, updated_at, ended_at)
       VALUES ('repair-terminal', 'child', 't', 'process', 'lost', 'failed start', 1, 2, 2)`);
     await applyAppMigrations(db);
     await applyAppMigrations(db);
     expect(await missingSchemaRepairs(db)).toEqual([]);
-    expect((await db.query("SELECT terminal_signal_expected FROM engine_wakeups WHERE id = 'repair-terminal'")).rows)
-      .toEqual([{ terminal_signal_expected: false }]);
+    expect((await db.query("SELECT terminal_signal_expected, terminal_signal_started_at FROM engine_wakeups WHERE id = 'repair-terminal'")).rows)
+      .toEqual([{ terminal_signal_expected: false, terminal_signal_started_at: null }]);
     await db.query("DELETE FROM engine_wakeups WHERE id = 'repair-terminal'");
   });
 

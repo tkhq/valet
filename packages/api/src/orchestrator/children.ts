@@ -772,6 +772,7 @@ export class ChildWatcher {
   private retentionTimer: SweepTimer | undefined;
   /** Children the retention sweep already logged as kept by background work. */
   private readonly keptForWork = new Set<string>();
+  private readonly pendingTerminalAdmissions = new Map<string, { child: string; id: string; kind: WakeupKind | "hold"; at: number }>();
 
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
@@ -1421,7 +1422,8 @@ export class ChildWatcher {
       // through admission, and reject stale digests after explicit reactivation.
       const current = await this.deps.engineStore.getWakeup(row.id);
       if (current?.status !== "running" || !current.eventBuffer?.some(event => event.dedupeKey === digest.dedupeKey)) return;
-      await this.deliverBufferedEvent(row, digest, gate);
+      const lockedGate = gate ? await this.deps.engineStore.getDecisionGate(child, gate.id) : null;
+      await this.deliverBufferedEvent(row, digest, lockedGate);
     });
   }
 
@@ -1697,6 +1699,13 @@ export class ChildWatcher {
         console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
       }
     }
+    for (const [key, gap] of this.pendingTerminalAdmissions) {
+      if (now - gap.at <= CHILD_TERMINAL_SIGNAL_GRACE_MS
+        || this.deps.engineHost.liveSession(gap.child)?.attachment.state === "provisioning") continue;
+      this.pendingTerminalAdmissions.delete(key);
+      recordChildTerminalSignalAbandoned(gap.kind);
+      console.error(`ChildWatcher: ${gap.kind} ${gap.id} of child ${gap.child}: terminal signal admission was not observed before its grace elapsed; retention proceeds.`);
+    }
   }
 
   /** With warm retention off, a person's completed turn still gets the platform idle grace. */
@@ -1712,16 +1721,20 @@ export class ChildWatcher {
    * The terminal transition precedes admission, so the row and deterministic
    * dispatch ID are the durable evidence, including after a reboot. Only
    * the terminal decision can promise a signal. Refused starts and bad
-   * rows never count. Past the grace the signal is lost; count it and proceed.
+   * rows never count. Historical rows do not trigger dispatch reads. If an
+   * observed admission gap ages out, count it and proceed.
    */
   private async owesTerminalSignal(childSessionId: string, terminal: {
     id: string; kind: WakeupKind | "hold"; endedAt: number; dispatchId: string;
   }, now: number): Promise<boolean> {
-    if (await this.deps.engineStore.getQueueItemByDispatchId(childSessionId, terminal.dispatchId)) return false;
-    if (now - terminal.endedAt <= CHILD_TERMINAL_SIGNAL_GRACE_MS) return true;
-    recordChildTerminalSignalAbandoned(terminal.kind);
-    console.error(`ChildWatcher: ${terminal.kind} ${terminal.id} of child ${childSessionId} ended at ${new Date(terminal.endedAt).toISOString()} and its terminal signal never arrived; retention proceeds.`);
-    return false;
+    const key = `${childSessionId}:${terminal.dispatchId}`;
+    if (now - terminal.endedAt > CHILD_TERMINAL_SIGNAL_GRACE_MS) return false;
+    if (await this.deps.engineStore.getQueueItemByDispatchId(childSessionId, terminal.dispatchId)) {
+      this.pendingTerminalAdmissions.delete(key);
+      return false;
+    }
+    this.pendingTerminalAdmissions.set(key, { child: childSessionId, id: terminal.id, kind: terminal.kind, at: terminal.endedAt });
+    return true;
   }
 
   /**
@@ -1731,6 +1744,9 @@ export class ChildWatcher {
    * concurrency M2; spec INV-8). Logged once per child.
    */
   private async holdsBackgroundWork(childSessionId: string, now = Date.now()): Promise<boolean> {
+    // Forced human cancels defer their signals until replacement finishes.
+    // Provisioning can exceed the terminal grace and must not be reclaimed.
+    if (this.deps.engineHost.liveSession(childSessionId)?.attachment.state === "provisioning") return true;
     const store = this.deps.engineStore;
     // One lease snapshot covers release-to-admission, including after restart.
     const leaseRows = await store.listLeases(childSessionId);
@@ -1741,15 +1757,15 @@ export class ChildWatcher {
     const timers = wakeups.filter(w => w.kind === "timer" && w.status === "pending").length;
     const events = wakeups.filter(w => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
     for (const wakeup of wakeups) {
-      if (wakeup.eventMatch?.childSessionId !== undefined || wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) continue;
-      if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost") continue;
-      if (await this.owesTerminalSignal(childSessionId, { id: wakeup.id, kind: wakeup.kind, endedAt: wakeup.endedAt,
+      if (wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) continue;
+      if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost" && wakeup.status !== "cancelled") continue;
+      if (await this.owesTerminalSignal(childSessionId, { id: wakeup.id, kind: wakeup.kind, endedAt: wakeup.terminalSignalStartedAt ?? wakeup.endedAt,
         dispatchId: `wakeup:${wakeup.id}:terminal` }, now)) return true;
     }
     for (const lease of leaseRows) {
       if (lease.ownerKind !== "hold" || lease.releasedAt === undefined || !lease.terminalSignalExpected) continue;
-      if (await this.owesTerminalSignal(childSessionId, { id: lease.id, kind: "hold", endedAt: lease.releasedAt,
-        dispatchId: `lease:${lease.id}:expired` }, now)) return true;
+      if (await this.owesTerminalSignal(childSessionId, { id: lease.id, kind: "hold", endedAt: lease.terminalSignalStartedAt ?? lease.releasedAt,
+        dispatchId: `lease:${lease.id}:${lease.releaseCause === "cancelled" ? "released" : "expired"}` }, now)) return true;
     }
     if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);

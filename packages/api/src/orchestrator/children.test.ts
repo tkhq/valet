@@ -27,7 +27,7 @@ import type {
 } from "@valet/engine";
 import { cancelChildDelivery } from "./child-delivery.js";
 import { childGateOrigin } from "./children.js";
-import { endChildSubscriptions } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, cancelWorkAsHuman, endChildSubscriptions } from "../engine/wakeups-admin.js";
 import * as sandboxTokenAuth from "../auth/sandbox-tokens.js";
 import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
@@ -1629,6 +1629,28 @@ describe("ChildWatcher", () => {
         await childDelivery!.sweep();
         expect(lookup).toHaveBeenCalled();
         expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("cancelled");
+        expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`)).toBeNull();
+      } finally { lookup.mockRestore(); }
+    });
+
+    it("rereads a gate resolved before acquiring the delivery lock", async () => {
+      const c = await armedChild("resolved-before-lock");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const gate = { id: "resolved-before-lock", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: c.watch.queueItemId,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Already resolved", actions: [], status: "pending" as const,
+        createdAt: Date.now(), updatedAt: Date.now() };
+      await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+      await c.watcher.reportGateOpened(c.child.id, gate);
+      const get = c.engineStore.getDecisionGate.bind(c.engineStore);
+      const lookup = vi.spyOn(c.engineStore, "getDecisionGate").mockImplementationOnce(async (session, id) => {
+        const pending = await get(session, id);
+        await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, { ...gate, status: "resolved" });
+        return pending;
+      });
+      try {
+        await childDelivery!.sweep();
+        expect(lookup).toHaveBeenCalled();
         expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`)).toBeNull();
       } finally { lookup.mockRestore(); }
     });
@@ -3890,6 +3912,7 @@ describe("child sandbox retention", () => {
     readonly backend = "hib-child-test";
     readonly suspendCalls: string[] = [];
     hibernation = true;
+    onCreate?: () => Promise<void>;
     private sandboxes = new Map<string, VirtualSandbox>();
     private nextId = 1;
 
@@ -3905,6 +3928,7 @@ describe("child sandbox retention", () => {
       };
     }
     async create(_opts: SandboxCreateOpts): Promise<Sandbox> {
+      await this.onCreate?.();
       const id = `hib-child-${this.nextId++}`;
       const sb = new TrackedSandbox(id, () => this.sandboxes.delete(id));
       this.sandboxes.set(id, sb);
@@ -3999,6 +4023,213 @@ describe("child sandbox retention", () => {
     return rows[0];
   }
 
+  it.each([0, RETENTION_MS].flatMap(retentionMs =>
+    (["hold", "timer", "process", "watch"] as const).map(kind => ({ retentionMs, kind })),
+  ))("human cancel retains $kind until admission with retention=$retentionMs", async ({ retentionMs, kind }) => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs }));
+    const { watch, child, childThread } = await seedParkableChild(api, "human-cancel-gap", "parent-human-cancel");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    const id = kind === "hold" ? "ls_human_gap" : "wk_human_gap";
+    if (kind === "hold") await store.createLease({ id, sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "preserve scratch", createdAt: now, deadlineAt: now + 60_000 });
+    else {
+      const row: Wakeup = { id, sessionId: child.id, threadId: childThread.id, kind,
+        status: kind === "timer" ? "pending" : "running", reason: "human cancellation", fireAt: now + 60_000,
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now };
+      if (kind === "timer") await store.createWakeup(row);
+      else await store.createWakeupWithLease({ ...row, leaseId: "ls_human_job" }, {
+        id: "ls_human_job", sessionId: child.id, threadId: childThread.id, sandboxId: child.attachment.sandboxId,
+        ownerKind: kind, ownerId: id, reason: row.reason, createdAt: now, deadlineAt: now + 60_000,
+      });
+    }
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    // Stale watch/activity clocks make both retention modes eligible immediately.
+    await api.providers.db.update(childWatches).set({ settledAt: now - RETENTION_MS - 1 }).where(eq(childWatches.childSessionId, child.id));
+    const activity = vi.spyOn(store, "latestActivityAt").mockResolvedValue(now - RETENTION_MS - 1);
+    let stateAtAdmission: string | undefined;
+    const prompt = vi.spyOn(child, "prompt").mockImplementation(async (content, options) => {
+      await watcher.sweepRetention();
+      stateAtAdmission = child.attachment.state;
+      await store.admitSubmission(child.id, childThread.id, { ...queuedItem("human-terminal", childThread.id, ""), content,
+        dispatchId: options?.dispatchId });
+      return { queueItemId: "human-terminal", sessionId: child.id, threadId: childThread.id, status: "queued" };
+    });
+    try {
+      expect((await cancelWorkAsHuman(store, child, child.id, id, { actorUserId: "local-user", signal: "deliver" })).kind).toBe("cancelled");
+      expect(stateAtAdmission).toBe("ready");
+      await store.settleUnclaimed(child.id, childThread.id, "human-terminal", { outcome: "completed" });
+      await watcher.sweepRetention();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { prompt.mockRestore(); activity.mockRestore(); }
+  });
+
+  it("human cancellation of child updates retains the recipient until event.ended admission", async () => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "human-event-gap", "parent-human-event");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createLease({ id: "ls_event_keep", sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "keep while arming", createdAt: now, deadlineAt: now + 60_000 });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    const id = "wk_child_events:grandchild-human";
+    await store.createWakeup({ id, sessionId: child.id, threadId: childThread.id, kind: "event", status: "running",
+      reason: "grandchild updates", eventMatch: { childSessionId: "grandchild-human", clauses: [], once: false, self: [] },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    await store.releaseLease("ls_event_keep", "cancelled", now);
+    const prompt = vi.spyOn(child, "prompt").mockImplementation(async (content, options) => {
+      await watcher.sweepRetention();
+      expect(child.attachment.state).toBe("ready");
+      expect(await store.getWakeup(id)).toMatchObject({ status: "cancelled", terminalSignalExpected: true });
+      await store.admitSubmission(child.id, childThread.id, { ...queuedItem("human-event-terminal", childThread.id, ""),
+        content, dispatchId: options?.dispatchId });
+      return { queueItemId: "human-event-terminal", sessionId: child.id, threadId: childThread.id, status: "queued" };
+    });
+    try {
+      expect((await cancelWorkAsHuman(store, child, child.id, id, { actorUserId: "local-user", signal: "deliver" })).kind).toBe("cancelled");
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(await store.getQueueItemByDispatchId(child.id, `wakeup:${id}:terminal`)).not.toBeNull();
+      await store.settleUnclaimed(child.id, childThread.id, "human-event-terminal", { outcome: "completed" });
+      await store.transitionWakeup(id, ["cancelled"], "running", {}, Date.now());
+      await child.options.wakeups?.cancel(id);
+      expect((await store.getWakeup(id))?.terminalSignalExpected).not.toBe(true);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      await watcher.sweepRetention();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { prompt.mockRestore(); }
+  });
+
+  it.each((["replace", "profile", "move"] as const).flatMap(action =>
+    (["hold", "process"] as const).map(kind => ({ action, kind })),
+  ))("deferred $action cancellation of $kind protects provisioning beyond terminal grace", async ({ action, kind }) => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "deferred-human-gap", "parent-deferred-human");
+    const { engineStore: store, engineHost } = api.providers;
+    const now = Date.now();
+    const id = kind === "hold" ? "ls_deferred_gap" : "wk_deferred_gap";
+    const dispatchId = kind === "hold" ? `lease:${id}:released` : `wakeup:${id}:terminal`;
+    const lease = { id: "ls_deferred_gap", sessionId: child.id, threadId: childThread.id, ownerKind: kind,
+      reason: "preserve scratch", createdAt: now, deadlineAt: now + 60_000 };
+    if (kind === "hold") await store.createLease(lease);
+    else await store.createWakeupWithLease({ id, sessionId: child.id, threadId: childThread.id, kind,
+      leaseId: lease.id, status: "running", reason: lease.reason, logOffset: 0, logTail: "", eventCount: 0,
+      createdAt: now, updatedAt: now }, { ...lease, ownerId: id });
+    const terminal = () => kind === "hold" ? store.getLease(id) : store.getWakeup(id);
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    let stateDuringProvision: string | undefined;
+    let reclaimedDuringProvision: number | null | undefined;
+    let expectationDuringProvision: boolean | undefined;
+    let restoreClock: (() => void) | undefined;
+    let stateAtSignalAdmission: string | undefined;
+    const admit = store.admitSubmission.bind(store);
+    const admission = vi.spyOn(store, "admitSubmission").mockImplementation(async (...args) => {
+      if (args[0] === child.id && args[2].dispatchId === dispatchId) {
+        await watcher.sweepRetention(Date.now());
+        stateAtSignalAdmission = engineHost.liveSession(child.id)?.attachment.state;
+      }
+      return admit(...args);
+    });
+    provider.onCreate = async () => {
+      expectationDuringProvision = (await terminal())?.terminalSignalExpected;
+      await watcher.sweepRetention(now + CHILD_TERMINAL_SIGNAL_GRACE_MS + 60_000);
+      stateDuringProvision = engineHost.liveSession(child.id)?.attachment.state;
+      reclaimedDuringProvision = (await watchRow(api!, child.id))?.sandboxReclaimedAt;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + CHILD_TERMINAL_SIGNAL_GRACE_MS + 60_000);
+      restoreClock = () => clock.mockRestore();
+    };
+    try {
+      // Child sessions cannot move through HTTP. Exercise the same deferred
+      // cancel/provision/send protocol here; the route suite verifies owner moves.
+      const response = action === "move" ? await (async () => {
+        const stopped = await cancelAllWorkAsHuman(store, child, child.id, {}, {
+          actorUserId: "local-user", signal: "defer", note: "They moved the session to another workspace.",
+        });
+        await child.attachment.replace();
+        await stopped.sendSignals(child);
+        return new Response("{}", { status: 200 });
+      })() : await fetch(`${api.baseUrl}/api/sessions/${child.id}${action === "replace" ? "/sandbox/replace?force=true" : ""}`, {
+        method: action === "replace" ? "POST" : "PATCH",
+        headers: { "Content-Type": "application/json" },
+        ...(action === "replace" ? {} : { body: JSON.stringify({ force: true, profile: "full" }) }),
+      });
+      provider.onCreate = undefined;
+      expect(response.status, await response.text()).toBe(200);
+      expect(stateDuringProvision).toBe("provisioning");
+      expect(reclaimedDuringProvision).toBeNull();
+      expect(expectationDuringProvision).toBe(true);
+      expect(await store.getQueueItemByDispatchId(child.id, dispatchId)).not.toBeNull();
+      expect(stateAtSignalAdmission).toBe("ready");
+      expect((await terminal())?.terminalSignalStartedAt).toBe(now + CHILD_TERMINAL_SIGNAL_GRACE_MS + 60_000);
+    } finally { admission.mockRestore(); restoreClock?.(); provider.onCreate = undefined; }
+  });
+
+  it.each(["hold", "timer", "process", "watch"] as const)("silent agent cancel of %s does not retain the sandbox", async kind => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "agent-cancel-gap", "parent-agent-cancel");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    const id = kind === "hold" ? "ls_agent_cancel" : "wk_agent_cancel";
+    if (kind === "hold") await store.createLease({ id, sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "scratch", createdAt: now, deadlineAt: now + 60_000 });
+    else {
+      const row: Wakeup = { id, sessionId: child.id, threadId: childThread.id, kind,
+        status: kind === "timer" ? "pending" : "running", reason: "agent cancellation", fireAt: now + 60_000,
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now };
+      if (kind === "timer") await store.createWakeup(row);
+      else await store.createWakeupWithLease({ ...row, leaseId: "ls_agent_job" }, {
+        id: "ls_agent_job", sessionId: child.id, threadId: childThread.id, sandboxId: child.attachment.sandboxId,
+        ownerKind: kind, ownerId: id, reason: row.reason, createdAt: now, deadlineAt: now + 60_000,
+      });
+    }
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    expect(await child.options.wakeups?.cancel(id)).toMatchObject({ kind: kind === "hold" ? "lease" : "wakeup" });
+    const row = kind === "hold" ? await store.getLease(id) : await store.getWakeup(id);
+    expect(row?.terminalSignalExpected).not.toBe(true);
+    expect(row?.terminalSignalStartedAt).toBeUndefined();
+    await watcher.sweepRetention();
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it("does not query dispatch IDs for historical terminal expectations", async () => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "terminal-history", "parent-terminal-history");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createLease({ id: "ls_old_expected", sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "old scratch", createdAt: now, deadlineAt: now + 60_000 });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await store.releaseLease("ls_old_expected", "deadline", now, { terminalSignalExpected: true });
+    await store.createWakeup({ id: "wk_old_expected", sessionId: child.id, threadId: childThread.id, kind: "timer", status: "done",
+      reason: "old timer", endedAt: now, terminalSignalExpected: true, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    const dispatch = vi.spyOn(store, "getQueueItemByDispatchId");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await watcher.sweepRetention(now + CHILD_TERMINAL_SIGNAL_GRACE_MS + 1);
+      expect(dispatch.mock.calls.filter(([, id]) => id === "lease:ls_old_expected:expired" || id === "wakeup:wk_old_expected:terminal")).toEqual([]);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { dispatch.mockRestore(); errors.mockRestore(); }
+  });
+
   it("new bot repro 3: retains the sandbox between hold release and lease.expired admission", async () => {
     const provider = new HibernatingChildProvider();
     provider.hibernation = false;
@@ -4063,7 +4294,7 @@ describe("child sandbox retention", () => {
       expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
       expect(child.attachment.state).toBe("released");
       expect((await store.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
-      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal never arrived"))).toBe(expected);
+      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal admission was not observed"))).toBe(expected);
     } finally { prompt.mockRestore(); errors.mockRestore(); }
   });
 
@@ -4144,7 +4375,7 @@ describe("child sandbox retention", () => {
       expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
       expect(api.providers.engineHost.liveSession(child.id)).toBeNull();
       expect((await api.providers.engineStore.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
-      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal never arrived"))).toBe(bounded);
+      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal admission was not observed"))).toBe(bounded);
       await watcher.sweepRetention(ended + 365 * 24 * 60 * 60_000);
       expect((await api.providers.engineStore.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
     } finally { errors.mockRestore(); }

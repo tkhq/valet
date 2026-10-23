@@ -127,6 +127,8 @@ export interface Wakeup {
   endedAt?: number;
   /** Set by the terminal CAS only when its decision emits a terminal signal. */
   terminalSignalExpected?: boolean;
+  /** First human terminal-signal admission attempt; deferred provisioning precedes this clock. */
+  terminalSignalStartedAt?: number;
   /** The channel origin of the turn that created it. Signals carry it with `reply: "manual"`. */
   origin?: ChannelOrigin;
   /** `watch`: start of the current rate window (ms). */
@@ -173,8 +175,10 @@ export interface Lease {
   deadlineAt: number;
   releasedAt?: number;
   releaseCause?: LeaseReleaseCause;
-  /** Set atomically with hold release only when its expiry signal will be emitted. */
+  /** Set atomically with hold release only when a terminal signal will be emitted. */
   terminalSignalExpected?: boolean;
+  /** First human terminal-signal admission attempt; deferred provisioning precedes this clock. */
+  terminalSignalStartedAt?: number;
 }
 
 /** Keyset position for paging `listDueWakeups` in (createdAt, id) order. */
@@ -287,7 +291,7 @@ export interface WakeupsSeam {
   /** The background work of `threadId`, plus a count for the session's other threads. */
   list(threadId: string): Promise<WakeupsListing>;
   /** Null for an unknown, ended, or foreign id. `refused` carries the text the tool returns. */
-  cancel(id: string): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
+  cancel(id: string, opts?: { terminalSignalExpected: true }): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
   /**
    * `tail` reads the last `bytes` of the log instead of reading forward from
    * `offset`. `capped` is true when the provider dropped output at its log

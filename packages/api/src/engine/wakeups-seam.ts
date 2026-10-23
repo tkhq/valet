@@ -471,13 +471,13 @@ export function buildWakeupsSeam(
       };
     },
 
-    async cancel(id: string) {
+    async cancel(id: string, opts?: { terminalSignalExpected: true }) {
       const nowMs = now();
       if (id.startsWith("wk_")) {
         const wakeup = await ownWakeup(id);
         if (!wakeup) return null;
         if (wakeup.eventMatch?.childSessionId && deps.db) {
-          await cancelChildDelivery(deps.db, engineStore, wakeup.eventMatch.childSessionId, "The child-updates subscription was cancelled.");
+          await cancelChildDelivery(deps.db, engineStore, wakeup.eventMatch.childSessionId, "The child-updates subscription was cancelled.", opts);
           recordEnded(wakeup.kind, "cancelled");
           return { kind: "wakeup" as const };
         }
@@ -486,7 +486,7 @@ export function buildWakeupsSeam(
         // CAS first, with the lease release in the same statement (spec B5,
         // fix wave 2 M1). A lost CAS kills nothing, so a watcher that ended
         // the row first keeps its exit signal and its cause.
-        const patch = { cause: "cancelled" as const, endedAt: nowMs };
+        const patch = { cause: "cancelled" as const, endedAt: nowMs, terminalSignalExpected: opts?.terminalSignalExpected ?? false };
         const transitioned = wakeup.leaseId
           ? await engineStore.transitionWakeupAndReleaseLease(id, ["running", "pending"], "cancelled", patch, nowMs, "cancelled")
           : await engineStore.transitionWakeup(id, ["running", "pending"], "cancelled", patch, nowMs);
@@ -509,7 +509,7 @@ export function buildWakeupsSeam(
             text: `[wakeup_cancel] ${id} belongs to ${lease.ownerKind} ${owner}. Cancel ${owner} instead; that stops the ${lease.ownerKind} and releases this lease.`,
           };
         }
-        const released = await engineStore.releaseLease(id, "cancelled", nowMs);
+        const released = await engineStore.releaseLease(id, "cancelled", nowMs, opts);
         return released ? { kind: "lease" as const } : null;
       }
       return null;
