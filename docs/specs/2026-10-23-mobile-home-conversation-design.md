@@ -156,3 +156,5 @@ ReasoningSelect and the native platform picker. Model-supported levels intersect
 with the organization limit; unavailable saved values remain labeled until changed.
 Default still clears the override. The desktop button group stays unchanged.
 This follows the single effort entry and list patterns in Claude and Codex.
+The phone field uses an inset chevron and reserves space between the label and arrow.
+Other ReasoningSelect fields keep their native appearance.

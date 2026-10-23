@@ -1,5 +1,7 @@
+import { ChevronDown } from "lucide-react";
 import { useOrgReasoning } from "~/api/settings";
 import { Select } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { levelsUpTo, REASONING_LABELS, reasoningLabelFor } from "~/lib/reasoning";
 
 /**
@@ -24,6 +26,7 @@ export function ReasoningSelect({
   allowedLevels,
   id,
   descriptionId,
+  chevron = "native",
 }: {
   value: string | null;
   onChange: (level: string | null) => void;
@@ -34,12 +37,13 @@ export function ReasoningSelect({
   allowedLevels?: readonly string[];
   id?: string;
   descriptionId?: string;
+  chevron?: "native" | "inset";
 }) {
   const orgReasoningQ = useOrgReasoning();
   const levels = levelsUpTo(orgReasoningQ.data?.max).filter(level => allowedLevels === undefined || allowedLevels.includes(level));
   const unavailableValue = value && !levels.some(level => level === value) ? value : null;
 
-  return (
+  const select = (
     <Select
       id={id}
       aria-label={ariaLabel}
@@ -49,7 +53,7 @@ export function ReasoningSelect({
         const next = e.target.value;
         if (next === "" || levels.some(level => level === next)) onChange(next === "" ? null : next);
       }}
-      className="w-full"
+      className={cn("w-full", chevron === "inset" && "appearance-none pr-10")}
       disabled={disabled || (levels.length === 0 && unavailableValue === null)}
     >
       <option value="">{emptyLabel}</option>
@@ -61,4 +65,10 @@ export function ReasoningSelect({
       ))}
     </Select>
   );
+  return chevron === "inset" ? (
+    <div className="relative">
+      {select}
+      <ChevronDown aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+    </div>
+  ) : select;
 }
