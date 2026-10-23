@@ -21,6 +21,37 @@ describe("EngineHost.evictAll", () => {
     api = undefined;
   });
 
+  it.each(["regular", "assistant", "child", "workflow"] as const)("does not reuse a released %s attachment with queued work", async kind => {
+    api = await bootTestApi();
+    const { engineHost, engineStore } = api.providers;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const parent = await engineHost.sessionFor(`release-parent-${kind}`, meta);
+    await parent.pause();
+    const resolve = () => {
+      switch (kind) {
+        case "regular": return engineHost.sessionFor("release-regular", meta);
+        case "assistant": return defaultAssistantSessionFor(api!.providers, { type: "user", id: "local-user" },
+          { actorUserId: "local-user", orgId: "local-org" });
+        case "child": return engineHost.childSessionFor("release-child", { parentSessionId: parent.id,
+          parentThreadId: parent.thread().id, actorUserId: "local-user", orgId: "local-org",
+          owner: { type: "user", id: "local-user" }, workspace: "/tmp" });
+        case "workflow": return engineHost.workflowSessionFor("release-workflow", { actorUserId: "local-user",
+          orgId: "local-org", owner: { type: "user", id: "local-user" }, workspace: "/tmp" });
+      }
+    };
+    const original = await resolve();
+    await original.pause();
+    const receipt = await original.prompt("queued across release");
+    await original.attachment.ensureReady({ timeoutMs: 5000 });
+    await original.attachment.destroy("child_retention");
+    expect(engineHost.liveSession(original.id)).toBeNull();
+    const replacement = await resolve();
+    expect(replacement).not.toBe(original);
+    await expect(replacement.attachment.ensureReady({ timeoutMs: 5000 })).resolves.toBeDefined();
+    expect(await engineStore.getQueueItem(original.id, receipt.queueItemId)).toMatchObject({ id: receipt.queueItemId, content: "queued across release" });
+    expect(await resolve()).toBe(replacement);
+  });
+
   it("retries admission if reclaim evicts the session after resolution", async () => {
     api = await bootTestApi();
     const { engineHost } = api.providers;

@@ -1630,11 +1630,8 @@ export class ChildWatcher {
         try {
           if (!await live.attachment.destroy(reason)) return false;
         } finally {
-          // A failed destroy releases its attachment too. Preserve any admitted work's session owner.
-          if (live.attachment.state === "released"
-            && (await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length === 0) {
-            this.deps.engineHost.evictCache(childSessionId, live);
-          }
+          // Released attachments cannot execute queued work. Restore it from durable state on the next session resolution.
+          if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId, live);
         }
       } else if (sandboxId) {
         // Always retry the provider destroy. The pre-check only avoids counting a previously completed destroy twice.

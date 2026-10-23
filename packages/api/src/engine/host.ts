@@ -836,6 +836,14 @@ export class EngineHost {
 
   sessionBuildInFlight(sessionId: string): boolean { return this.inflight.has(sessionId); }
 
+  /** Released attachments are terminal. Eviction keeps durable submissions for the next session restore. */
+  private reusableCacheEntry(sessionId: string): CacheEntry | undefined {
+    const entry = this.cache.get(sessionId);
+    if (entry?.session.attachment.state !== "released") return entry;
+    this.evictCache(sessionId);
+    return undefined;
+  }
+
   private teardown = new Map<string, Promise<void>>();
   private lifecycleEpoch = new Map<string, number>();
 
@@ -1010,6 +1018,11 @@ export class EngineHost {
   private trackHibernationWake(sessionId: string, session: Session): void {
     let wasSuspended = false;
     session.attachment.onStatus((status) => {
+      if (status.state === "released") {
+        // A caller can admit after resolving but before reclaim. Never retain its terminal attachment, even with queued work.
+        if (this.cache.get(sessionId)?.session === session) this.evictCache(sessionId);
+        return;
+      }
       if (status.state === "suspended") {
         wasSuspended = true;
         return;
@@ -1080,7 +1093,7 @@ export class EngineHost {
       if (!assistant) throw new ArchivedAssistantError();
       return this.assistantSessionFor(assistant.id, { actorUserId: meta.userId, orgId: meta.orgId }, { sessionId });
     }
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -1107,7 +1120,7 @@ export class EngineHost {
       }
       // The awaited lookup opened a gap since the cache/inflight checks
       // above — re-check, or two concurrent cold wakes both start a build.
-      const cachedAfter = this.cache.get(sessionId);
+      const cachedAfter = this.reusableCacheEntry(sessionId);
       if (cachedAfter) return cachedAfter.session;
       const pendingAfter = this.inflight.get(sessionId);
       if (pendingAfter) return pendingAfter;
@@ -2924,8 +2937,9 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) {
       const assistant = this.opts.db ? await loadAssistant(this.opts.db, assistantId) : undefined;
       const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
@@ -2934,7 +2948,10 @@ export class EngineHost {
         this.evictCache(sessionId);
         throw new ArchivedAssistantError();
       }
-      return cached.session;
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
+      this.assertSessionBuildAllowed(sessionId);
+      const current = this.reusableCacheEntry(sessionId);
+      if (current) return current.session;
     }
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -3513,7 +3530,7 @@ export class EngineHost {
   }
 
   liveSession(sessionId: string): Session | null {
-    return this.cache.get(sessionId)?.session ?? null;
+    return this.reusableCacheEntry(sessionId)?.session ?? null;
   }
 
   /**
@@ -4093,7 +4110,7 @@ export class EngineHost {
   ): Promise<Session> {
     while (this.sandboxCleanups.has(childSessionId)) await this.sandboxCleanups.get(childSessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(childSessionId);
-    const cached = this.cache.get(childSessionId);
+    const cached = this.reusableCacheEntry(childSessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(childSessionId);
     if (pending) return pending;
@@ -4406,8 +4423,9 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;

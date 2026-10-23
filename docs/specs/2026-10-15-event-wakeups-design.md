@@ -796,7 +796,9 @@ An event waiter follows the rule for timers:
   Queued work always blocks reclaim.
   Reclaim stamps follow successful sandbox-token revocation.
   A failed revoke leaves the row eligible for retry.
-  A failed attachment destroy evicts the cached session only when it has no unsettled submissions, so later prompts can rebuild it.
+  A released attachment always evicts its cached session, even when a caller admitted work after resolving the session but before destruction.
+  Eviction suspends old timers without deleting submissions. The next resolution restores queued work on a fresh attachment.
+  All host session builders and live-cache reads reject released cache entries. The release-status listener removes them immediately.
   The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
   A retry uses that handle directly, never the released attachment's no-op destroy.
   Both the parked handle and the session handle are cleared after confirmation, before revoke.

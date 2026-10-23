@@ -1282,7 +1282,10 @@ with an earlier entry, the entry below wins.
   idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
   Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
-  A failed attachment destroy evicts the cached session only without unsettled work, but retains its durable handle for retry and revival.
+  A released attachment always evicts the cached session, including when a direct caller admitted work during destruction.
+  Eviction keeps durable submissions. Later session resolution restores queued work with a fresh attachment, without deleting history.
+  All session builders and live-cache reads reject released entries. A release-status listener also evicts them immediately.
+  Failed attachment destruction retains its durable handle for retry and revival.
   Retries call the provider with that handle, not the released attachment.
   Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
   Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.
