@@ -262,11 +262,14 @@ function isMidGrain(place: string): boolean {
 export function listenerRowPlace(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string | null {
   const services = listenerServices(rule);
   const places = listenerPlaces(rule, slackTeam);
+  const compoundSlack = Array.isArray(rule.filters) && rule.filters.filter((filter: unknown) =>
+    typeof filter === "object" && filter !== null && "field" in filter
+    && (filter.field === "channel" || filter.field === "channel_name")).length > 1;
   // Each service's row, in the fixed order slack, github, linear. A service
   // whose filters name a concrete place wins over one that names only its
   // root, so a Slack+GitHub line with a repo filter lists at the repository.
   const rows = SERVICES.filter((service) => services.includes(service))
-    .map((service) => places[services.indexOf(service)])
+    .map((service) => service === "slack" && compoundSlack ? rootOf(service, slackTeam) : places[services.indexOf(service)])
     .filter((place): place is string => place !== undefined)
     .map((place) => {
       let row = place;

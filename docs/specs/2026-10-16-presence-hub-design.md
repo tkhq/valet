@@ -1366,3 +1366,14 @@ saved conditions.
 
 The overlap notice must fit the side pane. Long response names wrap within
 the reference. They must not hide the rest of the notice or widen the pane.
+
+### Filtered channel groups (2026-10-23)
+
+A single exact channel keeps its channel name as the overview heading.
+Compound channel conditions list at the Slack workspace row.
+Use `Filtered channels` when every response in that row has channel conditions.
+Use `Slack responses` when the row also has an unrestricted response.
+Keep the full conditions in each response sentence.
+This changes display grouping only. Event matching and channel coverage stay the same.
+The channel picker contains no response cards or name-response creation form.
+Use Advanced setup or an existing Presence entry to edit conditions.

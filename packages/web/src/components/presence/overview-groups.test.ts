@@ -55,7 +55,7 @@ describe("overviewGroups", () => {
     const slack = groups[0]!;
     const service = slack.blocks.filter((b) => b.serviceWide);
     expect(service).toHaveLength(1);
-    expect(service[0]).toMatchObject({ subject: "slack:T1", label: "Everywhere in Slack", serviceWide: true });
+    expect(service[0]).toMatchObject({ subject: "slack:T1", label: "Slack responses", serviceWide: true });
     expect(service[0]!.lines.map((l) => l.id)).toEqual(["A", "B"]);
     const all = slack.blocks.flatMap((b) => b.lines.map((l) => l.id));
     expect(all.filter((id) => id === "A")).toHaveLength(1);
@@ -78,7 +78,7 @@ describe("overviewGroups", () => {
       for (const places of [PLACES, []]) {
         const blocks = overviewGroups(places, lines, new Set()).flatMap((group) => group.blocks);
         expect(blocks).toHaveLength(1);
-        expect(blocks[0]).toMatchObject({ label: "Slack channel responses", service: "slack", serviceWide: true });
+        expect(blocks[0]).toMatchObject({ label: order === "prefix-only" ? "Filtered channels" : "Slack responses", service: "slack", serviceWide: true });
         expect(blocks[0]?.lines).toEqual(lines);
       }
     },
@@ -176,4 +176,23 @@ describe("namedPlaceLabel", () => {
     expect(namedPlaceLabel(mention("a", "C900"), PLACES)).toBe("#incidents");
     expect(namedPlaceLabel({ filters: [] }, PLACES)).toBeNull();
   });
+});
+
+it("groups compound channel conditions with patterns instead of under one channel", () => {
+  const compound = { ...mention("C", "C900"), placeKey: "slack:T1/C900" };
+  compound.filters.push({ field: "channel_name", op: "prefix", value: "lead-" });
+  const pattern = line("P", ["slack.app_mention"], [{ field: "channel_name", op: "regex", value: "^lead-" }]);
+  const blocks = overviewGroups(PLACES, [compound, pattern], new Set())[0]!.blocks;
+  expect(blocks).toHaveLength(1);
+  expect(blocks[0]).toMatchObject({ subject: "slack:T1", label: "Filtered channels", serviceWide: true });
+  expect(blocks[0]!.lines.map((entry) => entry.id)).toEqual(["C", "P"]);
+});
+
+it("preserves an authoritative repository row for a mixed-service response", () => {
+  const mixed = { ...line("mixed", ["slack.message", "github.push"], [
+    { field: "channel", op: "not_in", value: ["C900"] },
+    { field: "channel_name", op: "not_prefix", value: "lead-" },
+    { field: "repo", op: "eq", value: "acme/api" },
+  ]), placeKey: "github:acme/api" };
+  expect(blockSubjectFor(mixed, PLACES)).toBe("github:acme/api");
 });

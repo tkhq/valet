@@ -231,3 +231,11 @@ Run stored regular expressions in a worker with a deadline. A slow expression
 must not stop the page. During a check, or if the check fails, block new channel
 selections and saving. Show the status and a retry action. Do not present
 unknown coverage as an available channel.
+
+### Compact channel picker (2026-10-23)
+
+The channel picker shows the channel list and its coverage only.
+Remove the condition explanation, response cards, edit buttons, and name-response creation form.
+Advanced setup remains the single editor entry from this dialog.
+Manage existing responses from their Presence entries.
+This replaces the separate name-response controls described above.

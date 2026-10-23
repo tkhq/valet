@@ -152,3 +152,12 @@ describe("placeCovers", () => {
     expect(placeCovers("github:*", "slack:T1/C900")).toBe(false);
   });
 });
+
+it("groups compound Slack channel conditions at the workspace", () => {
+  const rule = { eventKeys: ["slack.app_mention"], filters: [
+    { field: "channel", op: "eq", value: "C900" },
+    { field: "channel_name", op: "prefix", value: "lead-" },
+  ] };
+  expect(listenerPlaces(rule, "T1")).toEqual(["slack:T1/C900"]);
+  expect(listenerRowPlace(rule, "T1")).toBe("slack:T1");
+});

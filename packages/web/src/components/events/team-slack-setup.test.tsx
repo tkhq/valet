@@ -99,18 +99,14 @@ function open() {
   fireEvent.click(screen.getByRole("button", { name: state.existing ? "Listen in channels" : "Choose channels" }));
 }
 describe("team homepage Slack setup", () => {
-  it("shows name-pattern rules alongside exact channels and opens each for editing", () => {
+  it("keeps pattern controls out of the channel picker", () => {
     state.existing = true;
-    state.patterns = [{
-      id: "lead-rule", name: "Lead replies", enabled: true, ownerType: "team", ownerId: "a", createdBy: "u", createdAt: 1, updatedAt: 1,
-      eventKeys: ["slack.app_mention"], filters: [{ field: "channel_name", op: "prefix", value: "lead-" }],
-      target: { kind: "assistant", assistant: "team", teamId: "a", follow: true },
-    }];
+    state.patterns = [{ ...mentionRule("pattern", "a", "C1"), filters: [{ field: "channel_name", op: "prefix", value: "lead-" }] }];
     open();
-    expect(screen.getByText(/channel name starts with lead-/i)).toBeTruthy();
-    expect(screen.getByText(/Separate responses cover alternative channels/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit Lead replies" }));
-    expect(screen.getByTestId("line-editor").textContent).toContain("edit Lead replies");
+    expect(screen.queryByText(/Separate responses/)).toBeNull();
+    expect(screen.queryByRole("region", { name: "Channel-name responses" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add channel-name|Edit / })).toBeNull();
+    expect(screen.getByRole("button", { name: "Advanced setup" })).toBeTruthy();
   });
 
   it.each(["prefix", "regex"] as const)("blocks pattern-covered channels for %s without changing the pattern on save", async (op) => {
@@ -193,10 +189,9 @@ describe("team homepage Slack setup", () => {
       { field: "channel_name", op: "prefix", value: "gen" },
     ] };
     const props = { team: { id: "a", name: "Alpha" }, teamName: () => "Alpha", onOpenChange: vi.fn(),
-      onAdvanced: vi.fn(), onAddPattern: vi.fn(), onEditPattern: vi.fn() };
+      onAdvanced: vi.fn() };
     const view = render(<TeamSlackChannelPicker {...props} subscriptions={[exact, pattern]} />);
     fireEvent.click(screen.getByRole("checkbox", { name: /general/ }));
-    expect(screen.getByText(/channel name starts with gen/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Stop listening" }));
     expect(deleteMutate).toHaveBeenCalledExactlyOnceWith("exact", expect.anything());
     expect(patchMutate).not.toHaveBeenCalled();
@@ -206,15 +201,6 @@ describe("team homepage Slack setup", () => {
     expect(screen.getByRole("checkbox", { name: /general/ })).toHaveProperty("checked", true);
     expect(screen.getByRole("checkbox", { name: /general/ })).toHaveProperty("disabled", true);
     expect(screen.getByText("Listening (advanced setup)")).toBeTruthy();
-  });
-
-  it("offers a separate channel-name response rule", () => {
-    state.existing = true;
-    open();
-    fireEvent.click(screen.getByRole("button", { name: "Add channel-name response" }));
-    fireEvent.change(screen.getByLabelText("Channel name prefix"), { target: { value: "lead-" } });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    expect(screen.getByTestId("line-editor").textContent).toContain("create team Alpha (a)");
   });
 
   it("hides the homepage prompt once the team listens, and adds channels to its one rule", () => {

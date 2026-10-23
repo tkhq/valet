@@ -10,8 +10,6 @@ import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-l
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { useSlackChannelListeners } from "~/lib/use-slack-channel-listeners";
 import type { EditorMode } from "~/components/presence/editor/draft";
-import { conditionWords } from "~/components/presence/editor/when-section";
-import { fromWireFilters } from "./filter-editor";
 import { LineEditor } from "~/components/presence/editor/line-editor";
 
 /**
@@ -151,11 +149,6 @@ export function TeamSlackSetupModal({
         teamName={(id) => teamsQ.data?.teams.find((candidate) => candidate.id === id)?.name}
         onOpenChange={onOpenChange}
         onAdvanced={() => setEditor({ kind: "create", preselected: { team: { id: team.id, name: team.name } } })}
-        onEditPattern={(line) => setEditor({ kind: "edit", line })}
-        onAddPattern={(prefix) => setEditor({ kind: "create", preselected: {
-          team: { id: team.id, name: team.name },
-          channelNamePattern: { prefix },
-        } })}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );
@@ -186,8 +179,6 @@ export function TeamSlackChannelPicker({
   teamName,
   onOpenChange,
   onAdvanced,
-  onAddPattern,
-  onEditPattern,
   onCloseAutoFocus,
 }: {
   team: { id: string; name: string };
@@ -195,13 +186,9 @@ export function TeamSlackChannelPicker({
   teamName: (id: string) => string | undefined;
   onOpenChange: (open: boolean) => void;
   onAdvanced: () => void;
-  onAddPattern: (prefix: string) => void;
-  onEditPattern: (line: Parameters<typeof slackChannelListeners>[0][number]) => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [addingPattern, setAddingPattern] = useState(false);
-  const [prefix, setPrefix] = useState("");
   // The picker edits this team's one channel rule. Its channels start checked.
   const listening = useMemo(() => teamListening(subscriptions, team.id), [subscriptions, team.id]);
   const [picked, setPicked] = useState<Map<string, string>>(() => new Map(listening.editableChannels.map((channel) => [channel.id, channel.label])));
@@ -292,29 +279,6 @@ export function TeamSlackChannelPicker({
             );
           })}
         </ul>
-        <section aria-label="Channel-name responses" className="space-y-2">
-          <p className="text-sm text-muted">Separate responses cover alternative channels. All conditions for a response must match.</p>
-          {listening.patterns.map((rule) => (
-            <div key={rule.id} className="rounded-md border border-line p-3 text-sm">
-              <p className="font-medium">{rule.name}</p>
-              <p className="text-muted">{fromWireFilters(rule.filters).map((row) => conditionWords(row)).join(" AND ")}</p>
-              <Button variant="ghost" size="sm" aria-label={`Edit ${rule.name}`} onClick={() => onEditPattern(rule)}>Edit</Button>
-            </div>
-          ))}
-          {!addingPattern ? (
-            <Button variant="secondary" size="sm" onClick={() => setAddingPattern(true)}>Add channel-name response</Button>
-          ) : (
-            <div className="space-y-2 rounded-md border border-line p-3">
-              <label className="text-sm" htmlFor="slack-channel-prefix">Channel name prefix</label>
-              <Input id="slack-channel-prefix" value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="lead-" />
-              <p className="text-xs text-muted">Use the name without #. This creates a separate response, including future channels. Review overlaps with exact channels and other name responses before saving.</p>
-              {!unchanged && <p role="status" className="text-sm text-muted">Save or discard your channel changes before adding a response.</p>}
-              <Button size="sm" disabled={coverageUnknown || pending || !unchanged || prefix.trim().replace(/^#/, "").length === 0}
-                onClick={() => onAddPattern(prefix.trim().replace(/^#/, ""))}>Continue</Button>
-              <Button variant="ghost" size="sm" onClick={() => setAddingPattern(false)}>Cancel name response</Button>
-            </div>
-          )}
-        </section>
         {error && <p role="alert" className="text-sm text-danger-600">{errorText(error)}</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={onAdvanced}>Advanced setup</Button>
