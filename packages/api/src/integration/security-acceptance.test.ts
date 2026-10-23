@@ -502,7 +502,7 @@ describe("acceptance scenario B: api restart is a non-event", () => {
       expect(await watchSettled(db, child2)).toBe(false);
 
       // ── The "restart": drop all in-memory session state. ──
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       expect(engineHost.liveSession(child2)).toBeNull();
       expect(engineHost.liveSession(sessionId)).toBeNull();
 
