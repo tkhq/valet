@@ -392,7 +392,7 @@ export function SessionView({
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           {pendingGate && (
-            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
           <TypingLine viewers={viewers} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
