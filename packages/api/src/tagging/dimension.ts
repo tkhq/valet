@@ -17,6 +17,7 @@ export interface Dimension {
   rules?: (subject: TagSubject) => string | undefined;
   maxActiveKeys: number;
   subjectTypes: readonly string[];
+  maxRetagsPerDay?: number;
 }
 
 export function normalizeKey(value: string): string {

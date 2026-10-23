@@ -2880,7 +2880,7 @@ CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS tag_subjects (
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
- input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 );
 --> statement-breakpoint

@@ -434,9 +434,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "tag_labels_aggregate", probe: { kind: "index", index: "tag_labels_aggregate" }, sql: `CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at)` },
   { describe: "tag_subjects", probe: { kind: "table", table: "tag_subjects" }, sql: `CREATE TABLE IF NOT EXISTS tag_subjects (
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
- input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 )` },
+  { describe: "tag_subjects.retag_count", probe: { kind: "column", table: "tag_subjects", column: "retag_count" },
+    sql: `DO $repair$ BEGIN ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_day bigint NOT NULL DEFAULT 0;
+      ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_count integer NOT NULL DEFAULT 0; END $repair$` },
   { describe: "tag_subjects.owner_type", probe: { kind: "column", table: "tag_subjects", column: "owner_type" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_type text` },
   { describe: "tag_subjects.owner_id", probe: { kind: "column", table: "tag_subjects", column: "owner_id" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_id text` },
   { describe: "tag_jobs", probe: { kind: "table", table: "tag_jobs" }, sql: `CREATE TABLE IF NOT EXISTS tag_jobs (

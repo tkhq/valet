@@ -6,11 +6,11 @@
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
-import type { SessionOutcomeUsage } from "@valet/api/wire";
 import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
   HomeConversationResponse,
   HomeTasksResponse,
+  SessionOutcomeUsage,
   ExternalUsageResponse,
   GetLinearConnectionResponse,
   ListTeamDeletionRequestsParams,

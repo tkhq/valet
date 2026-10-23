@@ -23,13 +23,13 @@ const jobWhere = (orgId: string, dimension: string, subject: SubjectRef) => and(
 const hashInput = (dimension: string, subject: TagSubject) => createHash("sha256").update(JSON.stringify([dimension, subject.text, subject.command ?? null])).digest("hex");
 
 /** Durable refs only. The caller owns rendering and the confidentiality of text. */
-export async function enqueueTagging(db: AppDb, orgId: string, dimension: string, refs: readonly SubjectRef[], force = false): Promise<void> {
+export async function enqueueTagging(db: AppDb, orgId: string, dimension: string, refs: readonly SubjectRef[], force = false, delayMs = 0): Promise<void> {
   const unique = [...new Map(refs.map(ref => [`${ref.type}:${ref.id}`, ref])).values()];
   for (let offset = 0; offset < unique.length; offset += TAG_BATCH_SIZE) {
     await db.insert(tagJobs).values(unique.slice(offset, offset + TAG_BATCH_SIZE).map(ref => ({
-      orgId, dimension, subjectType: ref.type, subjectId: ref.id, nextAttemptAt: Date.now(), force })))
+      orgId, dimension, subjectType: ref.type, subjectId: ref.id, nextAttemptAt: Date.now() + delayMs, force })))
       .onConflictDoUpdate({ target: [tagJobs.orgId, tagJobs.dimension, tagJobs.subjectType, tagJobs.subjectId],
-        set: { version: sql`${tagJobs.version} + 1`, attempts: 0, nextAttemptAt: Date.now(), force: sql`${tagJobs.force} OR ${force}` } });
+        set: { version: sql`${tagJobs.version} + 1`, attempts: 0, nextAttemptAt: Date.now() + delayMs, force: sql`${tagJobs.force} OR ${force}` } });
   }
 }
 
@@ -99,21 +99,27 @@ export class Tagger {
     }
   }
 
-  private async classifyBatch(dimension: Dimension, provided: readonly TagSubject[], forced: ReadonlySet<string>, token: string): Promise<void> {
+  private async classifyBatch(dimension: Dimension, provided: readonly TagSubject[], forced: ReadonlySet<string>, token: string): Promise<Set<string>> {
     const { db, orgId } = this.deps;
     const renewed = await db.update(tagDimensionState).set({ leaseUntil: Date.now() + LEASE_MS })
       .where(and(stateWhere(orgId, dimension.id), eq(tagDimensionState.leaseToken, token), sql`${tagDimensionState.leaseUntil} > ${Date.now()}`)).returning();
     if (!renewed.length) throw new Error("Tagging lease expired. Retry the batch.");
     const subjects: TagSubject[] = [];
+    const handled = new Set<string>();
+    const day = Math.floor(Date.now() / 86400000);
     for (const source of new Map(provided.map(subject => [`${subject.type}:${subject.id}`, subject])).values()) {
       if (!dimension.subjectTypes.includes(source.type)) throw new Error("Unsupported tag subject. Register its subject type first.");
       const subject = { ...source, text: capSubjectText(source.text) };
       const [old] = await db.select().from(tagSubjects).where(subjectWhere(orgId, dimension.id, subject));
-      if (!subject.text.trim() && (old || !dimension.rules?.(subject))) continue;
-      if (!forced.has(`${subject.type}:${subject.id}`) && old?.inputHash === hashInput(dimension.id, subject)) continue;
+      const ref = `${subject.type}:${subject.id}`;
+      if ((!subject.text.trim() && (old || !dimension.rules?.(subject)))
+        || (!forced.has(ref) && old?.inputHash === hashInput(dimension.id, subject))
+        || (dimension.maxRetagsPerDay !== undefined && old?.retagDay === day && old.retagCount >= dimension.maxRetagsPerDay)) {
+        handled.add(ref); continue;
+      }
       subjects.push(subject);
     }
-    if (!subjects.length) return;
+    if (!subjects.length) return handled;
     const keys = await readRegistry(db, orgId, dimension.id);
     const rules = new Map(subjects.map(subject => [subject, dimension.rules?.(subject)]));
     // Blank subjects without a deterministic rule stay unlabeled, not other.
@@ -168,8 +174,13 @@ export class Tagger {
           examples.add(`${subject.type}:${subject.id}`); assignedExamples.set(label.key, examples);
         }
         const inputHash = hashInput(dimension.id, subject);
-        await tx.insert(tagSubjects).values({ orgId, dimension: dimension.id, subjectType: subject.type, subjectId: subject.id, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, inputHash })
-          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId } });
+        const [previous] = await tx.select().from(tagSubjects).where(subjectWhere(orgId, dimension.id, subject));
+        const retagCount = dimension.maxRetagsPerDay !== undefined && previous
+          ? (previous.retagDay === day ? previous.retagCount : 0) + 1 : 0;
+        await tx.insert(tagSubjects).values({ orgId, dimension: dimension.id, subjectType: subject.type, subjectId: subject.id, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId,
+          inputHash, retagDay: day, retagCount })
+          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, retagDay: day, retagCount } });
+        handled.add(`${subject.type}:${subject.id}`);
         await tx.delete(tagLabels).where(labelWhere(orgId, dimension.id, subject));
         if (labels.length) await tx.insert(tagLabels).values(labels.map(label => ({ ...label, orgId, dimension: dimension.id, mode: dimension.mode,
           subjectType: subject.type, subjectId: subject.id, inputHash, model: rule ? "rule" : response.model, classifiedAt: Date.now() })));
@@ -180,8 +191,8 @@ export class Tagger {
       }
       await promoteKeys(tx, orgId, dimension.id);
       if (created) await tx.update(tagDimensionState).set({ retryOther: true }).where(stateWhere(orgId, dimension.id));
-
     });
+    return handled;
   }
 
   private async enqueueOtherRetries(id: string): Promise<void> {
@@ -234,12 +245,14 @@ export class Tagger {
           subjects.push(...rendered.filter(subject => refs.some(ref => ref.type === subject.type && ref.id === subject.id)));
         }
         const forced = new Set(jobs.filter(job => job.force).map(job => `${job.subjectType}:${job.subjectId}`));
-        for (const group of ownerBatches(subjects)) await this.classifyBatch(this.dimension(id), group, forced, token);
+        const handled = new Set<string>();
+        for (const group of ownerBatches(subjects)) {
+          for (const ref of await this.classifyBatch(this.dimension(id), group, forced, token)) handled.add(ref);
+        }
         for (const job of jobs) {
           const ref = { type: job.subjectType, id: job.subjectId };
           const subject = subjects.find(subject => subject.type === ref.type && subject.id === ref.id);
-          const [saved] = await db.select().from(tagSubjects).where(subjectWhere(orgId, id, ref));
-          if (subject?.text.trim() && saved?.inputHash !== hashInput(id, { ...subject, text: capSubjectText(subject.text) })) {
+          if (subject && !handled.has(`${ref.type}:${ref.id}`)) {
             await this.failJob(id, job);
           } else await db.delete(tagJobs).where(and(jobWhere(orgId, id, ref), eq(tagJobs.version, job.version)));
         }

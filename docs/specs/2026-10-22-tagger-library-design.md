@@ -138,3 +138,16 @@ The completion provider was deterministic, not a live model.
 Session outcome labels also retain null actors for synthetic team runtime principals.
 
 The UI stress gallery seeds scoped session outcomes without network requests.
+
+## Outcome review constraints
+
+Outcome subjects are thread identities: `session_id:thread_id` from the event envelope.
+The renderer reads only that thread's compaction, recent turns, and latest queue item.
+Empty assistant messages do not add a line.
+Running or queued work does not receive a settled label; a human gate can receive a blocked label.
+Each relevant event postpones classification until ten quiet minutes have passed.
+An initial label permits at most three successful re-tags per UTC day.
+Unchanged text and rejected output do not consume that budget.
+Workflow-step sessions (`wf:`) are excluded.
+Child-session threads are included and identified in the card tooltip.
+The response retains the `sessions` count field, but each count now represents one thread.

@@ -11,7 +11,7 @@ import { toolIntentDimension, toolIntentRenderer } from "./tool-intent.js";
 
 export function createTagger(db: AppDb, credentials: CredentialStore, orgId: string, store: SessionStore): Tagger {
   return new Tagger({ db, orgId, dimensions: [toolIntentDimension, sessionOutcomeDimension], classify: taggingModel(db, credentials, orgId),
-    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)], ["session", sessionOutcomeRenderer(db, store, orgId)]]) });
+    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)], ["session_thread", sessionOutcomeRenderer(db, store, orgId)]]) });
 }
 
 /** Uses EventDispatcher's existing retry rail. No timer or session reader lives here. */

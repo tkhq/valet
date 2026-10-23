@@ -14,7 +14,7 @@ describe("Session outcomes", () => {
   it("shows an empty state", () => {
     state.data = { outcomes: [] };
     render(<SessionOutcomes period={{ kind: "lookback", window: "7d" }} scope="me" />);
-    expect(screen.getByText("No classified sessions in this window.")).toBeTruthy();
+    expect(screen.getByText("No classified threads in this window.")).toBeTruthy();
   });
   it("provides retry on failure", () => {
     state.isError = true;
