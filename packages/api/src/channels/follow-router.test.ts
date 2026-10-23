@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
-import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
+import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
@@ -119,10 +119,10 @@ describe("handleFollowedMessage", () => {
     // Read persisted queue metadata after all four admissions. Editing the
     // rule must not rewrite earlier turns or retain removed avatar fields.
     for (const [eventId, expected] of [
-      ["presence-first", { [MID_TURN_DELIVERY_KEY]: true, presence: first }],
-      ["presence-edited", { [MID_TURN_DELIVERY_KEY]: true, presence: edited }],
-      ["presence-unbound", { [MID_TURN_DELIVERY_KEY]: true }],
-      ["presence-cleared", { [MID_TURN_DELIVERY_KEY]: true }],
+      ["presence-first", { presence: first }],
+      ["presence-edited", { presence: edited }],
+      ["presence-unbound", null],
+      ["presence-cleared", null],
     ] as const) {
       const dispatchId = `slack:follow:${eventId}`;
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };

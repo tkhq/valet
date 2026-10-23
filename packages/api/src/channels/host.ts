@@ -1807,7 +1807,8 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          queueMode: thread.key === HOME_THREAD_KEY ? "followup" : undefined,
+          queueMode: channelType === "slack" ? "steer" : undefined,
+          ...(channelType === "slack" ? { steerScope: "active-origin" as const } : {}),
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say

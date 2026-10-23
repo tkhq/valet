@@ -475,3 +475,11 @@ export function originFromEntries(entries: SessionEntry[], queueItemId: string):
   }
   return origin;
 }
+
+/** Only messages from the same external conversation can interrupt each other. */
+export function sameSubmissionOrigin(left: PromptContent, right: PromptContent): boolean {
+  if (!isSignalContent(left) || !isSignalContent(right)) return false;
+  const a = left.origin;
+  const b = right.origin;
+  return !!a?.threadKey && !!b?.threadKey && a.channelType === b.channelType && a.threadKey === b.threadKey;
+}

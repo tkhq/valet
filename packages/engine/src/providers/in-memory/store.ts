@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
-import { countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
+import { sameSubmissionOrigin, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
 import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -538,7 +538,7 @@ export class InMemorySessionStore implements SessionStore {
     // admission semantics mirror the sqlite backend's in-transaction check
     // exactly: idempotent replays never trip the cap, and the count reflects
     // state as of immediately before this item lands.
-    if (opts?.maxPending !== undefined) {
+    if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
       const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
@@ -563,11 +563,22 @@ export class InMemorySessionStore implements SessionStore {
     if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
       throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
     }
-    const activeScope = opts?.steerScope === "active";
+    const originScope = opts?.steerScope === "active-origin";
+    const activeScope = opts?.steerScope === "active" || originScope;
     if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
       throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
     }
-    const headScope = promotionScope || activeScope;
+    const matchingActive = !originScope || [...r.queueItems.values()].some(candidate =>
+      candidate.threadId === threadId && !candidate.supersededByItemId &&
+      (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
+      sameSubmissionOrigin(candidate.content, item.content) &&
+      (r.entriesByThread.get(threadId) ?? []).some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === candidate.id));
+    if (originScope && opts?.maxPending !== undefined) {
+      const unsettled = [...r.queueItems.values()].filter(candidate => candidate.status !== "settled");
+      const remaining = countPendingForCap(unsettled, threadId) - (matchingActive ? 1 : 0);
+      if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
+    }
+    const headScope = promotionScope || (activeScope && matchingActive);
     const queuedCreatedAt = headScope
       ? [...r.queueItems.values()]
           .filter(
@@ -594,6 +605,7 @@ export class InMemorySessionStore implements SessionStore {
     if (opts?.steer) {
       for (const other of r.queueItems.values()) {
         if (other.id === stored.id) continue;
+        if (originScope && (!matchingActive || !sameSubmissionOrigin(other.content, item.content))) continue;
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;

@@ -1,5 +1,6 @@
 import {
   boundEventDigest,
+  sameSubmissionOrigin,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
   EVENT_DELIVERED_MAX_KEYS,
@@ -932,7 +933,7 @@ export class PgSessionStore implements SessionStore {
             }
           }
 
-          if (opts?.maxPending !== undefined) {
+          if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
             const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
             const count = toNum(countResult.rows[0]?.count, "count");
             if (count >= opts.maxPending) {
@@ -944,13 +945,14 @@ export class PgSessionStore implements SessionStore {
           if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
             throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
           }
-          const activeScope = opts?.steerScope === "active";
+          const originScope = opts?.steerScope === "active-origin";
+          const activeScope = opts?.steerScope === "active" || originScope;
           if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
             throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
           }
-          const headScope = promotionScope || activeScope;
+          const lockScope = promotionScope || activeScope;
           let lockedPending: QueueItem[] = [];
-          if (headScope) {
+          if (lockScope) {
             // Lock every runnable candidate before inserting the promoted
             // head. A claim that won first is observed as running and gets
             // superseded; a claim that lost waits, then sees the new head.
@@ -959,6 +961,22 @@ export class PgSessionStore implements SessionStore {
               queueItemRowToItem(rawToQueueItemRow(raw)),
             );
           }
+
+          // An input must be in history before its turn can be interrupted.
+          // Otherwise a reply racing startup could erase the first message.
+          const entered = originScope ? await tx.query(
+            "SELECT queue_item_id FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND queue_item_id = ANY($3::text[]) AND entry_type = 'message' AND role = 'user'",
+            [sessionId, threadId, lockedPending.map(candidate => candidate.id)],
+          ) : { rows: [] };
+          const enteredIds = new Set(entered.rows.map(row => row.queue_item_id));
+          const matchingActive = !originScope || lockedPending.some(candidate =>
+            (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
+            sameSubmissionOrigin(candidate.content, item.content) && enteredIds.has(candidate.id));
+          if (originScope && opts?.maxPending !== undefined) {
+            const remaining = lockedPending.length - (matchingActive ? 1 : 0);
+            if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
+          }
+          const headScope = promotionScope || (activeScope && matchingActive);
 
           if (opts?.promoteFromItemId) {
             let srcItem: QueueItem | null | undefined;
@@ -1006,13 +1024,14 @@ export class PgSessionStore implements SessionStore {
 
           const superseded: string[] = [];
           if (opts?.steer) {
-            const ids = headScope
+            const ids = lockScope
               ? lockedPending
                   .filter(
                     (candidate) =>
-                      candidate.id === opts.promoteFromItemId ||
+                      (candidate.id === opts.promoteFromItemId ||
                       candidate.status === "running" ||
-                      candidate.status === "blocked_on_decision_gate",
+                      candidate.status === "blocked_on_decision_gate") &&
+                      (!originScope || (matchingActive && sameSubmissionOrigin(candidate.content, item.content))),
                   )
                   .map((candidate) => candidate.id)
               : (

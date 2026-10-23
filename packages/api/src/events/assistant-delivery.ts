@@ -465,15 +465,15 @@ async function deliverToAssistantThreadInner(
     }
     return { sessionId: session.id, threadId: thread.id };
   }
-  // `inject`, not the thread default: a personal assistant thread defaults
-  // to `steer`, which would abort the person's running turn and drop the
-  // items queued behind it. The engine admits the delivery into the running
-  // turn only when it adds no authority; otherwise it waits as a followup.
+  // A Slack reply starts a fresh turn in the same conversation. Other events
+  // retain mid-turn injection and cannot cancel a person's work.
+  const interrupts = !args.unattended && signal.origin?.channelType === "slack" && signal.attributes?.rehydrated !== "true";
   const receipt = args.recordOnly
     ? await thread.recordSignal(signal, { dispatchId: args.dispatchId, author: args.author ?? { id: args.actorUserId } })
     : await thread.submitPrompt(signal, {
       dispatchId: args.dispatchId,
-      queueMode: "inject",
+      queueMode: interrupts ? "steer" : "inject",
+      ...(interrupts ? { steerScope: "active-origin" as const } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {}),
       author: args.author ?? { id: args.actorUserId },
     });

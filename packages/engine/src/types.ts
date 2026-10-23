@@ -393,6 +393,8 @@ export interface PromptOptions {
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
   queueMode?: QueueMode;
+  /** Limit steering to the active turn, optionally in the same external conversation. */
+  steerScope?: "active" | "active-origin";
   model?: string;
   role?: string;
   resultSchema?: TSchema;
@@ -2080,7 +2082,7 @@ export interface ListOpts {
 
 export interface SubmissionAdmissionOptions {
   steer?: boolean;
-  steerScope?: "all" | "active-and-source" | "active";
+  steerScope?: "all" | "active-and-source" | "active" | "active-origin";
   maxPending?: number;
   promoteFromItemId?: string;
 }

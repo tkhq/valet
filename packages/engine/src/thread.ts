@@ -852,20 +852,16 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
-    // Steer admissions are exempt from the pending cap: the same atomic
-    // `admitSubmission({ steer: true })` call supersedes every prior
-    // unsettled item on the thread in the same transaction, so the count
-    // they'd leave behind is always ~0-1 regardless of how many were pending
-    // beforehand. For every other mode, the cap is enforced by the store
-    // INSIDE the admission transaction (opts.maxPending) rather than via a
-    // separate pre-check, so concurrent admissions can't race past it.
+    // Unscoped steering replaces all pending work. Conversation steering
+    // preserves queued work, so the store checks the cap after excluding
+    // the active turn it will replace. Admission and the check are atomic.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), ...(opts.steerScope === "active-origin" ? { maxPending: cap } : {}) } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {

@@ -60,6 +60,7 @@ export {
   completedSubmissionOutcome,
   resolvePartialSubmissionText,
   originFromEntries,
+  sameSubmissionOrigin,
   validateSignalTagName,
   validateSignalAttributeKeys,
   renderSignalEnvelope,
