@@ -171,7 +171,7 @@ async function pollWithinDeadline(poll: () => Promise<JobPoll>, deadline: number
   }
 }
 
-type ForegroundExecResult = Omit<ExecResult, "exitCode"> & { exitCode?: number; jobFailed?: boolean };
+type ForegroundExecResult = Omit<ExecResult, "exitCode"> & { exitCode?: number; jobFailed?: boolean; jobTimedOut?: boolean };
 
 /**
  * Poll a job-mode exec to completion, accumulating output across polls
@@ -199,7 +199,7 @@ async function pollJobToCompletion(
     }
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
-      return { stdout: output, stderr: "", exitCode: 124, timedOut: true, truncated };
+      return { stdout: output, stderr: "", exitCode: 124, timedOut: true, jobTimedOut: true, truncated };
     }
 
     const poll = await pollWithinDeadline(() => pollJob(execId, offset), deadline, ctx.signal);
@@ -349,7 +349,8 @@ export const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMax
 export async function runForegroundExec(ctx: ToolContext, command: string, opts: ExecOpts): Promise<ForegroundExecResult> {
   const sandbox = ctx.sandbox;
   if (!sandbox) throw new Error("No sandbox. Run this command in a session with a sandbox.");
-  const timeoutMs = opts.timeout ?? BASH_DEFAULT_TIMEOUT_S * 1000;
+  const { timeout, ...jobOpts } = opts;
+  const timeoutMs = timeout ?? BASH_DEFAULT_TIMEOUT_S * 1000;
   // PolicySandbox always exposes job methods. Fall back only when kickoff says unsupported.
   // Bind the instance: policy methods use this.dispatch internally.
   const execJob = sandbox.execJob?.bind(sandbox);
@@ -357,7 +358,7 @@ export async function runForegroundExec(ctx: ToolContext, command: string, opts:
   const cancelJob = sandbox.cancelJob?.bind(sandbox);
   if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
     let handle: ExecJobHandle | undefined;
-    try { handle = await execJob(command, opts); }
+    try { handle = await execJob(command, jobOpts); }
     catch (err) { if (!isJobUnsupported(err)) throw err; }
     if (handle) return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
   }
@@ -402,7 +403,7 @@ export const bashTool = defineTool({
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
     const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
-    const outcome = result.timedOut || result.jobFailed || result.exitCode === undefined ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
+    const outcome = result.jobTimedOut || result.jobFailed ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
     return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
   },
 });

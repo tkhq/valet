@@ -99,6 +99,7 @@ describe("bash tool: mode selection", () => {
     };
     const ctx = makeCtx(sandbox);
     const result = await execute({ command: "long-thing", timeout: 61 }, ctx);
+    expect(sandbox.execJob).toHaveBeenCalledWith("long-thing", { signal: ctx.signal });
     expect(sandbox.execJob).toHaveBeenCalledTimes(1);
     expect(sandbox.exec).not.toHaveBeenCalled();
     expect((result as { text: string }).text).toBe("job-out\n");
@@ -230,6 +231,36 @@ describe("bash tool: job-mode poll loop", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["short", "no-job-support", "unsupported-job"])("records comment outcomes on foreground timeouts (%s)", async mode => {
+    const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+    const sandbox: FakeSandbox = {
+      id: "foreground-timeout",
+      exec: vi.fn(async (): Promise<ExecResult> => ({ stdout: url, stderr: "", exitCode: 124, timedOut: true })),
+      ...(mode !== "no-job-support" ? {
+        execJob: vi.fn(async (): Promise<ExecJobHandle> => { throw new Error("[job_unsupported]"); }),
+        pollJob: vi.fn(), cancelJob: vi.fn(),
+      } : {}),
+    };
+    const result = await execute({ command: "gh pr comment 1031 --body test", timeout: mode === "short" ? 60 : 61 }, makeCtx(sandbox));
+    expect(result.text).toContain(url);
+    expect(result.text).toContain("timed out");
+    expect(result.text).not.toContain("[exit 124]");
+    expect(result.outcome).toEqual({ kind: "pull_request_comment", url });
+    expect(sandbox.exec).toHaveBeenCalledTimes(1);
+    if (mode === "short") expect(sandbox.execJob).not.toHaveBeenCalled();
+  });
+
+  it("records a completed job's comment outcome even without an exit code, as on dev-v2", async () => {
+    const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+    const sandbox: FakeSandbox = {
+      id: "comment-unknown-exit", execJob: async () => ({ execId: "comment-job" }),
+      pollJob: async () => ({ status: "done", output: url, nextOffset: url.length }), cancelJob: async () => {},
+    };
+    const result = await execute({ command: "gh pr comment 1031 --body test", timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe(url);
+    expect(result.outcome).toEqual({ kind: "pull_request_comment", url });
   });
 
   it("does not record a comment outcome from job output on timeout", async () => {

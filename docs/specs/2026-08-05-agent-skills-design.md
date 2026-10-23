@@ -184,6 +184,7 @@ Bash and skill scripts share the foreground execution helper.
 Above 60 seconds, supported providers use job mode.
 The helper cancels jobs at the deadline or on abort, including a stalled poll.
 A timed-out bash job records no terminal outcome, even if its output contains a comment URL.
+Foreground timeouts still recognize comment outcomes, including when job mode is unavailable.
 Job output combines stdout and stderr in the stdout result field.
 The tool stays registered so scripts added after session construction can become reachable through skill refresh.
 An unknown script skill triggers at most one extra refresh for that tool instance.
