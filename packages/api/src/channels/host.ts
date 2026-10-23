@@ -1,6 +1,7 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
+import { bindConversation, findConversationBinding, findPriorConversationThread } from "./conversation-bindings.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -40,6 +41,7 @@ import {
   type SessionStore,
   type SignalContent,
   type StoredCredential,
+  type Thread,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
@@ -1674,6 +1676,38 @@ export class ChannelHost {
     });
   }
 
+  /** Recover old destinations once; later deliveries use the saved binding. */
+  private async directMessageThread(
+    session: Session,
+    channelType: string,
+    conversationKey: string,
+    threadKey: string,
+    userId: string,
+    orgId: string,
+    create: boolean,
+  ): Promise<Thread | null> {
+    if (channelType !== "slack") {
+      return create
+        ? this.deps.engineHost.ensureFreshThread(session, threadKey, { userId, orgId, workspace: session.options.workspace })
+        : session.threadByKey(threadKey);
+    }
+    const scope = { orgId, userId, sessionId: session.id, channelType, conversationKey };
+    let threadId = await findConversationBinding(this.deps.db, scope);
+    if (!threadId) {
+      let candidateId = await findPriorConversationThread(this.deps.db, scope, threadKey);
+      if (!candidateId && create) {
+        candidateId = (await this.deps.engineHost.ensureFreshThread(session, threadKey, { userId, orgId, workspace: session.options.workspace })).id;
+      }
+      if (!candidateId) return null;
+      threadId = await bindConversation(this.deps.db, scope, candidateId);
+    }
+    const data = await this.deps.engineStore.getThread(session.id, threadId);
+    if (!data) throw new ConflictError("This Slack conversation's saved chat is unavailable. Start a new Slack thread.");
+    const thread = await session.loadThread(data.id);
+    if (!thread) throw new ConflictError("This Slack conversation's saved chat is unavailable. Start a new Slack thread.");
+    return thread;
+  }
+
   /**
    * A person changed a message that already reached their assistant thread.
    * The change is recorded for the model with no reply (`slackEditSignal`).
@@ -1693,14 +1727,13 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await session.threadByKey(threadKey) ??
-      (channelType === "slack" ? await session.threadByKey(HOME_THREAD_KEY) : null);
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, false);
     if (!thread) {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;
     }
     await thread.recordSignal(
-      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType } }),
+      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType }, origin: { channelType, threadKey } }),
       { dispatchId: event.dispatchId, author: { id: userId } },
     );
   }
@@ -1741,18 +1774,8 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    // A Slack DM with Valet is the person's home conversation, the same one
-    // the web app opens first. The reply still goes back to the DM thread:
-    // the origin below keeps the Slack thread key. A reply in a DM thread
-    // that already has its own Valet thread (one started before home
-    // existed) stays in that thread.
-    const ownThread = channelType === "slack" ? await session.threadByKey(threadKey) : null;
-    const thread = await this.deps.engineHost.ensureFreshThread(session, channelType === "slack" && !ownThread ? HOME_THREAD_KEY : threadKey, {
-      userId,
-      orgId,
-      workspace: session.options.workspace,
-    });
-    if (thread.key === HOME_THREAD_KEY) await thread.setMode("followup");
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, true);
+    if (!thread) throw new Error("A new direct message must resolve to a chat.");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1807,7 +1830,6 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          queueMode: thread.key === HOME_THREAD_KEY ? "followup" : undefined,
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say
