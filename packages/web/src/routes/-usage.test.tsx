@@ -103,6 +103,8 @@ const mockBreakdown: UsageBreakdownResponse = {
       unassignedInvocations: 2,
       attributedContextTokens: 3456,
       carryingCalls: 9,
+      fileReads: 0,
+      scriptRuns: 0,
     },
   ],
   byModel: [

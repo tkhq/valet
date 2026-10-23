@@ -1583,7 +1583,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };

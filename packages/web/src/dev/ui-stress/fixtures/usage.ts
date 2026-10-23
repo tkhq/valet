@@ -66,6 +66,8 @@ export const stressUsageBreakdown: UsageBreakdownResponse = {
     unassignedInvocations: i % 2,
     attributedContextTokens: i * 77_777,
     carryingCalls: i * 11,
+    fileReads: i * 5,
+    scriptRuns: i * 2,
   })),
   byModel: Array.from({ length: 12 }, (_, i) => ({
     ...bucket(i + 1),

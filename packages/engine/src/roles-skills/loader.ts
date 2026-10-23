@@ -103,3 +103,11 @@ function asStringMap(value: FrontmatterValue | undefined): Record<string, string
   }
   return out;
 }
+
+/** Companion inventories need no file bytes and apply to every invocation path. */
+export function skillFileManifest(skill: import("../types.js").SkillSource): string {
+  return skill.files?.length
+    ? "\n\nStored skill files:\n" + skill.files.map((file) => `- ${file.path} (${file.size} bytes)`).join("\n") +
+      "\nUse skill({ name, path }) to read a text file. Use skill_script({ name, script, args }) to run a scripts/ file."
+    : "";
+}

@@ -24,7 +24,7 @@ import { NotFoundError, parseSearchQuery } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, teamMembers, type SkillRow } from "../schema/index.js";
+import { skills, skillFiles, teamMembers, type SkillRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
 export type SkillOrigin = "local" | "repo";
@@ -504,6 +504,7 @@ export async function createSkill(
     frontmatter: fm,
     contentSha: skillContentSha(input.content),
     upstreamPath: input.upstreamPath ?? null,
+    upstreamBlobSha: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -700,7 +701,21 @@ export async function listSkillSourcesFor(
   principal: Principal,
   orgId: string,
 ): Promise<SkillSource[]> {
-  return (await listSkillRowsFor(db, principal, orgId)).map(rowToSkillSource);
+  const rows = await listSkillRowsFor(db, principal, orgId);
+  if (rows.length === 0) return [];
+  const files = await db.select({ skillId: skillFiles.skillId, path: skillFiles.path,
+    size: skillFiles.size, mode: skillFiles.mode, blobSha: skillFiles.blobSha })
+    .from(skillFiles).where(inArray(skillFiles.skillId, rows.map((row) => row.id)));
+  return rows.map((row) => ({
+    ...rowToSkillSource(row),
+    files: files.filter((file) => file.skillId === row.id),
+    readFile: async (file) => {
+      const [stored] = await db.select({ bytes: skillFiles.bytes }).from(skillFiles).where(and(
+        eq(skillFiles.skillId, row.id), eq(skillFiles.path, file.path), eq(skillFiles.blobSha, file.blobSha),
+      ));
+      return stored?.bytes;
+    },
+  }));
 }
 
 /** Stored rows available to one session principal, in registry precedence. */

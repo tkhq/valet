@@ -77,3 +77,16 @@ export async function backfillAuxUsageRollups(db: PgDb): Promise<void> {
     requestAfter = request;
   }
 }
+
+/** Correct pre-release companion facts through the existing delta triggers. */
+export async function prepareSkillCompanionUsage(db: PgDb): Promise<void> {
+  await db.transaction(async tx => {
+    await tx.query("SET LOCAL lock_timeout = '5s'");
+    await tx.query('LOCK TABLE skill_invocations, skill_context_attributions IN SHARE ROW EXCLUSIVE MODE');
+    await tx.query(AUX_USAGE_ROLLUP_SQL);
+    await tx.query(`UPDATE usage_skill_facts f SET invoked=0,tokens=0,request_id=NULL
+      FROM skill_invocations i WHERE i.id=f.invocation_id AND i.path IN ('file_read','script_run')`);
+  });
+}
+export const SKILL_COMPANION_USAGE_SQL = `CREATE OR REPLACE VIEW usage_skill_companion_ready AS
+  SELECT 1 AS version FROM usage_skill_facts,usage_skill_hourly WHERE false;`;

@@ -104,3 +104,11 @@ describe("dispatchCommand", () => {
     if (o.kind === "execute") expect(o.raw).toBe("claude-opus-4-8");
   });
 });
+
+it.each(["context", "prompt"] as const)("includes companion manifests in %s slash expansions", invocation => {
+  const registry = buildCommandRegistry({ skills: [{ ...reviewSkill, invocation,
+    files: [{ path: "references/x.md", size: 9, mode: "100644", blobSha: "sha" }] }], pluginCommands: [], bareSkillNames: false });
+  const result = dispatchCommand("/skill:review", registry);
+  expect(result.kind).toBe("expand");
+  if (result.kind === "expand") expect(result.text).toContain("references/x.md (9 bytes)");
+});

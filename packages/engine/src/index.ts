@@ -42,6 +42,7 @@ export {
   renderTemplate,
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
+  skillFileManifest,
   validateSkillFrontmatter,
   isLoadable,
   type FrontmatterValue,
@@ -169,6 +170,7 @@ export {
   threadReadTool,
   threadReference,
   JOB_MODE_THRESHOLD_MS,
+  runForegroundExec,
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,
 } from "./builtin-tools/index.js";
