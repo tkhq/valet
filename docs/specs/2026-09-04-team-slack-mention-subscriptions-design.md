@@ -239,3 +239,11 @@ Remove the condition explanation, response cards, edit buttons, and name-respons
 Advanced setup remains the single editor entry from this dialog.
 Manage existing responses from their Presence entries.
 This replaces the separate name-response controls described above.
+
+### Name lookup failures
+
+The picker also checks the backend behavior when a Slack name lookup fails.
+A name exclusion can match an absent name. Reserve that potential coverage
+instead of offering the channel to another team. Keep ID restrictions and
+positive name conditions in the same check. Mark coverage as conditional
+when only the absent-name case matches.

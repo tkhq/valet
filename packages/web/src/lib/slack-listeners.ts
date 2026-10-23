@@ -81,13 +81,18 @@ export function slackChannelListeners(
         if (!candidates.has(id)) candidates.set(id, { id });
       }
     }
-    const channels = channelFilters.length === 0 ? [ALL_CHANNELS] : [...candidates.values()]
-      .filter((channel) => channelFilters.every((filter) =>
-        channelFilterMatches(filter, filter.field === "channel" ? channel.id : channel.name)))
-      .map((channel) => channel.id);
+    const channels = channelFilters.length === 0 ? [{ id: ALL_CHANNELS }] : [...candidates.values()];
     for (const channel of channels) {
+      const matches = (name: string | undefined) => channelFilters.every((filter) =>
+        channelFilterMatches(filter, filter.field === "channel" ? channel.id : name));
+      const namedMatch = matches("name" in channel ? channel.name : undefined);
+      // Intake permits absent names for exclusion operators when Slack lookup
+      // fails. Reserve that potential coverage even when the catalog excludes it.
+      const missingNameMatch = matches(undefined);
+      if (!namedMatch && !missingNameMatch) continue;
+      const coverage: ChannelListener = !namedMatch && missingNameMatch ? { ...listener, conditional: true } : listener;
       // This team's own listener wins the label: it is the one it can edit.
-      if (!listeners.has(channel) || listener.kind === "this-team") listeners.set(channel, listener);
+      if (!listeners.has(channel.id) || coverage.kind === "this-team") listeners.set(channel.id, coverage);
     }
   }
   return listeners;

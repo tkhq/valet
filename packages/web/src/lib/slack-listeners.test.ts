@@ -121,3 +121,24 @@ describe("catalog channel occupancy", () => {
     }
   });
 });
+
+
+it.each(["not_prefix", "not_in", "not_regex"] as const)("reserves %s coverage when Slack can omit a channel name", (op) => {
+  const listeners = slackChannelListeners([rule({ ownerId: "t2", filters: [
+    { field: "channel_name", op, value: op === "not_in" ? ["design"] : "design" },
+  ] })], "t1", () => "Design", [{ id: "C2", name: "design" }]);
+  expect(listenerFor(listeners, "C2")).toEqual({ kind: "other", owner: "Design's Valet", conditional: true });
+});
+
+it("keeps ID restrictions and positive name conditions when checking lookup failure", () => {
+  const listeners = slackChannelListeners([rule({ filters: [
+    { field: "channel", op: "eq", value: "C1" },
+    { field: "channel_name", op: "not_prefix", value: "design" },
+  ] })], "t1", () => undefined, [{ id: "C1", name: "design" }, { id: "C2", name: "design" }]);
+  expect([...listeners.keys()]).toEqual(["C1"]);
+  const contradictory = slackChannelListeners([rule({ filters: [
+    { field: "channel_name", op: "prefix", value: "design" },
+    { field: "channel_name", op: "not_prefix", value: "design" },
+  ] })], "t1", () => undefined, [{ id: "C1", name: "design" }]);
+  expect(contradictory.size).toBe(0);
+});

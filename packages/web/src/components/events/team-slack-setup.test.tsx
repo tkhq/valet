@@ -129,6 +129,17 @@ describe("team homepage Slack setup", () => {
     expect(createMutate).not.toHaveBeenCalled();
   });
 
+  it("blocks an excluded channel that can match after a name lookup failure", () => {
+    state.existing = true;
+    state.patterns = [{ ...mentionRule("exclusion", "b", "C2"), filters: [
+      { field: "channel_name", op: "not_prefix", value: "design" },
+    ] }];
+    open();
+    const design = screen.getByRole("checkbox", { name: /design/ });
+    expect(design).toHaveProperty("disabled", true);
+    expect(design.closest("li")?.textContent).toContain("Taken by Design's Valet");
+  });
+
   it("reserves conditional pattern coverage without claiming unconditional listening", () => {
     state.existing = true;
     state.patterns = [{ ...mentionRule("conditional", "a", "C3"), filters: [
