@@ -33,7 +33,6 @@ vi.mock("~/api/browser", () => ({
       enabled: state.enabled,
       settings: {
         enabled: state.settingsEnabled,
-        audience: "owner",
         grants: [],
         policyVersion: "1",
       },
@@ -197,13 +196,15 @@ describe("browser pane control", () => {
     expect(state.start).toHaveBeenCalledOnce();
   });
 
-  it("does not resubmit the selected browser audience", () => {
+  it("lets an admin disable browser access without an audience choice", () => {
     state.status = ready();
     render(<BrowserPane sessionId="session" />);
-    const owner = screen.getByRole("button", { name: "Owner" });
-    expect(owner.hasAttribute("disabled")).toBe(true);
-    fireEvent.click(owner);
-    expect(state.settings).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Owner" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Team" })).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Disable browser access" }),
+    );
+    expect(state.settings).toHaveBeenCalledWith({ enabled: false });
   });
 
   it("requests a private lease and explains the agent pause", () => {

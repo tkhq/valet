@@ -38,9 +38,9 @@ export interface BrowserGrant {
   expiresAt: number;
 }
 
+/** Access follows the session owner: the person, or the members of the owning team. */
 export interface BrowserSettings {
   enabled: boolean;
-  audience: "owner" | "team";
   policyVersion: string;
   grants: BrowserGrant[];
 }

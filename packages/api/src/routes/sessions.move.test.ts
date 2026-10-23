@@ -6,11 +6,12 @@
  * makes it the CALLER's), the no-op path, and the guarantee that a move —
  * like a rename — never starts a sandbox.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, childWatches, teamMembers, teams } from "../schema/index.js";
 import type { PatchSessionResponse } from "../wire/types.js";
+import { BrowserPolicy } from "../services/browser-policy.js";
 
 async function seedSession(
   api: TestApi,
@@ -84,6 +85,33 @@ describe("PATCH /api/sessions/:id — teamId (move between workspaces)", () => {
     const body = (await res.json()) as PatchSessionResponse;
     expect(body.owner).toEqual({ type: "team", id: "team_mv" });
     expect(await storedOwner(api, "mv-to-team")).toEqual({ type: "team", id: "team_mv" });
+  });
+
+  it("turns the browser off when a session moves, so the old owner's sign-ins stay private", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_br", ["local-user"]);
+    await seedSession(api, { id: "mv-browser", owner: { type: "user", id: "local-user" } });
+    const policy = api.providers.engineHost.browserPolicy();
+    expect((await policy?.settings("mv-browser"))?.enabled).toBe(true);
+    const res = await patch(api, "mv-browser", { teamId: "team_br" });
+    expect(res.status).toBe(200);
+    expect((await policy?.settings("mv-browser"))?.enabled).toBe(false);
+  });
+
+  it("keeps the old owner when the browser cannot be turned off", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_br2", ["local-user"]);
+    await seedSession(api, { id: "mv-browser-fail", owner: { type: "user", id: "local-user" } });
+    const disable = vi
+      .spyOn(BrowserPolicy.prototype, "disableForOwnerChange")
+      .mockRejectedValueOnce(new Error("store unavailable"));
+    try {
+      const res = await patch(api, "mv-browser-fail", { teamId: "team_br2" });
+      expect(res.ok).toBe(false);
+      expect(await storedOwner(api, "mv-browser-fail")).toEqual({ type: "user", id: "local-user" });
+    } finally {
+      disable.mockRestore();
+    }
   });
 
   it("teamId null moves a team session to the caller's own workspace", async () => {

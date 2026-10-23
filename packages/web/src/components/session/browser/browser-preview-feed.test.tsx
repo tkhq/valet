@@ -12,7 +12,6 @@ function ready(): SessionBrowserResponse {
     canAdminister: true,
     settings: {
       enabled: true,
-      audience: "owner",
       grants: [],
       policyVersion: "1",
     },
