@@ -201,7 +201,7 @@ The thread menu keeps browser access, sharing, and the thread audience visible.
 Embedded assistant panels retain their own close and host controls.
 Each project shows a touch-sized New thread button. Creation expands a collapsed project.
 
-Questions use one response area within the available phone viewport.
+Questions use one response area within the available phone viewport. Ordinary approvals leave the composer available.
 The composer stays mounted but hidden while a response form is expanded, preserving its draft with input shortcuts inactive.
 Folding or resolving the request restores the composer. Folding keeps the answer text and attachments mounted for Show. Desktop keeps its existing layout.
 

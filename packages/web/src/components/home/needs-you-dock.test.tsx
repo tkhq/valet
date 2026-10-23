@@ -15,7 +15,7 @@ describe("NeedsYouDock", () => {
   beforeEach(() => { gates = [question]; });
   it("labels questions accurately and restores the composer after deferring", () => {
     const expanded = vi.fn();
-    render(<NeedsYouDock onOpenTasks={() => {}} onExpandedChange={expanded} />);
+    render(<NeedsYouDock onOpenTasks={() => {}} onQuestionExpandedChange={expanded} />);
     expect(screen.getByText("Question 1 of 1 · Assistant")).toBeTruthy();
     expect(expanded).toHaveBeenLastCalledWith(true);
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
@@ -26,7 +26,7 @@ describe("NeedsYouDock", () => {
   });
   it("keeps an unfinished answer when Not now restores the composer", () => {
     const expanded = vi.fn();
-    render(<NeedsYouDock onOpenTasks={() => {}} onExpandedChange={expanded} />);
+    render(<NeedsYouDock onOpenTasks={() => {}} onQuestionExpandedChange={expanded} />);
     const answer = screen.getByRole("textbox", { name: "Your answer" });
     fireEvent.change(answer, { target: { value: "Keep these details" } });
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
@@ -39,15 +39,25 @@ describe("NeedsYouDock", () => {
   });
   it("restores the composer when a request resolves elsewhere", () => {
     const expanded = vi.fn();
-    const props = { onOpenTasks: () => {}, onExpandedChange: expanded };
+    const props = { onOpenTasks: () => {}, onQuestionExpandedChange: expanded };
     const view = render(<NeedsYouDock {...props} />);
     gates = [];
     view.rerender(<NeedsYouDock {...props} />);
     expect(expanded).toHaveBeenLastCalledWith(false);
   });
+  it("keeps ordinary approvals visible without taking over the composer", () => {
+    gates = [{ ...question, id: "approval-1", type: "approval", actions: [{ id: "approve", label: "Approve once" }] }];
+    const answering = vi.fn();
+    render(<NeedsYouDock onOpenTasks={() => {}} onQuestionExpandedChange={answering} />);
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(answering).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(answering).toHaveBeenLastCalledWith(false);
+  });
   it("excludes the current thread's own request", () => {
     const expanded = vi.fn();
-    render(<NeedsYouDock homeThreadId="thread-1" onOpenTasks={() => {}} onExpandedChange={expanded} />);
+    render(<NeedsYouDock homeThreadId="thread-1" onOpenTasks={() => {}} onQuestionExpandedChange={expanded} />);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(expanded).toHaveBeenLastCalledWith(false);
   });

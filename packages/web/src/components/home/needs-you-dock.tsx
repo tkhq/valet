@@ -12,7 +12,7 @@ import { ResolvedGateNotice, useResolvedGateNotice } from "~/components/session/
  * with "1 of 3", and folds to one line on "Not now". The home thread's own
  * gate docks through `SessionView`, so it is left out here.
  */
-export function NeedsYouDock({ homeThreadId, onOpenTasks, onExpandedChange }: { homeThreadId?: string; onOpenTasks: () => void; onExpandedChange?: (expanded: boolean) => void }) {
+export function NeedsYouDock({ homeThreadId, onOpenTasks, onQuestionExpandedChange }: { homeThreadId?: string; onOpenTasks: () => void; onQuestionExpandedChange?: (expanded: boolean) => void }) {
   const decisions = useNotificationDecisions();
   const workflows = useWorkflowActionRequired();
   const items = (decisions.data?.items ?? []).filter(item => item.gate.threadId !== homeThreadId);
@@ -26,9 +26,9 @@ export function NeedsYouDock({ homeThreadId, onOpenTasks, onExpandedChange }: { 
   useEffect(() => { if (index >= total) setIndex(Math.max(0, total - 1)); }, [index, total]);
   const current = items[Math.min(index, total - 1)];
   const resolved = useResolvedGateNotice(current?.gate);
-  const expanded = !folded && Boolean(current);
-  useEffect(() => { onExpandedChange?.(expanded); }, [expanded, onExpandedChange]);
-  useEffect(() => () => onExpandedChange?.(false), [onExpandedChange]);
+  const expanded = !folded && current?.gate.type === "question";
+  useEffect(() => { onQuestionExpandedChange?.(expanded); }, [expanded, onQuestionExpandedChange]);
+  useEffect(() => () => onQuestionExpandedChange?.(false), [onQuestionExpandedChange]);
   if (total === 0 && workflowCount === 0) return resolved ? <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} className="border-t border-line" /> : null;
   const label = total > 0 ? `${current?.gate.type === "question" ? "Question" : "Approval"} ${Math.min(index, total - 1) + 1} of ${total}` : "";
   const waiting = total + workflowCount;

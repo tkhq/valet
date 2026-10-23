@@ -28,7 +28,7 @@ export function HomeScreen({ view, onViewChange }: { view: HomeView; onViewChang
     <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} panel hidePanelHeader chatOnly sharedConversationChrome enableReplies
       active={!showSide}
       suppressComposer={answering}
-      composerAccessory={<NeedsYouDock homeThreadId={home.data.threadId} onExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />}
+      composerAccessory={<NeedsYouDock homeThreadId={home.data.threadId} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />}
       emptyState={<HomeEmptyState sessionId={home.data.sessionId} threadId={home.data.threadId} />} />
   </MobileConversationLayout>;
 }
