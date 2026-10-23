@@ -14,6 +14,8 @@ import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "../decision-
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
+import { updatePlanTool } from "./update-plan.js";
+export { updatePlanTool } from "./update-plan.js";
 import {
   watchTool,
   wakeAtTool,
@@ -1061,6 +1063,7 @@ export const builtinTools: ToolDef[] = [
   waitForEventTool,
   threadReadTool,
   listThreadsTool,
+  updatePlanTool,
   switchModelTool,
   askApprovalTool,
   askQuestionTool,

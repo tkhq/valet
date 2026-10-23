@@ -22,10 +22,13 @@ import {
 import { api } from "~/api/client";
 import { SessionView } from "./session-view";
 import { ChildPanel } from "./child-panel";
+import { useThreadReplyTarget } from "./send-as-person";
 
+let liveStatus: import("~/stores/stream").AgentStatus = "idle";
+let queueState: import("@valet/api/wire").WireQueueState | undefined;
 let fullProfile = false;
 let readOnlyReason: string | undefined;
-beforeEach(() => { fullProfile = false; readOnlyReason = undefined; });
+beforeEach(() => { fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; });
 
 vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined, useAnnounceThreadView: () => undefined, announceTyping: () => undefined }));
 
@@ -53,7 +56,8 @@ vi.mock("~/stores/stream", async (importOriginal) => {
     useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
       selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
     usePendingGateForThread: () => undefined,
-    useQueueStateForThread: () => undefined,
+    useQueueStateForThread: () => queueState,
+    useThreadLiveStatus: () => ({ status: liveStatus }),
   };
 });
 
@@ -68,7 +72,8 @@ vi.mock("./session-header", () => ({
   ),
 }));
 vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: () => <div>Thread summary contents</div> }));
-vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) => <div data-testid="message-list">{header}</div> }));
+vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) =>
+  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}</div> }));
 // The stub renders the status line slot, so the background work line shows.
 vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}</div> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
@@ -118,6 +123,7 @@ describe("SessionView header chrome", () => {
     renderInRouter("sess-1", false);
     expect(await screen.findByText(readOnlyReason)).toBeTruthy();
     expect(screen.queryByTestId("composer")).toBeNull();
+    expect(screen.getByTestId("message-list").getAttribute("data-can-reply")).toBe("false");
   });
   it("watches from chat, suspends in the full pane, restores, and returns focus on close", async () => {
     fullProfile = true;
@@ -224,5 +230,34 @@ describe("SessionView: background work status line", () => {
     expect(await screen.findByTestId("composer")).toBeTruthy();
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /^Background work: / })).toBeNull();
+  });
+});
+
+
+describe("SessionView processing visibility", () => {
+  it.each([
+    ["queued", "Valet is queued"],
+    ["thinking", "Valet is thinking…"],
+    ["tool_calling", "Valet is working…"],
+    ["streaming", "Valet is working…"],
+    ["blocked_on_decision_gate", "Valet is waiting for a response"],
+  ] as const)("shows %s beside the composer without a transcript message", async (status, label) => {
+    liveStatus = status;
+    renderInRouter("sess-1", false);
+    const cue = await screen.findByText(label);
+    expect(cue.closest('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
+    expect(cue.closest('[data-testid="message-list"]')).toBeNull();
+    expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+  it("uses durable queue state for externally submitted work before any live token", async () => {
+    queueState = { mode: "followup", status: "running", pendingIds: [], collectingIds: [], activeItemId: "slack-item" };
+    renderInRouter("sess-1", true);
+    expect(await screen.findByText("Valet is working…")).toBeTruthy();
+  });
+  it.each(["idle", "error"] as const)("does not claim to work when %s", async status => {
+    liveStatus = status;
+    renderInRouter("sess-1", false);
+    await screen.findByTestId("composer");
+    expect(screen.queryByText(/Valet is/)).toBeNull();
   });
 });

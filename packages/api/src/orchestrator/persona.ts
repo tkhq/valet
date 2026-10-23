@@ -12,7 +12,7 @@
  * identity, capability catalog, and memory rules stay v2.
  */
 import type { Principal } from "@valet/engine";
-import { ACTION_RULES, MODEL_SWITCH_RULES, TOOL_USE_RULES } from "../engine/prompt-rules.js";
+import { ACTION_RULES, MODEL_SWITCH_RULES, PLAN_RULE, TOOL_USE_RULES } from "../engine/prompt-rules.js";
 
 const CAPABILITY_RULES = `## Capabilities
 
@@ -287,7 +287,9 @@ explicit channel replies brief, direct, and grounded in the conversation.`;
  */
 const BACKGROUND_WORK = `## Background work
 
-A \`<wakeup>\` signal is your own scheduled work, even when it shows \`addressed="false"\`: a timer you set with \`wake_at\`, or a process or watch you started. Act on it. When it carries an origin, report the result there with the origin service's reply_to_origin action. To come back to something later, call \`wake_at\` and end your turn; do not ask the person to remind you. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`.`;
+A \`<wakeup>\` signal is your own scheduled work, even when it shows \`addressed="false"\`: a timer you set with \`wake_at\`, or a process or watch you started. Act on it. When it carries an origin, report the result there with the origin service's reply_to_origin action. To come back to something later, call \`wake_at\` and end your turn; do not ask the person to remind you. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`.
+
+${PLAN_RULE}`;
 
 /**
  * The orchestrator runs no sandbox prep, so it has no secrets command. Told

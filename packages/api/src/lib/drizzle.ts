@@ -498,6 +498,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   PRIMARY KEY ("session_id", "thread_id", "url")
 )` },
   { describe: "thread_pull_requests_url", probe: { kind: "index", index: "thread_pull_requests_url" }, sql: 'CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url")' },
+  { describe: "home tasks", probe: { kind: "table", table: "home_tasks" }, sql: `CREATE TABLE IF NOT EXISTS "home_tasks" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "title" text NOT NULL, "queue_item_id" text, "created_at" bigint NOT NULL, "reported_at" bigint, "done_at" bigint
+)` },
+  { describe: "home_tasks_user", probe: { kind: "index", index: "home_tasks_user" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at")' },
+  { describe: "home_tasks_thread", probe: { kind: "index", index: "home_tasks_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id")' },
   // The thread that opened the pull request. A delegating thread's copy names
   // its child here; rows recorded before this column stay null.
   { describe: "thread_pull_requests.opened_session_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_session_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_session_id" text' },

@@ -491,14 +491,24 @@ function approvalGateRequest(
       // Approvals are not sticky (`findStickyTerminalGate`): a later call
       // opens a new gate. The policy path clears this for a borrow gate.
       oneShot: true,
-      ...(entry.action.approvalScope === "actor" && ctx.interactiveActor
-        ? { approver: { userId: ctx.interactiveActor.id } } : {}),
+      ...(answeredByAsker(entry, ctx) && ctx.interactiveActor
+        ? { approver: { userId: ctx.interactiveActor.id, ...(ctx.actor?.id === ctx.interactiveActor.id && ctx.actor.name ? { name: ctx.actor.name } : {}) } } : {}),
     },
   };
 }
 
+/**
+ * Only the person who asked answers this approval: an action that says so,
+ * and any action in a team session that a person asked for. A teammate who
+ * opens a shared thread sees who the request waits on, not buttons that act
+ * for someone else's request.
+ */
+function answeredByAsker(entry: CatalogEntry, ctx: ToolContext): boolean {
+  return entry.action.approvalScope === "actor" || (ctx.owner?.type === "team" && ctx.interactiveActor !== undefined);
+}
+
 function approvalActorMatches(entry: CatalogEntry, ctx: ToolContext, resolution: DecisionResolution): boolean {
-  return entry.action.approvalScope !== "actor" ||
+  return !answeredByAsker(entry, ctx) ||
     (ctx.interactiveActor !== undefined && resolution.resolvedBy === ctx.interactiveActor.id);
 }
 
@@ -885,7 +895,9 @@ export async function invokeAction(
     gateOrdinal = resolution.gateOrdinal;
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
-    const approverMatches = approvalActorMatches(entry, ctx, resolution);
+    const approverMatches = decision.approver
+      ? resolution.resolvedBy === decision.approver.userId
+      : approvalActorMatches(entry, ctx, resolution);
     const oneShotResolution = !actorApproval || resolution.actionId === "approve" || resolution.actionId === "deny";
     let onResolutionThrew = false;
     if (resolver.onResolution && approverMatches && oneShotResolution) {

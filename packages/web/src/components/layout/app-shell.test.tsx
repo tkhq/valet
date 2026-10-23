@@ -90,20 +90,20 @@ describe("AppShell — mobile sidebar drawer", () => {
     renderShell();
     const opener = screen.getByRole("button", { name: /open threads/i });
     await userEvent.click(opener);
-    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Threads" }));
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Valet" }));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
 
-  it("shows a Threads header whose close button closes the list", async () => {
+  it("shows a Valet header whose close button closes the drawer", async () => {
     renderShell();
     await userEvent.click(screen.getByRole("button", { name: /open threads/i }));
-    const dialog = screen.getByRole("dialog", { name: "Threads" });
-    expect(within(dialog).getByText("Threads").className).not.toContain("sr-only");
+    const dialog = screen.getByRole("dialog", { name: "Valet" });
+    expect(within(dialog).getByText("Valet").className).not.toContain("sr-only");
     // One close control, in the header row; no floating corner X.
     expect(within(dialog).getAllByRole("button", { name: /close/i })).toHaveLength(1);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Close threads" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close menu" }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

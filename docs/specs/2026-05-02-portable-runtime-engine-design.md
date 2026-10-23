@@ -760,6 +760,7 @@ Three categories of tools, merged at prompt time:
 - `glob` — file pattern matching via SandboxProvider
 - `thread_read` — read messages from a sibling, parent, or child thread
 - `task` — spawn a child session for delegated work (depth-limited)
+- `update_plan` — replace the thread's checklist, stored in thread metadata under `plan`. Each turn shows the open plan to the model as a system section, so the plan survives compaction.
 
 **Plugin tools** (`ToolDef[]`, registered at session creation):
 - Custom tools from plugin packages (GitHub, Slack, Linear, memory, browser, etc.)

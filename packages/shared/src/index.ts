@@ -15,6 +15,7 @@ export * from './search-query.js';
 export * from './sandbox-resources.js';
 export * from './skill-block.js';
 export * from './thread-policy.js';
+export * from './thread-plan.js';
 export * from './tool-scope.js';
 export * from './toon-syntax.js';
 export * from './upload-limits.js';

@@ -45,6 +45,7 @@ describe("workflow tool focus", () => {
     expect(actionInScope(scope, "workflows.patch_workflow")).toBe(false);
     expect(actionInScope(scope, "slack.post_message")).toBe(false);
     expect(toolInScope(scope, "bash")).toBe(false);
+    expect(toolInScope(scope, "update_plan")).toBe(true);
   });
   it("adds editing and preview for repair without starting runs", () => {
     const scope = workflowToolFocus("repair");

@@ -1,4 +1,6 @@
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
+import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
+import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
@@ -44,7 +46,7 @@ import {
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
-import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import type { CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
 import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
 import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
@@ -376,6 +378,12 @@ export interface EngineHostOpts {
    * session that may check on them.
    */
   childStatusReader?: ChildStatusReader;
+  /**
+   * Tools a personal assistant gets for its person's home conversation:
+   * start, list, and steer work across their workspaces (`home/tools.ts`).
+   * A getter, because the tools need providers built after this host.
+   */
+  homeTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -2946,7 +2954,8 @@ export class EngineHost {
     // omits the sentence.
     const publicUrl = publicUrlFromEnv(process.env);
     const assistantThreadContext = (thread: { id: string; key: string }): string | undefined => {
-      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread)].filter(
+      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread),
+        principal.type === "user" && thread.key === HOME_THREAD_KEY ? HOME_THREAD_CONTEXT : undefined].filter(
         (part): part is string => part !== undefined,
       );
       return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -3040,7 +3049,7 @@ export class EngineHost {
       meta.orgId,
       pins,
       [],
-      buildMemoryTools().map((tool) => tool.name),
+      [...buildMemoryTools(), ...buildWidgetTools()].map((tool) => tool.name),
       true,
     );
 
@@ -3128,7 +3137,7 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this

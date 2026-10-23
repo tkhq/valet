@@ -15,6 +15,7 @@ import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
 import { ApiError } from "~/api/client";
 import type {
+  ArtifactListItem,
   BackgroundWorkConflict,
   DecisionGate,
   GetModelTiersResponse,
@@ -22,6 +23,7 @@ import type {
   ChildWorkSummary,
   ListSessionWakeupsResponse,
   ThreadSummary,
+  WorkflowDefinitionSummary,
 } from "@valet/api/wire";
 
 const navigate = vi.fn();
@@ -45,6 +47,34 @@ let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 let wakeups: ListSessionWakeupsResponse | undefined;
+// The phone drawer and the web sidebar share this component. Most tests
+// cover the web sidebar; a phone test sets `mobile`.
+let mobile = false;
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobile }));
+let workflows: WorkflowDefinitionSummary[] = [];
+let artifacts: ArtifactListItem[] = [];
+/** The `enabled` option of each workflow and artifact list read, in render order. */
+const listReads: Array<{ list: "workflows" | "artifacts"; enabled: boolean | undefined; ownerId: string | undefined }> = [];
+
+// The search dialog lists the workspace's workflows and files.
+function listResult<T>(data: T, enabled: boolean | undefined) {
+  const on = enabled !== false;
+  return { data: on ? data : undefined, isPending: !on, isError: false, isSuccess: on, refetch: vi.fn() };
+}
+vi.mock("~/api/workflows", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/workflows")>(),
+  useWorkflows: (owner?: { ownerId: string }, opts?: { enabled?: boolean }) => {
+    listReads.push({ list: "workflows", enabled: opts?.enabled, ownerId: owner?.ownerId });
+    return listResult({ workflows }, opts?.enabled);
+  },
+}));
+vi.mock("~/api/artifacts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/artifacts")>(),
+  useArtifacts: (owner?: { ownerId: string }, opts?: { enabled?: boolean }) => {
+    listReads.push({ list: "artifacts", enabled: opts?.enabled, ownerId: owner?.ownerId });
+    return listResult({ artifacts }, opts?.enabled);
+  },
+}));
 
 const markThreadsReadMutate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
@@ -53,6 +83,8 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useSearch: () => ({}),
   useNavigate: () => navigate,
+  // The thread list renders on /chat here, where a row can be the open thread.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/chat" } }),
 }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
@@ -189,6 +221,10 @@ beforeEach(() => {
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
   wakeups = undefined;
+  workflows = [];
+  artifacts = [];
+  listReads.length = 0;
+  mobile = false;
 });
 
 describe("ThreadTree progressive loading", () => {
@@ -451,7 +487,24 @@ describe("ThreadTree — collapsible subconversations", () => {
 
     await user.click(screen.getByRole("button", { name: /expand subconversations/i }));
     expect(screen.getByText("child one")).toBeTruthy();
-    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBeNull();
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBe("0");
+  });
+
+  it("starts collapsed on a phone, and keeps a group the person opened", async () => {
+    mobile = true;
+    children = [child({ title: "child one" })];
+    const user = userEvent.setup();
+    const view = renderTree();
+
+    const expand = screen.getByRole("button", { name: /expand subconversations/i });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("child one")).toBeNull();
+    await user.click(expand);
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBe("0");
+
+    view.unmount();
+    renderTree();
+    expect(screen.getByText("child one")).toBeTruthy();
   });
 
   it("keeps each parent's state independent", async () => {
@@ -476,6 +529,19 @@ describe("ThreadTree — collapsible subconversations", () => {
 });
 
 describe("ThreadTree — settled children", () => {
+  it("shows the settled mark, Dismiss on hover, and neither on a phone", () => {
+    children = [child({ sessionId: "child-done", title: "done-child", status: "settled" })];
+    renderTree();
+
+    const settled = screen.getByRole("img", { name: "settled" }).className;
+    expect(settled).toContain("max-md:hidden");
+    expect(settled).not.toContain("opacity-0");
+    const dismiss = screen.getByRole("button", { name: "Dismiss done-child" }).className;
+    expect(dismiss).toContain("max-md:hidden");
+    expect(dismiss).toContain("opacity-0");
+    expect(dismiss).toContain("group-hover/child:opacity-100");
+  });
+
   it("settled children get a dismiss affordance; running ones do not", async () => {
     children = [
       child({ sessionId: "child-done", title: "done-child", status: "settled" }),
@@ -851,5 +917,193 @@ describe("ThreadTree: timer wait line", () => {
     wakeups = { wakeups: [], leases: [] };
     renderTree();
     expect(screen.queryByText(/^Waiting · next wakeup/)).toBeNull();
+  });
+});
+
+/** Saves the sidebar document the projects hook reads at render. */
+function saveSidebar(value: { projects?: Array<{ id: string; name: string; collapsed: boolean }>; pinned?: string[] }) {
+  window.localStorage.setItem(`valet:thread-projects:user-1:${encodeURIComponent("orchestrator:user-1")}`, JSON.stringify({
+    projects: value.projects ?? [], assignments: {}, pinned: value.pinned ?? [], grouped: true, collapsed: false,
+  }));
+}
+
+describe("ThreadTree: Needs you section", () => {
+  // The section is the phone drawer's. The web sidebar marks rows in place.
+  beforeEach(() => { mobile = true; });
+
+  it("keeps gated threads in place on a wider screen", () => {
+    mobile = false;
+    threads = [thread({ id: "gated", title: "Gated thread" })];
+    pendingGates = { g1: gate("g1", "gated") };
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Recents" })).getByText("Gated thread")).toBeTruthy();
+  });
+
+  it("moves a gated thread to the top section and out of Pinned and Recents", () => {
+    threads = [
+      thread({ id: "quiet", title: "Quiet thread", createdAt: 3_000 }),
+      thread({ id: "gated", title: "Gated thread", createdAt: 2_000 }),
+    ];
+    pendingGates = { g1: gate("g1", "gated") };
+    saveSidebar({ pinned: ["gated"] });
+    renderTree();
+
+    const needsYou = screen.getByRole("region", { name: "Needs you" });
+    expect(within(needsYou).getByText("Gated thread")).toBeTruthy();
+    expect(within(needsYou).getByRole("img", { name: "Needs approval" })).toBeTruthy();
+    expect(within(needsYou).getByText("Gated thread").className).toContain("font-medium");
+    expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).queryByText("Gated thread")).toBeNull();
+    expect(within(recents).getByText("Quiet thread")).toBeTruthy();
+    expect(screen.getAllByText("Gated thread")).toHaveLength(1);
+  });
+
+  it("lists questions and gates newest activity first, and hides when nothing waits", () => {
+    threads = [
+      thread({ id: "older", title: "Older question", createdAt: 1, lastUserActivityAt: 10, lastAgentActivityAt: 20, agentQuestion: "Ship it?" }),
+      thread({ id: "newer", title: "Newer question", createdAt: 2, lastUserActivityAt: 10, lastAgentActivityAt: 50, agentQuestion: "Merge it?" }),
+    ];
+    const view = renderTree();
+    // The mocked Link renders an `a` without `href`, which has no link role.
+    const titles = [...screen.getByRole("region", { name: "Needs you" }).querySelectorAll("a")].map((link) => link.textContent);
+    expect(titles[0]).toContain("Newer question");
+    expect(titles[1]).toContain("Older question");
+    view.unmount();
+
+    threads = [thread()];
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+  });
+});
+
+describe("ThreadTree: project row controls", () => {
+  it("hides per-project actions on a phone, keeps the list menu, and always shows them on a wider screen", () => {
+    saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
+    renderTree();
+
+    for (const name of ["New thread in ACME", "Project menu: ACME", "New project"]) {
+      const control = screen.getByRole("button", { name });
+      expect(control.className).toContain("max-md:hidden");
+      expect(control.className).not.toContain("opacity-0");
+    }
+    // The list-wide menu (sort, filter, mark all read) has no other home on a
+    // phone, so it stays, with a 44px target.
+    const options = screen.getByRole("button", { name: "Sidebar options" }).className;
+    expect(options).not.toContain("max-md:hidden");
+    expect(options).toContain("max-md:min-h-11");
+  });
+
+  it("shows an empty project's drop hint on a wider screen only", () => {
+    saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
+    renderTree();
+    expect(screen.getByText("Start a thread with + or move one here").className).toContain("max-md:hidden");
+  });
+});
+
+function workflow(overrides: Partial<WorkflowDefinitionSummary> = {}): WorkflowDefinitionSummary {
+  return { id: "wf-1", name: "Nightly release notes", definition: {}, createdAt: 1, updatedAt: 1, ownerType: "user", ownerId: "user-1", ...overrides };
+}
+
+function artifact(overrides: Partial<ArtifactListItem> = {}): ArtifactListItem {
+  return {
+    id: "artifact-1", ownerType: "user", path: "reports/q3.md", title: "Quarterly report", format: "markdown", icon: "file",
+    version: 1, sharedVersion: null, token: "token-1", url: "https://valet.example/a/token-1", visibility: "org",
+    actorUserId: "user-1", revoked: false, createdAt: 1, updatedAt: 1, ...overrides,
+  };
+}
+
+function openSearch(query: string): HTMLElement {
+  fireEvent.click(screen.getByRole("button", { name: "Search threads" }));
+  const input = screen.getByRole("combobox", { name: "Search threads" });
+  fireEvent.change(input, { target: { value: query } });
+  return input;
+}
+
+describe("ThreadTree: search filter chips", () => {
+  // Workflow and file results are the phone drawer's. The web sidebar searches threads.
+  beforeEach(() => { mobile = true; });
+
+  it("searches threads only on a wider screen, with no chips and no workflow or file reads", () => {
+    mobile = false;
+    workflows = [workflow({ name: "Release workflow" })];
+    threads = [thread({ title: "Release checklist" })];
+    renderTree();
+    openSearch("release");
+    expect(screen.queryByRole("group", { name: "Search in" })).toBeNull();
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Release checklist"]);
+    expect(listReads.every((read) => read.enabled === false)).toBe(true);
+  });
+
+  it("reads workflows and files only while the dialog is open", () => {
+    renderTree();
+    expect(listReads.length).toBeGreaterThan(0);
+    expect(listReads.every((read) => read.enabled === false)).toBe(true);
+
+    openSearch("");
+    expect(listReads.slice(-2)).toEqual([
+      { list: "workflows", enabled: true, ownerId: "user-1" },
+      { list: "artifacts", enabled: true, ownerId: "user-1" },
+    ]);
+  });
+
+  it("lists matching workflow names under Workflows and opens one with Enter", () => {
+    workflows = [workflow({ id: "wf-release", name: "Nightly Release notes" }), workflow({ id: "wf-triage", name: "Triage alerts" })];
+    threads = [thread({ title: "Release checklist" })];
+    renderTree();
+    const input = openSearch("release");
+
+    fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
+    expect(screen.getByRole("button", { name: "Workflows" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(input);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Nightly Release notes"]);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/workflows/$workflowId", params: { workflowId: "wf-release" } });
+  });
+
+  it("lists matching files by title or path under Files and opens one like the Artifacts page", () => {
+    artifacts = [
+      artifact({ id: "a-title", title: "Quarterly report", path: "reports/q3.md", token: "token-title" }),
+      artifact({ id: "a-path", title: "Notes", path: "journal/quarterly-notes.md", token: "token-path" }),
+      artifact({ id: "a-revoked", title: "Old quarterly", revoked: true }),
+      artifact({ id: "a-other", title: "Unrelated", path: "misc.md" }),
+    ];
+    renderTree();
+    openSearch("quarterly");
+
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    const options = screen.getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual(["Quarterly reportreports/q3.md", "Notesjournal/quarterly-notes.md"]);
+
+    fireEvent.click(options[1]!);
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/a/$token", params: { token: "token-path" } });
+  });
+
+  it("shows every group under All, threads first and at most eight each, and arrows move across groups", () => {
+    threads = Array.from({ length: 10 }, (_, i) => thread({ id: `t-${i}`, title: `Deploy thread ${i}`, createdAt: 100 - i, lastUserActivityAt: 100 - i }));
+    workflows = Array.from({ length: 10 }, (_, i) => workflow({ id: `wf-${i}`, name: `Deploy workflow ${i}` }));
+    artifacts = [artifact({ id: "doc", title: "Deploy runbook" })];
+    renderTree();
+    const input = openSearch("deploy");
+
+    const listbox = screen.getByRole("listbox");
+    const groups = within(listbox).getAllByRole("group").map((group) => group.getAttribute("aria-label"));
+    expect(groups).toEqual(["Threads", "Workflows", "Files"]);
+    expect(within(screen.getByRole("group", { name: "Threads" })).getAllByRole("option")).toHaveLength(8);
+    expect(within(screen.getByRole("group", { name: "Workflows" })).getAllByRole("option")).toHaveLength(8);
+    expect(within(screen.getByRole("group", { name: "Files" })).getAllByRole("option")).toHaveLength(1);
+
+    // jsdom has no scrollIntoView. The arrow keys keep the active option in view.
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: vi.fn(), configurable: true });
+    try {
+      for (let i = 0; i < 8; i++) fireEvent.keyDown(input, { key: "ArrowDown" });
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+    const firstWorkflow = screen.getByRole("option", { name: "Deploy workflow 0" });
+    expect(firstWorkflow.getAttribute("aria-selected")).toBe("true");
+    expect(input.getAttribute("aria-activedescendant")).toBe(firstWorkflow.id);
   });
 });

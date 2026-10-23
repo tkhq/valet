@@ -11,7 +11,8 @@ import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { LineEditor } from "~/components/presence/editor/line-editor";
 
 /**
- * The dashboard's setup prompt, shown only until the team listens somewhere.
+ * The team dashboard's and team settings' setup prompt, shown only until the
+ * team listens somewhere.
  * Once it does, Presence carries the listening state, and each Slack row's
  * `Choose channels` opens the same dialog. Mount by team ID so a workspace
  * change discards selections.

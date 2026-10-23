@@ -89,6 +89,25 @@ describe("PolicyGateCard", () => {
     expect(screen.getByText(/truncated/i)).toBeTruthy();
   });
 
+  it("previews a known call and keeps the JSON behind Details", () => {
+    const gateParams = { to: "a@example.com", subject: "Weekly report", body: "Numbers are up." };
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ service: "gmail", action: "send_email", gateParams })} />);
+    const preview = screen.getByRole("group", { name: "Preview" });
+    expect(preview.textContent).toContain("Weekly report");
+    // The subject shows once, in the preview, not again as a params label.
+    expect(screen.getAllByText("Weekly report")).toHaveLength(1);
+    const details = screen.getByText("Details").closest("details");
+    expect(details?.querySelector("pre")?.textContent).toBe(JSON.stringify(gateParams, null, 2));
+    expect(screen.queryByText("Parameters")).toBeNull();
+  });
+
+  it("shows truncated params raw, without a preview", () => {
+    const gateParams = { to: "a@example.com", subject: "Weekly report", body: "Numbers are" };
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ service: "gmail", action: "send_email", gateParams, gateParamsTruncated: true })} />);
+    expect(screen.queryByRole("group", { name: "Preview" })).toBeNull();
+    expect(screen.getByText("Parameters")).toBeTruthy();
+  });
+
   // ── Case 2: Approve once ───────────────────────────────────────────────────
 
   it("Approve once fires with scope=once and the gate iteration", () => {

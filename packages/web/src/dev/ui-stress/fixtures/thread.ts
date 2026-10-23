@@ -1,14 +1,26 @@
 /** One thread's transcript with running gate tool calls, and the decision
  * gates that the thread view shows below it. */
-import type { DecisionGate, Message } from "@valet/api/wire";
+import type { DecisionGate, Message, ThreadPlan } from "@valet/api/wire";
+import { THREAD_PLAN_MAX_ITEMS, THREAD_PLAN_MAX_TEXT } from "@valet/shared";
 import {
   EMOJI, HEX_300, LONG_ACTION, LONG_SERVICE, MINUTE, NOW, RTL_ARABIC, STRING_2000, TITLE_400, URL_300,
-  deepJson, memberId, stressMe,
+  deepJson, memberId, stressMe, unbroken,
 } from "./common";
 import { QUESTION_OPTIONS, TOOL_APPROVAL_ACTIONS, decisionGate } from "./approvals";
+import { meetingMemoryWidget } from "./widgets";
 
 export const THREAD_SESSION_ID = "session-thread-stress";
 export const THREAD_ID = "thread-stress";
+
+/** The largest plan `update_plan` accepts: every item at the length limit,
+ * and the current item an unbroken hash. */
+export const stressThreadPlan: ThreadPlan = {
+  items: Array.from({ length: THREAD_PLAN_MAX_ITEMS }, (_, i) => ({
+    text: i === 7 ? HEX_300.slice(0, THREAD_PLAN_MAX_TEXT) : TITLE_400.slice(0, THREAD_PLAN_MAX_TEXT).trimEnd(),
+    status: i < 7 ? "done" : i === 7 ? "in_progress" : "pending",
+  })),
+  updatedAt: NOW,
+};
 
 function message(i: number, fields: Pick<Message, "role" | "content" | "parts"> & Partial<Message>): Message {
   return {
@@ -21,6 +33,40 @@ function message(i: number, fields: Pick<Message, "role" | "content" | "parts"> 
     ...fields,
   };
 }
+
+/** A finished turn as the engine writes it: one message per agent step,
+ * most of them tool calls only, so the transcript folds them into one work
+ * line. It has reasoning, plugin calls with the agent's own purpose line,
+ * an agent it started and messaged, a failed push, and a reply. */
+function turnMessage(i: number, fields: Pick<Message, "role" | "content" | "parts"> & Partial<Message>): Message {
+  return { ...message(i, fields), id: `turn-${i}`, createdAt: NOW - (40 - i) * MINUTE };
+}
+const done = "completed" as const;
+export const workTurnMessages: Message[] = [
+  turnMessage(0, { role: "user", content: "What did Teammate say about pricing, and is the retry fix ready?", parts: [], author: { id: stressMe.id, name: stressMe.name } }),
+  turnMessage(1, { role: "assistant", content: "", parts: [
+    { kind: "thinking", text: "", startedAt: NOW - 39 * MINUTE, durationMs: 2400 },
+    { kind: "tool_call", callId: "turn-ff", toolName: "call_tool", status: done, args: { tool_id: "fireflies.fireflies_search", summary: "Find last week's pricing calls", params: { query: "pricing" } }, result: { text: "2 meetings" } },
+  ] }),
+  turnMessage(2, { role: "assistant", content: "", parts: [
+    { kind: "tool_call", callId: "turn-gh", toolName: "call_tool", status: done, args: { tool_id: "github.read_repo_file", summary: "Read the retry tests", params: { path: "packages/engine/test/transient-turn-retry.test.ts" } }, result: { text: "describe(\"retry\")" } },
+    { kind: "tool_call", callId: "turn-notion", toolName: "call_tool", status: done, args: { tool_id: "notion.notion-fetch", params: { id: "pricing-page" } }, result: { text: "# Pricing" } },
+  ] }),
+  turnMessage(3, { role: "assistant", content: "", parts: [
+    { kind: "tool_call", callId: "turn-test", toolName: "bash", status: done, args: { command: "pnpm --filter @valet/engine test retry" }, result: { text: "41 passed" } },
+    { kind: "tool_call", callId: "turn-task", toolName: "task", status: done, args: { title: "Review retry coverage", prompt: "Review the retry tests." }, result: { text: "Started." } },
+    { kind: "tool_call", callId: "turn-send", toolName: "child_send", status: done, args: { child_session_id: "child-review", message: "Focus on the cooldown." }, result: { text: "Sent." } },
+  ] }),
+  turnMessage(4, { role: "assistant", content: "", parts: [
+    { kind: "tool_call", callId: "turn-push", toolName: "bash", status: "error", args: { command: "git push origin fix/provider-retry-hints" }, error: "remote: Permission to tkhq/valet.git denied (403)" },
+  ] }),
+  turnMessage(6, { role: "assistant", content: "", parts: [
+    { kind: "tool_call", callId: "turn-widget", toolName: "show_widget", status: done, args: { title: "Meeting memory", spec: meetingMemoryWidget }, result: { text: "The card is in the thread." } },
+  ] }),
+  turnMessage(7, { role: "assistant", content: "", parts: [
+    { kind: "text", text: "Teammate wants the starter plan generous and paid tiers to win on collaboration. The retry fix passes its tests, but the push failed: I don't have write access to the branch." },
+  ] }),
+];
 
 export const stressThreadMessages: Message[] = [
   message(0, {
@@ -54,9 +100,17 @@ export const stressThreadMessages: Message[] = [
   }),
 ];
 
+/** A Slack post with a long channel id and message, as the engine writes it. */
+const SLACK_ARGS = {
+  channel: `C${unbroken("0123456789ABCDEF", 120)}`,
+  text: `**Release notes** for ${URL_300}\n\n${STRING_2000}\n\n${EMOJI} ${RTL_ARABIC}`,
+  thread_ts: "1780887543.189519",
+};
+
 /** The gates under the transcript: a tool approval with Always allow, an
- * ask_question gate with eight long options, a credential request, and a
- * shared-account gate that waits on another member. */
+ * ask_question gate with eight long options, a credential request, a Slack
+ * post with a payload preview, and a shared-account gate that waits on
+ * another member. */
 export const stressThreadGates: DecisionGate[] = [
   decisionGate(1, {
     id: "thread-gate-approval",
@@ -90,6 +144,19 @@ export const stressThreadGates: DecisionGate[] = [
     title: `Connect ${LONG_SERVICE} to continue`,
     body: `Valet needs an account for ${URL_300}.`,
     actions: [{ id: "provide", label: `Connect ${LONG_SERVICE}`, style: "primary" }, { id: "deny", label: "Skip" }],
+    approver: undefined,
+  }),
+  decisionGate(5, {
+    id: "thread-gate-slack-preview",
+    sessionId: THREAD_SESSION_ID,
+    threadId: THREAD_ID,
+    type: "approval",
+    title: "Approve Send Message?",
+    body: `Post the release notes ${TITLE_400}\n\ntool_id=slack.send_message\nargs=${JSON.stringify(SLACK_ARGS, null, 2)}`,
+    tool: { id: "slack.send_message", args: SLACK_ARGS },
+    actions: TOOL_APPROVAL_ACTIONS,
+    riskLevel: "high",
+    oneShot: true,
     approver: undefined,
   }),
   decisionGate(3, {

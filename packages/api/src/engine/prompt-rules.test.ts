@@ -171,6 +171,12 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     );
     expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(BACKGROUND_WORK_RULES));
   });
+
+  it("tells the model to keep a plan for work with three or more steps", () => {
+    expect(CODING_SYSTEM_PROMPT).toContain(
+      "For work with three or more steps, call `update_plan` before you start, and update it when each step finishes. Keep exactly one item `in_progress`, and mark an item `done` only when it is done.",
+    );
+  });
 });
 
 describe("threadLinkContext (event wakeups spec 2026-10-15, Part I)", () => {

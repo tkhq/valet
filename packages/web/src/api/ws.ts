@@ -14,6 +14,7 @@ import { useStreamStore } from "~/stores/stream";
 import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
+import { qkThreadPlan } from "./thread-plan";
 
 const MAX_RETRY_MS = 8_000;
 /** `WebSocket.OPEN`. */
@@ -260,6 +261,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         }
         if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
           void qc.invalidateQueries({ queryKey: ["settings"] });
+        }
+        // Only `update_plan` changes a thread's plan.
+        if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {
+          void qc.invalidateQueries({ queryKey: qkThreadPlan(wire.threadId) });
         }
         if (wire.type === "title.updated") {
           invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));

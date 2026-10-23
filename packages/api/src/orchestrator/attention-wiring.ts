@@ -33,7 +33,7 @@ import type { DeliveredBusEvent, EventStream, Principal, SessionStore } from "@v
 import { parseAssistantSessionId } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { digestGate } from "../channels/gate-digest.js";
-import { gateApprover } from "../services/session-access.js";
+import { gateApprover, isSharedAccountGate } from "../services/session-access.js";
 import { governingThreadKey, runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, workflowRuns } from "../schema/index.js";
@@ -132,7 +132,9 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
     ...(audienceKey !== undefined ? { audienceKey } : {}),
     title: digest.title,
     body: digest.body,
-    ...(approver ? {} : { href: attentionHref(sessionId, gate.threadId, sessionData.owner) }),
+    // A borrow approver may not see the requester's thread; the person who
+    // asked can, so their notice links to it.
+    ...(approver && isSharedAccountGate(gate) ? {} : { href: attentionHref(sessionId, gate.threadId, sessionData.owner) }),
     dedupeKey: gate.id,
     gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });

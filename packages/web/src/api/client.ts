@@ -1,4 +1,4 @@
-import type { GetLinearConnectionResponse } from "@valet/api/wire";
+import type { GetLinearConnectionResponse, HomeConversationResponse, HomeTasksResponse } from "@valet/api/wire";
 import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
@@ -19,6 +19,7 @@ import type {
   ThreadChannelActivity,
   ThreadContextResponse,
   ActiveViewersResponse,
+  ThreadPlanResponse,
   ThreadRecapResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -654,6 +655,9 @@ export const api = {
     request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
+  /** The checklist the model keeps with `update_plan`. */
+  getThreadPlan: (threadId: string) =>
+    request<ThreadPlanResponse>("GET", `/threads/${encodeURIComponent(threadId)}/plan`),
   getThreadRecap: (threadId: string, since?: number) =>
     request<ThreadRecapResponse>("GET", `/threads/${encodeURIComponent(threadId)}/recap${since === undefined ? "" : `?since=${since}`}`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
@@ -814,6 +818,9 @@ export const api = {
     request<EnsureWorkspaceConversationResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`, body),
   listWorkspaceConversations: (workspace: string) =>
     request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
+  ensureHomeConversation: () => request<HomeConversationResponse>("POST", "/home"),
+  getHomeTasks: () => request<HomeTasksResponse>("GET", "/home/tasks"),
+  markHomeTaskDone: (taskId: string) => request<void>("POST", `/home/tasks/${encodeURIComponent(taskId)}/done`),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>

@@ -84,6 +84,48 @@ describe("actor-scoped action consent", () => {
   });
 });
 
+describe("team approvals wait on the person who asked", () => {
+  const plugin: ActionPlugin = { service: "chat", defaultApprovalMode: "require_approval", actions: [{
+    id: "chat.post", name: "Post", description: "Post", riskLevel: "medium",
+    parameters: Type.Object({}), execute: async () => ({ success: true }),
+  }] };
+
+  it("names the asker on a team session's approval, and keeps personal approvals open", async () => {
+    const requests: DecisionGateRequest[] = [];
+    const requestDecision = async (request: DecisionGateRequest) => { requests.push(request); return { actionId: "approve", resolvedBy: "asker", resolvedAt: 1 }; };
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" }, actor: { id: "asker", name: "Asker Name" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "me", owner: { type: "user", id: "me" }, interactiveActor: { id: "me" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, requestDecision,
+    }), "Post");
+    expect(requests.map((request) => request.context?.approver)).toEqual([{ userId: "asker", name: "Asker Name" }, undefined, undefined]);
+  });
+
+  it.each(["lender", "asker", "another-member"])("requires the account lender's consent when %s answers", async (resolvedBy) => {
+    const onResolution = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({ success: true }));
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      policyResolver: {
+        resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+        onResolution,
+      },
+      requestDecision: async (request) => {
+        expect(request.context?.approver).toEqual({ userId: "lender" });
+        return { actionId: "approve", resolvedBy, resolvedAt: 1 };
+      },
+    }), "Post");
+    expect(result.kind).toBe(resolvedBy === "lender" ? "ok" : "denied-approval");
+    expect(onResolution).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+    expect(execute).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+  });
+});
+
 it("scopes live availability reads for actions and filtered discovery", async () => {
   const plugin: ActionPlugin = {
     service: "one",

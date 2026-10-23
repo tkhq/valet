@@ -1,3 +1,4 @@
+import { HOME_THREAD_KEY } from "../home/context.js";
 import type { ListThreadsResponse, ThreadSummary } from "../wire/types.js";
 
 type Origin = "chat" | "auto" | "channel" | "other";
@@ -23,10 +24,14 @@ export function threadPage(threads: ThreadSummary[], params: URLSearchParams): L
   if (sort !== "created" && sort !== "last-user-activity") throw new Error("Use created or last-user-activity to sort threads.");
   const filter = params.get("origin") ?? "all";
   if (!["all", "chat", "auto", "channel", "other"].includes(filter)) throw new Error("Select a supported thread origin filter.");
-  const visible = threads.filter(t => !t.key?.startsWith("app-assistant:") && !t.key?.startsWith("workflow:"));
+  // Home is the app's first screen, not a row in a thread list. Earlier
+  // helper conversations are rows, so they stay reachable, but a workspace
+  // never opens one by default.
+  const visible = threads.filter(t => !t.key?.startsWith("workflow:") && t.key !== HOME_THREAD_KEY);
   const originCounts = { all: visible.length, chat: 0, auto: 0, channel: 0, other: 0 };
   for (const t of visible) originCounts[origin(t)]++;
-  const defaultThreadId = [...visible].sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0]?.id;
+  const defaultThreadId = visible.filter(t => !t.key?.startsWith("app-assistant:"))
+    .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0]?.id;
   const time = (t: ThreadSummary) => sort === "created" ? t.createdAt : t.lastUserActivityAt;
   const sorted = visible.filter(t => filter === "all" || origin(t) === filter)
     .sort((a, b) => time(b) - time(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));

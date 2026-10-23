@@ -1,4 +1,7 @@
 import { ListTree } from "lucide-react";
+import { QuickReplies } from "./quick-replies";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { ResolvedGateNotice, useResolvedGateNotice } from "./gate-outcome";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
@@ -28,6 +31,8 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
+import { PinnedPlan } from "~/components/session/thread-plan";
+import { ProcessingStatus } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
@@ -47,6 +52,10 @@ import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, LoadingRow } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
+import { flattenChildWork, useChildWork } from "~/api/child-work";
+import { AgentsLine } from "./agents-line";
+import { ThreadReplyContext } from "./send-as-person";
+import { ChildTitlesContext } from "./work-group";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -81,7 +90,14 @@ export function SessionView({
   scopeNotice,
   chatOnly = false,
   active = true,
+  composerAccessory,
+  emptyState,
 }: {
+  /** Shown above the composer, under the thread's own pending gate. Home
+   * uses it for approvals from work in other threads. */
+  composerAccessory?: ReactNode;
+  /** Shown in place of the transcript while the thread has no messages. */
+  emptyState?: ReactNode;
   /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
   active?: boolean;
   chatOnly?: boolean;
@@ -192,6 +208,17 @@ export function SessionView({
   usePendingGatesSeed(sessionId);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const resolvedGate = useResolvedGateNotice(pendingGate ?? undefined);
+  // The agents this session started: their titles name them in work lines,
+  // and the ones this thread is running show as one line under the transcript.
+  const childWorkQuery = useChildWork(sessionId);
+  const childWork = useMemo(() => flattenChildWork(childWorkQuery.data), [childWorkQuery.data]);
+  const childTitles = useMemo(() => new Map(childWork.map(child => [child.sessionId, child.title])), [childWork]);
+  // A widget's buttons reply into the thread on screen, as the person.
+  const widgetReplyTarget = useMemo(() => effectiveThreadId && !session.data?.readOnlyReason
+    ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
+  // Quick replies are a phone affordance: tap an answer instead of typing it.
+  const mobile = useMobileLayout();
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
@@ -352,7 +379,10 @@ export function SessionView({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PageDropTarget>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <ThreadReplyContext.Provider value={widgetReplyTarget}>
+            <ChildTitlesContext.Provider value={childTitles}>
             <MessageList
+              footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
               header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
               messages={stream.messages}
               threadId={effectiveThreadId}
@@ -362,7 +392,10 @@ export function SessionView({
               viewerId={me.data?.id}
               onReply={enableReplies ? setReplyTarget : undefined}
               newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
+              emptyState={emptyState}
             />
+            </ChildTitlesContext.Provider>
+            </ThreadReplyContext.Provider>
             {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
@@ -391,10 +424,16 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
+          <PinnedPlan threadId={effectiveThreadId} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
+          {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} />}
+          {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
+          {composerAccessory}
           <TypingLine viewers={viewers} />
+          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

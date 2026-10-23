@@ -31,9 +31,10 @@ export function WorkRow({ title, badge, time, detail, actions }: {
   </div>;
 }
 
-/** A titled list of `WorkRow`s in one bordered box. */
-export function WorkSection({ title, count, icon, actions, children }: {
-  title: string; count?: number; icon?: ReactNode; actions?: ReactNode; children: ReactNode;
+/** A titled list of `WorkRow`s in one bordered box. `bare` drops the box, for
+ * content that draws its own cards. */
+export function WorkSection({ title, count, icon, actions, bare, children }: {
+  title: string; count?: number; icon?: ReactNode; actions?: ReactNode; bare?: boolean; children: ReactNode;
 }) {
   return <section aria-label={title}>
     <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -41,7 +42,7 @@ export function WorkSection({ title, count, icon, actions, children }: {
       {count !== undefined && <span className="text-xs text-muted">{count}</span>}
       {actions && <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">{actions}</div>}
     </div>
-    <WorkList>{children}</WorkList>
+    {bare ? children : <WorkList>{children}</WorkList>}
   </section>;
 }
 

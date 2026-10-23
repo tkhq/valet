@@ -500,3 +500,73 @@ describe("DecisionGateCard — long request layout", () => {
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });
+
+describe("DecisionGateCard — tool payload preview", () => {
+  const args = { channel: "#eng-releases", text: "Release 1.2 is out." };
+  const call = `tool_id=slack.send_message\nargs=${JSON.stringify(args, null, 2)}`;
+  const body = `Post the release notes\n\n${call}`;
+
+  it("shows the summary and the preview, with the raw call behind Details", () => {
+    renderCard(gate({ body, tool: { id: "slack.send_message", args } }));
+    const request = screen.getByRole("region", { name: "Request details" });
+    expect(request.querySelector("p")?.textContent).toBe("Post the release notes");
+    expect(screen.getByRole("group", { name: "Preview" }).textContent).toContain("Slack · #eng-releases");
+    const details = request.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector("summary")?.textContent).toBe("Details");
+    expect(details?.querySelector("pre")?.textContent).toBe(call);
+    expect(request.className).not.toContain("whitespace-pre-wrap");
+  });
+
+  it("renders the body verbatim for a tool with no preview", () => {
+    const linearBody = "Create the issue\n\ntool_id=linear.save_issue\nargs={}";
+    renderCard(gate({ body: linearBody, tool: { id: "linear.save_issue", args: {} } }));
+    const request = screen.getByRole("region", { name: "Request details" });
+    expect(request.textContent).toBe(linearBody);
+    expect(request.className).toContain("whitespace-pre-wrap");
+    expect(screen.queryByRole("group", { name: "Preview" })).toBeNull();
+    expect(request.querySelector("details")).toBeNull();
+  });
+});
+
+describe("DecisionGateCard — Not now", () => {
+  it("hides the docked approval without answering it, and Show brings it back", async () => {
+    const user = userEvent.setup();
+    renderCard(gate({ title: "Approve Send Message?" }));
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("Approval waiting: Approve Send Message?");
+    const show = screen.getByRole("button", { name: "Show" });
+    expect(document.activeElement).toBe(show);
+    expect(resolveMutateAsync).not.toHaveBeenCalled();
+    expect(withdrawMutateAsync).not.toHaveBeenCalled();
+
+    await user.click(show);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+  });
+
+  it("shows a different gate that arrives while one is hidden", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderCard();
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    rerender(
+      <TooltipProvider>
+        <DecisionGateCard sessionId="sess_1" gate={gate({ id: "gate_2", title: "Merge the pull request?" })} />
+      </TooltipProvider>,
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("heading").textContent).toBe("Merge the pull request?");
+  });
+
+  it("is offered only on docked approvals", () => {
+    const { unmount } = renderCard(gate(), "notification");
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+    unmount();
+    renderCard(gate({ type: "question", actions: [] }));
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+  });
+});

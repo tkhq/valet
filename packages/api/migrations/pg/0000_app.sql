@@ -2787,3 +2787,13 @@ CREATE TABLE IF NOT EXISTS "workflow_account_grants" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "workflow_account_grants_share" ON "workflow_account_grants" ("team_id", "service", "member_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "home_tasks" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "title" text NOT NULL, "queue_item_id" text, "created_at" bigint NOT NULL, "reported_at" bigint, "done_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");

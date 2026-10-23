@@ -17,6 +17,10 @@
       "types": "./src/lib/memory-links.ts",
       "import": "./src/lib/memory-links.ts"
     },
+    "./widgets": {
+      "types": "./src/widgets/catalog.ts",
+      "import": "./src/widgets/catalog.ts"
+    },
     "./service-display-name": {
       "types": "./src/lib/service-display-name.ts",
       "import": "./src/lib/service-display-name.ts"
@@ -70,6 +74,8 @@
     "@firecrawl/pdf-inspector": "^1.17.0",
     "@hono/node-server": "^1.13.0",
     "@hono/node-ws": "^1.0.0",
+    "@json-render/core": "0.21.1",
+    "@json-render/react": "0.21.1",
     "@kubernetes/client-node": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@opentelemetry/api": "^1.9.1",

@@ -72,7 +72,7 @@ import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
+import { answersGate, isSharedAccountGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
 import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
@@ -1753,7 +1753,9 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
     return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
   }
   if (!answersGate(gate, c.var.principal)) {
-    return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
+    return c.json({ error: isSharedAccountGate(gate)
+      ? `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.`
+      : `Only ${gateApprover(gate)?.name ?? "the person who asked"} can answer this request. Ask them in the thread.` }, 403);
   }
 
   if (body.actionId === "always_allow_account" && (

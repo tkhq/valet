@@ -40,6 +40,19 @@ function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
 }
 
 describe("entryToMessage — stable order projection", () => {
+  it("projects measured reasoning without deriving timing from the whole turn", () => {
+    const entry = baseEntry({ role: "assistant", parts: [
+      { type: "thinking", text: "first", startedAt: 1000, durationMs: 2400 },
+      { type: "thinking", text: "old reasoning" },
+      { type: "thinking", text: "", startedAt: 9000, durationMs: 500 },
+    ], createdAt: 60000 });
+    expect(entryToMessage(entry, "sess", "th")?.parts).toEqual([
+      { kind: "thinking", text: "first", startedAt: 1000, durationMs: 2400 },
+      { kind: "thinking", text: "old reasoning" },
+      { kind: "thinking", text: "", startedAt: 9000, durationMs: 500 },
+    ]);
+  });
+
   it("projects the store sequence on a message entry", () => {
     expect(entryToMessage(baseEntry({ sequence: 17 }), "sess", "th")?.sequence).toBe(17);
   });

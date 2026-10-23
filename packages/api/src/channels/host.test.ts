@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HOME_THREAD_KEY } from "../home/context.js";
 import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
@@ -395,6 +396,77 @@ describe("ChannelHost.handleUpdate", () => {
         name: "image.jpg",
       },
     ]);
+  });
+
+  it("puts a Slack DM in the person's home thread and keeps the DM as the reply origin", async () => {
+    const slack: ChannelTransport = {
+      channelType: "slack",
+      verifyWebhook: () => null,
+      parseUpdate: () => null,
+      threadKeyFromConversationKey: (key: string) => `slack:${key.split(":")[2]}:${key.split(":")[3]}`,
+      conversationKeyFromThreadKey: () => null,
+      send: async (conversationKey: string) => ({ conversationKey, messageId: "1" }),
+      sendMedia: async (conversationKey: string) => ({ conversationKey, messageId: "m" }),
+      sendGatePrompt: async (conversationKey: string) => ({ conversationKey, messageId: "g" }),
+      updateGatePrompt: async () => {},
+    };
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "slack-bot-token" });
+    const slackHost = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "slack-test", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+      resolveOrgId: async () => ORG_ID });
+    await slackHost.start();
+    try {
+      await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
+      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const home = await session.threadByKey(HOME_THREAD_KEY);
+      expect(home).not.toBeNull();
+      expect(await session.threadByKey("slack:D1:111.1")).toBeNull();
+      let entry: Extract<Awaited<ReturnType<typeof session.providers.store.getEntries>>[number], { type: "message" }> | undefined;
+      for (let i = 0; i < 50 && !entry; i++) {
+        const found = (await session.providers.store.getEntries(session.id, home!.id)).find((item) => item.type === "message" && item.role === "user");
+        entry = found?.type === "message" ? found : undefined;
+        if (!entry) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
+    } finally {
+      await slackHost.stop();
+    }
+  });
+
+  it("keeps a reply in a DM thread that already has its own Valet thread there", async () => {
+    const slack: ChannelTransport = {
+      channelType: "slack",
+      verifyWebhook: () => null,
+      parseUpdate: () => null,
+      threadKeyFromConversationKey: (key: string) => `slack:${key.split(":")[2]}:${key.split(":")[3]}`,
+      conversationKeyFromThreadKey: () => null,
+      send: async (conversationKey: string) => ({ conversationKey, messageId: "1" }),
+      sendMedia: async (conversationKey: string) => ({ conversationKey, messageId: "m" }),
+      sendGatePrompt: async (conversationKey: string) => ({ conversationKey, messageId: "g" }),
+      updateGatePrompt: async () => {},
+    };
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "slack-bot-token" });
+    const slackHost = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "slack-test", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+      resolveOrgId: async () => ORG_ID });
+    await slackHost.start();
+    try {
+      await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const old = await session.createThread("slack:D1:099.9", {});
+      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:099.9", text: "following up" }));
+      let entry: Extract<Awaited<ReturnType<typeof session.providers.store.getEntries>>[number], { type: "message" }> | undefined;
+      for (let i = 0; i < 50 && !entry; i++) {
+        const found = (await session.providers.store.getEntries(session.id, old.id)).find((item) => item.type === "message" && item.role === "user");
+        entry = found?.type === "message" ? found : undefined;
+        if (!entry) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(entry?.content).toContain("following up");
+      expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
+    } finally {
+      await slackHost.stop();
+    }
   });
 
   it("delivers a PDF DM attachment as a sandbox file, never as a provider image block", async () => {

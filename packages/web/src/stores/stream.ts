@@ -47,6 +47,7 @@ export type AgentStatus =
  * comment on `submission.settled` for the fallback this store uses instead).
  */
 export interface StreamMessage extends Message {
+  thinkingIndices?: Record<number, number>;
   /** Client-only rows stay until REST confirms the same message or queue item. */
   persistence?: "optimistic" | "streaming";
   /** Next canonical row seen when this client-only row first needs reconciliation. */
@@ -236,6 +237,8 @@ export interface StreamStore {
    * found (e.g. it was already reconciled away by a REST snapshot).
    */
   setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
+  /** Remove a failed local send without removing a confirmed server message. */
+  discardOptimisticMessage(sessionId: string, messageId: string): void;
   /**
    * Merge one thread with a REST snapshot. If REST returns a bounded tail,
    * preserve the current prefix before the first overlap. Keep only typed
@@ -365,6 +368,21 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "thinking_update": {
+      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId && m.threadId === ev.threadId);
+      if (idx < 0) return next;
+      const m = slice.messages[idx];
+      const partIndex = m.thinkingIndices?.[ev.index] ?? m.parts.length;
+      const previous = m.parts[partIndex];
+      if (previous?.kind === "thinking" && previous.durationMs !== undefined && ev.part.durationMs === undefined) return next;
+      const parts = [...m.parts];
+      parts[partIndex] = ev.part;
+      next.messages = replaceAt(slice.messages, idx, {
+        ...m, parts, thinkingIndices: { ...m.thinkingIndices, [ev.index]: partIndex },
+      });
+      return next;
+    }
+
     case "text_delta": {
       const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
       if (idx < 0) return next;
@@ -379,9 +397,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
       if (idx < 0) return next;
       const m = slice.messages[idx];
-      const updated: Message = {
+      const updated: StreamMessage = {
         ...m,
         parts: ev.parts,
+        thinkingIndices: undefined,
         content: ev.content ?? m.content,
       };
       next.messages = replaceAt(slice.messages, idx, updated);
@@ -853,6 +872,15 @@ export const useStreamStore = create<StreamStore>((set) => ({
     });
     return id;
   },
+
+  discardOptimisticMessage: (sessionId, messageId) => set((state) => {
+    const slice = state.bySession[sessionId];
+    if (!slice) return state;
+    const messages = slice.messages.filter((message) => message.id !== messageId
+      || message.persistence !== "optimistic" || message.queueItemId !== undefined);
+    if (messages.length === slice.messages.length) return state;
+    return { bySession: { ...state.bySession, [sessionId]: { ...slice, messages } } };
+  }),
 
   setMessageQueueItemId: (sessionId, messageId, queueItemId) =>
     set((state) => {

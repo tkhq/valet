@@ -1,7 +1,7 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -437,7 +437,7 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;
@@ -757,6 +757,8 @@ export interface ToolContext {
   readonly toolScope?: ToolScope;
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
+  /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
+  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -1829,6 +1831,7 @@ export type ModelStateEvent =
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
+  | { type: "thinking_update"; threadId: string; messageId: string; index: number; part: Extract<MessagePart, { type: "thinking" }> }
   | {
       /**
        * Live-only tool-call argument streaming (same ephemeral plane as

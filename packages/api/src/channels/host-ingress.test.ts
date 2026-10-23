@@ -64,11 +64,17 @@ describe("publicUrlFromEnv", () => {
  * `signal` aborts — mirrors what a real long-poll transport does while
  * waiting on the next network round trip. */
 class PollingFakeTransport implements ChannelTransport {
-  readonly channelType = "fake";
+  readonly channelType: string;
   queue: RawChannelUpdate[];
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
 
-  constructor(queue: RawChannelUpdate[]) {
+  statuses: Array<{ conversationKey: string; threadTs: string; status: string }> = [];
+  async setStatus(conversationKey: string, threadTs: string, status: string): Promise<void> {
+    this.statuses.push({ conversationKey, threadTs, status });
+  }
+
+  constructor(queue: RawChannelUpdate[], channelType = "fake") {
+    this.channelType = channelType;
     this.queue = queue;
   }
 
@@ -89,6 +95,10 @@ class PollingFakeTransport implements ChannelTransport {
     return { conversationKey, messageId: "g" };
   }
   async updateGatePrompt() {}
+
+  conversationKeyFromThreadKey(threadKey: string): string | null {
+    return threadKey.startsWith("slack:") ? `slack:T:${threadKey.slice(6)}` : null;
+  }
 
   async *poll(signal: AbortSignal): AsyncIterable<RawChannelUpdate> {
     for (const update of this.queue) {
@@ -115,6 +125,7 @@ async function waitFor(check: () => Promise<boolean>, attempts = 50, delayMs = 2
 }
 
 describe("long-poll mode", () => {
+  let events: PgEventStream;
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;
@@ -139,11 +150,12 @@ describe("long-poll mode", () => {
     const engineStore = new PgSessionStore(pgdb);
     const sandboxProvider = new VirtualSandboxProvider();
     const eventStream = new PgEventStream(pgdb);
+    events = eventStream;
     const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     const fakePlugin: ValetPlugin = {
       name: "fake",
       version: "0",
-      transports: [{ channelType: "fake", create: () => transport }],
+      transports: [{ channelType: transport.channelType, create: () => transport }],
     };
     engineHost = new EngineHost({
       scratchCaps: {},
@@ -167,9 +179,9 @@ describe("long-poll mode", () => {
     });
   }
 
-  async function saveCredential(): Promise<void> {
+  async function saveCredential(provider = "fake"): Promise<void> {
     const engineCredentials = new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key"));
-    await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
+    await engineCredentials.save({ type: "org", id: ORG_ID }, provider, {
       type: "bot_token",
       accessToken: "fake-bot-token",
     });
@@ -241,6 +253,83 @@ describe("long-poll mode", () => {
     expect(createCalls).toBe(1);
 
     await host.stop();
+  });
+
+  it("shows processing for threaded ingress and clears it after settlement", async () => {
+    await saveCredential();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const transport = new PollingFakeTransport([inbound({ threadTs: "123.456" })]);
+    const host = buildHost(transport);
+    try {
+      await host.start();
+      await waitFor(async () => transport.statuses.some(call => call.status === ""), 200);
+      expect(transport.statuses[0]).toEqual({ conversationKey: "fake:dm:99", threadTs: "123.456", status: "is thinking…" });
+      expect(transport.statuses.at(-1)?.status).toBe("");
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("does not restart Slack subscriptions when credentials resolve after stop", async () => {
+    const transport = new PollingFakeTransport([], "slack");
+    const host = buildHost(transport);
+    let resumeCredential = () => {};
+    let notifyCredentialRead = () => {};
+    const blocked = new Promise<void>(resolve => { resumeCredential = resolve; });
+    const credentialRead = new Promise<void>(resolve => { notifyCredentialRead = resolve; });
+    const credential = vi.spyOn(PgCredentialStore.prototype, "get").mockImplementationOnce(async () => {
+      notifyCredentialRead();
+      await blocked;
+      return { type: "bot_token", accessToken: "fake-slack-token" };
+    });
+    const outbound = vi.spyOn(host, "startOutbound");
+    const subscribe = vi.spyOn(events, "subscribe");
+    const poll = vi.spyOn(transport, "poll");
+    const starting = host.start();
+    try {
+      await credentialRead;
+      await host.stop();
+      resumeCredential();
+      await starting;
+      expect(outbound).not.toHaveBeenCalled();
+      expect(subscribe).not.toHaveBeenCalled();
+      expect(poll).not.toHaveBeenCalled();
+      expect(host.transportFor("slack")).toBeNull();
+      expect(transport.statuses).toEqual([]);
+    } finally {
+      resumeCredential();
+      await starting;
+      await host.stop();
+      credential.mockRestore();
+      outbound.mockRestore();
+      subscribe.mockRestore();
+      poll.mockRestore();
+    }
+  });
+
+  it("tracks an addressed Slack channel origin from a live queue event", async () => {
+    await saveCredential("slack");
+    const transport = new PollingFakeTransport([], "slack");
+    const host = buildHost(transport);
+    await host.start();
+    try {
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost },
+        { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = session.thread("slack:C1:123.456");
+      await testDb.pgdb.query(`INSERT INTO engine_queue_items
+        (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+        VALUES ('channel-status-q', $1, $2, 'queued', $3, 0, 10, 99999999, 0, 0)`,
+        [session.id, thread.id, JSON.stringify({ kind: "signal", signalType: "slack.message", body: "Help", origin: { channelType: "slack", threadKey: "slack:C1:123.456" } })]);
+      await events.append({ sessionId: session.id, threadId: thread.id, timestamp: 1,
+        event: { type: "queue_state", threadId: thread.id, state: { threadId: thread.id, mode: "followup", status: "running", activeItemId: "channel-status-q", pending: [] } } }, "channel-status-queued");
+      await waitFor(async () => transport.statuses.some(call => call.status === "is thinking…"));
+      expect(transport.statuses[0].conversationKey).toBe("slack:T:C1:123.456");
+      await events.append({ sessionId: session.id, threadId: thread.id, timestamp: 2,
+        event: { type: "submission_settled", sessionId: session.id, threadId: thread.id, queueItemId: "channel-status-q", outcome: { outcome: "completed" } } }, "channel-status-settled");
+      await waitFor(async () => transport.statuses.at(-1)?.status === "");
+    } finally {
+      await host.stop();
+    }
   });
 
   it("poller resumes after restart without duplicate admission", async () => {

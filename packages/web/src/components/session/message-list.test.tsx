@@ -9,7 +9,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
-import { MessageList, isContinuation } from "./message-list";
+import { MessageList } from "./message-list";
+import { isContinuation } from "./transcript-plan";
 
 vi.mock("./message-item", () => ({
   MessageItem: ({ message }: { message: StreamMessage }) => (

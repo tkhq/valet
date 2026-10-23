@@ -1769,9 +1769,9 @@ export class Session {
       event,
       timestamp: Date.now(),
     };
-    // text_delta / tool_call_update are the high-frequency streaming plane —
+    // Text, thinking, and tool argument updates use the streaming plane —
     // never durable.
-    if (event.type === "text_delta" || event.type === "tool_call_update") {
+    if (event.type === "text_delta" || event.type === "tool_call_update" || event.type === "thinking_update") {
       this.providers.stream.publishEphemeral(busEvent);
       return;
     }

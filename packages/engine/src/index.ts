@@ -3,6 +3,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
+export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
 export { boundEventDigest, cutUtf8 } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
@@ -168,6 +169,7 @@ export {
   bashTool,
   threadReadTool,
   threadReference,
+  updatePlanTool,
   JOB_MODE_THRESHOLD_MS,
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,

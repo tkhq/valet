@@ -265,7 +265,6 @@ export class ChannelStreamBridge {
     const transport = this.deps.transportFor(turn.channelType);
     if (!transport || !canStream(transport)) return undefined;
     this.pending.set(stateKey(turn.sessionId, turn.threadId), turn);
-    void this.setStatus(turn, "is thinking…");
     return turn;
   }
 
@@ -313,7 +312,6 @@ export class ChannelStreamBridge {
     if (turn) {
       // The gate opens a new segment: let the post-approval text stream.
       turn.streamedText = false;
-      await this.setStatus(turn, "is waiting for your approval…");
     }
   }
 
@@ -394,7 +392,6 @@ export class ChannelStreamBridge {
     }
 
     if (e.type === "turn_end") {
-      const turn = this.pending.get(key);
       this.pending.delete(key);
       // A turn can end without a message_end for an open stream (a crash
       // between rounds). Close anything still open rather than trust that
@@ -402,7 +399,6 @@ export class ChannelStreamBridge {
       if (this.active.has(key)) {
         void this.guard("finish", () => this.finish(key));
       }
-      if (turn) void this.setStatus(turn, "");
     }
   }
 
@@ -709,16 +705,19 @@ export class ChannelStreamBridge {
     const ref = stream.ref;
     stream.ref = null;
     if (!ref) return;
-    await this.deps.onMessageClosed?.(stream.turn, ref.messageId, stream.engineMessageId)
-      .catch((err: unknown) => console.error("[channels] stream record failed", err));
+    let keepRecord = false;
     if (transport && canStream(transport)) {
       const outcome = await this.tryStop(transport, ref, stream.turn.channelType);
       // The row is the ONLY record that a stream is open. Drop it when the
       // close worked, and when the provider says the message is already gone.
       // Keep it after any other failure: the orphan sweep is then the reader's
       // last chance at a message that would otherwise shimmer for ever.
-      if (outcome === "retry") return;
+      keepRecord = outcome === "retry";
     }
+    // The callback can restore processing status after Slack closes the reply.
+    await this.deps.onMessageClosed?.(stream.turn, ref.messageId, stream.engineMessageId)
+      .catch((err: unknown) => console.error("[channels] stream record failed", err));
+    if (keepRecord) return;
     await this.deleteRecordFor(stream.turn.channelType, stream.turn.conversationKey, ref.messageId);
   }
 
@@ -782,17 +781,6 @@ export class ChannelStreamBridge {
     if (this.streamedOrder.length > STREAMED_CAP) {
       const evict = this.streamedOrder.shift();
       if (evict !== undefined) this.streamed.delete(evict);
-    }
-  }
-
-  private async setStatus(turn: StreamTurn, status: string): Promise<void> {
-    const transport = this.deps.transportFor(turn.channelType);
-    if (!transport?.setStatus) return;
-    try {
-      await transport.setStatus(turn.conversationKey, turn.threadTs, status);
-    } catch (err) {
-      // A status shimmer is decoration. Losing it must not fail a turn.
-      console.error(`[channels] ${turn.channelType}: setStatus failed`, err);
     }
   }
 

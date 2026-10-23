@@ -1,6 +1,7 @@
+import { ThinkingTiming } from "./thinking-timing.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -67,6 +68,7 @@ import {
 } from "./reasoning.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
+import { planOverlay } from "./builtin-tools/update-plan.js";
 import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import {
@@ -512,6 +514,7 @@ export class Thread {
   private turnAgentError: unknown;
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
+  private thinkingTiming = new ThinkingTiming();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -3975,6 +3978,7 @@ export class Thread {
     this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
+    this.thinkingTiming = new ThinkingTiming();
     this.currentToolCalls.clear();
     if (!(await this.canRunCurrentSubmission())) return;
 
@@ -4125,6 +4129,9 @@ export class Thread {
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
     const coldHintApplied = this.applyColdHintForTurn();
+    // The thread's open plan, read from metadata at each turn start so it
+    // survives compaction.
+    const planApplied = this.applyPlanForTurn();
     // Followed Slack-thread signals carry `reply: "manual"`. Add the shared
     // delivery guidance after all other turn overlays so it remains prominent.
     const slackOverheardApplied = this.applySlackOverheardGuidanceForTurn(item);
@@ -4159,6 +4166,7 @@ export class Thread {
       }
     } finally {
       this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardApplied);
+      if (planApplied) this.appendSystemSection("valet-plan", null);
       this.restoreColdHintAfterTurn(coldHintApplied);
       this.restoreRoleAfterTurn(roleOverlay);
       this.restoreRepoInstructionsAfterTurn(repoInstructionsApplied);
@@ -4223,6 +4231,15 @@ export class Thread {
 
   private restoreColdHintAfterTurn(applied: boolean): void {
     if (applied) this.appendSystemSection("valet-cold-sandbox", null);
+  }
+
+  /** Shows the thread's plan to the model while any item is not done. */
+  private applyPlanForTurn(): boolean {
+    const plan = readThreadPlan(this.threadMetadata);
+    const overlay = plan && planOverlay(plan);
+    if (!overlay) return false;
+    this.appendSystemSection("valet-plan", overlay);
+    return true;
   }
 
   /** Add the shared Slack guidance only to manual-delivery message signals. */
@@ -5776,6 +5793,13 @@ export class Thread {
     await this.patchThreadMetadata((current) => current?.[key] === true ? undefined : { ...current, [key]: true }, "before-save");
   }
 
+  /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
+  async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
+    const plan: ThreadPlan = { items, updatedAt: Date.now() };
+    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_PLAN_KEY]: plan }), "after-save");
+    return plan;
+  }
+
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
     await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
@@ -5802,6 +5826,7 @@ export class Thread {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
+      setThreadPlan: (items) => this.setPlan(items),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
@@ -5956,6 +5981,7 @@ export class Thread {
           this.currentAssistantMessageId = uid("e");
           this.streamedTextLength = 0;
           this.currentAssistantParts = [];
+          this.thinkingTiming = new ThinkingTiming();
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
           // One llm.generate span per assistant round, parented under the
@@ -5996,7 +6022,27 @@ export class Thread {
         // painting a dead attempt's output into live clients.
         if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
-        if (ev.type === "text_delta") {
+        if (ev.type === "text_start" || ev.type === "toolcall_start") {
+          const finished = this.thinkingTiming.finish(Date.now());
+          for (const index of finished) {
+            if (!this.currentAssistantMessageId) break;
+            await this.session.emit({
+              type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
+              index, part: this.thinkingTiming.part(index),
+            });
+          }
+        }
+        if (ev.type === "thinking_start" || ev.type === "thinking_delta" || ev.type === "thinking_end") {
+          if (ev.type === "thinking_start") this.thinkingTiming.start(ev.contentIndex, Date.now());
+          if (ev.type === "thinking_end") this.thinkingTiming.end(ev.contentIndex, Date.now());
+          const block = ev.partial.content[ev.contentIndex];
+          if (this.currentAssistantMessageId && block?.type === "thinking") {
+            await this.session.emit({
+              type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
+              index: ev.contentIndex, part: this.thinkingTiming.part(ev.contentIndex),
+            });
+          }
+        } else if (ev.type === "text_delta") {
           this.streamedTextLength += ev.delta.length;
           await this.session.emit({
             type: "text_delta",
@@ -6053,9 +6099,16 @@ export class Thread {
           }
           this.llmRoundStartedAt = Date.now();
           const text = textOf(event.message);
-          // Compose parts: leading text + tool calls (already tracked)
+          this.thinkingTiming.finish(Date.now());
           const parts: MessagePart[] = [];
-          if (text) parts.push({ type: "text", text });
+          for (const [index, block] of event.message.content.entries()) {
+            if (block.type === "text") parts.push({ type: "text", text: block.text });
+            else if (block.type === "thinking") parts.push(this.thinkingTiming.part(index));
+            else if (block.type === "toolCall") {
+              const call = this.currentToolCalls.get(block.id);
+              if (call) parts.push(call);
+            }
+          }
           for (const p of this.currentAssistantParts) {
             // A call the stream removed from the final message (a truncated call after a
             // saved image) never runs. Settle its part, or it stays "running" forever.
@@ -6064,7 +6117,7 @@ export class Thread {
               p.status = "error";
               p.error = "The response ended before this call completed. It did not run.";
             }
-            parts.push(p);
+            if (!parts.includes(p)) parts.push(p);
           }
 
           // Keep the transcript's legacy stop mapping. Result validation uses
@@ -6118,6 +6171,10 @@ export class Thread {
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
           this.currentAssistantEntry = entry;
+          await this.fencedEmit(
+            { type: "message_update", threadId: this.id, messageId: entry.id, parts, content: text },
+            { queueItemId: this.runningItem?.id },
+          );
           await this.fencedEmit(
             {
               type: "message_end",
@@ -7196,10 +7253,11 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
 }
 
 /** The tools a turn from a channel sender with no Valet account may run
- * beyond policy-checked plugin actions: listing actions, and reading the
- * threads its conversation may read (`threadAccess`). Sandbox, file, memory,
- * artifact, and child tools act as the workspace, so they refuse that turn. */
-const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
+ * beyond policy-checked plugin actions: listing actions, reading the
+ * threads its conversation may read (`threadAccess`), and keeping this
+ * thread's plan. Sandbox, file, memory, artifact, and child tools act as the
+ * workspace, so they refuse that turn. */
+const EXTERNAL_SENDER_TOOLS = new Set(["list_tools", "list_threads", "thread_read", "update_plan"]);
 
 /** A member other than the owner wrote this turn in a personal session: a
  * reply in a shared thread. Policy-checked plugin actions run with the
@@ -7211,7 +7269,7 @@ function guestTurn(ctx: ToolContext): boolean {
 }
 
 function refuseOutsideAuthors(def: ToolDef): ToolDef {
-  const actsAsWorkspace = !def.policyChecked && !EXTERNAL_SENDER_READS.has(def.name);
+  const actsAsWorkspace = !def.policyChecked && !EXTERNAL_SENDER_TOOLS.has(def.name);
   if (!actsAsWorkspace && !def.ownerOnly) return def;
   return {
     ...def,

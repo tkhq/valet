@@ -50,6 +50,14 @@ describe("engineSignalToWire", () => {
 });
 
 describe("engineToWireParts", () => {
+  it("keeps per-block timing in history and live updates", () => {
+    const part = { type: "thinking" as const, text: "", startedAt: 1000, durationMs: 2400 };
+    const wirePart = { kind: "thinking", text: "", startedAt: 1000, durationMs: 2400 };
+    expect(engineToWireParts([part])).toEqual([wirePart]);
+    expect(busEventToWire(ev({ type: "thinking_update", threadId: "t1", messageId: "m1", index: 2, part })))
+      .toEqual([{ type: "thinking_update", threadId: "t1", messageId: "m1", index: 2, part: wirePart }]);
+  });
+
   it("translates engine tool_call → wire tool_call (snake_case kind)", () => {
     const parts: EngineMessagePart[] = [
       { type: "tool_call", callId: "c1", toolName: "bash", status: "running" },
@@ -464,6 +472,55 @@ describe("engineGateToWire riskLevel", () => {
   it("omits an unknown level and gates without tool context", () => {
     expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "extreme" })).riskLevel).toBeUndefined();
     expect(engineGateToWire(gate({ riskLevel: "high" })).riskLevel).toBeUndefined();
+  });
+});
+
+describe("engineGateToWire tool", () => {
+  // The body the engine writes for a tool approval (`approvalGateRequest`).
+  const toolBody = (toolId: string, args: Record<string, unknown>) =>
+    `Post the release notes\n\ntool_id=${toolId}\nargs=${JSON.stringify(args, null, 2)}`;
+  const gate = (overrides: Partial<DecisionGate>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve Send Message?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...overrides,
+  });
+
+  it("carries the gated call's id and args", () => {
+    const args = { channel: "#eng", text: "Release 1.2 is out.", thread_ts: "1780887543.189519" };
+    const wire = engineGateToWire(gate({
+      body: toolBody("slack.send_message", args),
+      context: { tool_id: "slack.send_message", service: "slack", args, summary: "Post the release notes", oneShot: true },
+    }));
+    expect(wire.tool).toEqual({ id: "slack.send_message", args });
+  });
+
+  it("carries the id alone when the context has no args", () => {
+    const wire = engineGateToWire(gate({ body: toolBody("gmail.send_draft", {}), context: { tool_id: "gmail.send_draft" } }));
+    expect(wire.tool).toEqual({ id: "gmail.send_draft" });
+  });
+
+  it("cuts string args longer than 4000 characters at any depth", () => {
+    const long = `${"a".repeat(3999)}😀tail`;
+    const args = { text: long, short: "ok", count: 3, nested: { body: long }, list: [long, 1] };
+    const wire = engineGateToWire(gate({ body: toolBody("slack.send_message", args), context: { tool_id: "slack.send_message", args } }));
+    const cut = `${"a".repeat(3999)}😀…`;
+    expect(wire.tool?.args).toEqual({ text: cut, short: "ok", count: 3, nested: { body: cut }, list: [cut, 1] });
+    // A string at the limit passes through unchanged.
+    const atLimit = "b".repeat(4000);
+    const exact = engineGateToWire(gate({ body: toolBody("slack.send_message", { text: atLimit }), context: { tool_id: "slack.send_message", args: { text: atLimit } } }));
+    expect(exact.tool?.args).toEqual({ text: atLimit });
+  });
+
+  it("omits it on gates without tool context", () => {
+    expect(engineGateToWire(gate({ body: "Deploy to production?" })).tool).toBeUndefined();
+    expect(engineGateToWire(gate({ type: "question", body: toolBody("slack.send_message", {}), context: { tool_id: "slack.send_message", args: {} } })).tool).toBeUndefined();
+  });
+
+  it("omits it when the body does not show the call", () => {
+    // A shared-account gate replaces the tool_id/args body with prose.
+    const context = { tool_id: "slack.send_message", args: { channel: "#eng", text: "hi" }, approver: { userId: "u2" } };
+    expect(engineGateToWire(gate({ body: "Valet would use your Slack account.", context })).tool).toBeUndefined();
+    expect(engineGateToWire(gate({ context })).tool).toBeUndefined();
   });
 });
 
