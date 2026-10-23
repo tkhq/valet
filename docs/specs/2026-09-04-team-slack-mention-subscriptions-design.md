@@ -208,7 +208,7 @@ Name prefixes use `channel_name`, without `#`, and include future channels.
 The setup lists each name rule with its conditions and an edit action.
 A name rule remains on the Slack workspace row. Its sentence shows the pattern.
 
-`Add channel-name rule` opens the editor for a separate team mention response.
+`Add channel-name response` opens the editor for a separate team mention response.
 The prefix entry explains future channels. Continue grants `Any channel` consent for that pattern.
 Conditional exact rules do not justify automatic ID exclusions, which could lose mentions.
 Later exact additions use the existing collision workflow.

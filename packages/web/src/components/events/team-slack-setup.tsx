@@ -280,8 +280,8 @@ export function TeamSlackChannelPicker({
             );
           })}
         </ul>
-        <section aria-label="Channel-name rules" className="space-y-2">
-          <p className="text-sm text-muted">Separate rules match alternative channels. All conditions within a rule must match.</p>
+        <section aria-label="Channel-name responses" className="space-y-2">
+          <p className="text-sm text-muted">Separate responses cover alternative channels. All conditions for a response must match.</p>
           {listening.patterns.map((rule) => (
             <div key={rule.id} className="rounded-md border border-line p-3 text-sm">
               <p className="font-medium">{rule.name}</p>
@@ -290,16 +290,16 @@ export function TeamSlackChannelPicker({
             </div>
           ))}
           {!addingPattern ? (
-            <Button variant="secondary" size="sm" onClick={() => setAddingPattern(true)}>Add channel-name rule</Button>
+            <Button variant="secondary" size="sm" onClick={() => setAddingPattern(true)}>Add channel-name response</Button>
           ) : (
             <div className="space-y-2 rounded-md border border-line p-3">
               <label className="text-sm" htmlFor="slack-channel-prefix">Channel name prefix</label>
               <Input id="slack-channel-prefix" value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="lead-" />
-              <p className="text-xs text-muted">Use the name without #. This creates a separate reply rule, including future channels. Review overlaps with exact channels and other name rules before saving.</p>
-              {!unchanged && <p role="status" className="text-sm text-muted">Save or discard your channel changes before adding a rule.</p>}
+              <p className="text-xs text-muted">Use the name without #. This creates a separate response, including future channels. Review overlaps with exact channels and other name responses before saving.</p>
+              {!unchanged && <p role="status" className="text-sm text-muted">Save or discard your channel changes before adding a response.</p>}
               <Button size="sm" disabled={pending || !unchanged || prefix.trim().replace(/^#/, "").length === 0}
                 onClick={() => onAddPattern(prefix.trim().replace(/^#/, ""))}>Continue</Button>
-              <Button variant="ghost" size="sm" onClick={() => setAddingPattern(false)}>Cancel name rule</Button>
+              <Button variant="ghost" size="sm" onClick={() => setAddingPattern(false)}>Cancel name response</Button>
             </div>
           )}
         </section>

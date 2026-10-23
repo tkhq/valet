@@ -103,7 +103,7 @@ describe("team homepage Slack setup", () => {
     }];
     open();
     expect(screen.getByText(/channel name starts with lead-/i)).toBeTruthy();
-    expect(screen.getByText(/Separate rules match alternative channels/)).toBeTruthy();
+    expect(screen.getByText(/Separate responses cover alternative channels/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit Lead replies" }));
     expect(screen.getByTestId("line-editor").textContent).toContain("edit Lead replies");
   });
@@ -111,7 +111,7 @@ describe("team homepage Slack setup", () => {
   it("offers a separate channel-name response rule", () => {
     state.existing = true;
     open();
-    fireEvent.click(screen.getByRole("button", { name: "Add channel-name rule" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add channel-name response" }));
     fireEvent.change(screen.getByLabelText("Channel name prefix"), { target: { value: "lead-" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(screen.getByTestId("line-editor").textContent).toContain("create team Alpha (a)");

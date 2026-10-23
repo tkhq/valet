@@ -350,7 +350,7 @@ function Conditions({ draft, mode, onChange, services, names }: {
         )}
       </div>
       <p className="mt-1.5 text-xs text-muted">
-        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : `All conditions must match. ${conditionHint(service)} Use separate rules for alternative channels.`}
+        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : `All conditions must match. ${conditionHint(service)} Use separate responses for alternative channels.`}
       </p>
       {adding && (
         <AddCondition

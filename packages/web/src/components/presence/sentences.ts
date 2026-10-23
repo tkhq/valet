@@ -598,7 +598,8 @@ function presencePlace(
     const filter = filters.find((f) => f.field === field);
     if (filter && filterEntries(filter).length > 0) {
       const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
-      return [text(`${article(fieldWords(field))} that ${opWords(filter.op)} ${values}`)];
+      const place = field === "channel_name" ? "a channel whose name" : `${article(fieldWords(field))} that`;
+      return [text(`${place} ${opWords(filter.op)} ${values}`)];
     }
   }
   return [text(ANY_PLACE[service])];

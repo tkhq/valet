@@ -78,7 +78,7 @@ describe("overviewGroups", () => {
       for (const places of [PLACES, []]) {
         const blocks = overviewGroups(places, lines, new Set()).flatMap((group) => group.blocks);
         expect(blocks).toHaveLength(1);
-        expect(blocks[0]).toMatchObject({ label: "Slack channel rules", service: "slack", serviceWide: true });
+        expect(blocks[0]).toMatchObject({ label: "Slack channel responses", service: "slack", serviceWide: true });
         expect(blocks[0]?.lines).toEqual(lines);
       }
     },

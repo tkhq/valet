@@ -288,7 +288,7 @@ describe("LineEditor", () => {
       team: { id: "t_platform", name: "Platform" }, channelNamePattern: { prefix: "lead-" },
     } });
     expect(screen.getByLabelText(/^Any channel/)).toHaveProperty("checked", true);
-    expect(sentence()).toContain("channel name that starts with lead-");
+    expect(sentence()).toContain("channel whose name starts with lead-");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription).toHaveBeenCalledWith(expect.objectContaining({
       eventKeys: ["slack.app_mention"], anyChannel: true, audience: "organization",

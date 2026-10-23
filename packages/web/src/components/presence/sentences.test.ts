@@ -1062,5 +1062,5 @@ describe("lineEntryParts (Part D step 1.7)", () => {
 
 it("names a channel-name prefix in the response rule sentence", () => {
   const rule = sub({ filters: [{ field: "channel_name", op: "prefix", value: "lead-" }], target: { kind: "assistant", follow: true } });
-  expect(presenceSentence(rule, catalog, workflows, threads)).toContain("channel name that starts with lead-");
+  expect(presenceSentence(rule, catalog, workflows, threads)).toContain("channel whose name starts with lead-");
 });

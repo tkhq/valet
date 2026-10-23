@@ -223,7 +223,7 @@ export function overviewGroups(
     }
     block.lines.push(line);
     if (block.service === "slack" && block.serviceWide && line.filters.some((filter) => filter.field === "channel_name")) {
-      block.label = "Slack channel rules";
+      block.label = "Slack channel responses";
     }
   }
   const groups: OverviewGroup[] = [];

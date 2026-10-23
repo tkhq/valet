@@ -1260,7 +1260,7 @@ Revision 4 deviations:
   Other services keep their field semantics. Opening or renaming a saved
   rule never converts its ID conditions into name conditions.
 - **Slack setup lists channel-name rules.** Exact selections and name rules
-  are separate alternatives. `Add channel-name rule` opens the editor with
+  are separate alternatives. `Add channel-name response` opens the editor with
   a name prefix and the team's reply target. The prefix entry explains future
   channels; Continue grants `Any channel` consent for that pattern. The reader
   reviews the conditions before creation. Conditional exact rules do not
@@ -1270,7 +1270,7 @@ Revision 4 deviations:
 - **Pattern rules keep their place clause.** A name pattern remains on the
   Slack workspace row, without an invented channel place. The row sentence
   shows the pattern. A Slack workspace row containing a `channel_name` rule
-  uses the heading `Slack channel rules`, including groups with unscoped rules.
+  uses the heading `Slack channel responses`, including groups with unscoped rules.
   Groups without channel-name rules retain `Everywhere in Slack`.
   Pattern rules have edit actions in Slack setup.
 - **A proposal's row Edit opens edit (Part D step 2).** The overview row's
@@ -1351,3 +1351,5 @@ name no place), the Activity landing, the `Activity` and `Routines` rail
 counts (replaced by the banner), the `/presence/routines?routine=<id>`
 page (now `/presence/routines/<id>`), and the ungated routine row switch
 (the roster row reads `routineReadOnly`).
+
+Presence copy uses response for these entries. A name condition reads as a channel whose name matches the condition.

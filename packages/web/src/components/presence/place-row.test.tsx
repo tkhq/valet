@@ -321,5 +321,5 @@ it("shows the channel-name pattern on the Slack workspace place row", () => {
   renderRow(block({ service: "slack", subject: "slack:T1", label: "Everywhere in Slack", serviceWide: true,
     lines: [line("prefix-replies", { eventKeys: ["slack.app_mention"], filters: [{ field: "channel_name", op: "prefix", value: "lead-" }], target: { kind: "assistant", follow: true } })],
   }));
-  expect(screen.getByRole("link", { name: /channel name that starts with lead-/ })).toBeTruthy();
+  expect(screen.getByRole("link", { name: /channel whose name starts with lead-/ })).toBeTruthy();
 });
