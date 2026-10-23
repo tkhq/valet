@@ -324,7 +324,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
           className="shrink-0 border-b border-line bg-danger-wash px-3 py-2 text-sm text-danger-600"
         >
           {error ?? data.error}
-          {error && (
+          {error && runtime && (
             <Button
               size="sm"
               variant="secondary"
@@ -400,7 +400,12 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
               runtime?.state === "starting" ||
               runtime?.state === "incompatible"
             }
-            onClick={() => void run(() => actions.start.mutateAsync())}
+            onClick={() =>
+              void run(async () => {
+                const response = await actions.start.mutateAsync();
+                if (response.error) throw new Error(response.error);
+              })
+            }
           >
             {runtime?.state === "sleeping" ? "Wake browser" : "Start browser"}
           </Button>
