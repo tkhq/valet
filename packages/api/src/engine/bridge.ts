@@ -10,7 +10,7 @@ import type {
   QueueState as EngineQueueState,
   SignalContent as EngineSignalContent,
 } from "@valet/engine";
-import { gateApprover } from "../services/session-access.js";
+import { gateApprover, isSharedAccountGate } from "../services/session-access.js";
 import type {
   DecisionGate as WireDecisionGate,
   DecisionGateProvenance,
@@ -39,7 +39,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
   const approver = gateApprover(g);
   const toolContext = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
-  const oneShot = !approver && toolContext?.oneShot === true;
+  const oneShot = !isSharedAccountGate(g) && toolContext?.oneShot === true;
   const riskLevel = WIRE_RISK_LEVELS.find((level) => level === toolContext?.riskLevel);
   const tool = gateTool(g.body, toolContext);
   return {

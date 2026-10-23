@@ -70,6 +70,19 @@ describe("update_plan", () => {
     expect(updatePlanTool.ownerOnly).toBeUndefined();
   });
 
+  it.each(["external", "guest"])("keeps %s input out of persistent plan context", async kind => {
+    const { faux, providers, options } = setup(`plan-untrusted-${kind}`);
+    const seen: { prompt: string; messages: string }[] = [];
+    faux.setResponses([planCall("untrusted-plan", ITEMS), fauxAssistantMessage("Noted."), capture(seen, "Hello.")]);
+    const session = await new Engine({ providers }).createSession(options);
+    const receipt = await session.prompt("Remember this plan", { author: { id: kind === "guest" ? "another-member" : "u", externalSender: kind === "external" } });
+    await session.thread().awaitResult(receipt.queueItemId);
+    expect((await toolResult(providers, session, "untrusted-plan")).text).toContain("[not_available]");
+    expect(readThreadPlan(session.thread().toThreadData().metadata)).toBeUndefined();
+    await turn(session, "Hello again.");
+    expect(seen[0]?.prompt).not.toContain("## Your current plan");
+  });
+
   it("keeps the plan in thread metadata and shows it each turn, after compaction and a restore", async () => {
     const { faux, providers, options } = setup("plan-persist");
     const seen: { prompt: string; messages: string }[] = [];

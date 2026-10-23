@@ -2039,8 +2039,10 @@ export class ChannelHost {
       }
     }
     if (stored && !answersGate(stored, userPrincipal(userId))) {
-      await transport?.answerCallback?.(gateCallback.callbackId, `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`);
-      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the account's owner may answer this gate");
+      await transport?.answerCallback?.(gateCallback.callbackId, isSharedAccountGate(stored)
+        ? `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`
+        : `Only ${gateApprover(stored)?.name ?? "the person who asked"} can answer this request. Ask them in the thread.`);
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the named approver may answer this gate");
       return;
     }
 

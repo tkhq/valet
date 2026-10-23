@@ -1,9 +1,9 @@
 import { expect, it, vi } from "vitest";
-import { InMemoryEventStream } from "@valet/engine";
+import { InMemoryEventStream, type ChannelTransport } from "@valet/engine";
 import { PgSessionStore } from "@valet/store-postgres";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { ChannelProcessingStatus } from "./processing-status.js";
-import { restoreProcessingStatus } from "./processing-status-recovery.js";
+import { restoreProcessingStatus, trackProcessingItem } from "./processing-status-recovery.js";
 
 it("restores queued, running and gated Slack work from Postgres across pages and clears on settlement", async () => {
   const { pgdb, appDb } = await freshTestPgDb();
@@ -61,5 +61,83 @@ it("restores queued, running and gated Slack work from Postgres across pages and
     await vi.waitFor(() => expect(calls.at(-1)).toBe(""));
   } finally {
     await second.stop();
+  }
+});
+
+it("recovers DM status past a page of non-Slack work containing escaped NUL", async () => {
+  const { pgdb, appDb } = await freshTestPgDb();
+  const store = new PgSessionStore(pgdb);
+  await pgdb.query(`INSERT INTO engine_sessions
+    (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+    VALUES ('s', 'user', 'u', 'u', 'org', 'w', 'assistant', 'active', 0, 0)`);
+  await pgdb.query(`INSERT INTO engine_queue_items
+    (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+    SELECT 'a' || n, 's', 't', 'queued', $1, 0, 10, 99999999, 0, 0
+    FROM generate_series(1, 100) n`, [JSON.stringify("hello\0world")]);
+  await pgdb.query(`INSERT INTO engine_queue_items
+    (id, session_id, thread_id, status, content, channel, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+    VALUES ('z', 's', 't', 'queued', $1, $2, 0, 10, 99999999, 0, 0)`,
+  [JSON.stringify("DM with\0NUL"), JSON.stringify({ channelType: "slack", channelId: "slack:T:D100:123.456" })]);
+  const calls: string[] = [];
+  const status = new ChannelProcessingStatus(new InMemoryEventStream(), () => ({
+    setStatus: async (key, _ts, value) => { calls.push(`${key} ${value}`); },
+  }));
+  status.start();
+  try {
+    await restoreProcessingStatus(appDb, store, status, "org");
+    expect(calls).toEqual(["slack:T:D100:123.456 is thinking…"]);
+  } finally {
+    await status.stop();
+  }
+});
+
+it.each(["startup", "live"])("tracks only Slack DMs from channel targets and signal origins during %s", async mode => {
+  const { pgdb, appDb } = await freshTestPgDb();
+  const store = new PgSessionStore(pgdb);
+  await pgdb.query(`INSERT INTO engine_sessions
+    (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+    VALUES ('s', 'user', 'u', 'u', 'org', 'w', 'assistant', 'active', 0, 0)`);
+  const calls: string[] = [];
+  const transport: ChannelTransport = {
+    channelType: "slack",
+    verifyWebhook: () => null,
+    parseUpdate: () => null,
+    send: async key => ({ conversationKey: key, messageId: "m" }),
+    sendMedia: async key => ({ conversationKey: key, messageId: "m" }),
+    sendGatePrompt: async key => ({ conversationKey: key, messageId: "g" }),
+    updateGatePrompt: async () => {},
+    conversationKeyFromThreadKey: key => `slack:T:${key.slice(6)}`,
+    setStatus: async (key, _ts, value) => { calls.push(`${key} ${value}`); },
+  };
+  const status = new ChannelProcessingStatus(new InMemoryEventStream(), () => transport);
+  status.start();
+  try {
+    for (const source of ["channel", "origin"]) {
+      for (const channelId of ["C100", "G100", "D100"]) {
+        const id = `${source}-${channelId}`;
+        const ts = source === "channel" ? "123.456" : "123.457";
+        const content = source === "channel" ? "hello" : {
+          kind: "signal", signalType: "slack.message", body: "a passing remark in a followed thread",
+          origin: { channelType: "slack", threadKey: `slack:${channelId}:${ts}`, reply: "manual" },
+        };
+        const channel = source === "channel" ? { channelType: "slack", channelId: `slack:T:${channelId}:${ts}` } : null;
+        await pgdb.query(`INSERT INTO engine_queue_items
+          (id, session_id, thread_id, status, content, channel, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+          VALUES ($1, 's', 't', 'queued', $2, $3, 0, 10, 99999999, 0, 0)`,
+        [id, JSON.stringify(content), channel && JSON.stringify(channel)]);
+        if (mode === "live") {
+          const item = await store.getQueueItem("s", id);
+          if (!item) throw new Error(`Missing queue item ${id}`);
+          await trackProcessingItem(store, status, "s", item, transport);
+        }
+      }
+    }
+    if (mode === "startup") await restoreProcessingStatus(appDb, store, status, "org", transport);
+    expect(calls).toEqual([
+      "slack:T:D100:123.456 is thinking…",
+      "slack:T:D100:123.457 is thinking…",
+    ]);
+  } finally {
+    await status.stop();
   }
 });

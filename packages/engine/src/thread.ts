@@ -2044,7 +2044,7 @@ export class Thread {
         dedupeKey: req.dedupeKey,
       });
       if (sticky?.kind === "denied") {
-        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal };
+        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal, gateContext: sticky.gate.context ?? {} };
       }
       if (sticky?.kind === "expired") {
         throw new DecisionGateExpiredError(sticky.gate.id, sticky.gate.ordinal);
@@ -2172,7 +2172,7 @@ export class Thread {
       await fencedGateWrite(() =>
         session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
       );
-      return resolution;
+      return { ...resolution, gateContext: gate.context ?? {} };
     } catch (err) {
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
@@ -6704,12 +6704,15 @@ export class Thread {
         });
         if (sc.match) {
           const replayOrdinal = this.suspendedDecisionForReplay?.ordinal;
+          const replayGateId = this.suspendedDecisionForReplay?.gateId;
           this.suspendedDecisionForReplay = undefined; // one-shot
           // The persisted resolution already carries gateOrdinal from the
           // original (non-replay) requestDecision call below, but stamp it
           // defensively so a replay is self-describing even if the stored
           // record predates this field.
-          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
+          const storedGate = replayGateId ? await session.providers.store.getDecisionGate(session.id, replayGateId) : null;
+          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal,
+            gateContext: storedGate ? storedGate.context ?? {} : req.context };
         }
         // Nobody watches an unattended workflow task, so a new gate would wait
         // until it expires. Refuse it here, after replay, so a gate opened
@@ -8146,10 +8149,10 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
 
 /** The tools a turn from a channel sender with no Valet account may run
  * beyond policy-checked plugin actions: listing actions, reading the
- * threads its conversation may read (`threadAccess`), and keeping this
- * thread's plan. Sandbox, file, memory, artifact, and child tools act as the
+ * threads its conversation may read (`threadAccess`). Persistent plans,
+ * sandbox, file, memory, artifact, and child tools act as the
  * workspace, so they refuse that turn. */
-const EXTERNAL_SENDER_TOOLS = new Set(["list_tools", "list_threads", "thread_read", "update_plan"]);
+const EXTERNAL_SENDER_TOOLS = new Set(["list_tools", "list_threads", "thread_read"]);
 
 /** A member other than the owner wrote this turn in a personal session: a
  * reply in a shared thread. Policy-checked plugin actions run with the

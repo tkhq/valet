@@ -404,11 +404,14 @@ async function requestApprovalDecision(
   ctx: ToolContext,
   req: DecisionGateRequest,
 ): Promise<
-  | { kind: "resolved"; resolution: DecisionResolution }
+  | { kind: "resolved"; resolution: DecisionResolution; gateContext: Record<string, unknown> | undefined }
   | { kind: "expired"; gateOrdinal?: number }
 > {
   try {
-    return { kind: "resolved", resolution: await ctx.requestDecision(req) };
+    // The original gate context distinguishes a legacy team approval from
+    // a new requester-only gate. An empty stored context is authoritative.
+    const resolution = await ctx.requestDecision(req);
+    return { kind: "resolved", resolution, gateContext: resolution.gateContext ?? req.context };
   } catch (err) {
     // Carry the expired gate's ordinal into the audit record — the policy
     // sink derives its deterministic invocation id from it.
@@ -507,9 +510,19 @@ function answeredByAsker(entry: CatalogEntry, ctx: ToolContext): boolean {
   return entry.action.approvalScope === "actor" || (ctx.owner?.type === "team" && ctx.interactiveActor !== undefined);
 }
 
-function approvalActorMatches(entry: CatalogEntry, ctx: ToolContext, resolution: DecisionResolution): boolean {
-  return !answeredByAsker(entry, ctx) ||
-    (ctx.interactiveActor !== undefined && resolution.resolvedBy === ctx.interactiveActor.id);
+function approvalActorMatches(
+  entry: CatalogEntry,
+  ctx: ToolContext,
+  resolution: DecisionResolution,
+  gateContext: Record<string, unknown> | undefined,
+): boolean {
+  if (entry.action.approvalScope === "actor" &&
+    (!ctx.interactiveActor || resolution.resolvedBy !== ctx.interactiveActor.id)) return false;
+  const approver = gateContext?.approver;
+  // Unmarked legacy team gates retain member-authorized approval. New gates
+  // carry the requester in their stored context, including on replay.
+  return !approver || typeof approver !== "object" || !("userId" in approver) ||
+    resolution.resolvedBy === approver.userId;
 }
 
 /**
@@ -708,7 +721,7 @@ export async function invokeAction(
       if (isUnattendedWorkflowRefusal(resolution)) return { kind: "denied-unattended" };
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
-      if (!approvalActorMatches(entry, ctx, resolution)) return { kind: "denied-approval" };
+      if (!approvalActorMatches(entry, ctx, resolution, gateOutcome.gateContext)) return { kind: "denied-approval" };
       const availability = await checkServiceAvailability(
         catalog,
         entry.service,
@@ -897,7 +910,7 @@ export async function invokeAction(
     // fails the approval closed (treated as not-approved).
     const approverMatches = decision.approver
       ? resolution.resolvedBy === decision.approver.userId
-      : approvalActorMatches(entry, ctx, resolution);
+      : approvalActorMatches(entry, ctx, resolution, gateOutcome.gateContext);
     const oneShotResolution = !actorApproval || resolution.actionId === "approve" || resolution.actionId === "deny";
     let onResolutionThrew = false;
     if (resolver.onResolution && approverMatches && oneShotResolution) {

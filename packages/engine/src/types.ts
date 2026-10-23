@@ -1150,6 +1150,9 @@ export interface DecisionGateRequest {
 }
 
 export interface DecisionResolution {
+  /** Transient engine-supplied context from the actual gate, not a caller's
+   * answer. Empty means a legacy gate had no context. Not persisted here. */
+  gateContext?: Record<string, unknown>;
   /** Inline images supplied with a question answer; persisted for restart replay. */
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;

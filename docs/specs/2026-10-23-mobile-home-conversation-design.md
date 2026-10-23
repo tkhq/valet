@@ -184,3 +184,11 @@ The web checks persisted widget specs with the same validator before rendering t
 Desktop keeps its dashboard, but an explicit private Home thread link remains reachable through the chat route.
 
 The Home queue default persists before admission and survives engine restarts. Widgets use explicit elements; state-driven repeat expansion is rejected.
+
+Processing recovery scans bounded organization-scoped pages without casting message text to PostgreSQL JSON.
+Slack processing status is limited to DM conversations; silent channel work does not announce activity.
+External senders and guests in personal shared threads cannot update the persistent plan.
+Approval surfaces distinguish the requester from a shared-account owner.
+Legacy unmarked team approvals retain member-authorized behavior after restart.
+New requester gates use their stored approver, and explicit actor-only and shared-account approvals stay restricted.
+Requester gates retain their one-shot marker for bulk approval; shared-account gates remain excluded.

@@ -82,6 +82,17 @@ describe("actor-scoped action consent", () => {
     expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/verified.*author/i) });
     expect(gates).toBe(0);
   });
+
+  it.each([false, true])("refuses another member's legacy approval for an explicitly actor-scoped action (resolver: %s)", async (withResolver) => {
+    const result = await invokeAction(buildPluginCatalog([plugin]), "settings.change", {}, makeCtx({
+      userId: "author", interactiveActor: { id: "author" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "org_policy" } }),
+      } } : {}),
+      requestDecision: async () => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1, gateContext: {} }),
+    }), "Change settings");
+    expect(result.kind).toBe("denied-approval");
+  });
 });
 
 describe("team approvals wait on the person who asked", () => {
@@ -103,6 +114,51 @@ describe("team approvals wait on the person who asked", () => {
       userId: "runtime", owner: { type: "team", id: "team-1" }, requestDecision,
     }), "Post");
     expect(requests.map((request) => request.context?.approver)).toEqual([{ userId: "asker", name: "Asker Name" }, undefined, undefined]);
+  });
+
+  it.each([false, true])("honors a teammate's approval of an unmarked legacy team gate (resolver: %s)", async (withResolver) => {
+    const records: PolicyInvocationRecord[] = [];
+    let resolutions = 0;
+    let executions = 0;
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute: async () => {
+      executions++;
+      return { success: true };
+    } }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "team_policy" } }),
+        onResolution: async () => { resolutions++; },
+        onInvocation: async (record: PolicyInvocationRecord) => { records.push(record); },
+      } } : {}),
+      // requestDecision returns the stored gate context when joining or replaying it.
+      requestDecision: async () => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1,
+        gateContext: { tool_id: "chat.post", oneShot: true } }),
+    }), "Post");
+    expect(result.kind).toBe("ok");
+    expect(executions).toBe(1);
+    expect(resolutions).toBe(withResolver ? 1 : 0);
+    expect(records.map(record => record.status)).toEqual(withResolver ? ["completed"] : []);
+  });
+
+  it.each([false, true])("refuses another member's answer to a new requester gate (resolver: %s)", async (withResolver) => {
+    let resolutions = 0;
+    let executions = 0;
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute: async () => {
+      executions++;
+      return { success: true };
+    } }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "team_policy" } }),
+        onResolution: async () => { resolutions++; },
+      } } : {}),
+      requestDecision: async request => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1, gateContext: request.context }),
+    }), "Post");
+    expect(result.kind).toBe("denied-approval");
+    expect(executions).toBe(0);
+    expect(resolutions).toBe(0);
   });
 
   it.each(["lender", "asker", "another-member"])("requires the account lender's consent when %s answers", async (resolvedBy) => {

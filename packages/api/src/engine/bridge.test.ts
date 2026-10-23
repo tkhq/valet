@@ -448,11 +448,34 @@ describe("engineGateToWire oneShot", () => {
     expect(engineGateToWire(gate({ tool_id: "github.get_issue", oneShot: true })).oneShot).toBe(true);
   });
 
+  it("preserves one-shot eligibility when the gate names its requester", () => {
+    const wire = engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver: { userId: "bea" },
+      provenance: { baseMode: "require_approval", source: "team_policy" },
+    }));
+    expect(wire.oneShot).toBe(true);
+    expect(wire.approver).toEqual({ userId: "bea" });
+  });
+
+  it.each([undefined, { userId: "lender" }])("excludes shared-account consent even with a stale one-shot marker (approver: %j)", (approver) => {
+    expect(engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver,
+      provenance: { baseMode: "allow", source: "shared_account" },
+    })).oneShot).toBeUndefined();
+  });
+
+  it("excludes legacy shared-account consent without complete policy provenance", () => {
+    expect(engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver: { userId: "lender" },
+      provenance: { source: "shared_account" },
+    })).oneShot).toBeUndefined();
+  });
+
   it("leaves it off a gate that covers later work or lends an account", () => {
     // sec_start and ask_approval open plain approval gates with approve/deny and no tool context.
     expect(engineGateToWire(gate()).oneShot).toBeUndefined();
     expect(engineGateToWire(gate({ tool_id: "github.get_issue" })).oneShot).toBeUndefined();
-    expect(engineGateToWire(gate({ tool_id: "github.get_issue", oneShot: true, approver: { userId: "bea" } })).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", approver: { userId: "bea" } })).oneShot).toBeUndefined();
     expect(engineGateToWire(gate({ oneShot: true })).oneShot).toBeUndefined();
   });
 });

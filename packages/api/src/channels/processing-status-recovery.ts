@@ -12,8 +12,7 @@ export async function restoreProcessingStatus(
     const result = await db.execute(sql`
       SELECT q.id, q.session_id FROM engine_queue_items q
       JOIN engine_sessions s ON s.id = q.session_id
-      WHERE s.org_id = ${orgId} AND q.status <> 'settled'
-        AND (q.channel::jsonb ->> 'channelType' = 'slack' OR q.content::jsonb -> 'origin' ->> 'channelType' = 'slack') AND q.id > ${cursor}
+      WHERE s.org_id = ${orgId} AND q.status <> 'settled' AND q.id > ${cursor}
       ORDER BY q.id LIMIT 100`) as { rows: Array<{ id: string; session_id: string }> }; // SQL projection has these two text columns.
     if (result.rows.length === 0) return;
     for (const row of result.rows) {
@@ -35,7 +34,8 @@ export async function trackProcessingItem(
   const conversationKey = item.channel?.channelType === "slack" ? item.channel.channelId
     : origin?.channelType === "slack" ? transport?.conversationKeyFromThreadKey?.(origin.threadKey) : undefined;
   if (!conversationKey) return;
-  const match = /^slack:[^:]+:[^:]+:([0-9]+\.[0-9]+)$/.exec(conversationKey);
+  // Slack assistant status is available only in DM conversations.
+  const match = /^slack:[^:]+:D[^:]*:([0-9]+\.[0-9]+)$/.exec(conversationKey);
   if (!match) return;
   // Buffer live settlement and gate events while durable state is read.
   const turn = status.begin({ channelType: "slack", conversationKey, threadTs: match[1], sessionId, threadId: item.threadId }, item.id);
