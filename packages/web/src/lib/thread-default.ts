@@ -1,16 +1,23 @@
 import type { ThreadSummary } from "@valet/api/wire";
 
+/** The person's home conversation: the phone's first screen, the pinned Home
+ * row of the web sidebar, and the thread a Slack DM continues. */
+export function isHomeThread(thread: Pick<ThreadSummary, "key">): boolean {
+  return thread.key === "home";
+}
+
 /** Helper conversations, workflow threads, and the home conversation: never
  * the thread a workspace opens by default, and private to their person. */
 export function isAppAssistantThread(thread: Pick<ThreadSummary, "key">): boolean {
-  return Boolean(thread.key?.startsWith("app-assistant:") || thread.key?.startsWith("workflow:") || thread.key === "home");
+  return Boolean(thread.key?.startsWith("app-assistant:") || thread.key?.startsWith("workflow:") || isHomeThread(thread));
 }
 
 /** Threads that are not rows in the thread list: workflow threads, and the
- * home conversation (the app's first screen). Earlier helper conversations
- * from the side panel are rows, so they stay reachable. */
+ * home conversation, which the web sidebar pins above the list instead.
+ * Earlier helper conversations from the side panel are rows, so they stay
+ * reachable. */
 export function isHiddenFromThreadList(thread: Pick<ThreadSummary, "key">): boolean {
-  return Boolean(thread.key?.startsWith("workflow:") || thread.key === "home");
+  return Boolean(thread.key?.startsWith("workflow:") || isHomeThread(thread));
 }
 
 /** The implicit thread is always the newest created thread, regardless of sidebar sort. */

@@ -2,6 +2,7 @@ import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
+import { useHomeConversation } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -13,6 +14,7 @@ import {
   Bot,
   Filter,
   Hash,
+  House,
   Slack,
   Zap,
   Folder,
@@ -366,6 +368,10 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   // conversations live in the Ask Valet panel.
   const mobile = useMobileLayout();
   const unlisted = (thread: Pick<ThreadSummary, "key">) => isHiddenFromThreadList(thread) || (!mobile && isAppAssistantThread(thread));
+  // Home is a place, not a row. The web sidebar pins it above the list in the
+  // person's own workspace; a phone opens Home as its first screen instead.
+  const home = useHomeConversation(!mobile);
+  const homeId = !mobile && home.data?.sessionId === sessionId ? home.data.threadId : undefined;
   // Who is in which thread now: faces on the rows.
   const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
@@ -404,7 +410,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
   const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
-  const fixedIds = [...new Set([...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
+  // The home thread rides along as a fixed thread so its row has live state.
+  const fixedIds = [...new Set([...(homeId ? [homeId] : []), ...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
     projects.value.grouped && projects.value.projects.some(project => project.id === projects.value.assignments[id]))])].sort();
   const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -475,7 +482,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   );
   const searching = !!normalizedSearch && (debouncedSearch !== normalizedSearch || contentSearch.isFetching);
   const searchCandidates = [...new Map([...threads, ...(debouncedSearch === normalizedSearch ? contentSearch.data?.threads ?? [] : [])].map(thread => [thread.id, thread])).values()];
-  const searchResults = sortThreads(searchCandidates.filter(thread => !unlisted(thread)), sortMode).filter((thread) => {
+  // Home has no row in the list, but a content match still finds it.
+  const searchResults = sortThreads(searchCandidates.filter(thread => !unlisted(thread) || thread.id === homeId), sortMode).filter((thread) => {
     const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
     return contentMatchIds.has(thread.id) || `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(normalizedSearch);
   });
@@ -803,6 +811,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           width, which defeats row truncation within the fixed-width sidebar. */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
+          {homeId && <HomeRow sessionId={sessionId} threadId={homeId} thread={threadsQ.data?.threads.find((t) => t.id === homeId)}
+            active={openThreadId === homeId} hasPendingGate={gatedThreadIds.has(homeId)} />}
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
             <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
@@ -943,6 +953,47 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * The pinned Home row at the top of the web sidebar: the person's one
+ * conversation with Valet, the same one the phone opens first and a Slack
+ * DM continues. It is never archived, renamed, pinned, or moved, so it has
+ * none of a thread row's controls. Its marks follow the thread rows'.
+ */
+function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
+  sessionId: string;
+  threadId: string;
+  /** The home thread's summary, once the fixed-thread read returns it. */
+  thread?: ThreadSummary;
+  active: boolean;
+  hasPendingGate: boolean;
+}) {
+  const liveStatus = useThreadLiveStatus(sessionId, threadId);
+  const queueState = useQueueStateForThread(sessionId, threadId);
+  const question = thread ? pendingAgentQuestion(thread) : undefined;
+  const unread = !active && thread !== undefined && isThreadUnread(thread);
+  return (
+    <section aria-label="Home" className="pt-1">
+      <Tooltip content="Your conversation with Valet: the same one on your phone and in your Slack DM." delayDuration={600}>
+        <Link
+          to="/chat"
+          search={(prev) => ({ ...prev, thread: threadId, child: undefined })}
+          className={cn(
+            "flex items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
+            active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
+          )}
+        >
+          <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+          <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
+          {question
+            ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+            : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+          <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
+        </Link>
+      </Tooltip>
+    </section>
   );
 }
 

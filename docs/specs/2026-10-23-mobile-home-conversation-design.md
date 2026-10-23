@@ -181,7 +181,8 @@ If initial provisioning fails, Home remains available and logs the failure witho
 
 Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
 The web checks persisted widget specs with the same validator before rendering them.
-Desktop keeps its dashboard, but an explicit private Home thread link remains reachable through the chat route.
+Desktop keeps its dashboard. The web sidebar pins a Home row above the thread list in the person's own workspace, with the same unread, question, and work marks as a thread row. Home is never an ordinary row, but thread search finds it when its content matches.
+The API names the home thread Home in every thread response and never auto-titles it, so the web, the CLI, and agents show one name.
 
 The Home queue default persists before admission and survives engine restarts. Widgets use explicit elements; state-driven repeat expansion is rejected.
 
