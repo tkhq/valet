@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -536,5 +536,30 @@ describe("ModelPicker — reasoning row", () => {
   it("appends the reasoning level to the trigger label", () => {
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("· High");
+  });
+});
+
+
+describe("ModelPicker — phone settings panel", () => {
+  it("shows model and thinking controls directly, and stays open after a selection", async () => {
+    const onSelect = vi.fn();
+    const onSelectReasoning = vi.fn();
+    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onSelectReasoning });
+    expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Search models" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Small" }));
+    expect(onSelect).toHaveBeenCalledWith("s");
+    expect(screen.getByRole("button", { name: "High reasoning" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "High reasoning" }));
+    expect(onSelectReasoning).toHaveBeenCalledWith("high");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("uses native keyboard activation for thinking without selecting a highlighted model", () => {
+    const onSelect = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onSelectReasoning: vi.fn() });
+    fireEvent.keyDown(screen.getByRole("button", { name: "High reasoning" }), { key: "Enter" });
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

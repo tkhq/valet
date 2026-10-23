@@ -78,6 +78,8 @@ import { matchesNeedle } from "~/lib/text-match";
  */
 export interface ModelPickerProps {
   currentId?: string;
+  /** A phone settings dialog embeds the controls without a second popup. */
+  presentation?: "menu" | "panel";
   /** Model shown in the closed trigger. Picker behavior remains based on
    * `currentId`. */
   displayId?: string;
@@ -154,6 +156,7 @@ type FlatEntry = { kind: "tier"; tier: SizeTier } | { kind: "model"; model: Mode
 
 export function ModelPicker({
   currentId,
+  presentation = "menu",
   displayId,
   ariaDescription,
   onSelect,
@@ -161,6 +164,7 @@ export function ModelPicker({
   onSelectReasoning,
   disabled,
 }: ModelPickerProps) {
+  const panel = presentation === "panel";
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
@@ -255,12 +259,12 @@ export function ModelPicker({
 
   // Keep the highlighted row scrolled into view.
   useEffect(() => {
-    if (!open) return;
+    if (!open && (!panel || document.activeElement !== searchRef.current)) return;
     const el = listRef.current?.querySelector<HTMLElement>(
       `[data-model-index="${highlightIndex}"]`,
     );
-    el?.scrollIntoView({ block: "nearest" });
-  }, [highlightIndex, open]);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [highlightIndex, open, panel]);
 
   const triggerId = displayId ?? currentId;
   const triggerLabel = triggerId
@@ -280,12 +284,13 @@ export function ModelPicker({
 
   function commitHighlighted() {
     const entry = flat[highlightIndex];
-    if (!entry) return;
+    if (!entry || disabled) return;
     onSelect(entry.kind === "tier" ? entry.tier : entry.model.id);
     setOpen(false);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (panel && e.target !== searchRef.current) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlightIndex((i) => Math.min(i + 1, Math.max(flat.length - 1, 0)));
@@ -301,6 +306,252 @@ export function ModelPicker({
       searchRef.current?.focus();
     }
   }
+
+  const GroupLabel = panel ? "div" : DropdownMenuLabel;
+  const content = <>
+        <div className="sticky top-0 z-10 bg-paper border-b border-line px-2 py-1.5">
+          <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2">
+            <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search models…"
+              className="h-7 max-sm:min-h-11 max-sm:text-base w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
+              aria-label="Search models"
+            />
+          </div>
+        </div>
+        <div ref={listRef} className={cn("min-h-0 max-h-[440px] overflow-y-auto overscroll-contain", panel && "flex-1 max-h-none")}>
+          {modelsQ.isLoading && (
+            <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
+          )}
+          {!modelsQ.isLoading && !approvalScopeResolved && (
+            <div className="px-3 py-2 text-xs text-muted">Loading model policy…</div>
+          )}
+          {!modelsQ.isLoading && models.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted">No models available.</div>
+          )}
+          {!modelsQ.isLoading && models.length > 0 && flat.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted">No matching models.</div>
+          )}
+          {filteredTiers.length > 0 && (
+            <div>
+              <GroupLabel className={cn("sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted", panel && "px-3 py-2")}>
+                Size
+              </GroupLabel>
+              {filteredTiers.map((tier, idx) => {
+                const isHighlighted = idx === highlightIndex;
+                const isSelected = currentId === tier;
+                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    data-model-index={idx}
+                    data-row-kind="tier"
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                    disabled={disabled}
+                    onClick={panel ? () => onSelect(tier) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      // Prevent input blur from stealing focus before we
+                      // commit — otherwise the click can race the close.
+                      e.preventDefault();
+                      onSelect(tier);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      panel && "min-h-11",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isSelected ? (
+                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
+                      ) : (
+                        <span className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="text-sm font-medium">{TIER_LABELS[tier]}</span>
+                      {isSelected && (
+                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
+                          current
+                        </span>
+                      )}
+                    </div>
+                    {subtitle && (
+                      <div className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {grouped.map(({ provider, entries }) => (
+            <div key={provider}>
+              <GroupLabel className={cn("sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted", panel && "px-3 py-2")}>
+                {provider}
+              </GroupLabel>
+              {entries.map((m) => {
+                const idx = filteredTiers.length + filteredModels.indexOf(m);
+                const isHighlighted = idx === highlightIndex;
+                const isSelected = m.id === currentId;
+                const curated = curatedForCatalogId(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    data-model-index={idx}
+                    data-row-kind="model"
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                    disabled={disabled}
+                    onClick={panel ? () => onSelect(m.id) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      // Prevent input blur from stealing focus before we
+                      // commit — otherwise the click can race the close.
+                      e.preventDefault();
+                      onSelect(m.id);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      panel && "min-h-11",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isSelected ? (
+                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
+                      ) : (
+                        <span className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="min-w-0 break-words text-sm font-medium">{curated?.label ?? m.name}</span>
+                      {isSelected && (
+                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
+                          current
+                        </span>
+                      )}
+                      <span className={cn("ml-auto font-mono text-[10px] text-muted/70 truncate max-w-[160px]", panel && "hidden")}>
+                        {m.id}
+                      </span>
+                    </div>
+                    {(curated?.description || m.providerName !== provider) && (
+                      <div className="pl-[22px] text-xs text-muted leading-snug">
+                        {curated?.description}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        <div className="sticky bottom-0 shrink-0 bg-paper border-t border-line">
+          {onSelectReasoning && (
+            <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
+              <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={panel ? () => onSelectReasoning(null) : undefined}
+                aria-label="Default reasoning"
+                aria-pressed={currentReasoning === undefined}
+                onMouseDown={(e) => {
+                  if (panel) return;
+                  e.preventDefault();
+                  onSelectReasoning(null);
+                }}
+                className={cn(
+                  "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                  panel && "min-h-11 min-w-11 text-xs",
+                  currentReasoning === undefined
+                    ? "bg-moss-wash text-ink border-moss"
+                    : "text-muted hover:text-ink",
+                )}
+              >
+                Default
+              </button>
+              {reasoningLevels.map((level) => {
+                const levelDisabled = isLevelDisabled(level);
+                const active = currentReasoning === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    aria-label={`${REASONING_LABELS[level]} reasoning`}
+                    aria-pressed={active}
+                    disabled={disabled || levelDisabled}
+                    onClick={panel ? () => onSelectReasoning(level) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      onSelectReasoning(level);
+                    }}
+                    className={cn(
+                      "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                      panel && "min-h-11 min-w-11 text-xs",
+                      levelDisabled
+                        ? "opacity-40 cursor-not-allowed"
+                        : active
+                          ? "bg-moss-wash text-ink border-moss"
+                          : "text-muted hover:text-ink",
+                    )}
+                  >
+                    {REASONING_LABELS[level]}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="px-3 py-1.5 text-[10px] text-muted">
+            <span>
+              {filteredModels.length} of {roleScoped.length} models
+              {!restricted && hiddenCount > 0 && !showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
+                    onClick={panel ? () => { setShowAll(!showAll); searchRef.current?.focus(); } : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      setShowAll(true);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    show {hiddenCount} more
+                  </button>
+                </>
+              )}
+              {!restricted && showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
+                    onClick={panel ? () => { setShowAll(!showAll); searchRef.current?.focus(); } : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      setShowAll(false);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    recommended only
+                  </button>
+                </>
+              )}
+            </span>
+          </div>
+        </div>
+  </>;
+  if (panel) return <div className="flex min-h-0 flex-1 flex-col" role="group" aria-label="Model and thinking settings">
+    <p className="mb-3 shrink-0 text-sm text-muted">{triggerLabel}{triggerReasoning}</p>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line" onKeyDown={onKeyDown}>{content}</div>
+  </div>;
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -333,225 +584,7 @@ export function ModelPicker({
         // handling doesn't fight ours.
         onKeyDown={onKeyDown}
       >
-        <div className="sticky top-0 z-10 bg-paper border-b border-line px-2 py-1.5">
-          <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2">
-            <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search models…"
-              className="h-7 max-sm:min-h-11 max-sm:text-base w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
-              aria-label="Search models"
-            />
-          </div>
-        </div>
-        <div ref={listRef} className="min-h-0 max-h-[440px] overflow-y-auto overscroll-contain">
-          {modelsQ.isLoading && (
-            <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
-          )}
-          {!modelsQ.isLoading && !approvalScopeResolved && (
-            <div className="px-3 py-2 text-xs text-muted">Loading model policy…</div>
-          )}
-          {!modelsQ.isLoading && models.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted">No models available.</div>
-          )}
-          {!modelsQ.isLoading && models.length > 0 && flat.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted">No matching models.</div>
-          )}
-          {filteredTiers.length > 0 && (
-            <div>
-              <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
-                Size
-              </DropdownMenuLabel>
-              {filteredTiers.map((tier, idx) => {
-                const isHighlighted = idx === highlightIndex;
-                const isSelected = currentId === tier;
-                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
-                return (
-                  <button
-                    key={tier}
-                    type="button"
-                    data-model-index={idx}
-                    data-row-kind="tier"
-                    onMouseEnter={() => setHighlightIndex(idx)}
-                    onMouseDown={(e) => {
-                      // Prevent input blur from stealing focus before we
-                      // commit — otherwise the click can race the close.
-                      e.preventDefault();
-                      onSelect(tier);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
-                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isSelected ? (
-                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
-                      ) : (
-                        <span className="h-3.5 w-3.5 shrink-0" />
-                      )}
-                      <span className="text-sm font-medium">{TIER_LABELS[tier]}</span>
-                      {isSelected && (
-                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
-                          current
-                        </span>
-                      )}
-                    </div>
-                    {subtitle && (
-                      <div className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {grouped.map(({ provider, entries }) => (
-            <div key={provider}>
-              <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
-                {provider}
-              </DropdownMenuLabel>
-              {entries.map((m) => {
-                const idx = filteredTiers.length + filteredModels.indexOf(m);
-                const isHighlighted = idx === highlightIndex;
-                const isSelected = m.id === currentId;
-                const curated = curatedForCatalogId(m.id);
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    data-model-index={idx}
-                    data-row-kind="model"
-                    onMouseEnter={() => setHighlightIndex(idx)}
-                    onMouseDown={(e) => {
-                      // Prevent input blur from stealing focus before we
-                      // commit — otherwise the click can race the close.
-                      e.preventDefault();
-                      onSelect(m.id);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
-                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isSelected ? (
-                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
-                      ) : (
-                        <span className="h-3.5 w-3.5 shrink-0" />
-                      )}
-                      <span className="text-sm font-medium">{curated?.label ?? m.name}</span>
-                      {isSelected && (
-                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
-                          current
-                        </span>
-                      )}
-                      <span className="ml-auto font-mono text-[10px] text-muted/70 truncate max-w-[160px]">
-                        {m.id}
-                      </span>
-                    </div>
-                    {(curated?.description || m.providerName !== provider) && (
-                      <div className="pl-[22px] text-xs text-muted leading-snug">
-                        {curated?.description}
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-        <div className="sticky bottom-0 bg-paper border-t border-line">
-          {onSelectReasoning && (
-            <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
-              <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
-              <button
-                type="button"
-                aria-label="Default reasoning"
-                aria-pressed={currentReasoning === undefined}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onSelectReasoning(null);
-                }}
-                className={cn(
-                  "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
-                  currentReasoning === undefined
-                    ? "bg-moss-wash text-ink border-moss"
-                    : "text-muted hover:text-ink",
-                )}
-              >
-                Default
-              </button>
-              {reasoningLevels.map((level) => {
-                const levelDisabled = isLevelDisabled(level);
-                const active = currentReasoning === level;
-                return (
-                  <button
-                    key={level}
-                    type="button"
-                    aria-label={`${REASONING_LABELS[level]} reasoning`}
-                    aria-pressed={active}
-                    disabled={levelDisabled}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      onSelectReasoning(level);
-                    }}
-                    className={cn(
-                      "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
-                      levelDisabled
-                        ? "opacity-40 cursor-not-allowed"
-                        : active
-                          ? "bg-moss-wash text-ink border-moss"
-                          : "text-muted hover:text-ink",
-                    )}
-                  >
-                    {REASONING_LABELS[level]}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="px-3 py-1.5 text-[10px] text-muted">
-            <span>
-              {filteredModels.length} of {roleScoped.length} models
-              {!restricted && hiddenCount > 0 && !showAll && !query && (
-                <>
-                  {" · "}
-                  <button
-                    type="button"
-                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setShowAll(true);
-                      searchRef.current?.focus();
-                    }}
-                  >
-                    show {hiddenCount} more
-                  </button>
-                </>
-              )}
-              {!restricted && showAll && !query && (
-                <>
-                  {" · "}
-                  <button
-                    type="button"
-                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setShowAll(false);
-                      searchRef.current?.focus();
-                    }}
-                  >
-                    recommended only
-                  </button>
-                </>
-              )}
-            </span>
-          </div>
-        </div>
+        {content}
       </DropdownMenuContent>
     </DropdownMenu>
   );

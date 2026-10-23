@@ -11,6 +11,8 @@ import {
 import { X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "~/components/primitives/dialog";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { useMobileAppViewport } from "~/hooks/use-mobile-app-viewport";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
@@ -97,6 +99,9 @@ export function AppShell({
   children: ReactNode;
   className?: string;
 }) {
+  const mobile = useMobileLayout();
+  const shellRef = useRef<HTMLDivElement>(null);
+  useMobileAppViewport(shellRef, mobile);
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
   const sidebarPane = useResizablePane({
     storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
@@ -142,7 +147,7 @@ export function AppShell({
 
   return (
     <SidebarControlsContext.Provider value={controls}>
-      <div className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
+      <div ref={shellRef} data-mobile-app-shell={mobile ? "" : undefined} className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
         {topNav}
         <div className="flex-1 flex min-h-0 relative" style={sidebarPane.containerStyle}>
           {sidebar != null && (

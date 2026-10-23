@@ -132,3 +132,16 @@ returning from Browser without the old sandbox tab strip.
 
 Channels with standing instructions, teammate mentions, and persistent allow
 choices on expired approval cards remain outside this change.
+
+
+### Phone settings and viewport bounds
+
+The phone model dialog embeds the model list and thinking options in one panel.
+Selecting a model keeps the panel open for thinking changes.
+It uses the same catalog, approval scope, and callbacks as the desktop picker.
+The desktop picker remains a dropdown.
+
+The signed-in phone shell fixes the document viewport and contains scroll gestures.
+Only content regions scroll. The visual viewport sets shell and model-dialog bounds
+when Safari opens the keyboard or pans a focused field. Public pages and desktop
+retain normal document behavior. Viewport listeners and variables clear on desktop.

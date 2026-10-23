@@ -419,9 +419,9 @@ export function SessionHeader({
   const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
   const modelPicker = canAdminister ? (
-    <Tooltip content={modelHint}>
-      <span className="min-w-0">
+    <span className={cn("min-w-0", mobile && "flex min-h-0 flex-1 flex-col")}>
         <ModelPicker
+          presentation={mobile ? "panel" : "menu"}
           currentId={configuredModel}
           displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
           ariaDescription={modelHint}
@@ -450,8 +450,7 @@ export function SessionHeader({
           }}
           disabled={pickerDisabled}
         />
-      </span>
-    </Tooltip>
+    </span>
   ) : null;
 
   // The edit box replaces the title cluster. The right-hand side keeps the
@@ -560,7 +559,7 @@ export function SessionHeader({
         />
       )}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
-        {!mobile && modelPicker}
+        {!mobile && <Tooltip content={modelHint}>{modelPicker}</Tooltip>}
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
@@ -706,7 +705,7 @@ export function SessionHeader({
       )}
       {guard.dialog}
       {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
-        <DialogContent title="Model and thinking" description="Choose the model and thinking level for this thread."
+        <DialogContent data-mobile-model-settings className="flex flex-col overflow-hidden [&>header]:shrink-0" title="Model and thinking" description="Choose the model and thinking level for this thread."
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             threadMenuTrigger.current?.focus();
