@@ -539,3 +539,19 @@ A live file check created and changed a text file outside Git. Edit with file
 undo restored its earlier content. `/fork <prompt>` copied that content into a
 disjoint personal directory. A change in the fork left the source file unchanged.
 The second account could read neither the personal fork nor its saved history.
+
+### Release safety review
+
+- Copy Slack channel gates to an isolated fork's governing thread before copying history or files. Sandbox resource access uses this boundary too.
+- Recheck edit ownership on the snapshot used for the branch compare-and-swap. A newly arrived message from another author must stop the edit.
+- Commit the branch note before file restoration. Save each restore point and planned bases on that note before changing files. An interrupted restore keeps a recovery record.
+- Do not use a partial checkpoint pair for automatic undo or fork seeds.
+- Refuse restore paths with symlink ancestors before reading or deleting files.
+- Record actual sandbox file writes. Allow automatic undo only when the write's preimage and result match the checkpoint blobs and file modes. Skip concurrent, legacy, and opaque shell changes without this evidence. Keep those changes available in complete fork snapshots.
+- Carry earlier branch notes' external actions, lasting grants, and file coverage context into later edits. Retain provenance to avoid counting the same action twice.
+- A completed undo note establishes the current fork file state, even when the replacement turn makes no file-tool call. An interrupted restoration cannot establish a seed.
+
+Safe restoration requires Python 3 and directory handles that refuse symlinks.
+If the sandbox lacks them, restoration leaves files unchanged and reports the missing requirement.
+Content and mode conflict checks are best effort against external writers; they do not provide a shared filesystem transaction.
+Shell and binary writes without an observed file-write receipt are not undone automatically.

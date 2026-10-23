@@ -4,7 +4,9 @@
  * branch note; the old branch stays in the store. A return moves the leaf
  * back. A fork copies the active path into an empty thread.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import * as checkpoints from "../src/checkpoints.js";
+afterEach(() => vi.restoreAllMocks());
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import {
   fauxAssistantMessage,
@@ -400,6 +402,43 @@ describe("thread edit", () => {
     await expect(h.thread.editMessage(theirs.id, "theirs, edited", { author: TEAMMATE })).resolves.toMatchObject({ threadId: h.thread.id });
   });
 
+  it("rechecks other authors when a queued edit starts", async () => {
+    const h = await setup("edit-ownership-race", [fauxAssistantMessage("reply")]);
+    await h.send("mine");
+    const mine = await h.userEntry("mine");
+    await h.thread.pause();
+    const receipt = await h.thread.editMessage(mine.id, "replacement", { author: PERSON });
+    const snapshot = await h.store.getThreadSnapshot(h.session.id, h.thread.id);
+    if (!snapshot) throw new Error("Missing snapshot");
+    await h.store.appendEntries(h.session.id, h.thread.id, [{
+      ...mine, id: "other-author-race", content: "new teammate message", author: TEAMMATE,
+      parentId: snapshot.thread.activeLeafEntryId ?? null,
+    }]);
+    await h.thread.resume();
+    await waitFor(() => h.settled(receipt.queueItemId));
+    expect(await h.outcome(receipt.queueItemId)).toBe("failed");
+    expect(await h.path()).toContain("user:new teammate message");
+    expect(await h.path()).not.toContain("note:edit");
+  });
+
+  it("does not restore files when the edit branch CAS fails", async () => {
+    const h = await setup("edit-file-cas-race", [fauxAssistantMessage("reply")]);
+    await h.send("mine");
+    const mine = await h.userEntry("mine");
+    await h.store.updateEntry(h.session.id, h.thread.id, {
+      ...mine, metadata: { fileCheckpoint: { repos: [{ repo: ".", before: "a".repeat(40), after: "b".repeat(40), changed: ["note.txt"] }] } },
+    });
+    const append = h.store.appendBranch.bind(h.store);
+    vi.spyOn(h.store, "appendBranch").mockImplementation(async (...args) =>
+      args[2].some((entry) => entry.type === "branch_summary") ? false : append(...args));
+    const exec = vi.spyOn(h.session.sandbox, "exec");
+    const receipt = await h.thread.editMessage(mine.id, "replacement", { author: PERSON }, { undoFiles: true });
+    await waitFor(() => h.settled(receipt.queueItemId));
+    expect(await h.outcome(receipt.queueItemId)).toBe("failed");
+    expect(exec).not.toHaveBeenCalled();
+    expect(await h.path()).toContain("user:mine");
+  });
+
   it("refuses a message that came from a channel, and a second edit while one waits", async () => {
     const { tool, entered } = blockingTool();
     const h = await setup("edit-channel", [
@@ -595,4 +634,49 @@ describe("thread fork", () => {
     await fork.copyPath(await h.thread.forkPath(null), { source });
     await expect(fork.copyPath([], { source })).rejects.toThrow(/already has messages/);
   });
+});
+
+it("does not restore files when the return branch CAS fails", async () => {
+  const h = await setup("return-file-cas-race", [fauxAssistantMessage("first"), fauxAssistantMessage("replacement reply")]);
+  await h.send("mine");
+  await h.edit("mine", "replacement");
+  const note = await h.note();
+  const replacement = await h.userEntry("replacement");
+  await h.store.updateEntry(h.session.id, h.thread.id, {
+    ...replacement, metadata: { fileCheckpoint: { repos: [{ repo: ".", before: "a".repeat(40), after: "b".repeat(40), changed: ["note.txt"] }] } },
+  });
+  vi.spyOn(h.store, "appendBranch").mockResolvedValue(false);
+  const exec = vi.spyOn(h.session.sandbox, "exec");
+  await expect(h.thread.returnToBranch(note.id, PERSON, { restoreFiles: true })).rejects.toThrow(/thread changed/i);
+  expect(exec).not.toHaveBeenCalled();
+  expect(await h.path()).toContain("user:replacement");
+});
+
+it.each([false, true])("journals recovery before changing files and retains uncertain results (%s)", async (uncertain) => {
+  const h = await setup("edit-restore-journal", [fauxAssistantMessage("first"), fauxAssistantMessage("replacement reply")]);
+  await h.send("mine");
+  const target = await h.userEntry("mine");
+  vi.spyOn(checkpoints, "planFileUndo").mockReturnValue([{ repo: ".", paths: [{ path: "note.txt", source: "a".repeat(40), expected: "b".repeat(40) }] }]);
+  vi.spyOn(checkpoints, "restorePaths").mockImplementation(async (_sandbox, _workspace, _plan, _ref, onPrepared) => {
+    const before = await h.store.getThreadSnapshot(h.session.id, h.thread.id);
+    expect(before?.entries.some((entry) => entry.type === "branch_summary")).toBe(true);
+    if (!onPrepared) throw new Error("Restore journal callback missing");
+    await onPrepared(".", "c".repeat(40));
+    const snapshot = await h.store.getThreadSnapshot(h.session.id, h.thread.id);
+    const note = snapshot?.entries.find((entry) => entry.type === "branch_summary");
+    const journal = readBranchNote(note?.metadata)?.files?.[0];
+    expect(journal?.restorePoint).toBe("c".repeat(40));
+    expect(journal?.bases).toEqual({ "note.txt": "a".repeat(40) });
+    expect(journal?.failed).toContain("not completed");
+    return [{ repo: ".", restored: uncertain ? [] : ["note.txt"], removed: [], skipped: [], restorePoint: "c".repeat(40),
+      ...(uncertain ? { failed: "Command failed after writing, before reporting its result" } : {}) }];
+  });
+  const receipt = await h.thread.editMessage(target.id, "replacement", { author: PERSON }, { undoFiles: true });
+  await waitFor(() => h.settled(receipt.queueItemId));
+  expect(await h.outcome(receipt.queueItemId)).toBe("completed");
+  const files = readBranchNote((await h.note()).metadata)?.files?.[0];
+  expect(files?.bases).toEqual({ "note.txt": "a".repeat(40) });
+  expect(files?.restored).toEqual(uncertain ? [] : ["note.txt"]);
+  if (uncertain) expect(files?.failed).toContain("after writing");
+  else expect(files?.failed).toBeUndefined();
 });

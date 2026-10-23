@@ -1040,7 +1040,7 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
 export async function openThread(
   c: Context<AppEnv>,
   loaded: { session: typeof agentSessions.$inferSelect; engineSession: EngineSession; meta: Awaited<ReturnType<typeof loadSessionMeta>> },
-  opts: { source?: Thread | null; title?: string; isolated?: boolean },
+  opts: { source?: Thread | null; title?: string; isolated?: boolean; channels?: string[] },
 ): Promise<{ thread: Thread; summary: CreateThreadResponse }> {
   const { session, engineSession, meta } = loaded;
   const { db, engineHost } = c.var.providers;
@@ -1078,7 +1078,7 @@ export async function openThread(
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const target = opts.isolated && assistant
     ? (await ensureAssistantExecution(c.var.providers, { type: assistant.ownerType, id: assistant.ownerId },
-      { orgId: session.orgId, actorUserId: c.var.user.id }, key, { isolated: true })).session
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key, { isolated: true, metadata: { [SLACK_CHANNELS_METADATA_KEY]: opts.channels ?? [] } })).session
     : engineSession.options.readOnlyReason && session.ownerType === "team"
     ? (await ensureAssistantExecution(c.var.providers, { type: "team", id: session.ownerId },
       { orgId: session.orgId, actorUserId: c.var.user.id }, key)).session
@@ -1828,13 +1828,14 @@ async function forkThreadAt(
 
   let opened: Awaited<ReturnType<typeof openThread>>;
   try {
-    opened = await openThread(c, home, { source, title, isolated: true });
+    opened = await openThread(c, home, { source, title, isolated: true, channels: audience?.channels });
   } catch (err) {
     if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
     throw err;
   }
   const { thread, summary } = opened;
-  // Before any history is copied, so the fork is never wider than its source.
+  // The governing thread receives these gates at execution creation. Keep
+  // them on the visible thread too, before any history or files are copied.
   for (const channel of audience?.channels ?? []) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
   // A fork in its own working directory (a team conversation) takes the
   // source's files at the fork point along, as git bundles in the blob store.

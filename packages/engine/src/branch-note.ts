@@ -58,6 +58,10 @@ export interface BranchNote {
   filesChanged: boolean;
   /** Approval choices on the left branch that still apply, such as "Always allow for me". */
   grants: string[];
+  /** Entries already represented by these facts, including earlier notes. */
+  summarizedEntryIds?: string[];
+  /** Earlier file undo results, retained as context rather than new restore instructions. */
+  fileContext?: string[];
   /** File changes put back when the leaf moved. */
   files?: BranchNoteRepoFiles[];
   /** The person whose action wrote the note. */
@@ -150,6 +154,8 @@ export function readBranchNote(metadata: Record<string, unknown> | undefined): B
     moreActions: typeof v.moreActions === "number" ? v.moreActions : 0,
     filesChanged: v.filesChanged === true,
     grants: strings(v.grants),
+    ...(Array.isArray(v.summarizedEntryIds) ? { summarizedEntryIds: strings(v.summarizedEntryIds) } : {}),
+    ...(Array.isArray(v.fileContext) ? { fileContext: strings(v.fileContext) } : {}),
     ...(files && files.length > 0 ? { files } : {}),
     ...(typeof v.actorId === "string" ? { actorId: v.actorId } : {}),
     ...(source ? { source } : {}),
@@ -210,12 +216,52 @@ function readSource(v: unknown): BranchNote["source"] {
 export function summarizeBranchActions(
   entries: readonly SessionEntry[],
   tools: { silent: ReadonlySet<string>; files: ReadonlySet<string>; plugin: ReadonlySet<string> },
-): Pick<BranchNote, "actions" | "moreActions" | "filesChanged" | "grants"> {
+): Pick<BranchNote, "actions" | "moreActions" | "filesChanged" | "grants" | "summarizedEntryIds" | "fileContext"> {
   const lines: BranchNoteAction[] = [];
   const builtin = new Map<string, BranchNoteAction>();
   const grants: string[] = [];
+  const fileContext = new Set<string>();
+  const covered = new Set<string>();
+  const carried = new Map<string, BranchNote>();
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  // Prefer the latest note: it may already carry an older note's facts.
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index]!;
+    if (entry.type !== "branch_summary" || covered.has(entry.id)) continue;
+    const note = readBranchNote(entry.metadata);
+    if (!note || note.kind === "fork") continue;
+    carried.set(entry.id, note);
+    for (const id of note.summarizedEntryIds ?? []) covered.add(id);
+    // Older notes have no provenance. Their branch endpoints still identify
+    // original entries when that branch is also present on the left path.
+    if (!note.summarizedEntryIds) {
+      let original = byId.get(entry.branchLeafId);
+      const visited = new Set<string>();
+      while (original && !visited.has(original.id)) {
+        visited.add(original.id);
+        covered.add(original.id);
+        if (original.id === entry.branchRootId) break;
+        original = original.parentId ? byId.get(original.parentId) : undefined;
+      }
+    }
+  }
+  let carriedMore = 0;
   let filesChanged = false;
   for (const entry of entries) {
+    if (covered.has(entry.id)) continue;
+    const note = carried.get(entry.id);
+    if (note) {
+      lines.push(...note.actions);
+      carriedMore += note.moreActions;
+      filesChanged ||= note.filesChanged;
+      for (const grant of note.grants) if (!grants.includes(grant)) grants.push(grant);
+      for (const context of note.fileContext ?? []) fileContext.add(context);
+      if (note.files) {
+        for (const context of filesText(note.files,
+          note.kind === "edit" ? "undone" : "restored", "an earlier branch")) fileContext.add(context);
+      }
+      continue;
+    }
     if (entry.type === "decision_gate") {
       const grant = grantOf(entry);
       if (grant && !grants.includes(grant)) grants.push(grant);
@@ -251,8 +297,10 @@ export function summarizeBranchActions(
     }
   }
   const shown = lines.slice(0, MAX_NOTE_ACTIONS);
-  const moreActions = lines.slice(MAX_NOTE_ACTIONS).reduce((total, line) => total + line.count, 0);
-  return { actions: shown, moreActions, filesChanged, grants };
+  const moreActions = carriedMore + lines.slice(MAX_NOTE_ACTIONS).reduce((total, line) => total + line.count, 0);
+  const summarizedEntryIds = [...new Set([...entries.map((entry) => entry.id), ...covered])];
+  return { actions: shown, moreActions, filesChanged, grants, summarizedEntryIds,
+    ...(fileContext.size > 0 ? { fileContext: [...fileContext] } : {}) };
 }
 
 /** "Always allow for me: Create a pull request" for a gate answered with a lasting approval. */
@@ -359,6 +407,9 @@ export function branchNoteText(note: BranchNote): string {
     lines.push(...filesText(note.files, note.kind === "edit" ? `undone to their state before ${left}` : "brought back from the version this one returned to", left));
   } else if (note.filesChanged) {
     lines.push(`The working directory keeps any file changes from ${left}.`);
+  }
+  if (note.fileContext?.length) {
+    lines.push("Earlier branch notes reported these file restore results. They describe earlier changes, not a new restore:", ...note.fileContext);
   }
   return lines.join("\n");
 }

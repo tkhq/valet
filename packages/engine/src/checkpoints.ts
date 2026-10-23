@@ -123,6 +123,8 @@ export interface RepoCheckpoint {
   after: string;
   /** Repo-relative paths that differ between `before` and `after`. */
   changed: string[];
+  /** Paths whose actual tool-write receipt chain matches both snapshots. Missing on legacy records. */
+  authoredPaths?: string[];
   /** Branch checked out when the turn ended, if any. */
   branch?: string;
   /** Untracked files were over the size limit, so the snapshots hold tracked files only. */
@@ -152,6 +154,7 @@ export function readTurnCheckpoint(metadata: Record<string, unknown> | undefined
       before: r.before,
       after: r.after,
       changed: r.changed.filter((path): path is string => typeof path === "string"),
+      ...(Array.isArray(r.authoredPaths) ? { authoredPaths: r.authoredPaths.filter((path): path is string => typeof path === "string") } : {}),
       ...(typeof r.branch === "string" ? { branch: r.branch } : {}),
       ...(r.partial === true ? { partial: true } : {}),
       ...(typeof r.undoUnavailable === "string" ? { undoUnavailable: r.undoUnavailable } : {}),
@@ -225,7 +228,11 @@ export interface Snapshot {
 
 /** Commit the repository's whole working tree under `ref`, without touching its index or files. */
 export async function snapshotRepo(sandbox: Sandbox, dir: string, ref: string, workspaceFiles = false): Promise<Snapshot> {
-  const result = await sandbox.exec(workspaceFiles ? WORKSPACE_SNAPSHOT : SNAPSHOT_SCRIPT, {
+  return takeSnapshot(sandbox.exec.bind(sandbox), dir, ref, workspaceFiles);
+}
+
+async function takeSnapshot(exec: Sandbox["exec"], dir: string, ref: string, workspaceFiles: boolean): Promise<Snapshot> {
+  const result = await exec(workspaceFiles ? WORKSPACE_SNAPSHOT : SNAPSHOT_SCRIPT, {
     cwd: dir,
     timeout: SNAPSHOT_TIMEOUT_MS,
     env: { ...GIT_IDENTITY, VALET_REF: ref, VALET_MAX_UNTRACKED_KB: String(MAX_UNTRACKED_KB) },
@@ -261,6 +268,8 @@ export interface PathRestore {
 export interface RepoRestore {
   repo: string;
   paths: PathRestore[];
+  /** Paths without a verified tool-write chain; never restore across these gaps. */
+  skipped?: string[];
   /** Coverage failure, reported without attempting a restore. */
   unavailable?: string;
 }
@@ -274,15 +283,21 @@ export interface RepoRestore {
 export function planFileUndo(entries: readonly SessionEntry[]): RepoRestore[] {
   const byRepo = new Map<string, Map<string, PathRestore>>();
   const unavailable = new Map<string, string>();
+  const skipped = new Map<string, Set<string>>();
   for (const entry of entries) {
     if (entry.type !== "message" || entry.role !== "user") continue;
     const checkpoint = readTurnCheckpoint(entry.metadata);
     for (const failed of checkpoint?.unavailable ?? []) unavailable.set(failed.repo, failed.reason);
     for (const repo of checkpoint?.repos ?? []) {
       if (repo.undoUnavailable) unavailable.set(repo.repo, repo.undoUnavailable);
+      if (repo.partial) unavailable.set(repo.repo, "A checkpoint pair is partial. Files were left unchanged. Take a complete checkpoint before retrying.");
       const paths = byRepo.get(repo.repo) ?? new Map<string, PathRestore>();
       byRepo.set(repo.repo, paths);
+      const unowned = skipped.get(repo.repo) ?? new Set<string>();
+      skipped.set(repo.repo, unowned);
+      const authored = new Set(repo.authoredPaths ?? []);
       for (const path of repo.changed) {
+        if (!authored.has(path)) unowned.add(path);
         // The restore script reads tab-separated lines.
         if (/[\t\n]/.test(path)) continue;
         const known = paths.get(path);
@@ -294,7 +309,11 @@ export function planFileUndo(entries: readonly SessionEntry[]): RepoRestore[] {
   // If any replaced turn lacks coverage, do not restore that target across
   // the gap: expected content alone cannot establish its earlier state.
   return [
-    ...[...byRepo].filter(([repo]) => !unavailable.has(repo)).map(([repo, paths]) => ({ repo, paths: [...paths.values()] })).filter((r) => r.paths.length > 0),
+    ...[...byRepo].filter(([repo]) => !unavailable.has(repo)).map(([repo, paths]) => {
+      const omitted = [...skipped.get(repo) ?? []];
+      return { repo, paths: [...paths.values()].filter((path) => !skipped.get(repo)?.has(path.path)),
+        ...(omitted.length > 0 ? { skipped: omitted } : {}) };
+    }).filter((r) => r.paths.length > 0 || r.skipped?.length),
     ...[...unavailable].map(([repo, reason]) => ({ repo, paths: [], unavailable: reason })),
   ];
 }
@@ -317,10 +336,14 @@ export function returnPlan(currentUndo: readonly RepoRestore[], noteFiles: reado
       paths.set(path, { path, source: files.restorePoint, expected: paths.get(path)?.expected ?? base });
     }
   }
+  const skipped = new Map(currentUndo.map((repo) => [repo.repo, repo.skipped ?? []]));
   const unavailable = currentUndo.filter((repo) => repo.unavailable);
   const blocked = new Set(unavailable.map((repo) => repo.repo));
   return [
-    ...[...byRepo].filter(([repo]) => !blocked.has(repo)).map(([repo, paths]) => ({ repo, paths: [...paths.values()] })).filter((r) => r.paths.length > 0),
+    ...[...byRepo].filter(([repo]) => !blocked.has(repo)).map(([repo, paths]) => ({
+      repo, paths: [...paths.values()].filter((path) => !skipped.get(repo)?.includes(path.path)),
+      ...(skipped.get(repo)?.length ? { skipped: skipped.get(repo) } : {}),
+    })).filter((r) => r.paths.length > 0 || r.skipped?.length),
     ...unavailable,
   ];
 }
@@ -330,54 +353,188 @@ export function planPathCount(plan: readonly RepoRestore[]): number {
   return plan.reduce((total, repo) => total + repo.paths.length, 0);
 }
 
-const RESTORE_SCRIPT = `set -e
-plan=$(mktemp)
-listing=$(mktemp)
-trap 'rm -f "$plan" "$listing"' EXIT
-cat > "$plan"
-tab=$(printf '\\t')
-# Validate EVERY source and expected commit before changing ANY file. A
-# missing object is unavailable coverage, never evidence of a missing path.
-while IFS="$tab" read -r path source expected; do
-  [ -n "$path" ] || continue
-  if ! git cat-file -e "$source^{commit}" 2>/dev/null || ! git cat-file -e "$expected^{commit}" 2>/dev/null; then
-    echo 'Checkpoint commits are missing. Files were left unchanged.' >&2
-    exit 1
-  fi
-  for commit in "$source" "$expected"; do
-    if ! git ls-tree -z --full-tree "$commit" -- ":(literal)$path" > "$listing"; then
-      echo 'Checkpoint trees are missing. Files were left unchanged.' >&2
-      exit 1
-    fi
-    if [ -s "$listing" ] && ! git cat-file -e "$commit:$path" 2>/dev/null; then
-      echo 'Checkpoint file objects are missing. Files were left unchanged.' >&2
-      exit 1
-    fi
+// Git also follows symlink ancestors when hashing or removing a leaf path.
+// Check every component before any working-tree read, restore or deletion.
+const REPO_SAFE_PATH = `safe_path() {
+  case "$1" in ''|/*|../*|*/../*|*/..|./*|*//*) return 1;; esac
+  rest="$1"; prefix=.
+  while [ -n "$rest" ]; do
+    part=\${rest%%/*}
+    case "$part" in .|..|.git|${WORKSPACE_STORE}) return 1;; esac
+    prefix="$prefix/$part"
+    [ ! -L "$prefix" ] || return 1
+    case "$rest" in */*) [ ! -e "$prefix" ] || [ -d "$prefix" ] || return 1; rest=\${rest#*/};; *) rest=;; esac
   done
-done < "$plan"
-while IFS="$tab" read -r path source expected; do
-  [ -n "$path" ] || continue
-  if [ "$VALET_WORKSPACE_FILES" = 1 ] && ! safe_path "$path"; then printf 'skipped\\t%s\\n' "$path"; continue; fi
-  if [ "$VALET_SEED" = 1 ]; then want=missing
-  else want=$(git rev-parse -q --verify "$expected:$path" 2>/dev/null || echo missing)
-  fi
-  if [ -L "$path" ]; then have=other
-  elif [ -f "$path" ]; then have=$(git hash-object -- "$path")
-  elif [ -e "$path" ]; then have=other
-  else have=missing
-  fi
-  if [ "$have" != "$want" ]; then printf 'skipped\\t%s\\n' "$path"; continue; fi
-  git ls-tree -z --full-tree "$source" -- ":(literal)$path" > "$listing"
-  if [ -s "$listing" ]; then
-    git cat-file -e "$source:$path"
-    mkdir -p "$(dirname -- "$path")"
-    git restore --source="$source" --worktree -- ":(literal)$path"
-    printf 'restored\\t%s\\n' "$path"
-  else
-    rm -f -- "$path"
-    printf 'removed\\t%s\\n' "$path"
-  fi
-done < "$plan"`;
+}
+`;
+
+// Directory descriptors keep a raced parent or leaf symlink from redirecting
+// filesystem writes. Content/mode conflict checks are still best effort.
+const FD_RESTORE_SCRIPT = `import fnmatch, os, stat, subprocess, sys, uuid
+
+OVERLAY = os.environ.get('VALET_WORKSPACE_FILES') == '1'
+EXCLUDED = ${JSON.stringify(WORKSPACE_EXCLUDED_NAMES)}
+GIT = ['git', '--git-dir=.valet-file-checkpoints', '--work-tree=.'] if OVERLAY else ['git']
+FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+class UnsafePath(Exception):
+    pass
+
+def git(*args, **kwargs):
+    return subprocess.run(GIT + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, **kwargs).stdout
+
+def tree_entry(commit, path):
+    data = git('ls-tree', '-z', '--full-tree', commit, '--', ':(literal)' + path)
+    if not data:
+        return None
+    mode, kind, oid = data.split(b'\\t', 1)[0].split()
+    return mode.decode(), oid.decode()
+
+def fail(message):
+    print(message + ' Files were left unchanged.', file=sys.stderr)
+    sys.exit(1)
+
+def exists(fd, name):
+    try:
+        os.stat(name, dir_fd=fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+def check_overlay_repo(fd):
+    if OVERLAY and (exists(fd, '.git') or (exists(fd, 'HEAD') and exists(fd, 'objects'))):
+        raise UnsafePath()
+
+def parts_for(path):
+    parts = path.split('/')
+    if any(part in ('', '.', '..', '.git', '.valet-file-checkpoints') for part in parts):
+        raise UnsafePath()
+    if OVERLAY and any(fnmatch.fnmatchcase(part, pattern) for part in parts for pattern in EXCLUDED):
+        raise UnsafePath()
+    return parts
+
+def parent_for(root, parts, create=False):
+    fd = os.dup(root)
+    try:
+        check_overlay_repo(fd)
+        for part in parts[:-1]:
+            try:
+                child = os.open(part, FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            check_overlay_repo(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def current_entry(parent, leaf):
+    if parent is None:
+        return None
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ('other', 'other')
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return ('other', 'other')
+        mode = '100755' if info.st_mode & stat.S_IXUSR else '100644'
+        # Hash bytes through the opened descriptor, never through the path.
+        oid = git('hash-object', '--stdin', stdin=fd).decode().strip()
+        return mode, oid
+    finally:
+        os.close(fd)
+
+try:
+    plan = [line.rstrip('\\n').split('\\t') for line in sys.stdin if line.rstrip('\\n')]
+    if any(len(row) != 3 for row in plan):
+        fail('The checkpoint path format is invalid.')
+    entries = {}
+    # Every object is checked before any working-tree mutation.
+    for path, source, expected in plan:
+        for commit in (source, expected):
+            try:
+                git('cat-file', '-e', commit + '^{commit}')
+            except subprocess.CalledProcessError:
+                fail('Checkpoint commits are missing.')
+            try:
+                entry = tree_entry(commit, path)
+            except subprocess.CalledProcessError:
+                fail('Checkpoint trees are missing.')
+            if entry is not None:
+                try:
+                    git('cat-file', '-e', entry[1])
+                except subprocess.CalledProcessError:
+                    fail('Checkpoint file objects are missing.')
+            entries[(commit, path)] = entry
+    if os.environ.get('VALET_PREFLIGHT') == '1':
+        sys.exit(0)
+    root = os.open('.', FLAGS)
+    try:
+        for path, source, expected in plan:
+            parent = None
+            temporary = None
+            try:
+                parts = parts_for(path)
+                leaf = parts[-1]
+                parent = parent_for(root, parts)
+                want = None if os.environ.get('VALET_SEED') == '1' else entries[(expected, path)]
+                have = current_entry(parent, leaf)
+                original = entries[(source, path)]
+                if have != want or (original is not None and original[0] not in ('100644', '100755')):
+                    print('skipped\\t' + path, flush=True)
+                    continue
+                if original is None:
+                    if parent is not None:
+                        try:
+                            os.unlink(leaf, dir_fd=parent)
+                        except FileNotFoundError:
+                            pass
+                    print('removed\\t' + path, flush=True)
+                    continue
+                if parent is None:
+                    parent = parent_for(root, parts, create=True)
+                # A new inode and descriptor-relative replace cannot write
+                # through a raced leaf symlink or an outside hard link.
+                temporary = '.valet-restore-' + uuid.uuid4().hex
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                try:
+                    subprocess.run(GIT + ['cat-file', 'blob', original[1]], stdout=fd, stderr=subprocess.PIPE, check=True)
+                    os.fchmod(fd, 0o755 if original[0] == '100755' else 0o644)
+                finally:
+                    os.close(fd)
+                os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                temporary = None
+                print('restored\\t' + path, flush=True)
+            except (UnsafePath, OSError):
+                print('skipped\\t' + path, flush=True)
+            finally:
+                if temporary is not None and parent is not None:
+                    try:
+                        os.unlink(temporary, dir_fd=parent)
+                    except FileNotFoundError:
+                        pass
+                if parent is not None:
+                    os.close(parent)
+    finally:
+        os.close(root)
+except (OSError, subprocess.CalledProcessError, ValueError) as error:
+    print('File restore failed. Retry with a complete checkpoint. ' + str(error), file=sys.stderr)
+    sys.exit(1)
+`;
+const RESTORE_SCRIPT = `python3 -c ${q(FD_RESTORE_SCRIPT)}`;
 
 export interface RepoRestoreResult {
   repo: string;
@@ -387,6 +544,47 @@ export interface RepoRestoreResult {
   /** The snapshot taken before the restore, which a return uses to bring the files back. */
   restorePoint?: string;
   failed?: string;
+}
+
+// The shell inherits an opened directory, not a cwd resolved through a saved
+// path. Open each component relative to its parent without following links.
+const PIN_REPO_CWD = `import os, sys
+try:
+    path = sys.argv[1]
+    parts = [] if path == '.' else path.split('/')
+    if any(part in ('', '.', '..', '.git', '${WORKSPACE_STORE}') for part in parts):
+        raise OSError('invalid repository path')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open('.', flags)
+    for part in parts:
+        child = os.open(part, flags, dir_fd=fd)
+        os.close(fd)
+        fd = child
+    os.fchdir(fd)
+    os.close(fd)
+    os.environ['PWD'] = os.getcwd()
+    os.execvpe('sh', ['sh', '-c', sys.argv[2]], os.environ)
+except OSError as error:
+    print('The checkpoint repository path could not be pinned. Use a repository inside the working directory before retrying. ' + str(error), file=sys.stderr)
+    sys.exit(1)
+`;
+
+function pinnedRepoExec(sandbox: Sandbox, workspace: string, repo: string): Sandbox["exec"] {
+  return (script, options) => sandbox.exec(
+    `command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for safe file restore. Install Python 3 before retrying.' >&2; exit 1; }\npython3 -c ${q(PIN_REPO_CWD)} ${q(repo === WORKSPACE_FILES ? "." : repo)} ${q(script)}`,
+    { ...options, cwd: workspace },
+  );
+}
+
+/** Validate from the workspace before a saved repo path becomes an exec cwd. */
+async function validateRestoreRepo(sandbox: Sandbox, workspace: string, repo: string): Promise<void> {
+  if (repo === "." || repo === WORKSPACE_FILES) return;
+  const unsafe = () => new Error("The checkpoint repository path is unsafe. Use a repository inside the working directory before retrying.");
+  if (repo.startsWith("/") || repo.split("/").some((part) => !part || part === "." || part === "..")) throw unsafe();
+  const checked = await sandbox.exec(REPO_SAFE_PATH + 'safe_path "$VALET_REPO"', {
+    cwd: workspace, timeout: SNAPSHOT_TIMEOUT_MS, env: { VALET_REPO: repo },
+  });
+  if (checked.exitCode !== 0 || checked.timedOut) throw unsafe();
 }
 
 /**
@@ -399,24 +597,35 @@ export async function restorePaths(
   workspace: string,
   plan: readonly RepoRestore[],
   restoreRef: (repo: string) => string,
+  onPrepared?: (repo: string, restorePoint: string) => Promise<void>,
 ): Promise<RepoRestoreResult[]> {
   const results: RepoRestoreResult[] = [];
   for (const repo of plan) {
-    const result: RepoRestoreResult = { repo: repo.repo, restored: [], removed: [], skipped: [] };
+    const result: RepoRestoreResult = { repo: repo.repo, restored: [], removed: [], skipped: [...repo.skipped ?? []] };
     results.push(result);
     if (repo.unavailable) {
       result.failed = `Checkpoint coverage unavailable: ${repo.unavailable}`;
       continue;
     }
+    if (repo.paths.length === 0) continue;
     const dir = repoDir(workspace, repo.repo);
     try {
-      result.restorePoint = (await snapshotRepo(sandbox, dir, restoreRef(repo.repo), repo.repo === WORKSPACE_FILES)).commit;
-      const run = await sandbox.exec((repo.repo === WORKSPACE_FILES ? WORKSPACE_GIT + WORKSPACE_SAFE_PATH : "") + RESTORE_SCRIPT, {
-        env: { VALET_WORKSPACE_FILES: repo.repo === WORKSPACE_FILES ? "1" : "0" },
-        cwd: dir,
-        timeout: RESTORE_TIMEOUT_MS,
+      await validateRestoreRepo(sandbox, workspace, repo.repo);
+      const exec = pinnedRepoExec(sandbox, workspace, repo.repo);
+      const recovery = await takeSnapshot(exec, dir, restoreRef(repo.repo), repo.repo === WORKSPACE_FILES);
+      if (recovery.partial) throw new Error("The recovery snapshot is partial. Files were left unchanged. Reduce untracked file size before retrying.");
+      result.restorePoint = recovery.commit;
+      const script = (repo.repo === WORKSPACE_FILES ? WORKSPACE_GIT + WORKSPACE_SAFE_PATH : REPO_SAFE_PATH) + RESTORE_SCRIPT;
+      const options = {
+        cwd: dir, timeout: RESTORE_TIMEOUT_MS,
         stdin: repo.paths.map((p) => `${p.path}\t${p.source}\t${p.expected}\n`).join(""),
-      });
+      };
+      const preflight = await exec(script, { ...options, env: { VALET_PREFLIGHT: "1", VALET_WORKSPACE_FILES: repo.repo === WORKSPACE_FILES ? "1" : "0" } });
+      if (preflight.exitCode !== 0 || preflight.timedOut) throw new Error((preflight.stderr || "Checkpoint preflight timed out. Files were left unchanged.").trim().slice(0, 300));
+      // A durable journal must be committed before the first working-tree write.
+      await onPrepared?.(repo.repo, recovery.commit);
+      await validateRestoreRepo(sandbox, workspace, repo.repo);
+      const run = await exec(script, { ...options, env: { VALET_WORKSPACE_FILES: repo.repo === WORKSPACE_FILES ? "1" : "0" } });
       for (const line of run.stdout.split("\n")) {
         const [outcome, path] = line.split("\t");
         if (!path) continue;
@@ -445,6 +654,8 @@ export interface ForkSeedRepo {
   unavailable?: string;
   /** Only snapshots referenced by this copied path, including usable return notes. */
   history?: string[];
+  /** Successful note restores to apply to snapshot in a temporary Git index. */
+  restoredBases?: Record<string, string>;
 }
 
 /** The latest checkpoint per repository among `entries` (a fork's copied path). */
@@ -460,13 +671,29 @@ export function planForkSeed(entries: readonly SessionEntry[]): ForkSeedRepo[] {
     if (entry.type === "branch_summary") {
       for (const files of readBranchNote(entry.metadata)?.files ?? []) {
         if (files.restorePoint && files.bases) keep(files.repo, [files.restorePoint, ...Object.values(files.bases)]);
+        if (files.failed) {
+          latest.set(files.repo, { repo: files.repo, snapshot: "", unavailable: files.failed });
+          continue;
+        }
+        const changed = [...files.restored, ...files.removed];
+        if (!files.restorePoint || changed.some((path) => !files.bases?.[path])) {
+          if (changed.length > 0) latest.set(files.repo, { repo: files.repo, snapshot: "", unavailable: "The file restore has no complete checkpoint. Take a new checkpoint before forking files." });
+          continue;
+        }
+        keep(files.repo, [files.restorePoint]);
+        latest.set(files.repo, {
+          repo: files.repo, snapshot: files.restorePoint,
+          ...(latest.get(files.repo)?.branch ? { branch: latest.get(files.repo)?.branch } : {}),
+          ...(changed.length > 0 ? { restoredBases: Object.fromEntries(changed.map((path) => [path, files.bases![path]!])) } : {}),
+        });
       }
     }
     if (entry.type !== "message" || entry.role !== "user") continue;
     const checkpoint = readTurnCheckpoint(entry.metadata);
     for (const repo of checkpoint?.repos ?? []) {
       keep(repo.repo, [repo.before, repo.after]);
-      latest.set(repo.repo, { repo: repo.repo, snapshot: repo.after, ...(repo.branch ? { branch: repo.branch } : {}) });
+      latest.set(repo.repo, { repo: repo.repo, snapshot: repo.after, ...(repo.branch ? { branch: repo.branch } : {}),
+        ...(repo.partial ? { unavailable: "The checkpoint pair is partial. Take a complete checkpoint before forking files." } : {}) });
     }
     for (const failed of checkpoint?.unavailable ?? []) {
       latest.set(failed.repo, { repo: failed.repo, snapshot: "", unavailable: failed.reason });
@@ -499,14 +726,61 @@ async function bundleFile(sandbox: Sandbox, dir: string, workspaceFiles = false)
   return { git: path, io: path.startsWith("/") ? path : `${dir}/${path}` };
 }
 
+/** Build note state without reading or writing the live working tree. */
+async function composeNoteSnapshot(sandbox: Sandbox, workspace: string, seed: ForkSeedRepo): Promise<void> {
+  if (!seed.restoredBases) return;
+  const paths = Object.entries(seed.restoredBases);
+  if (paths.some(([path]) => !path || /[\t\n]/.test(path))) throw new Error("Unsupported checkpoint restore path. Take a new checkpoint before forking files.");
+  const result = await sandbox.exec(`${seed.repo === WORKSPACE_FILES ? WORKSPACE_GIT : ""}set -e
+idx=$(mktemp)
+listing=$(mktemp)
+trap 'rm -f "$idx" "$listing"' EXIT
+rm -f "$idx"
+export GIT_INDEX_FILE="$idx"
+git read-tree "$VALET_SNAPSHOT"
+tab=$(printf '\\t')
+while IFS="$tab" read -r path source; do
+  git cat-file -e "$source^{commit}"
+  git ls-tree --full-tree "$source" -- ":(literal)$path" > "$listing"
+  if [ -s "$listing" ]; then
+    mode=$(awk 'NR==1 { print $1 }' "$listing")
+    object=$(awk 'NR==1 { print $3 }' "$listing")
+    case "$mode" in 100644|100755|120000) ;; *) echo 'Unsupported checkpoint file mode.' >&2; exit 1;; esac
+    git cat-file -e "$object"
+    git update-index --add --cacheinfo "$mode,$object,$path"
+  else git update-index --force-remove -- "$path"
+  fi
+done
+tree=$(git write-tree)
+parent=$(git rev-parse -q --verify "$VALET_SNAPSHOT^1" || true)
+if [ -n "$parent" ]; then commit=$(git commit-tree "$tree" -p "$parent" -m 'valet restored checkpoint')
+else commit=$(git commit-tree "$tree" -m 'valet restored checkpoint')
+fi
+git update-ref "$VALET_REF" "$commit"
+printf '%s\\n' "$commit"`, {
+    cwd: repoDir(workspace, seed.repo), timeout: SNAPSHOT_TIMEOUT_MS,
+    env: { ...GIT_IDENTITY, VALET_SNAPSHOT: seed.snapshot, VALET_REF: `refs/valet/fork-composed/${crypto.randomUUID()}` },
+    stdin: paths.map(([path, commit]) => `${path}\t${commit}\n`).join(""),
+  });
+  const commit = result.stdout.trim();
+  if (result.exitCode !== 0 || result.timedOut || !/^[0-9a-f]{40,64}$/.test(commit)) {
+    throw new Error(`Restored checkpoint could not be composed. Take a new checkpoint before forking files. ${result.stderr.trim().slice(0, 200)}`);
+  }
+  // The caller records this finalized snapshot ID after exporting the bundle.
+  seed.snapshot = commit;
+  delete seed.restoredBases;
+}
+
 /**
  * A git bundle of `seed.snapshot` that leaves out what the remotes already
  * hold, so it stays small when the fork's working directory clones the same
- * remote. Returns the bundle bytes.
+ * remote. Finalizes `seed.snapshot` when a note needs a composed state.
+ * Returns the bundle bytes.
  */
 export async function exportSeedBundle(sandbox: Sandbox, workspace: string, seed: ForkSeedRepo): Promise<Uint8Array> {
   const label = seed.repo === WORKSPACE_FILES ? "Working directory" : seed.repo;
   if (seed.unavailable) throw new Error(`Checkpoint coverage unavailable for ${label}: ${seed.unavailable}`);
+  await composeNoteSnapshot(sandbox, workspace, seed);
   const prefix = `refs/valet/fork-exports/${crypto.randomUUID()}`;
   const commits = [...new Set([seed.snapshot, ...seed.history ?? []])];
   const refs = commits.map((_, index) => `${prefix}/${index}`);

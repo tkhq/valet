@@ -90,7 +90,7 @@ describe("checkpoint scripts", () => {
     // A file the turn never touched stays as it is.
     await writeFile(join(repo, "d.txt"), "other thread\n");
 
-    const plan = planFileUndo([userEntry("e1", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo: "app", before: before.commit, after: after.commit, changed }] } })]);
+    const plan = planFileUndo([userEntry("e1", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo: "app", before: before.commit, after: after.commit, changed, authoredPaths: changed }] } })]);
     const [result] = await restorePaths(sandbox, ws, plan, () => "refs/valet/x/restore");
 
     expect(result).toMatchObject({ restored: ["a.txt"], removed: ["b.txt"], skipped: ["c.txt"] });
@@ -118,9 +118,9 @@ describe("checkpoint scripts", () => {
   it("plans each path from the first turn that changed it to the last", () => {
     const repo = "/w/app";
     const plan = planFileUndo([
-      userEntry("e1", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo, before: "b1", after: "a1", changed: ["x"] }] } }),
+      userEntry("e1", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo, before: "b1", after: "a1", changed: ["x"], authoredPaths: ["x"] }] } }),
       userEntry("e2"),
-      userEntry("e3", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo, before: "b3", after: "a3", changed: ["x", "y"] }] } }),
+      userEntry("e3", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo, before: "b3", after: "a3", changed: ["x", "y"], authoredPaths: ["x", "y"] }] } }),
     ]);
     expect(plan).toEqual([{ repo, paths: [{ path: "x", source: "b1", expected: "a3" }, { path: "y", source: "b3", expected: "a3" }] }]);
   });
@@ -361,7 +361,7 @@ describe("non-repository workspace checkpoints", () => {
     const files = await sandbox.exec(`git --git-dir=.valet-file-checkpoints ls-tree -r --name-only ${after.commit}`, { cwd: ws });
     expect(files.stdout.trim().split("\n")).toEqual(["manual.txt", "new.txt", "notes.txt"]);
     await writeFile(join(ws, "manual.txt"), "later manual edit");
-    const entries = [userEntry("loose", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo: target, before: before.commit, after: after.commit, changed }] } })];
+    const entries = [userEntry("loose", { [FILE_CHECKPOINT_KEY]: { repos: [{ repo: target, before: before.commit, after: after.commit, changed, authoredPaths: changed }] } })];
     const [undo] = await restorePaths(sandbox, ws, planFileUndo(entries), () => "refs/valet/nonrepo/undo");
     expect(undo).toMatchObject({ restored: ["notes.txt"], removed: ["new.txt"], skipped: ["manual.txt"] });
     expect(await read(join(ws, "notes.txt"))).toBe("before");
@@ -592,7 +592,7 @@ describe("fork snapshot history", () => {
     const forkDir = repo === WORKSPACE_FILES ? forkWs : join(forkWs, repo);
     const git = repo === WORKSPACE_FILES ? "git --git-dir=.valet-file-checkpoints" : "git";
     expect((await fork.exec(`${git} cat-file -e ${abandoned.commit}`, { cwd: forkDir })).exitCode).not.toBe(0);
-    const [restored] = await restorePaths(fork, forkWs, [{ repo, paths: [{ path: "a.txt", source: point.commit, expected: after.commit }] }], () => "refs/valet/history/restore");
+    const [restored] = await restorePaths(fork, forkWs, [{ repo, paths: [{ path: "a.txt", source: point.commit, expected: before.commit }] }], () => "refs/valet/history/restore");
     expect(restored).toMatchObject({ restored: ["a.txt"], removed: [] });
     expect(await read(join(forkDir, "a.txt"))).toBe("return point");
   });

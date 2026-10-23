@@ -1,3 +1,4 @@
+import { normalizeGatePath } from "./builtin-tools/index.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
@@ -624,6 +625,9 @@ export class Thread {
   private turnUserEntryId: string | undefined;
   /** This turn's snapshots from before its first file change (`beginTurnCheckpoint`). */
   private turnCheckpoint: Promise<PendingCheckpoint | undefined> | undefined;
+  private readonly turnFileWrites = new Map<string, { before?: string; after: string; conflicted: boolean }>();
+  private turnFileWriteBytes = 0;
+  private turnFileWritesUnavailable = false;
   /** The leaf moved; the next model call logs how much of the prompt the cache served. */
   private branchSwitchCachePending = false;
   /**
@@ -2310,6 +2314,21 @@ export class Thread {
     const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) throw new NotFoundError("thread", this.id);
     const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const index = this.validateEditPath(active, entryId, editorId);
+    // An edit that already wrote its branch note has started; its turn may
+    // run on, or wait for an approval, without blocking the next edit.
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    const waiting = unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata)
+      && !snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id));
+    if (waiting) {
+      throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
+    }
+    return { active, index };
+  }
+
+  /** Recheck ownership against the snapshot used for the branch CAS. */
+  private validateEditPath(active: readonly SessionEntry[], entryId: string, editorId: string | undefined): number {
+    if (!editorId) throw new ValidationError("Only a person can edit a message. Send the text as a new message.");
     const index = active.findIndex((entry) => entry.id === entryId);
     const target = active[index];
     if (!target) {
@@ -2328,15 +2347,7 @@ export class Thread {
     if (later) {
       throw new ValidationError(`${later} wrote after this message, and an edit would remove that message. Branch into a new thread instead.`);
     }
-    // An edit that already wrote its branch note has started; its turn may
-    // run on, or wait for an approval, without blocking the next edit.
-    const unsettled = await store.listUnsettledSubmissions(this.session.id);
-    const waiting = unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata)
-      && !snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id));
-    if (waiting) {
-      throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
-    }
-    return { active, index };
+    return index;
   }
 
   /**
@@ -2440,15 +2451,9 @@ export class Thread {
       if (snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id)) return undefined;
       const leaf = snapshot.thread.activeLeafEntryId ?? null;
       const active = walkTranscriptDag(snapshot.entries, leaf ?? undefined);
-      const index = active.findIndex((entry) => entry.id === edit.entryId);
-      if (index < 0) {
-        throw new ValidationError("The message you edited is no longer in this conversation. Edit it again from the current version.");
-      }
+      const index = this.validateEditPath(active, edit.entryId, item.author?.id);
       const left = active.slice(index);
       const noteId = uid("e");
-      // Files go back before the note is written, so the note says what
-      // happened. The leaf has not moved yet; the claim holds the thread.
-      const files = edit.undoFiles ? await this.undoFileChanges(planFileUndo(left), noteId) : undefined;
       // The entry before it on the path, not its parentId: in a transcript
       // from before TKAI-211, the edited message's parent is null.
       const note = this.buildBranchNote("edit", {
@@ -2457,13 +2462,14 @@ export class Thread {
         left,
         actorId: item.author?.id,
         queueItemId: item.id,
-        files,
       });
       if (!(await store.appendBranch(this.session.id, this.id, [note], { expectedLeafId: leaf, fence }))) {
         throw new ConflictError("The thread changed while the edit started. Edit the message again.");
       }
       this.activeLeafEntryId = note.id;
       this.rehydrateTranscript([...snapshot.entries, note]);
+      const restored = edit.undoFiles ? await this.restoreBranchFiles(note, planFileUndo(left), fence) : note;
+      this.rehydrateTranscript([...snapshot.entries, restored]);
       this.branchSwitchCachePending = true;
       return note.id;
     });
@@ -2520,19 +2526,17 @@ export class Thread {
         throw new ValidationError(`${other} wrote in this version, and going back would remove that message. Branch into a new thread instead.`);
       }
       const freshId = uid("e");
-      // Bringing files back undoes this version's own file changes, then
-      // puts back what the note's undo took away.
-      const files = choices.restoreFiles
-        ? await this.undoFileChanges(returnPlan(planFileUndo(left), readBranchNote(note.metadata)?.files ?? []), freshId)
-        : undefined;
-      const fresh = this.buildBranchNote("return", { id: freshId, parentId: target.id, left, actorId: actor.id, files });
+      const fresh = this.buildBranchNote("return", { id: freshId, parentId: target.id, left, actorId: actor.id });
       if (!(await store.appendBranch(this.session.id, this.id, [fresh], { expectedLeafId: leaf }))) {
         throw new ConflictError("The thread changed. Reload it and try again.");
       }
       this.activeLeafEntryId = fresh.id;
+      const restored = choices.restoreFiles
+        ? await this.restoreBranchFiles(fresh, returnPlan(planFileUndo(left), readBranchNote(note.metadata)?.files ?? []))
+        : fresh;
       this.branchSwitchCachePending = true;
       if (this.transcriptPending) return fresh.id;
-      this.rehydrateTranscript([...snapshot.entries, fresh]);
+      this.rehydrateTranscript([...snapshot.entries, restored]);
       return fresh.id;
     });
     this.entryAppendTail = move.then(() => undefined, () => undefined);
@@ -2683,7 +2687,35 @@ export class Thread {
       ...def,
       execute: async (args, ctx) => {
         await this.beginTurnCheckpoint();
-        return def.execute(args, ctx);
+        const sandbox = new Proxy(ctx.sandbox, {
+          get: (target, property) => {
+            if (property === "writeFile") return async (path: string, content: string): Promise<void> => {
+              const key = normalizeGatePath(path, ctx.cwd ?? this.session.options.workspace);
+              if (this.turnFileWritesUnavailable) return target.writeFile(path, content);
+              let before: string | undefined;
+              let tooLarge = content.length > 8 * 1024 * 1024;
+              try { tooLarge ||= (await target.stat(path)).size > 16 * 1024 * 1024; } catch { /* A missing preimage is checked against the snapshot. */ }
+              if (!tooLarge) {
+                try { before = await target.readFile(path); } catch { /* Unreadable preimages cannot match an existing snapshot blob. */ }
+              }
+              const previous = this.turnFileWrites.get(key);
+              await target.writeFile(path, content);
+              this.turnFileWriteBytes += 2 * ((before?.length ?? 0) + content.length);
+              if (tooLarge || this.turnFileWriteBytes > 50 * 1024 * 1024) {
+                this.turnFileWrites.clear();
+                this.turnFileWritesUnavailable = true;
+                return;
+              }
+              this.turnFileWrites.set(key, {
+                before: previous ? previous.before : before, after: content,
+                conflicted: previous?.conflicted === true || (previous !== undefined && previous.after !== before),
+              });
+            };
+            const value: unknown = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return def.execute(args, { ...ctx, sandbox });
       },
     };
   }
@@ -2743,6 +2775,7 @@ export class Thread {
             before: repo.before,
             after: after.commit,
             changed,
+            authoredPaths: await this.authoredCheckpointPaths(dir, repo.before, after.commit, changed, repo.repo === WORKSPACE_FILES),
             ...(after.branch ? { branch: after.branch } : {}),
             ...(repo.partial || after.partial ? { partial: true } : {}),
           });
@@ -2776,21 +2809,106 @@ export class Thread {
       await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
     } catch (err) {
       console.error(`[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.turnFileWrites.clear();
+      this.turnFileWriteBytes = 0;
+      this.turnFileWritesUnavailable = false;
     }
   }
 
+  /** Only actual tool writes with matching preimages and results can be undone. */
+  private async authoredCheckpointPaths(dir: string, before: string, after: string, changed: readonly string[], workspaceFiles: boolean): Promise<string[]> {
+    if (changed.length === 0 || this.turnFileWritesUnavailable || this.turnFileWrites.size === 0) return [];
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    const git = workspaceFiles ? "git --git-dir=.valet-file-checkpoints --work-tree=. --literal-pathspecs" : "git --literal-pathspecs";
+    const tree = async (commit: string) => {
+      const result = await this.session.sandbox.exec(`${git} ls-tree -r -z ${quote(commit)} -- ${changed.map(quote).join(" ")}`, { cwd: dir, timeout: 20_000 });
+      if (result.exitCode !== 0 || result.timedOut) throw new Error("File ownership snapshot lookup failed");
+      const files = new Map<string, { mode: string; hash: string }>();
+      for (const record of result.stdout.split("\0")) {
+        const tab = record.indexOf("\t");
+        if (tab < 0) continue;
+        const [mode, type, hash] = record.slice(0, tab).split(" ");
+        if (mode && type === "blob" && hash) files.set(record.slice(tab + 1), { mode, hash });
+      }
+      return files;
+    };
+    const original = await tree(before);
+    const final = await tree(after);
+    const blob = async (content: string) => {
+      const data = new TextEncoder().encode(content);
+      const header = new TextEncoder().encode(`blob ${data.length}\0`);
+      const bytes = new Uint8Array(header.length + data.length);
+      bytes.set(header); bytes.set(data, header.length);
+      const digest = await crypto.subtle.digest(after.length === 64 ? "SHA-256" : "SHA-1", bytes);
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    };
+    const authored: string[] = [];
+    for (const path of changed) {
+      const write = this.turnFileWrites.get(normalizeGatePath(path, dir));
+      if (!write || write.conflicted) continue;
+      const old = original.get(path);
+      const current = final.get(path);
+      if (!current || !["100644", "100755"].includes(current.mode) || current.mode !== (old?.mode ?? "100644")) continue;
+      if (current.hash !== await blob(write.after)) continue;
+      if (write.before === undefined ? old !== undefined : old?.hash !== await blob(write.before)) continue;
+      authored.push(path);
+    }
+    return authored;
+  }
+
+  /** Commit the branch first, then journal each restore point before files change. */
+  private async restoreBranchFiles(note: BranchSummaryEntry, plan: readonly RepoRestore[], fence?: WriteFence): Promise<BranchSummaryEntry> {
+    const facts = readBranchNote(note.metadata);
+    if (!facts || plan.length === 0) return note;
+    const store = this.session.providers.store;
+    const update = async (files: BranchNoteRepoFiles[], writeFence?: WriteFence): Promise<BranchSummaryEntry> => {
+      const updatedFacts = { ...facts, files };
+      const updated: BranchSummaryEntry = {
+        ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts },
+      };
+      await store.updateEntry(this.session.id, this.id, updated, writeFence);
+      return updated;
+    };
+    let stale: StaleAttemptError | undefined;
+    const files = await this.undoFileChanges(plan, note.id, async (journal) => {
+      try { await update(journal, fence); }
+      catch (err) {
+        if (err instanceof StaleAttemptError) stale = err;
+        throw err;
+      }
+    });
+    // The result belongs to an already committed note. Keep its recovery data
+    // even if the turn's lease expires while the sandbox finishes restoring.
+    const restored = await update(files ?? []);
+    if (stale) throw stale;
+    return restored;
+  }
+
   /** Run a file plan with a restore point per repository, named for the note that records it. */
-  private async undoFileChanges(plan: readonly RepoRestore[], noteId: string): Promise<BranchNoteRepoFiles[] | undefined> {
+  private async undoFileChanges(plan: readonly RepoRestore[], noteId: string, onPrepared?: (journal: BranchNoteRepoFiles[]) => Promise<void>): Promise<BranchNoteRepoFiles[] | undefined> {
     if (plan.length === 0) return undefined;
+    const journal: BranchNoteRepoFiles[] = [];
     const results = await restorePaths(
       this.session.sandbox,
       this.session.options.workspace,
       plan,
       (repo) => checkpointRef(this.id, noteId, `restore-${plan.findIndex((r) => r.repo === repo)}`),
+      onPrepared ? async (repo, restorePoint) => {
+        journal.push({
+          repo, restored: [], removed: [], skipped: [], restorePoint,
+          bases: Object.fromEntries((plan.find((entry) => entry.repo === repo)?.paths ?? []).map((path) => [path.path, path.source])),
+          failed: "File restoration has not completed. Stop the turn and go back to recover the restore point.",
+        });
+        await onPrepared(journal);
+      } : undefined,
     );
     return results.map((result) => {
       const sources = new Map(plan.find((r) => r.repo === result.repo)?.paths.map((p) => [p.path, p.source]) ?? []);
-      const bases = Object.fromEntries([...result.restored, ...result.removed].flatMap((path) => {
+      // A failed command may have changed a path before reporting success.
+      // Retain the full prepared recovery map for every uncertain result.
+      const recoverable = result.failed ? [...sources.keys()] : [...result.restored, ...result.removed];
+      const bases = Object.fromEntries(recoverable.flatMap((path) => {
         const source = sources.get(path);
         return source ? [[path, source]] : [];
       }));
@@ -4618,6 +4736,9 @@ export class Thread {
     this.currentToolCalls.clear();
     this.turnUserEntryId = undefined;
     this.turnCheckpoint = undefined;
+    this.turnFileWrites.clear();
+    this.turnFileWriteBytes = 0;
+    this.turnFileWritesUnavailable = false;
     if (!(await this.canRunCurrentSubmission())) return;
     // An edit moves the leaf before anything else in the turn reads or
     // writes the transcript (model state, compaction, the user entry).
@@ -7475,15 +7596,20 @@ function copyEntry(
           return copied ? [copied] : [];
         }),
       };
-    case "branch_summary":
+    case "branch_summary": {
+      const facts = readBranchNote(entry.metadata);
       return {
         ...entry,
         ...base,
+        ...(facts ? { metadata: { ...entry.metadata, [BRANCH_NOTE_KEY]: {
+          ...facts, ...(facts.summarizedEntryIds ? { summarizedEntryIds: facts.summarizedEntryIds.map((id) => ids.get(id) ?? id) } : {}),
+        } } } : {}),
         // The version a copied note left is not in the copy, so the copy
         // cannot go back to it.
         branchRootId: ids.get(entry.branchRootId) ?? "",
         branchLeafId: ids.get(entry.branchLeafId) ?? "",
       };
+    }
     case "command_result":
       return { ...entry, ...base };
   }

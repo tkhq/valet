@@ -4,12 +4,13 @@
  * scrubs model keys, so a claimed edit fails at model resolution after its
  * leaf moved: the branch shape is what these tests read.
  */
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import type { MessageEntry, SessionEntry, Thread } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
-import { slackChannelPrivacy, teamMembers, teams } from "../schema/index.js";
-import { SLACK_CHANNELS_METADATA_KEY } from "../services/thread-access.js";
+import { assistantExecutions, slackChannelPrivacy, teamMembers, teams } from "../schema/index.js";
+import { resetThreadAccessCache, SLACK_CHANNELS_METADATA_KEY } from "../services/thread-access.js";
 import type {
   CreateSessionResponse,
   EditPreviewResponse,
@@ -257,11 +258,16 @@ describe("team fork audience", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ entryId: "a1" }),
     });
-    return { thread, fork };
+    return { thread, fork, sessionId: execution.sessionId };
   }
 
   it("refuses to branch a thread private to one person", async () => {
-    const { fork } = await teamThread("app-assistant:local-user");
+    const { fork, sessionId } = await teamThread("app-assistant:local-user");
+    const credential = (userId: string) => fetch(`${api!.baseUrl}/api/sessions/${sessionId}/sandbox-jwt`, {
+      method: "POST", headers: { "x-valet-test-user-id": userId },
+    });
+    expect((await credential("local-user")).status).toBe(200);
+    expect((await credential("test-member")).status).toBe(404);
     const res = await fork();
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("private to you");
@@ -278,5 +284,29 @@ describe("team fork audience", () => {
     const { thread: summary } = (await res.json()) as ForkThreadResponse;
     const stored = await api!.providers.engineStore.getThread(summary.sessionId, summary.id);
     expect(stored?.metadata?.[SLACK_CHANNELS_METADATA_KEY]).toEqual(["C-team"]);
+    const [execution] = await api!.providers.db.select().from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, summary.sessionId));
+    const destination = await api!.providers.engineStore.getSession(summary.sessionId);
+    expect(destination?.parentThreadId).toBe(execution.governingThreadId);
+    const governing = await api!.providers.engineStore.getThread(destination!.parentSessionId!, execution.governingThreadId);
+    expect(governing?.metadata?.[SLACK_CHANNELS_METADATA_KEY]).toEqual(["C-team"]);
+
+
+    const credential = (userId: string) => fetch(`${api!.baseUrl}/api/sessions/${summary.sessionId}/sandbox-jwt`, {
+      method: "POST", headers: { "x-valet-test-user-id": userId },
+    });
+    expect((await credential("local-user")).status).toBe(200);
+    expect((await credential("test-member")).status).toBe(200);
+
+    // Retaining an execution URL must not bypass a channel's new privacy gate.
+    await api!.providers.db.update(slackChannelPrivacy).set({ isPrivate: true })
+      .where(eq(slackChannelPrivacy.channelId, "C-team"));
+    resetThreadAccessCache();
+    const hidden = await fetch(`${api!.baseUrl}/api/threads/${summary.id}/messages`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(hidden.status).toBe(404);
+    expect((await credential("test-member")).status).toBe(404);
+    expect((await credential("local-user")).status).toBe(404);
   });
 });
