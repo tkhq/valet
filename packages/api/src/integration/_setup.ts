@@ -561,7 +561,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
-    drainTagging: taggingDrain(db, engineCredentials, engineStore),
+    drainTagging: taggingDrain(db, engineCredentials),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,

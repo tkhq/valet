@@ -27,9 +27,9 @@ export async function enqueueTagging(db: AppDb, orgId: string, dimension: string
   const unique = [...new Map(refs.map(ref => [`${ref.type}:${ref.id}`, ref])).values()];
   for (let offset = 0; offset < unique.length; offset += TAG_BATCH_SIZE) {
     await db.insert(tagJobs).values(unique.slice(offset, offset + TAG_BATCH_SIZE).map(ref => ({
-      orgId, dimension, subjectType: ref.type, subjectId: ref.id, nextAttemptAt: Date.now() + delayMs, force })))
+      orgId, dimension, subjectType: ref.type, subjectId: ref.id, nextAttemptAt: Date.now() + delayMs, force, sessionId: ref.sessionId, threadId: ref.threadId })))
       .onConflictDoUpdate({ target: [tagJobs.orgId, tagJobs.dimension, tagJobs.subjectType, tagJobs.subjectId],
-        set: { version: sql`${tagJobs.version} + 1`, attempts: 0, nextAttemptAt: Date.now() + delayMs, force: sql`${tagJobs.force} OR ${force}` } });
+        set: { sessionId: sql`coalesce(excluded.session_id, ${tagJobs.sessionId})`, threadId: sql`coalesce(excluded.thread_id, ${tagJobs.threadId})`, version: sql`${tagJobs.version} + 1`, attempts: 0, nextAttemptAt: Date.now() + delayMs, force: sql`${tagJobs.force} OR ${force}` } });
   }
 }
 
@@ -99,13 +99,14 @@ export class Tagger {
     }
   }
 
-  private async classifyBatch(dimension: Dimension, provided: readonly TagSubject[], forced: ReadonlySet<string>, token: string): Promise<Set<string>> {
+  private async classifyBatch(dimension: Dimension, provided: readonly TagSubject[], forced: ReadonlySet<string>, token: string): Promise<{ handled: Set<string>; deferred: Map<string, number> }> {
     const { db, orgId } = this.deps;
     const renewed = await db.update(tagDimensionState).set({ leaseUntil: Date.now() + LEASE_MS })
       .where(and(stateWhere(orgId, dimension.id), eq(tagDimensionState.leaseToken, token), sql`${tagDimensionState.leaseUntil} > ${Date.now()}`)).returning();
     if (!renewed.length) throw new Error("Tagging lease expired. Retry the batch.");
     const subjects: TagSubject[] = [];
     const handled = new Set<string>();
+    const deferred = new Map<string, number>();
     const day = Math.floor(Date.now() / 86400000);
     for (const source of new Map(provided.map(subject => [`${subject.type}:${subject.id}`, subject])).values()) {
       if (!dimension.subjectTypes.includes(source.type)) throw new Error("Unsupported tag subject. Register its subject type first.");
@@ -113,13 +114,15 @@ export class Tagger {
       const [old] = await db.select().from(tagSubjects).where(subjectWhere(orgId, dimension.id, subject));
       const ref = `${subject.type}:${subject.id}`;
       if ((!subject.text.trim() && (old || !dimension.rules?.(subject)))
-        || (!forced.has(ref) && old?.inputHash === hashInput(dimension.id, subject))
-        || (dimension.maxRetagsPerDay !== undefined && old?.retagDay === day && old.retagCount >= dimension.maxRetagsPerDay)) {
+        || (!forced.has(ref) && old?.inputHash === hashInput(dimension.id, subject))) {
         handled.add(ref); continue;
+      }
+      if (dimension.maxRetagsPerDay !== undefined && old?.retagDay === day && old.retagCount >= dimension.maxRetagsPerDay) {
+        deferred.set(ref, (day + 1) * 86400000); continue;
       }
       subjects.push(subject);
     }
-    if (!subjects.length) return handled;
+    if (!subjects.length) return { handled, deferred };
     const keys = await readRegistry(db, orgId, dimension.id);
     const rules = new Map(subjects.map(subject => [subject, dimension.rules?.(subject)]));
     // Blank subjects without a deterministic rule stay unlabeled, not other.
@@ -178,8 +181,8 @@ export class Tagger {
         const retagCount = dimension.maxRetagsPerDay !== undefined && previous
           ? (previous.retagDay === day ? previous.retagCount : 0) + 1 : 0;
         await tx.insert(tagSubjects).values({ orgId, dimension: dimension.id, subjectType: subject.type, subjectId: subject.id, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId,
-          inputHash, retagDay: day, retagCount })
-          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, retagDay: day, retagCount } });
+          inputHash, sessionId: subject.sessionId, threadId: subject.threadId, retagDay: day, retagCount })
+          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, sessionId: subject.sessionId, threadId: subject.threadId, retagDay: day, retagCount } });
         handled.add(`${subject.type}:${subject.id}`);
         await tx.delete(tagLabels).where(labelWhere(orgId, dimension.id, subject));
         if (labels.length) await tx.insert(tagLabels).values(labels.map(label => ({ ...label, orgId, dimension: dimension.id, mode: dimension.mode,
@@ -192,7 +195,7 @@ export class Tagger {
       await promoteKeys(tx, orgId, dimension.id);
       if (created) await tx.update(tagDimensionState).set({ retryOther: true }).where(stateWhere(orgId, dimension.id));
     });
-    return handled;
+    return { handled, deferred };
   }
 
   private async enqueueOtherRetries(id: string): Promise<void> {
@@ -200,14 +203,14 @@ export class Tagger {
     await db.transaction(async tx => {
       const [state] = await tx.select().from(tagDimensionState).where(stateWhere(orgId, id));
       if (!state?.retryOther) return;
-      const retry = await tx.select({ type: tagSubjects.subjectType, id: tagSubjects.subjectId }).from(tagSubjects)
+      const retry = await tx.select({ type: tagSubjects.subjectType, id: tagSubjects.subjectId, sessionId: tagSubjects.sessionId, threadId: tagSubjects.threadId }).from(tagSubjects)
         .innerJoin(tagLabels, and(eq(tagLabels.orgId, tagSubjects.orgId), eq(tagLabels.dimension, tagSubjects.dimension),
           eq(tagLabels.subjectType, tagSubjects.subjectType), eq(tagLabels.subjectId, tagSubjects.subjectId)))
         .where(and(eq(tagSubjects.orgId, orgId), eq(tagSubjects.dimension, id), eq(tagSubjects.otherRetried, false), eq(tagLabels.key, "other")))
         .limit(TAG_BATCH_SIZE);
       for (const ref of retry) {
-        await tx.update(tagSubjects).set({ otherRetried: true }).where(subjectWhere(orgId, id, ref));
-        await tx.insert(tagJobs).values({ orgId, dimension: id, subjectType: ref.type, subjectId: ref.id, force: true, nextAttemptAt: Date.now() })
+        await tx.update(tagSubjects).set({ otherRetried: true }).where(subjectWhere(orgId, id, { type: ref.type, id: ref.id }));
+        await tx.insert(tagJobs).values({ orgId, dimension: id, subjectType: ref.type, subjectId: ref.id, force: true, sessionId: ref.sessionId, threadId: ref.threadId, nextAttemptAt: Date.now() })
           .onConflictDoUpdate({ target: [tagJobs.orgId, tagJobs.dimension, tagJobs.subjectType, tagJobs.subjectId],
             set: { force: true, version: sql`${tagJobs.version} + 1`, attempts: 0, nextAttemptAt: Date.now() } });
       }
@@ -240,19 +243,26 @@ export class Tagger {
         for (const type of new Set(jobs.map(job => job.subjectType))) {
           const renderer = this.deps.renderers.get(type);
           if (!renderer) throw new Error("Missing tag renderer. Register the subject renderer before draining jobs.");
-          const refs = jobs.filter(job => job.subjectType === type).map(job => ({ type, id: job.subjectId }));
+          const refs = jobs.filter(job => job.subjectType === type).map(job => ({ type, id: job.subjectId, sessionId: job.sessionId ?? undefined, threadId: job.threadId ?? undefined }));
           const rendered = await renderer(refs);
           subjects.push(...rendered.filter(subject => refs.some(ref => ref.type === subject.type && ref.id === subject.id)));
         }
         const forced = new Set(jobs.filter(job => job.force).map(job => `${job.subjectType}:${job.subjectId}`));
         const handled = new Set<string>();
+        const deferred = new Map<string, number>();
         for (const group of ownerBatches(subjects)) {
-          for (const ref of await this.classifyBatch(this.dimension(id), group, forced, token)) handled.add(ref);
+          const result = await this.classifyBatch(this.dimension(id), group, forced, token);
+          for (const ref of result.handled) handled.add(ref);
+          for (const [ref, until] of result.deferred) deferred.set(ref, until);
         }
         for (const job of jobs) {
           const ref = { type: job.subjectType, id: job.subjectId };
           const subject = subjects.find(subject => subject.type === ref.type && subject.id === ref.id);
-          if (subject && !handled.has(`${ref.type}:${ref.id}`)) {
+          const until = deferred.get(`${ref.type}:${ref.id}`);
+          if (until !== undefined) {
+            await db.update(tagJobs).set({ nextAttemptAt: until, attempts: 0 })
+              .where(and(jobWhere(orgId, id, ref), eq(tagJobs.version, job.version)));
+          } else if (subject && !handled.has(`${ref.type}:${ref.id}`)) {
             await this.failJob(id, job);
           } else await db.delete(tagJobs).where(and(jobWhere(orgId, id, ref), eq(tagJobs.version, job.version)));
         }

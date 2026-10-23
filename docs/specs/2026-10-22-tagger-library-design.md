@@ -114,7 +114,9 @@ The library also keeps its required `other` fallback for invalid classifier outp
 The card only shows that fallback when it has assignments.
 
 The subject is one session thread, including assistant and child-session threads.
-The renderer uses that thread's latest compaction summary and up to 12 recent user/assistant messages.
+The renderer uses that thread's latest compaction summary and up to 12 recent nonempty user/assistant messages.
+SQL selects messages before limiting the tail, ordered by timestamp and sequence.
+A separate whole-thread user-message check determines eligibility, even when the user message is outside that tail.
 The existing transcript formatter flattens untrusted text.
 The final input stays under the library's 1,024-byte cap.
 Raw tool results and attachments are not included in the model prompt.
@@ -124,6 +126,7 @@ A running or queued latest submission defers classification until another stop e
 The existing event stream enqueues settled, idle, and human-blocked sessions.
 The generic queue debounces these jobs for ten minutes.
 The subject cache limits each thread to three successful re-tags per UTC day.
+Cap-blocked jobs keep their version and wait until the next UTC midnight, without consuming attempts.
 The input hash skips repeated unchanged states.
 A changed summary, tail, or execution state permits reclassification.
 There is no historical-session backfill.
@@ -141,7 +144,10 @@ The UI stress gallery seeds scoped session outcomes without network requests.
 
 ## Outcome review constraints
 
-Outcome subjects are thread identities: `session_id:thread_id` from the event envelope.
+Outcome subjects keep the external identity `session_id:thread_id` from the event envelope.
+Jobs and subject caches also store separate nullable `session_id` and `thread_id` source columns.
+The renderer and Usage joins use these columns, not concatenated identities.
+A deployed-schema repair resolves unambiguous existing subjects and jobs once; it skips ambiguous legacy identities.
 The renderer reads only that thread's compaction, recent turns, and latest queue item.
 Empty assistant messages do not add a line.
 Running or queued work does not receive a settled label; a human gate can receive a blocked label.

@@ -49,10 +49,12 @@ export async function toolIntentUsage(db: AppDb, orgId: string, where: SQL | und
 /** Counts thread subjects, including child-session threads. No transcript leaves this endpoint. */
 export async function sessionOutcomeUsage(db: AppDb, scope: UsageScope, period: ResolvedUsagePeriod): Promise<SessionOutcomeUsage> {
   const result = await db.execute(sql`SELECT l.key, count(*)::int AS sessions FROM tag_labels l
-    JOIN engine_threads t ON l.subject_id = t.session_id || ':' || t.id
+    JOIN tag_subjects subject ON subject.org_id = l.org_id AND subject.dimension = l.dimension
+      AND subject.subject_type = l.subject_type AND subject.subject_id = l.subject_id
+    JOIN engine_threads t ON t.session_id = subject.session_id AND t.id = subject.thread_id
     JOIN agent_sessions s ON s.id = t.session_id AND s.org_id = l.org_id
     WHERE l.org_id = ${scope.orgId} AND l.dimension = 'session_outcome' AND l.subject_type = 'session_thread'
-      AND s.status <> 'deleted' AND s.id NOT LIKE 'tagger:%' AND s.id NOT LIKE 'wf:%'
+      AND s.status <> 'deleted' AND s.id NOT LIKE 'wf:%'
       AND l.classified_at >= ${period.startMs} AND l.classified_at < ${period.endMs}
       ${scope.scope === "me" ? sql`AND s.user_id = ${scope.userId}` : sql``}
       ${scope.scope === "team" ? sql`AND s.owner_type = 'team' AND s.owner_id = ${scope.teamId}` : sql``}

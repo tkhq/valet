@@ -2879,12 +2879,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subje
 CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at);
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS tag_subjects (
+ session_id text, thread_id text,
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
  retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS tag_jobs (
+ session_id text, thread_id text,
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
  version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)

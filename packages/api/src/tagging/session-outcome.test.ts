@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryEventStream, type MessageEntry } from "@valet/engine";
 import { PgSessionStore } from "@valet/store-postgres";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
+import { applyAppMigrations, missingSchemaRepairs } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { agentSessions, tagJobs, tagLabels } from "../schema/index.js";
+import { agentSessions, tagJobs, tagLabels, tagSubjects } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import * as availability from "./availability.js";
 import { sessionOutcomeDimension, renderSessionOutcomeText, sessionOutcomeRenderer, wireSessionOutcomeTagging } from "./session-outcome.js";
@@ -19,7 +20,7 @@ let fixture: Awaited<ReturnType<typeof freshTestPgDb>>;
 beforeEach(async () => { fixture = await freshTestPgDb(); });
 const message = (id: string, role: "user" | "assistant", content: string, createdAt = 1): MessageEntry => ({ id, sessionId: "session", threadId: "thread", parentId: null, createdAt, type: "message", role, content });
 const result = (key: string) => ({ model: "mock-small", text: JSON.stringify({ subjects: [{ index: 0, labels: [{ key, confidence: 0.95 }] }] }) });
-const subject = { type: "session_thread", id: "session:thread", text: "user: Deliver the patch. assistant: The patch is delivered.", userId: "alice", ownerType: "user" as const, ownerId: "alice" };
+const subject = { type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread", text: "user: Deliver the patch. assistant: The patch is delivered.", userId: "alice", ownerType: "user" as const, ownerId: "alice" };
 
 describe("closed session outcomes", () => {
   it.each(["completed", "partial", "failed", "blocked_on_human", "abandoned", "unclear"])("accepts the defined %s key", async key => {
@@ -50,15 +51,15 @@ describe("closed session outcomes", () => {
     await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", ownerType: "team", ownerId: "team", workspace: "test", createdAt: 1, updatedAt: 1 });
     await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 2 });
     await store.appendEntries("session", "thread", [message("user", "user", "Finish the patch."), { id: "compact", sessionId: "session", threadId: "thread", type: "compaction", summary: "The requested patch is ready for validation.", coveredEntryIds: ["user"], tokenCountBefore: 100, tokenCountAfter: 20, parentId: "user", createdAt: 2 }, message("assistant", "assistant", "The tests passed and the patch is ready.", 3)]);
-    const renderer = sessionOutcomeRenderer(db, store, "org");
-    const rendered = await renderer([{ type: "session_thread", id: "session:thread" }]);
+    const renderer = sessionOutcomeRenderer(db, "org");
+    const rendered = await renderer([{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }]);
     expect(rendered[0]).toMatchObject({ userId: "alice", ownerType: "team", ownerId: "team" });
     expect(rendered[0]?.text).toContain("Summary: The requested patch is ready for validation.");
-    expect(await sessionOutcomeRenderer(db, store, "foreign")([{ type: "session_thread", id: "session:thread" }])).toEqual([]);
+    expect(await sessionOutcomeRenderer(db, "foreign")([{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }])).toEqual([]);
     await db.update(agentSessions).set({ userId: "team:team" }).where(eq(agentSessions.id, "session"));
-    expect((await renderer([{ type: "session_thread", id: "session:thread" }]))[0]).toMatchObject({ userId: null, ownerType: "team", ownerId: "team" });
+    expect((await renderer([{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }]))[0]).toMatchObject({ userId: null, ownerType: "team", ownerId: "team" });
     await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, "session"));
-    expect(await renderer([{ type: "session_thread", id: "session:thread" }])).toEqual([]);
+    expect(await renderer([{ type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" }])).toEqual([]);
   });
   it("aggregates latest labels with personal, team, organization, and period filters", async () => {
     const db = fixture.appDb;
@@ -71,7 +72,7 @@ describe("closed session outcomes", () => {
     for (const id of ["personal", "team-session", "foreign"]) await store.saveThread(id,
       { id: `thread-${id}`, sessionId: id, key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
     const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify: async request => ({ model: "mock", text: JSON.stringify({ subjects: request.subjects.map((_row, index) => ({ index, labels: [{ key: "completed", confidence: 1 }] })) }) }), renderers: new Map() });
-    await tagger.tag("session_outcome", [{ ...subject, id: "personal:thread-personal" }, { ...subject, id: "team-session:thread-team-session", userId: "bob", ownerType: "team", ownerId: "team" }]);
+    await tagger.tag("session_outcome", [{ ...subject, id: "personal:thread-personal", sessionId: "personal", threadId: "thread-personal" }, { ...subject, id: "team-session:thread-team-session", sessionId: "team-session", threadId: "thread-team-session", userId: "bob", ownerType: "team", ownerId: "team" }]);
     const resolved = resolveUsagePeriod({ window: "7d" });
     if (!resolved.ok) throw new Error(resolved.error.message);
     const period = resolved.period;
@@ -119,7 +120,7 @@ it("finishes a real local session, tags it through XS provider resolution, and s
     await vi.waitFor(async () => expect((await api!.providers.db.select().from(tagJobs)).some(row => row.dimension === "session_outcome")).toBe(true));
     faux.setResponses([fauxAssistantMessage(result("completed").text)]);
     await api.providers.db.update(tagJobs).set({ nextAttemptAt: Date.now() });
-    await createTagger(api.providers.db, api.providers.engineCredentials, "local-org", api.providers.engineStore).drain("session_outcome");
+    await createTagger(api.providers.db, api.providers.engineCredentials, "local-org").drain("session_outcome");
     expect((await api.providers.db.select().from(tagLabels))[0]?.key).toBe("completed");
     const mine = await (await fetch(`${api.baseUrl}/api/usage/session-outcomes?window=7d`)).json() as SessionOutcomeUsage;
     expect(mine.outcomes.find(row => row.key === "completed")?.sessions).toBe(1);
@@ -142,8 +143,8 @@ it("renders only the event thread, labels human gates, and skips running, queued
   }
   await fixture.pgdb.query(`INSERT INTO engine_queue_items(id,session_id,thread_id,status,content,attempt_count,max_attempts,timeout_at,created_at,updated_at)
     VALUES ('gate','session','thread','blocked_on_decision_gate','Deliver the patch.',0,3,0,1,1)`);
-  const render = sessionOutcomeRenderer(db, store, "org");
-  const ref = { type: "session_thread", id: "session:thread" };
+  const render = sessionOutcomeRenderer(db, "org");
+  const ref = { type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" };
   const subjects = await render([ref]);
   expect(subjects[0]?.text).toContain("blocked_on_decision_gate");
   expect(subjects[0]?.text).not.toContain("unrelated");
@@ -156,10 +157,10 @@ it("renders only the event thread, labels human gates, and skips running, queued
     await fixture.pgdb.query("UPDATE engine_queue_items SET status=$1 WHERE id='gate'", [status]);
     expect(await render([ref])).toEqual([]);
   }
-  expect(await render([{ type: "session_thread", id: "wf:run:step:step" }])).toEqual([]);
+  expect(await render([{ type: "session_thread", id: "wf:run:step:step", sessionId: "wf:run:step", threadId: "step" }])).toEqual([]);
 });
 
-it("caps successful re-tags at three per subject per UTC day without retrying a capped job", async () => {
+it("defers capped jobs until next UTC midnight and classifies them without a new event", async () => {
   const db = fixture.appDb;
   let current = { ...subject };
   const classify = vi.fn<Classify>(async () => result("partial"));
@@ -171,7 +172,109 @@ it("caps successful re-tags at three per subject per UTC day without retrying a 
   await tagger.enqueueTagging("session_outcome", [current]);
   expect(await tagger.drain("session_outcome")).toBe(1);
   expect(classify).toHaveBeenCalledTimes(4);
-  expect(await db.select().from(tagJobs)).toHaveLength(0);
-  await db.execute(sql`UPDATE tag_subjects SET retag_day = retag_day - 1`);
-  await tagger.tag("session_outcome", [current]); expect(classify).toHaveBeenCalledTimes(5);
+  const midnight = (Math.floor(Date.now() / 86400000) + 1) * 86400000;
+  expect(await db.select().from(tagJobs)).toEqual([expect.objectContaining({ attempts: 0, nextAttemptAt: midnight })]);
+  expect(await tagger.drain("session_outcome")).toBe(0);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(midnight + 1);
+  try {
+    expect(await tagger.drain("session_outcome")).toBe(1);
+    expect(classify).toHaveBeenCalledTimes(5);
+    expect(await db.select().from(tagJobs)).toEqual([]);
+  } finally { clock.mockRestore(); }
+});
+
+it("labels a long agentic turn after fourteen tool-only rounds and a final reply", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("user", "user", "Deliver the patch."),
+    ...Array.from({ length: 14 }, (_, i) => ({ ...message(`tools-${i}`, "assistant", ""), parts: [{ type: "tool_call" as const, callId: `call-${i}`, toolName: "bash", status: "completed" as const, args: { command: "test" } }] })),
+    message("final", "assistant", "The verified patch is delivered.")]);
+  const classify = vi.fn<Classify>(async request => {
+    expect(request.subjects[0]?.text).toContain("user: Deliver the patch.");
+    expect(request.subjects[0]?.text).toContain("assistant: The verified patch is delivered.");
+    return result("completed");
+  });
+  const render = sessionOutcomeRenderer(db, "org");
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify, renderers: new Map([["session_thread", render]]) });
+  await tagger.enqueueTagging("session_outcome", [subject]);
+  expect(await tagger.drain("session_outcome")).toBe(1);
+  expect(classify).toHaveBeenCalledOnce();
+  expect(await tagger.labelsFor(subject.type, subject.id)).toEqual([expect.objectContaining({ key: "completed" })]);
+  expect(await db.select().from(tagSubjects)).toEqual([expect.objectContaining({ sessionId: "session", threadId: "thread" })]);
+});
+it("checks user eligibility across the whole thread independently of its recent text window", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("old-user", "user", "Original request."),
+    ...Array.from({ length: 14 }, (_, i) => message(`assistant-${i}`, "assistant", `Progress ${i}.`))]);
+  const rendered = await sessionOutcomeRenderer(db, "org")([subject]);
+  expect(rendered).toHaveLength(1);
+  expect(rendered[0]?.text).toContain("Progress 13.");
+  expect(rendered[0]?.text).not.toContain("Original request.");
+});
+it("includes child-session threads in personal, team and organization outcome counts", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values([
+    { id: "parent", orgId: "org", userId: "alice", ownerType: "team", ownerId: "team", workspace: "test", createdAt: 1, updatedAt: 1 },
+    { id: "child", orgId: "org", userId: "alice", ownerType: "team", ownerId: "team", workspace: "test", createdAt: 1, updatedAt: 1 },
+  ]);
+  await store.saveSession({ id: "child", orgId: "org", userId: "alice", owner: { type: "team", id: "team" },
+    purpose: "child", status: "paused", workspace: "test", parentSessionId: "parent", parentThreadId: "parent-thread", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("child", { id: "child-thread", sessionId: "child", key: "task:child", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("child", "child-thread", [
+    { ...message("child-user", "user", "Finish the delegated patch."), sessionId: "child", threadId: "child-thread" },
+    { ...message("child-result", "assistant", "The patch is complete."), sessionId: "child", threadId: "child-thread" },
+  ]);
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify: async () => result("completed"),
+    renderers: new Map([["session_thread", sessionOutcomeRenderer(db, "org")]]) });
+  await tagger.enqueueTagging("session_outcome", [{ type: "session_thread", id: "child:child-thread", sessionId: "child", threadId: "child-thread" }]);
+  await tagger.drain("session_outcome");
+  const resolved = resolveUsagePeriod({ window: "7d" }); if (!resolved.ok) throw new Error(resolved.error.message);
+  for (const scope of [{ scope: "me" as const, orgId: "org", userId: "alice" }, { scope: "team" as const, orgId: "org", teamId: "team", byMember: false }, { scope: "org" as const, orgId: "org" }]) {
+    expect((await sessionOutcomeUsage(db, scope, resolved.period)).outcomes.find(row => row.key === "completed")?.sessions).toBe(1);
+  }
+});
+it("repairs source columns on deployed subjects and jobs without read-time encoded joins", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify: async () => result("completed"), renderers: new Map() });
+  await tagger.tag("session_outcome", [subject]); await tagger.enqueueTagging("session_outcome", [subject]);
+  for (const table of ["tag_subjects", "tag_jobs"]) await fixture.pgdb.query(`ALTER TABLE ${table} DROP COLUMN session_id, DROP COLUMN thread_id`);
+  await applyAppMigrations(fixture.pgdb);
+  expect(await missingSchemaRepairs(fixture.pgdb)).toEqual([]);
+  expect(await db.select().from(tagSubjects)).toEqual([expect.objectContaining({ sessionId: "session", threadId: "thread" })]);
+  expect(await db.select().from(tagJobs)).toEqual([expect.objectContaining({ sessionId: "session", threadId: "thread" })]);
+});
+
+it("joins outcome counts by stored source columns rather than an ambiguous encoded identity", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  for (const [sessionId, threadId] of [["a:b", "c"], ["a", "b:c"]] as const) {
+    await db.insert(agentSessions).values({ id: sessionId, orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+    await store.saveThread(sessionId, { id: threadId, sessionId: sessionId, key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  }
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify: async () => result("completed"), renderers: new Map() });
+  await tagger.tag("session_outcome", [{ ...subject, id: "a:b:c", sessionId: "a:b", threadId: "c" }]);
+  const resolved = resolveUsagePeriod({ window: "7d" }); if (!resolved.ok) throw new Error(resolved.error.message);
+  expect((await sessionOutcomeUsage(db, { scope: "org", orgId: "org" }, resolved.period)).outcomes.find(row => row.key === "completed")?.sessions).toBe(1);
+});
+it("does not defer a newer job version when a cap-blocked drain acknowledges its older version", async () => {
+  const db = fixture.appDb;
+  const classify = vi.fn<Classify>(async () => result("partial"));
+  let current = { ...subject }; let refresh = false;
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify,
+    renderers: new Map([["session_thread", async () => {
+      if (refresh) await tagger.enqueueTagging("session_outcome", [current]);
+      return [current];
+    }]]) });
+  await tagger.tag("session_outcome", [current]);
+  for (let i = 0; i < 3; i++) await tagger.tag("session_outcome", [{ ...current, text: `Retag ${i}.` }]);
+  current = { ...current, text: "Cap-blocked changed input." }; refresh = true;
+  await tagger.enqueueTagging("session_outcome", [current]);
+  await tagger.drain("session_outcome");
+  expect(await db.select().from(tagJobs)).toEqual([expect.objectContaining({ version: 2, attempts: 0 })]);
+  expect((await db.select().from(tagJobs))[0]?.nextAttemptAt).toBeLessThan(Date.now() + 1000);
+  expect(classify).toHaveBeenCalledTimes(4);
 });
