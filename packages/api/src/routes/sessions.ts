@@ -1213,6 +1213,14 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
+  // The browser profile moves with the session, including the old owner's
+  // sign-ins. Turn the browser off before the new owner is written, so no
+  // request can authorize as the new owner against the old profile. If this
+  // write fails, the move fails and the owner stays.
+  if (nextOwner !== undefined) {
+    await engineHost.browserPolicy()?.disableForOwnerChange(id);
+  }
+
   // The writes land after every validation, so a rejected model never
   // leaves a half-applied patch behind.
   let effectiveRow = row;
@@ -1254,11 +1262,6 @@ sessionsRouter.patch("/:id", async (c) => {
   // provider and credential context.
   if (nextOwner !== undefined || nextProfile !== undefined) {
     engineHost.evictCache(id);
-  }
-  // The browser profile moves with the session. Keep the old owner's sign-ins
-  // out of reach of the new owner until someone turns the browser back on.
-  if (nextOwner !== undefined) {
-    await engineHost.browserPolicy()?.disableForOwnerChange(id);
   }
 
   // Sends the forced stop's signals into the session as it now is.
