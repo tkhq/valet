@@ -85,6 +85,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/workspace-assistant-context.test.ts",
   "src/integration/auth.e2e.test.ts",
   "src/integration/auto-title.test.ts",
+  "src/integration/slack-conversation-routing.test.ts",
   "src/integration/memory-routes.test.ts",
   "src/integration/thread-timezone.test.ts",
   "src/integration/memory-tree.test.ts",

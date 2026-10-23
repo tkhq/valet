@@ -168,9 +168,14 @@ Search and default actions stay in the catalog view. Desktop keeps its existing 
 
 ### Home delivery and routine preferences
 
-Home queues new turns as follow-ups across web and direct messages. Task reports never supersede active work.
+Home queues turns as follow-ups. Task reports never supersede active work.
+New Slack DM roots use separate engine threads. Replies use the saved conversation binding.
+Existing dedicated conversations keep their thread. Slack conversations already in Home continue there.
 A plain-text question reply from Slack must match the question submission's original conversation.
-DM edits record the correction in Home or their existing legacy thread without sending a reply.
+DM edits record the correction in the thread that holds the original conversation without sending a reply.
+Existing Home history remains in Home and stays accessible through the desktop Home row.
+The routing change does not move or delete that history. Existing Home gate cards and command replies retain their original Slack destination.
+See the [Slack conversation routing design](2026-10-23-slack-conversation-routing-design.md).
 The host marks a linked person's direct channel input separately from background signals.
 Only that verified input supplies an interactive actor; replay retains its original channel context.
 Workflow and child turns cannot inherit this authority.
