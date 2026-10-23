@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { homeTasks, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
+import { homeTasks, sessionThreads, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
 import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
@@ -39,6 +39,19 @@ describe("home conversation", () => {
     expect(listed.threads.map((t) => t.id)).not.toContain(first.threadId);
     const selected = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=50&threadId=${first.threadId}`)).json() as ListThreadsResponse;
     expect(selected.threads.map(t => t.id)).toContain(first.threadId);
+  });
+
+  it("names the home thread Home in every thread response, over any stored title", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    // A title written before Home had one name, or by a client that renames threads.
+    await test.providers.db.update(sessionThreads).set({ title: "Valet Mobile Tap Bug Investigation" }).where(eq(sessionThreads.id, home.threadId));
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { title: string | null };
+    expect(detail.title).toBe("Home");
+    const fixed = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(home.sessionId)}/threads?fixedId=${home.threadId}&fixedOnly=1`)).json() as ListThreadsResponse;
+    expect(fixed.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
+    const all = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(home.sessionId)}/threads`)).json() as ListThreadsResponse;
+    expect(all.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
   });
 
   it("creates the morning brief routine once, posting into home at 08:00", async () => {

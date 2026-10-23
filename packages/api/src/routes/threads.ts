@@ -1,3 +1,4 @@
+import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
@@ -140,7 +141,7 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
     .where(and(eq(sessionThreads.id, threadId), eq(sessionThreads.sessionId, sessionId))).limit(1);
   const guest = c.var.threadShareGuest;
   const body: ThreadAddress = {
-    id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null,
+    id: threadId, sessionId, title: thread.key === HOME_THREAD_KEY ? HOME_THREAD_TITLE : meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null,
     ...(meta?.shareMode ? { share: meta.shareMode } : {}),
     ...(guest ? { guest: { mode: guest.mode, ownerName: await ownerName(c, sessionId) } } : {}),
   };
