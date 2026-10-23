@@ -27,7 +27,7 @@
  *     ownership of access control.
  */
 import { bestEffortTelemetry, externalCallOwner, externalWorkflowOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
-import { intentSchema, registerTool } from "./mcp-intent.js";
+import { observeMcpToolIntent, registerTool, type McpToolIntent } from "./mcp-intent.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { withMcpAuth } from "better-auth/plugins";
@@ -70,14 +70,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
     const started = Date.now();
     const orgId = await resolveOrgId(db);
     const identity = { orgId, userId: session.userId, clientId: session.clientId };
-    const body: unknown = req.method === "POST" ? await req.clone().json().catch(() => null) : null;
-    const rpc = object(body);
-    const params = object(rpc?.params);
-    const args = object(params?.arguments);
-    const clientInfo = object(params?.clientInfo);
-    if (rpc?.method === "initialize" && typeof clientInfo?.name === "string" && typeof clientInfo.version === "string") {
-      void saveMcpClientInfo(db, identity, { name: clientInfo.name, version: clientInfo.version });
-    }
+    let call: McpToolIntent | undefined;
     let outcome: "ok" | "error" | "denied" | "pending-approval" = "error";
     let errorCode: string | null = null;
     let finalHttpStatus: number | undefined;
@@ -87,6 +80,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
     let resolvedActionId: string | undefined;
     let admittedWorkflowPath: string | undefined;
     const server = new McpServer({ name: "valet", version: "1.0.0" });
+    observeMcpToolIntent(server, value => { call = value; });
 
     const [row] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
     if (row) {
@@ -117,8 +111,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
             ?? (url.searchParams.get("ownerType") === "team" ? url.searchParams.get("ownerId") : null);
           if (team && team !== "user") resolvedTeamId = team;
           if (typeof action?.tool_id === "string") resolvedActionId = action.tool_id;
-          if (pathParts[2] === "threads") resolvedThreadId = typeof action?.id === "string" ? action.id : pathParts[3];
-          if (typeof action?.threadId === "string") resolvedThreadId = action.threadId;
+          resolvedThreadId = threadIdFromMcpResponse(url.pathname, action) ?? resolvedThreadId;
           if (typeof action?.sessionId === "string") resolvedSessionId = action.sessionId;
         }
         return { status: res.status, body: parsed };
@@ -173,12 +166,12 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
     const send = transport.send.bind(transport);
     transport.send = async (message, ...rest) => {
       const reply = object(message);
-      if (rpc?.method === "tools/call" && reply && "id" in reply && reply.id === rpc.id) {
+      if (call && reply && "id" in reply) {
         const result = object(reply.result);
         const error = object(reply.error);
         outcome = error || result?.isError === true ? finalHttpStatus === 403 ? "denied" : "error" : "ok";
-        errorCode = error ? String(error.code ?? "rpc_error") : result?.isError === true ? "tool_error" : null;
-        if (params?.name === "call_tool" && Array.isArray(result?.content)) {
+        errorCode = outcome === "denied" ? "policy_denied" : error ? "rpc_error" : result?.isError === true ? "tool_error" : null;
+        if (call.name === "call_tool" && Array.isArray(result?.content)) {
           for (const block of result.content) {
             const text = object(block)?.text;
             if (typeof text !== "string") continue;
@@ -200,20 +193,21 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       errorCode = "internal_error";
       throw error;
     } finally {
-      if (rpc?.method === "tools/call" && typeof params?.name === "string") {
-        const toolName = params.name;
+      const clientInfo = server.server.getClientVersion();
+      if (clientInfo) void saveMcpClientInfo(db, identity, clientInfo);
+      if (call) {
+        const { name: toolName, intent } = call;
         const durationMs = Date.now() - started;
         void bestEffortTelemetry(async () => {
           const [client] = await db.select().from(mcpClientInfo).where(and(
             eq(mcpClientInfo.orgId, orgId), eq(mcpClientInfo.userId, session.userId), eq(mcpClientInfo.clientId, session.clientId),
           )).limit(1);
-          const intent = intentSchema.safeParse(params.name === "call_tool" ? args?.summary : args?.intent);
           await recordExternalCall(db, {
-            id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: (toolName === "call_tool" ? resolvedActionId ?? (typeof args?.tool_id === "string" ? args.tool_id : toolName) : toolName).slice(0, 200),
+            id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: (toolName === "call_tool" ? resolvedActionId ?? "unknown" : toolName).slice(0, 200),
             clientName: client?.name, clientVersion: client?.version,
             ...await externalWorkflowOwner(db, orgId, admittedWorkflowPath) ?? await externalCallOwner(db, orgId, session.userId, resolvedThreadId, resolvedSessionId, resolvedTeamId),
             outcome, errorCode, durationMs,
-            intent: intent.success && typeof intent.data === "string" ? intent.data.trim() : null, createdAt: started,
+            intent, createdAt: started,
           });
         });
       }
@@ -223,4 +217,11 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** Admitted thread routes identify their thread, not a nested message or decision id. */
+export function threadIdFromMcpResponse(path: string, response: Record<string, unknown> | undefined): string | undefined {
+  const parts = path.split("/");
+  if (parts[1] !== "api" || parts[2] !== "threads" || parts[3] === "read" || parts[3] === "viewers") return undefined;
+  return parts[3] || (typeof response?.threadId === "string" ? response.threadId : typeof response?.id === "string" ? response.id : undefined);
 }

@@ -35,6 +35,8 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
+  const periodKey = JSON.stringify(period);
+  useEffect(() => { setOffset(0); }, [scope, teamId, periodKey]);
   useEffect(() => {
     const timer = setTimeout(() => { setSearch(input); setOffset(0); }, 250);
     return () => clearTimeout(timer);
@@ -90,8 +92,8 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
                 <span className="break-all font-medium text-ink">{row.name}</span><Badge variant={row.outcome === "ok" ? "success" : row.outcome === "denied" ? "warning" : "danger"}>{row.outcome}</Badge>
                 <span>{LABELS[row.surface]}</span><Time ts={row.createdAt} className="sm:ml-auto" />
               </div>
-              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{row.intent ?? (row.surface === "cli" ? "CLI commands do not require intent." : "No valid intent was supplied.")}</p>
-              <p className="mt-2 break-all text-xs text-muted">{row.userName ?? row.userId} · {row.clientName ?? "Hosted Valet"}{row.clientVersion ? ` ${row.clientVersion}` : ""}</p>
+              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{row.intent ?? (row.intentCleared ? "Intent cleared after 90 days." : row.surface === "cli" ? "CLI commands do not require intent." : "No valid intent was supplied.")}</p>
+              <p className="mt-2 break-all text-xs text-muted">{row.userName ?? row.userId ?? row.teamName ?? "Automation"} · {row.clientName ?? "Hosted Valet"}{row.clientVersion ? ` ${row.clientVersion}` : ""}</p>
             </li>)}</ul>}
           <div className="flex items-center justify-between gap-3 border-t border-line px-5 py-3">
             <span className="text-xs text-muted">Page {Math.floor(offset / 20) + 1}</span><div className="flex gap-2">

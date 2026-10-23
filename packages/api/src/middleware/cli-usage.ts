@@ -17,7 +17,7 @@ export function cliUsage(): MiddlewareHandler<AppEnv> {
     const durationMs = Date.now() - started;
     void bestEffortTelemetry(async () => {
       let outcome: "ok" | "error" | "denied" | "pending-approval" = c.res.status === 403 ? "denied" : c.res.status >= 400 ? "error" : "ok";
-      let errorCode = c.res.status >= 400 ? `http_${c.res.status}` : null;
+      let errorCode = c.res.status === 403 ? "policy_denied" : c.res.status >= 400 ? `http_${c.res.status}` : null;
       if (c.req.path.startsWith("/api/actions/") && c.req.path.endsWith("/invoke") && c.res.ok) {
         const response: unknown = await c.res.clone().json();
         if (response && typeof response === "object" && "status" in response) {

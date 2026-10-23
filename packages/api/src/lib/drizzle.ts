@@ -418,6 +418,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
 )` },
   { describe: "external_calls_owner_created", probe: { kind: "index", index: "external_calls_owner_created" }, before: `ALTER TABLE external_calls ALTER COLUMN user_id DROP NOT NULL`, sql: `CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_id, owner_type, owner_id, created_at)` },
+  { describe: "external_calls.intent_cleared_at", probe: { kind: "column", table: "external_calls", column: "intent_cleared_at" }, sql: `ALTER TABLE external_calls ADD COLUMN IF NOT EXISTS intent_cleared_at bigint` },
+  { describe: "external_calls_intent_retention", probe: { kind: "index", index: "external_calls_intent_retention" }, sql: `CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL` },
   { describe: "external_calls_org_created", probe: { kind: "index", index: "external_calls_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id")` },
   { describe: "external_calls_user_created", probe: { kind: "index", index: "external_calls_user_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at")` },
   { describe: "mcp_client_info", probe: { kind: "table", table: "mcp_client_info" }, sql: `CREATE TABLE IF NOT EXISTS "mcp_client_info" (

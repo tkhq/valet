@@ -1,10 +1,12 @@
-import { visibleThreadIds, type AccessDeps } from "./thread-access.js";
+import { canAccessSessionResources } from "./session-access.js";
+import type { Providers } from "../providers/types.js";
+import { visibleThreadIds } from "./thread-access.js";
 import { getTeamInOrg, isTeamMember } from "./teams.js";
 import type { ToolUsageFact } from "@valet/shared";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, externalCalls, mcpClientInfo, sessionThreads, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, externalCalls, mcpClientInfo, sessionThreads, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { UsageScope } from "./usage.js";
 import type { ResolvedUsagePeriod } from "./usage-period.js";
 import type { ExternalUsageResponse } from "../wire/types.js";
@@ -76,7 +78,7 @@ export async function saveMcpClientInfo(db: AppDb, identity: { orgId: string; us
 }
 
 export async function getExternalUsage(db: AppDb, opts: {
-  viewer: { deps: AccessDeps; userId: string }; period: ResolvedUsagePeriod; scope: UsageScope; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
+  viewer: { deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">; userId: string }; period: ResolvedUsagePeriod; scope: UsageScope; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
 }): Promise<ExternalUsageResponse> {
   const { scope, period } = opts;
   const where = and(eq(externalCalls.orgId, scope.orgId),
@@ -91,7 +93,7 @@ export async function getExternalUsage(db: AppDb, opts: {
       .where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
     db.select({ name: externalCalls.name, surface: externalCalls.surface,
       calls: sql<number>`count(*)`.mapWith(Number),
-      errorRate: sql<number>`count(*) filter (where ${externalCalls.outcome} = 'error')::float / count(*)`.mapWith(Number),
+      errorRate: sql<number>`coalesce(count(*) filter (where ${externalCalls.outcome} = 'error')::float / nullif(count(*) filter (where ${externalCalls.outcome} in ('ok', 'error')), 0), 0)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number) }).from(externalCalls)
       .where(where).groupBy(externalCalls.name, externalCalls.surface).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
     db.select({ surface: externalCalls.surface, name: sql<string>`coalesce(${externalCalls.clientName}, case when ${externalCalls.surface} = 'hosted' then 'Hosted Valet' else 'Unknown client' end)`,
@@ -109,23 +111,44 @@ export async function getExternalUsage(db: AppDb, opts: {
   if (!detailsVisible) return { daily: filledDaily, tools, clients, detailsVisible, recent: [], hasMore: false };
   const feedWhere = and(where,
     scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined);
-  // Resolve audiences before text search or pagination; hidden intents must not affect either.
-  const pairs = await db.selectDistinct({ sessionId: externalCalls.sessionId, threadId: externalCalls.threadId }).from(externalCalls)
-    .where(and(feedWhere, eq(externalCalls.ownerType, "team"), sql`${externalCalls.sessionId} IS NOT NULL AND ${externalCalls.threadId} IS NOT NULL`));
-  const teamThreads = pairs.flatMap(pair => pair.sessionId && pair.threadId ? [{ sessionId: pair.sessionId, threadId: pair.threadId }] : []);
+  // Search first, then check a bounded candidate window. Hidden matches never set hasMore.
+  const candidates = await db.select({ call: externalCalls, userName: users.name, teamName: teams.name }).from(externalCalls)
+    .leftJoin(users, eq(users.id, externalCalls.userId))
+    .leftJoin(teams, and(eq(externalCalls.ownerType, "team"), eq(teams.id, externalCalls.ownerId), eq(teams.orgId, scope.orgId)))
+    .where(and(feedWhere, opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
+    .orderBy(sql`${externalCalls.createdAt} desc`, sql`${externalCalls.id} desc`).limit(Math.min(500, 5 * (opts.offset + opts.limit + 1)));
+  const teamThreads = candidates.flatMap(({ call }) => call.ownerType === "team" && call.sessionId && call.threadId
+    ? [{ sessionId: call.sessionId, threadId: call.threadId }] : []);
+  // The batch deduplicates thread and channel checks for this viewer/request.
   const visible = await visibleThreadIds(opts.viewer.deps, { ownerType: "team" }, { orgId: scope.orgId, userId: opts.viewer.userId }, teamThreads);
-  const hidden = teamThreads.filter(pair => !visible.has(`${pair.sessionId}:${pair.threadId}`));
-  const audience = hidden.length ? sql`NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(hidden)}::jsonb)
-    AS hidden("sessionId" text, "threadId" text) WHERE ${externalCalls.ownerType} = 'team'
-    AND hidden."sessionId" = ${externalCalls.sessionId} AND hidden."threadId" = ${externalCalls.threadId})` : undefined;
-  // strpos treats search as literal text, not a wildcard pattern.
-  const recent = await db.select({ call: externalCalls, userName: users.name }).from(externalCalls)
-    .leftJoin(users, eq(users.id, externalCalls.userId)).where(and(feedWhere, audience,
-    opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
-    .orderBy(sql`${externalCalls.createdAt} desc`, sql`${externalCalls.id} desc`).offset(opts.offset).limit(opts.limit + 1);
-  return { daily: filledDaily, tools, clients, detailsVisible, hasMore: recent.length > opts.limit,
-    recent: recent.slice(0, opts.limit).map(({ call: r, userName }) => ({ userName, id: r.id, surface: r.surface, name: r.name,
-      clientName: r.clientName, clientVersion: r.clientVersion, userId: r.userId, outcome: r.outcome, intent: r.intent, createdAt: r.createdAt })) };
+  const sessionVisibility = new Map<string, Promise<boolean>>();
+  const shown = [];
+  for (const row of candidates) {
+    const r = row.call;
+    if (r.ownerType === "team" && r.sessionId) {
+      if (r.threadId) {
+        if (!visible.has(`${r.sessionId}:${r.threadId}`)) continue;
+      } else {
+        const sessionId = r.sessionId;
+        let check = sessionVisibility.get(sessionId);
+        if (!check) {
+          check = (async () => {
+            const [session] = await db.select().from(agentSessions).where(and(eq(agentSessions.id, sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
+            return !!session && canAccessSessionResources(opts.viewer.deps, session, { type: "user", id: opts.viewer.userId });
+          })();
+          sessionVisibility.set(sessionId, check);
+        }
+        if (!await check) continue;
+      }
+    }
+    shown.push(row);
+    if (shown.length > opts.offset + opts.limit) break;
+  }
+  return { daily: filledDaily, tools, clients, detailsVisible, hasMore: shown.length > opts.offset + opts.limit,
+    recent: shown.slice(opts.offset, opts.offset + opts.limit).map(({ call: r, userName, teamName }) => ({ userName, teamName,
+      intentCleared: r.intentClearedAt !== null,
+      id: r.id, surface: r.surface, name: r.name, clientName: r.clientName, clientVersion: r.clientVersion,
+      userId: r.userId, outcome: r.outcome, intent: r.intent, createdAt: r.createdAt })) };
 }
 
 export function newExternalCallId(): string { return randomUUID(); }
@@ -145,9 +168,9 @@ export function externalUsageRetention(db: AppDb): () => Promise<void> {
       const result = await db.execute(sql`WITH expired AS (
         SELECT id FROM external_calls WHERE intent IS NOT NULL AND created_at < ${Date.now() - 90 * 86400000}
         ORDER BY created_at LIMIT 5000
-      ) UPDATE external_calls SET intent = NULL WHERE id IN (SELECT id FROM expired) RETURNING id`) as { rows: { id: string }[] };
+      ) UPDATE external_calls SET intent = NULL, intent_cleared_at = ${Date.now()} WHERE id IN (SELECT id FROM expired) RETURNING id`) as { rows: { id: string }[] };
       nextRun = Date.now() + (result.rows.length === 5000 ? 1000 : 3600000);
-    })().finally(() => { inFlight = undefined; });
+    })().catch(error => { nextRun = Date.now() + 60_000; throw error; }).finally(() => { inFlight = undefined; });
     return inFlight;
   };
 }

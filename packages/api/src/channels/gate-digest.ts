@@ -83,7 +83,7 @@ export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | 
     }
   }
 
-  if (gate.agentReason) fields.unshift({ label: "Agent's stated reason", value: gate.agentReason });
+  if (gate.agentReason) fields.unshift({ label: "Model-authored reason", value: gate.agentReason });
   // A blank summary must not leave the durable notification row (and the
   // card) with no body at all — fall back to naming the requested tool.
   const summary = ctx.summary !== undefined && ctx.summary.trim() !== "" ? ctx.summary.trim() : undefined;

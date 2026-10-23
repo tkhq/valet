@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { intentSchema, registerTool } from "./mcp-intent.js";
+import { intentSchema, registerTool, observeMcpToolIntent } from "./mcp-intent.js";
 import { registerAgentTools, type McpToolDeps } from "./mcp-tools.js";
 import { registerWorkspaceTools } from "./mcp-workspace-tools.js";
 
@@ -60,4 +60,22 @@ describe("MCP intent boundary", () => {
       ["POST", "/api/actions/demo.read/invoke", { params: { value: "x" }, idempotencyKey: "same" }],
     ]);
   });
+});
+
+it("captures parsed calls even when validation fails and names the correct metadata path", async () => {
+  const server = new McpServer({ name: "test", version: "1" });
+  const observe = vi.fn(); observeMcpToolIntent(server, observe);
+  const handler = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
+  registerTool(server, "call_tool", { description: "Broker", inputSchema: { tool_id: z.string() } }, handler);
+  const client = await clientFor(server);
+  const missing = await client.callTool({ name: "call_tool", arguments: { tool_id: "demo.read" } });
+  expect(JSON.stringify(missing)).toMatch(/Add summary:.*arguments\.summary/);
+  expect(observe).toHaveBeenLastCalledWith({ name: "call_tool", intent: null });
+  const invalid = await client.callTool({ name: "call_tool", arguments: { tool_id: 42, summary: "Check the response." } });
+  expect(invalid.isError).toBe(true);
+  expect(observe).toHaveBeenLastCalledWith({ name: "call_tool", intent: "Check the response." });
+  const absent = await client.callTool({ name: "call_tool" });
+  expect(absent.isError).toBe(true);
+  expect(observe).toHaveBeenLastCalledWith({ name: "call_tool", intent: null });
+  expect(handler).not.toHaveBeenCalled();
 });

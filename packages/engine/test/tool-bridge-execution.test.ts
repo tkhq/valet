@@ -1,6 +1,6 @@
 import { Engine, InMemorySessionStore, InMemoryEventStream, VirtualSandboxProvider } from "../src/index.js";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../src/test-helpers/index.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Type } from "typebox";
 import { toAgentTool } from "../src/tool-bridge.js";
 import { builtinTools, defineTool } from "../src/builtin-tools/index.js";
@@ -181,9 +181,19 @@ describe("legacy summary replay", () => {
     const def = defineTool({ name: "call_tool", intent: "summary", description: "Replay a broker", parameters: Type.Object({ summary: Type.String() }),
       execute: async args => { calls.push(args); return { text: "resumed" }; } });
     const args = summary === undefined ? {} : { summary };
-    expect((await toAgentTool(def, buildCtx).execute("fresh", args)).content).toEqual([{ type: "text", text: expect.stringContaining("Add intent") }]);
+    expect((await toAgentTool(def, buildCtx).execute("fresh", args)).content).toEqual([{ type: "text", text: expect.stringMatching(/Add summary:.*arguments\.summary/) }]);
     expect(calls).toEqual([]);
     expect((await toAgentTool(def, buildCtx, true).execute("replay", args)).content).toEqual([{ type: "text", text: "resumed" }]);
     expect(calls).toEqual([{ summary: "Resume the previously suspended tool call." }]);
   });
+});
+
+it("warns about an action-owned intent field once per tool name", () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const def = defineTool({ name: "intent_collision_warning", description: "Own intent", parameters: Type.Object({ intent: Type.String() }),
+      execute: async () => ({ text: "ok" }) });
+    for (let i = 0; i < 4; i++) toAgentTool(def, buildCtx);
+    expect(warn).toHaveBeenCalledOnce();
+  } finally { warn.mockRestore(); }
 });

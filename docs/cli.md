@@ -319,7 +319,8 @@ The server derives identity and ownership from its authorization checks.
 CLI commands do not require intent.
 
 MCP tools require a top-level `intent` string of 1 to 500 trimmed characters.
+`call_tool` uses `summary` instead, with the same limits.
 Use one plain-language sentence about your purpose and reason.
-For `call_tool`, put intent beside `tool_id`, not inside `params`.
+For `call_tool`, put `summary` beside `tool_id`, not inside `params`.
 The server removes intent before provider execution.
 Usage > Tool usage shows hosted, MCP, and CLI facts with a surface filter.

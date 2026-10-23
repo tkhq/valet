@@ -132,11 +132,11 @@ The instance publishes OAuth protected-resource and authorization-server metadat
 
 ## Required intent (TKAI-656)
 
-Every MCP tool requires a top-level `intent` string.
+MCP tools require a top-level `intent` string, except `call_tool`, which requires `summary`.
 Use one plain-language sentence about the purpose and reason for the call.
 The server trims the value and accepts 1 to 500 characters.
 It removes intent before dispatching to the tool handler.
-For `call_tool`, intent is outside `params`.
+For `call_tool`, `summary` is outside `params`.
 It does not change provider payloads or idempotency inputs.
 Missing or invalid intent returns a tool error before the operation runs.
 Usage facts share the hosted and CLI table.

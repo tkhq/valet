@@ -51,3 +51,21 @@ describe("Tool usage", () => {
     expect(screen.getByText("Only team admins can see individual intents.")).toBeTruthy();
   });
 });
+
+it("resets pagination on scope and period changes and labels retention and team automation", () => {
+  const rendered = show();
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  rendered.rerender(<ToolUsage period={{ kind: "lookback", window: "7d" }} scope="team" teamId="team" />);
+  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "team", "team", "", 0, undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  rendered.rerender(<ToolUsage period={{ kind: "lookback", window: "30d" }} scope="team" teamId="team" />);
+  expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "30d" }, "team", "team", "", 0, undefined);
+  hook.mockReturnValue({ data: { ...data, recent: [
+    { ...data.recent[0], id: "retained", intent: null, intentCleared: true, userId: null, userName: null, teamName: "Engineering" },
+    { ...data.recent[0], id: "invalid", intent: null, intentCleared: false },
+  ] }, isPending: false });
+  rendered.rerender(<ToolUsage period={{ kind: "lookback", window: "30d" }} scope="team" teamId="team" />);
+  expect(screen.getByText("Intent cleared after 90 days.")).toBeTruthy();
+  expect(screen.getByText("No valid intent was supplied.")).toBeTruthy();
+  expect(screen.getByText("Engineering · Claude Code 2.0")).toBeTruthy();
+});

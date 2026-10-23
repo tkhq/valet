@@ -1,5 +1,3 @@
-import * as agentTools from "./mcp-tools.js";
-import { registerTool } from "./mcp-intent.js";
 /**
  * Integration tests for the MCP tool broker: `search_tools`, `describe_tool`,
  * and `call_tool` over `/mcp`, backed by `/api/actions`.
@@ -9,6 +7,9 @@ import { registerTool } from "./mcp-intent.js";
  * require_approval), uses the caller's own credential without returning it,
  * honors idempotency keys without crossing users, and writes audit rows.
  */
+import * as agentTools from "./mcp-tools.js";
+import { threadIdFromMcpResponse } from "./mcp.js";
+import { registerTool } from "./mcp-intent.js";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { and, eq, like, lt } from "drizzle-orm";
@@ -443,4 +444,40 @@ it("records final MCP success after an inner 404 and pending approval separately
     const rows = await testApi.providers.db.select().from(externalCalls).where(eq(externalCalls.name, "demo.risky"));
     expect(rows[0]).toMatchObject({ outcome: "pending-approval", errorCode: "approval_required", intent: "Exercise this tool in the integration test." });
   });
+});
+
+it("audits invalid summary without cloning the MCP body and saves SDK client metadata", async () => {
+  const { testApi, alice } = await setup();
+  const clone = Request.prototype.clone;
+  const spy = vi.spyOn(Request.prototype, "clone").mockImplementation(function (this: Request) {
+    if (new URL(this.url).pathname === "/mcp") throw new Error("MCP must use the SDK-parsed request");
+    return clone.call(this);
+  });
+  const post = (method: string, params: Record<string, unknown>) => fetch(`${testApi.baseUrl}/mcp`, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+  });
+  try {
+    expect((await post("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "SDK test client", version: "3" } })).ok).toBe(true);
+    const res = await post("tools/call", { name: "call_tool", arguments: { tool_id: "demo.ping" } });
+    expect(JSON.stringify(await res.json())).toMatch(/Add summary:.*arguments\.summary/);
+    await vi.waitFor(async () => {
+      const rows = await testApi.providers.db.select().from(externalCalls);
+      expect(rows).toEqual([expect.objectContaining({ name: "unknown", intent: null, outcome: "error", clientName: "SDK test client", clientVersion: "3" })]);
+    });
+    await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "model text should not become a name" });
+    await vi.waitFor(async () => {
+      const rows = await testApi.providers.db.select().from(externalCalls);
+      expect(rows).toHaveLength(2);
+      expect(rows.every(row => row.name === "unknown")).toBe(true);
+    });
+  } finally { spy.mockRestore(); }
+});
+
+it("infers thread ids only from individual thread routes", () => {
+  expect(threadIdFromMcpResponse("/api/threads/thread/messages", { id: "message" })).toBe("thread");
+  expect(threadIdFromMcpResponse("/api/threads/thread/decisions/gate/resolve", { id: "gate" })).toBe("thread");
+  expect(threadIdFromMcpResponse("/api/threads", { id: "new-thread", sessionId: "session" })).toBe("new-thread");
+  expect(threadIdFromMcpResponse("/api/actions/demo.run/invoke", { id: "action", threadId: "not-a-thread" })).toBeUndefined();
+  expect(threadIdFromMcpResponse("/api/threads/read", { id: "batch" })).toBeUndefined();
 });

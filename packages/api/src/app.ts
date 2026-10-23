@@ -244,7 +244,7 @@ export function createApp(
   // Public agent onboarding pages (`/agent-setup.md`, `/agent-skill.md`).
   mountOnboardingRoutes(app);
 
-  app.get("/api/health", async (c) => {
+  app.get("/api/health", (c) => {
     const body: HealthResponse = {
       ok: true,
       service: "valet-api",

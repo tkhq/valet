@@ -359,7 +359,7 @@ export type InvokeActionResult =
   | { kind: "invalid-args"; error: string }
   /** `shared_account`: the action needs a teammate's shared account, and
    * the policy resolver refused to ask that teammate for this caller. */
-  | { kind: "denied-policy"; scope?: "team" | "shared_account" }
+  | { kind: "denied-policy"; scope?: "team" | "shared_account" | "tool" }
   /** The action needs approval and the turn came from a channel sender with
    * no Valet account (`ToolContext.externalSender`). No gate opens, so a
    * newcomer can never send a teammate an approval request. */
@@ -641,7 +641,7 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
-  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "error", message: scopeRefusal(actionId) };
+  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "denied-policy", scope: "tool" };
   if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
     return { kind: "unknown", toolId: actionId };
   }
@@ -1493,7 +1493,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
       const entry = catalog.byId.get(a.tool_id);
       const result = renderInvokeOutcome(outcome, a.tool_id);
-      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : a.tool_id } };
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : "unknown" } };
     },
   };
 }
@@ -1507,8 +1507,10 @@ function makeCallTool(catalog: Catalog): ToolDef {
 function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
   const result = renderInvokeResult(outcome, toolId);
   const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
-    : outcome.kind === "pending-approval" ? "pending-approval" : outcome.kind.startsWith("denied") ? "denied" : "error";
-  return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind } };
+    : outcome.kind === "pending-approval" ? "pending-approval" : (outcome.kind.startsWith("denied") || outcome.kind === "expired-approval") ? "denied" : "error";
+  return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind === "denied-policy" ? "policy_denied"
+    : outcome.kind === "pending-approval" ? "approval_required" : outcome.kind === "ok" || outcome.kind === "error" ? "action_failed"
+    : outcome.kind.replaceAll("-", "_") } };
 }
 
 function renderInvokeResult(outcome: InvokeActionResult, toolId: string): ToolResult {
@@ -1524,6 +1526,7 @@ function renderInvokeResult(outcome: InvokeActionResult, toolId: string): ToolRe
         text: `error resolving ${outcome.service} tools: ${resolveFailurePrefix(outcome.message)}${outcome.message}`,
       };
     case "denied-policy":
+      if (outcome.scope === "tool") return { text: scopeRefusal(toolId) };
       if (outcome.scope === "shared_account") {
         return {
           text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user to ask a team member to run it, or to ask a team admin to connect a team account on the team's Integrations page.`,

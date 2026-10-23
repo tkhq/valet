@@ -213,7 +213,7 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
 
   return async (req, ctx) => {
     const actionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
-    if (!actionInScope(ctx.toolScope, actionId)) return { ok: false, error: scopeRefusal(actionId) };
+    if (!actionInScope(ctx.toolScope, actionId)) return { ok: false, error: scopeRefusal(actionId), errorCode: "policy_denied" };
     const existing = await selectStoredResult(opts.db, req.invocationId);
     if (existing) return existing;
 

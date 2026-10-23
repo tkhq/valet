@@ -16,11 +16,11 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 
 ## Tool intent
 
-Every MCP call requires a top-level `intent` string.
+MCP calls require a top-level `intent` string, except `call_tool`, which requires `summary`.
 Use one plain-language sentence about your purpose and reason.
 Keep it between 1 and 500 trimmed characters.
 Do not include secrets.
-For `call_tool`, put intent beside `tool_id`, not inside `params`.
+For `call_tool`, put `summary` beside `tool_id`, not inside `params`.
 For example: `{"query":"create issue","intent":"Find an issue tool to track the reported bug."}`.
 CLI commands do not require intent.
 

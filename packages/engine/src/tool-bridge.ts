@@ -6,6 +6,8 @@ import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.j
 import { attrTruncate, withSpan } from "./tracing.js";
 import { recordToolExecution } from "./metrics.js";
 
+const warnedIntentTools = new Set<string>();
+
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
  * ToolContext via closure. The bridge also normalizes our ToolResult into the
@@ -25,7 +27,8 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
   }) => ToolContext,
   replay = false,
 ): AgentTool<TParams> {
-  if (def.intent === undefined && IsObject(def.parameters) && Object.hasOwn(def.parameters.properties, "intent")) {
+  if (def.intent === undefined && IsObject(def.parameters) && Object.hasOwn(def.parameters.properties, "intent") && !warnedIntentTools.has(def.name)) {
+    warnedIntentTools.add(def.name);
     console.warn(`Tool ${def.name} declares its own intent parameter. Intent telemetry is skipped for this tool.`);
   }
   return {
@@ -76,7 +79,7 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
       }
       if (def.name !== "focus_tools" && !(def.scopeAction
         ? actionInScope(ctx.toolScope, def.scopeAction) : toolInScope(ctx.toolScope, def.name))) {
-        return toAgentToolResult({ text: scopeRefusal(def.scopeAction ?? def.name), ok: false, usageOutcome: { outcome: "denied", errorCode: "tool_scope" } }, def.name);
+        return toAgentToolResult({ text: scopeRefusal(def.scopeAction ?? def.name), ok: false, usageOutcome: { outcome: "denied", errorCode: "policy_denied" } }, def.name);
       }
       // Every engine tool call funnels through this bridge — one span per
       // execution, a child of the running agent.turn via the active context.

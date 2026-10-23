@@ -1,11 +1,9 @@
 import { ThinkingTiming } from "./thinking-timing.js";
 import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
-import { stripToolIntent, type ToolUsageFact } from "@valet/shared";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
-import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope, mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -561,7 +559,7 @@ export class Thread {
     if (!def || def.intent === "exempt") return;
     let intent: string | null = null;
     try { intent = stripToolIntent(def, args).intent; } catch { /* Invalid calls still count. */ }
-    const actionId = def.scopeAction ?? (name === "call_tool" && typeof args.tool_id === "string" ? args.tool_id : name);
+    const actionId = def.scopeAction ?? (name === "call_tool" ? "unknown" : name);
     this.toolUsageStarts.set(callId, { createdAt: Date.now(), waitMs: 0, intent, name: actionId.slice(0, 200) });
   }
 
@@ -1659,14 +1657,15 @@ export class Thread {
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.
     const priorActive = this.runningItem;
+    const original = await this.session.providers.store.getQueueItem(this.session.id, suspended.queueItemId);
     this.runningItem = {
       id: suspended.queueItemId,
-      metadata: priorActive?.metadata,
-      author: priorActive?.author,
-      channel: priorActive?.channel,
-      replyTarget: priorActive?.replyTarget,
+      metadata: original?.metadata,
+      author: original?.author,
+      channel: original?.channel,
+      replyTarget: original?.replyTarget,
       threadId: this.id,
-      content: priorActive?.content ?? "",
+      content: original?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,

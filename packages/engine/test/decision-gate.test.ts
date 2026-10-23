@@ -16,6 +16,7 @@ import {
   type DecisionResolution,
   type WriteFence,
 } from "../src/index.js";
+import type { ToolUsageFact } from "@valet/shared";
 import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
@@ -1595,6 +1596,7 @@ describe("interactive actor provenance", () => {
 
   it.each(["direct", "legacy", "agent", "authorless", "signal", "channel", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
     const faux = registerFauxProvider({ provider: `interactive-replay-${kind}` });
+    const facts: ToolUsageFact[] = [];
     const seen: Array<ToolContext["interactiveActor"]> = [];
     const tool: ToolDef = {
       name: "approved_context", description: "Inspect replayed context", parameters: Type.Object({}), policyChecked: true,
@@ -1612,7 +1614,7 @@ describe("interactive actor provenance", () => {
     const options = {
       userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" } as const,
       purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator" as const,
-      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool], recordToolUsage: (fact: ToolUsageFact) => { facts.push(fact); },
     };
     // A workflow session refuses new gates, so this gate opens before that
     // rule (as an orchestrator) and must still resolve after the restart.
@@ -1631,6 +1633,7 @@ describe("interactive actor provenance", () => {
     await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() });
     await restored.thread(receipt.threadId).awaitResult(receipt.queueItemId);
     expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
+    expect(facts).toEqual([expect.objectContaining({ userId: kind === "authorless" ? null : "admin", outcome: "ok" })]);
     expect(events.flatMap(({ event }) => event.type === "tool_end" && event.callId === "replay-author" ? [event] : []))
       .toMatchObject([{ tool: "approved_context", result: "checked", isError: false }]);
     restored.suspendTimers();

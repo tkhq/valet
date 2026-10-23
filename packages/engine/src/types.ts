@@ -1,8 +1,6 @@
-import type { ToolUsageFact } from "@valet/shared";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";

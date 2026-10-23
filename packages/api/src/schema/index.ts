@@ -3095,8 +3095,10 @@ export const externalCalls = pgTable("external_calls", {
   errorCode: text("error_code"),
   durationMs: integer("duration_ms").notNull(),
   intent: text("intent"),
+  intentClearedAt: bigint("intent_cleared_at", { mode: "number" }),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [
+  index("external_calls_intent_retention").on(t.createdAt).where(sql`${t.intent} IS NOT NULL`),
   index("external_calls_org_created").on(t.orgId, t.createdAt, t.id),
   index("external_calls_owner_created").on(t.orgId, t.ownerType, t.ownerId, t.createdAt),
   index("external_calls_user_created").on(t.orgId, t.userId, t.createdAt),

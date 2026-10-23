@@ -5,7 +5,10 @@ export const TOOL_INTENT_SCHEMA = {
   pattern: "\\S",
   description: "State in one sentence, in plain words, what you are trying to accomplish and why you need this tool. Do not include secrets. Required; 1 to 500 characters.",
 } as const;
-export const TOOL_INTENT_ERROR = "Add intent: one sentence about your goal and why you need this tool. Use 1 to 500 characters.";
+export function toolIntentError(field = "intent"): string {
+  return `Add ${field}: one sentence about your goal and why you need this tool. Use 1 to 500 characters. Field: arguments.${field}.`;
+}
+export const TOOL_INTENT_ERROR = toolIntentError();
 
 export interface IntentTool {
   /** Exempt only actual sandbox primitives. Broker tools use their existing summary. */
@@ -18,16 +21,16 @@ export function requiresToolIntent(tool: IntentTool): boolean {
   return tool.intent === undefined && tool.parameters?.type === "object" && !Object.hasOwn(tool.parameters.properties ?? {}, "intent");
 }
 
-export function parseToolIntent(value: unknown): string {
-  if (typeof value !== "string") throw new Error(TOOL_INTENT_ERROR);
+export function parseToolIntent(value: unknown, field = "intent"): string {
+  if (typeof value !== "string") throw new Error(toolIntentError(field));
   const trimmed = value.trim();
-  if (trimmed.length < 1 || trimmed.length > 500) throw new Error(TOOL_INTENT_ERROR);
+  if (trimmed.length < 1 || trimmed.length > 500) throw new Error(toolIntentError(field));
   return trimmed;
 }
 
 /** Validation and stripping happen together, before policy, gates, or execution. */
 export function stripToolIntent(tool: IntentTool, args: Record<string, unknown>): { args: Record<string, unknown>; intent: string | null } {
-  if (tool.intent === "summary") return { args, intent: parseToolIntent(args.summary) };
+  if (tool.intent === "summary") return { args, intent: parseToolIntent(args.summary, "summary") };
   if (!requiresToolIntent(tool)) return { args, intent: null };
   const { intent, ...rest } = args;
   return { args: rest, intent: parseToolIntent(intent) };

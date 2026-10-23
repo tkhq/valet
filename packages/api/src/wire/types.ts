@@ -6638,7 +6638,7 @@ export interface ExternalUsageResponse {
   recent: {
     id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
     clientVersion: string | null; userId: string | null; userName: string | null; outcome: "ok" | "error" | "denied" | "pending-approval";
-    intent: string | null; createdAt: number;
+    intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
   }[];
   hasMore: boolean;
 }

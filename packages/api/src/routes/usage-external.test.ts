@@ -1,4 +1,6 @@
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
+import * as threadAccess from "../services/thread-access.js";
+import * as sessionAccess from "../services/session-access.js";
 import { Type } from "typebox";
 import { fauxToolCall } from "@valet/engine/test-helpers";
 import { buildPolicyResolver } from "../policies/service.js";
@@ -7,7 +9,7 @@ import { fauxAssistantMessage, fauxToolCall as rawToolCall, registerFauxProvider
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionInvocations, externalCalls, teams, teamMembers } from "../schema/index.js";
+import { actionInvocations, agentSessions, externalCalls, teams, teamMembers } from "../schema/index.js";
 import { externalUsageRetention, hostedToolUsageSink, recordExternalCall } from "../services/external-usage.js";
 import { InstanceClient } from "../cli/client.js";
 import { withCliInvocation } from "../cli/telemetry.js";
@@ -232,7 +234,7 @@ it("nulls old intent text while retaining counts and hides personal rows in the 
   await seed(api, "personal");
   await seed(api, "team", { ownerType: "team", ownerId: "team", userId: null });
   await externalUsageRetention(db)();
-  expect((await db.select().from(externalCalls).where(eq(externalCalls.id, "old")))[0]?.intent).toBeNull();
+  expect((await db.select().from(externalCalls).where(eq(externalCalls.id, "old")))[0]).toMatchObject({ intent: null, intentClearedAt: expect.any(Number) });
   const org = await (await read(api, "&scope=org")).json() as ExternalUsageResponse;
   expect(org.daily.reduce((sum, day) => sum + day.calls, 0)).toBe(2);
   expect(org.recent.map(row => row.id)).toEqual(["team"]);
@@ -299,5 +301,31 @@ it("counts execution errors separately from policy denial and pending approval",
   api = await bootTestApi();
   for (const outcome of ["ok", "error", "denied", "pending-approval"] as const) await seed(api, outcome, { outcome });
   const data = await (await read(api)).json() as ExternalUsageResponse;
-  expect(data.tools[0]).toMatchObject({ calls: 4, errorRate: .25 });
+  expect(data.tools[0]).toMatchObject({ calls: 4, errorRate: .5 });
+});
+
+it("bounds visibility to search candidates and caches session-only team audience checks", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  await db.insert(teams).values({ id: "team", name: "Engineering", orgId: "local-org", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: "team", userId: "local-user", role: "admin" });
+  await db.insert(agentSessions).values({ id: "private-execution", userId: "local-user", orgId: "local-org", ownerType: "team",
+    ownerId: "team", workspace: "test", createdAt: 1, updatedAt: 1 });
+  const visible = vi.spyOn(threadAccess, "visibleThreadIds").mockResolvedValue(new Set());
+  const audience = vi.spyOn(sessionAccess, "canAccessSessionResources").mockResolvedValue(false);
+  await db.insert(externalCalls).values(Array.from({ length: 610 }, (_, i) => ({ id: `bulk-${i}`, orgId: "local-org", userId: null,
+    ownerType: "team" as const, ownerId: "team", surface: "hosted" as const, name: "list_threads", outcome: "ok" as const,
+    sessionId: "session", threadId: `thread-${i}`, intent: "Unrelated text.", durationMs: 1, createdAt: Date.now() - 1000 })));
+  for (const id of ["hidden-a", "hidden-b"]) await seed(api, id, { ownerType: "team", ownerId: "team", sessionId: "private-execution", intent: "Needle match." });
+  const searched = await (await read(api, "&scope=team&teamId=team&q=Needle&limit=1")).json() as ExternalUsageResponse;
+  expect(searched.recent).toEqual([]); expect(searched.hasMore).toBe(false);
+  expect(visible.mock.calls[0]?.[3]).toEqual([]);
+  expect(audience).toHaveBeenCalledOnce();
+  expect(audience.mock.calls[0]?.[1].id).toBe("private-execution");
+  await read(api, "&scope=team&teamId=team&limit=1");
+  expect(visible.mock.calls[1]?.[3].length).toBeLessThanOrEqual(10);
+  await read(api, "&scope=team&teamId=team&limit=1&offset=100000");
+  expect(visible.mock.calls[2]?.[3].length).toBeLessThanOrEqual(500);
+  await seed(api, "cleared", { ownerType: "team", ownerId: "team", userId: null, intent: null, intentClearedAt: Date.now(), createdAt: Date.now() });
+  const data = await (await read(api, "&scope=team&teamId=team&limit=1")).json() as ExternalUsageResponse;
+  expect(data.recent[0]).toMatchObject({ id: "cleared", teamName: "Engineering", intentCleared: true });
 });

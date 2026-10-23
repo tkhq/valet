@@ -1355,7 +1355,7 @@ it("refuses a guessed dynamic action before discovering or executing it", async 
   let discoveries = 0;
   const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };
   const result = await invokeAction(buildPluginCatalog([plugin]), "remote.write", {}, makeCtx({ toolScope: { actions: [] } }), "write");
-  expect(result).toMatchObject({ kind: "error" });
+  expect(result).toMatchObject({ kind: "denied-policy", scope: "tool" });
   expect(discoveries).toBe(0);
 });
 
@@ -1370,7 +1370,7 @@ it("allows exact scoped team dynamic discovery without permitting sibling action
   });
   const catalog = buildPluginCatalog([plugin]);
   expect(await invokeAction(catalog, "remote.read", {}, ctx, "read")).toMatchObject({ kind: "ok", result: { data: "evidence" } });
-  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "error" });
+  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "denied-policy", scope: "tool" });
   expect(writes).toBe(0);
 });
 
@@ -1778,6 +1778,7 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
       }),
     );
     expect(result.text).toContain("expired");
+    expect(result.usageOutcome).toMatchObject({ outcome: "denied", errorCode: "expired_approval" });
     expect(result.text).toContain("do not call test.dangerous again");
   });
 
@@ -2526,4 +2527,17 @@ it("preserves a plugin action's own intent argument through the pinned bridge", 
   expect(tool.parameters.required).toEqual(["intent", "summary"]);
   await tool.execute("own-intent", { intent: 42, summary: "Send the action's numeric intent to check its contract." });
   expect(received).toEqual([{ intent: 42 }]);
+});
+
+it("keeps account-sharing summary model-authored when invokeAction has no thread runtime", async () => {
+  const { plugin } = makeMockPlugin();
+  let request: DecisionGateRequest | undefined;
+  const ctx = makeCtx({ threadId: undefined, policyResolver: {
+    resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+  }, requestDecision: async req => {
+    request = req;
+    return { actionId: "deny", resolvedBy: "lender", resolvedAt: 1 };
+  } });
+  await invokeAction(buildPluginCatalog([plugin]), "github.create_issue", {}, ctx, "Create an issue for the reported failure.");
+  expect(request).toMatchObject({ agentReason: "Create an issue for the reported failure.", context: { summary: "Create an issue for the reported failure." } });
 });
