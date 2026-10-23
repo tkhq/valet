@@ -680,3 +680,61 @@ it.each([false, true])("journals recovery before changing files and retains unce
   if (uncertain) expect(files?.failed).toContain("after writing");
   else expect(files?.failed).toBeUndefined();
 });
+
+it("queues an edit on a retiring owner without superseding its active turn", async () => {
+  const held = latch();
+  const entered = latch();
+  const h = await setup("edit-config-fence", [fauxAssistantMessage("first"), async () => {
+    entered.open(); await held.promise; return fauxAssistantMessage("active finished");
+  }]);
+  try {
+    await h.send("original");
+    const target = await h.userEntry("original");
+    const active = await h.thread.submitPrompt("active", { author: PERSON });
+    await entered.promise;
+    h.session.retireExecution(async () => {});
+    const edit = await h.thread.editMessage(target.id, "replacement", { author: PERSON });
+    expect(await h.store.getQueueItem(h.session.id, active.queueItemId)).toMatchObject({ status: "running", attemptCount: 1 });
+    expect((await h.store.getQueueItem(h.session.id, active.queueItemId))?.supersededByItemId).toBeUndefined();
+    expect(await h.store.getQueueItem(h.session.id, edit.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+    held.open();
+    await waitFor(() => h.settled(active.queueItemId));
+    expect(await h.outcome(active.queueItemId)).toBe("completed");
+  } finally { held.open(); await h.session.destroy(); h.faux.unregister(); }
+});
+
+it("refuses branch return on a reclaim-fenced owner without moving the leaf", async () => {
+  const h = await setup("return-reclaim-fence", [fauxAssistantMessage("first"), fauxAssistantMessage("edited")]);
+  try {
+    await h.send("original");
+    await h.edit("original", "replacement");
+    const note = await h.note();
+    const before = await h.store.getThread(h.session.id, h.thread.id);
+    expect(await h.session.beginReclaim()).toBe(true);
+    await expect(h.thread.returnToBranch(note.id, PERSON, { restoreFiles: true })).rejects.toThrow(/changing/);
+    expect((await h.store.getThread(h.session.id, h.thread.id))?.activeLeafEntryId).toBe(before?.activeLeafEntryId);
+  } finally { h.session.cancelReclaim(); await h.session.destroy(); h.faux.unregister(); }
+});
+
+it("reserves branch return before store awaits so reclaim cannot destroy its compute", async () => {
+  const h = await setup("return-reservation", [fauxAssistantMessage("first"), fauxAssistantMessage("edited")]);
+  const held = latch();
+  const entered = latch();
+  try {
+    await h.send("original");
+    await h.edit("original", "replacement");
+    const note = await h.note();
+    const get = h.store.getThreadSnapshot.bind(h.store);
+    const reading = vi.spyOn(h.store, "getThreadSnapshot").mockImplementationOnce(async (...args) => {
+      entered.open(); await held.promise; return get(...args);
+    });
+    const returning = h.thread.returnToBranch(note.id, PERSON);
+    try {
+      await entered.promise;
+      expect(await h.session.beginReclaim()).toBe(false);
+      held.open();
+      await returning;
+      expect(await h.path()).toContain("user:original");
+    } finally { held.open(); await returning; reading.mockRestore(); }
+  } finally { h.session.cancelReclaim(); await h.session.destroy(); h.faux.unregister(); }
+});

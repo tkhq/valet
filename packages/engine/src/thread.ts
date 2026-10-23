@@ -2444,7 +2444,9 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, steerScope: "active" },
+      this.session.isThreadExecutionFenced(this.id)
+        ? { maxPending: this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD }
+        : { steer: true, steerScope: "active" },
     );
     // The stopped turn can take a while to wind down (a tool waiting on the
     // sandbox), and the person who sent the edit must not wait for it. The
@@ -2525,6 +2527,16 @@ export class Thread {
    * leaves, so the person can return again.
    */
   async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    const result = await this.session.claimExecution(() => this.returnToBranchInner(noteEntryId, actor, choices), this.id);
+    if (!result) throw new ValidationError("The session configuration or sandbox is changing. Reload the thread and try again.");
+    return result;
+  }
+
+  private async returnToBranchInner(
     noteEntryId: string,
     actor: { id: string },
     choices: { restoreFiles?: boolean } = {},

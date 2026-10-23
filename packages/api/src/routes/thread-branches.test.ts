@@ -5,7 +5,8 @@
  * leaf moved: the branch shape is what these tests read.
  */
 import { eq } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as engine from "@valet/engine";
 import type { MessageEntry, SessionEntry, Thread } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
@@ -23,6 +24,7 @@ import type {
 let api: TestApi | undefined;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await api?.cleanup();
   api = undefined;
 });
@@ -309,4 +311,28 @@ describe("team fork audience", () => {
     expect((await credential("test-member")).status).toBe(404);
     expect((await credential("local-user")).status).toBe(404);
   });
+});
+
+it.each(["active", "fenced"] as const)("reserves fork file export and skips doomed compute when the source is %s", async mode => {
+  const h = await setup(true);
+  const source = api!.providers.engineHost.liveSession(h.sessionId)!;
+  vi.spyOn(engine, "planForkSeed").mockReturnValue([{ repo: ".", snapshot: "a".repeat(40) }]);
+  const exported = vi.spyOn(engine, "exportSeedBundle").mockImplementation(async () => {
+    expect(source.hasActiveExecution).toBe(true);
+    expect(await source.beginReclaim()).toBe(false);
+    return new Uint8Array([1, 2, 3]);
+  });
+  if (mode === "fenced") source.retireExecution(async () => {});
+  const response = await h.post(`/threads/${h.thread.id}/fork`, { entryId: "a2" });
+  expect(response.status).toBe(201);
+  const fork = await response.json() as ForkThreadResponse;
+  const entries = await api!.providers.engineStore.getEntries(fork.thread.sessionId, fork.thread.id);
+  const note = entries.find(entry => entry.type === "branch_summary");
+  if (mode === "active") {
+    expect(exported).toHaveBeenCalledOnce();
+    expect(engine.readBranchNote(note?.metadata)?.seed).toHaveLength(1);
+  } else {
+    expect(exported).not.toHaveBeenCalled();
+    expect(engine.readBranchNote(note?.metadata)?.seedSkipped).toContain("changing");
+  }
 });
