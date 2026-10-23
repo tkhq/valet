@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { namespaceInternalDispatchId } from "@valet/engine";
+import { canDeliverMidTurn, MID_TURN_DELIVERY_KEY, namespaceInternalDispatchId } from "@valet/engine";
 import type {
   ChannelOrigin,
   ChannelTransport,
@@ -24,7 +24,7 @@ import type {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, childReplyDeliveries, childWatches } from "../schema/index.js";
 import { submitSessionPrompt } from "../routes/messages.js";
-import { buildChildSender, childSendPromptOptions, ChildWatcher, parentDelegationMetadata, type ChildrenDeps } from "./children.js";
+import { buildChildSender, childGateOrigin, childSendPromptOptions, ChildWatcher, parentDelegationMetadata, type ChildrenDeps } from "./children.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -181,6 +181,66 @@ describe("delegated child completion over a channel", () => {
     // Delivery is once: further dispatcher passes do not post again.
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
+  });
+
+  it.each(["gate", "settlement"] as const)("bot merged-input repro: private mid-turn input protects the delegated %s", async event => {
+    const childId = `child-mid-turn-${event}`;
+    const run = await bootDelegation(childId);
+    const { db, engineStore: store } = api!.providers;
+    await store.settleUnclaimed(childId, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, childId, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    const before = run.transport.sent.length;
+    const resumed = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: childId, message: "delegated D2" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
+    );
+    if (!resumed) throw new Error("the second delegation was not admitted");
+    const d2 = resumed.queueItemId;
+    await store.claimSubmission({ sessionId: childId, threadId: run.childThreadId, itemId: d2, attemptId: "D2", ownerId: "test" });
+    const now = Date.now();
+    await store.appendEntries(childId, run.childThreadId, [{ type: "message", id: "D2-first", sessionId: childId,
+      threadId: run.childThreadId, parentId: null, createdAt: now, role: "user", content: "delegated D2", queueItemId: d2 }]);
+    const privateId = "private-merged-input";
+    await store.admitSubmission(childId, run.childThreadId, { ...delegatedItem(privateId, run.childThreadId,
+      { sessionId: run.parentId, threadId: run.parentThread.id }), metadata: { [MID_TURN_DELIVERY_KEY]: true }, author: { id: USER_ID }, content: "SECRET acquisition numbers" });
+    const injected = await store.getQueueItem(childId, privateId);
+    const running = await store.getQueueItem(childId, d2);
+    if (!injected || !running) throw new Error("the running turn or injected input is missing");
+    expect(canDeliverMidTurn(injected, running, USER_ID)).toBe(true);
+    await store.appendEntries(childId, run.childThreadId, [{ type: "message", id: "private-injected", sessionId: childId,
+      threadId: run.childThreadId, parentId: null, createdAt: now + 1, role: "user", content: "SECRET acquisition numbers", queueItemId: privateId }]);
+    await store.settleUnclaimed(childId, run.childThreadId, privateId, { outcome: "merged" }, { mergedIntoItemId: d2 });
+    if (event === "gate") {
+      const gate = { id: "mid-turn-private-gate", sessionId: childId, threadId: run.childThreadId, queueItemId: d2,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "SECRET acquisition approval", actions: [], status: "pending" as const,
+        createdAt: now + 2, updatedAt: now + 2 };
+      await store.saveDecisionGate(childId, run.childThreadId, gate);
+      await run.watcher.reportGateOpened(childId, gate);
+      await vi.waitFor(async () => {
+        await api!.providers.wakeWatcher.sweep();
+        expect(await store.getQueueItemByDispatchId(run.parentId, `${childId}:gate-opened:${childId}:${gate.id}`)).not.toBeNull();
+      });
+      const item = await store.getQueueItemByDispatchId(run.parentId, `${childId}:gate-opened:${childId}:${gate.id}`);
+      expect(await childGateOrigin(db, store, childId, d2)).toBeUndefined();
+      expect(item?.content).not.toHaveProperty("origin");
+      expect(JSON.stringify(item?.content)).not.toContain(gate.title);
+    } else {
+      const fence = { itemId: d2, attemptId: "D2" };
+      await store.reserveSettlement(childId, run.childThreadId, d2, { outcome: "completed" }, fence);
+      await store.finalizeSettlement(childId, run.childThreadId, d2, fence);
+      await run.watcher.observeTurn(childId, d2);
+      const signals = await vi.waitFor(async () => {
+        await api!.providers.wakeWatcher.sweep();
+        const found = await childSettledSignals(run.parentId);
+        expect(found).toHaveLength(2);
+        return found;
+      });
+      await run.parentThread.awaitResult(signals[1]!.id);
+      await api!.providers.channelHost.retryChildReplies();
+      expect(signals.at(-1)?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+      expect(run.transport.sent).toHaveLength(before);
+    }
   });
 
   it("keeps the origin thread when the delegating parent thread resumes a settled child", async () => {

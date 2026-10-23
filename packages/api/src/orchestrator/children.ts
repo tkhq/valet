@@ -407,17 +407,32 @@ async function privateInputThrough(
 ): Promise<boolean> {
   const item = await store.getQueueItem(childSessionId, itemId);
   if (!item) return false;
-  const ranThrough = new Set<string>([item.id]);
-  for (const entry of await store.getEntries(childSessionId, item.threadId)) {
-    if (entry.queueItemId === item.id) break;
+  const submissions = [
+    ...(await store.listUnsettledSubmissions(childSessionId)),
+    ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
+  ];
+  // Mid-turn inputs settle as merged after the turn's first transcript entry.
+  const turnItems = new Set([item.id]);
+  for (let size = -1; size !== turnItems.size;) {
+    size = turnItems.size;
+    for (const other of submissions) {
+      if (other.mergedIntoItemId && turnItems.has(other.mergedIntoItemId)) turnItems.add(other.id);
+    }
+  }
+  const entries = await store.getEntries(childSessionId, item.threadId);
+  let last = -1;
+  for (let index = 0; index < entries.length; index++) {
+    const id = entries[index]?.queueItemId;
+    if (id !== undefined && turnItems.has(id)) last = index;
+  }
+  const through = item.status === "running" || last < 0 ? entries.length : last + 1;
+  const ranThrough = new Set(turnItems);
+  for (const entry of entries.slice(0, through)) {
     if (entry.queueItemId !== undefined) ranThrough.add(entry.queueItemId);
   }
   const keepsRoute = (other: { metadata?: Record<string, unknown> }) => isParentDelegation(other)
     && nextReplyRoute("origin", { delegated: true, ...delegationSource(other) }, watch) === "origin";
-  return [
-    ...(await store.listUnsettledSubmissions(childSessionId)),
-    ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
-  ].some((other) => ranThrough.has(other.id) && !keepsRoute(other) && !isSignalSubmission(other));
+  return submissions.some(other => ranThrough.has(other.id) && !keepsRoute(other) && !isSignalSubmission(other));
 }
 
 function isSignalSubmission(item: { content: unknown }): boolean {

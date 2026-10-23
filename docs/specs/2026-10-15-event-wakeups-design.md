@@ -825,6 +825,9 @@ A publication after the close restores the ended waiter before ingestion.
 Gate Slack cards resolve the stored origin even after settlement notification.
 Private input and reply-route restrictions still apply.
 The privacy check includes the gate submission itself, not only earlier transcript entries.
+It follows merged constituents and scans through the turn's last transcript entry.
+For a running turn, it scans all current entries, including injected input before its merge write completes.
+Queued followups without transcript entries do not contaminate an earlier turn.
 Settlement routing applies the same inclusive check before it permits an automatic channel reply.
 Parent gate signals use the same origin resolver as gate cards.
 If the saved channel route cannot see the gate, the parent signal omits the origin and gate title.
