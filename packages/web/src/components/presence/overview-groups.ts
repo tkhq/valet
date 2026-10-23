@@ -168,6 +168,9 @@ export function blockSubjectFor(
   line: LineRowFields,
   places: readonly PresencePlaceWire[],
 ): string | null {
+  const compoundSlack = lineService(line) === "slack" && line.filters.filter((filter) => filter.field === "channel" || filter.field === "channel_name").length > 1;
+  if (compoundSlack && (line.placeKey === undefined || keyService(line.placeKey) === "slack")) return serviceRoot("slack", places)?.subject
+    ?? (line.placeKey?.startsWith("slack:") ? line.placeKey.split("/")[0]! : SYNTHETIC_ROOTS.slack);
   if (line.placeKey !== undefined && keyService(line.placeKey) !== null) return line.placeKey;
   const named = namedPlace(line, places);
   if (named !== null) return named.subject;
@@ -222,6 +225,10 @@ export function overviewGroups(
       blocks.set(subject, block);
     }
     block.lines.push(line);
+    if (block.service === "slack" && block.serviceWide) {
+      const scoped = block.lines.filter((entry) => entry.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name"));
+      if (scoped.length > 0) block.label = scoped.length === block.lines.length ? "Filtered channels" : "Slack responses";
+    }
   }
   const groups: OverviewGroup[] = [];
   for (const service of SERVICES) {

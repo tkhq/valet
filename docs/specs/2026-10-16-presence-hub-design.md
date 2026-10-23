@@ -1252,6 +1252,27 @@ Revision 4 deviations:
   carries `preselected.team`. The team Slack setup and the teams panel
   open the editor on a Slack mention line for that team, with the team's
   assistant fixed.
+- **Slack channel alternatives use separate rules (2026-10-23).** Conditions
+  within one rule remain ANDed. Exact channel selections use `channel` with
+  `eq` or `in`. New Slack name comparisons use `channel_name` with `prefix`,
+  `contains`, `regex`, `not_prefix`, or `not_regex`. Selecting Channel after
+  a name comparison resets the comparison to `eq` and clears its value.
+  Other services keep their field semantics. Opening or renaming a saved
+  rule never converts its ID conditions into name conditions.
+- **Slack setup lists channel-name rules.** Exact selections and name rules
+  are separate alternatives. `Add channel-name response` opens the editor with
+  a name prefix and the team's reply target. The prefix entry explains future
+  channels; Continue grants `Any channel` consent for that pattern. The reader
+  reviews the conditions before creation. Conditional exact rules do not
+  justify automatic ID exclusions, which could lose matching mentions.
+  Future exact additions and other name rules use the existing collision
+  workflow. The setup dialog does not bypass collision checks.
+- **Pattern rules keep their place clause.** A name pattern remains on the
+  Slack workspace row, without an invented channel place. The row sentence
+  shows the pattern. A Slack workspace row containing a `channel_name` rule
+  uses the heading `Slack channel responses`, including groups with unscoped rules.
+  Groups without channel-name rules retain `Everywhere in Slack`.
+  Pattern rules have edit actions in Slack setup.
 - **A proposal's row Edit opens edit (Part D step 2).** The overview row's
   Edit on a proposal opens the editor in edit mode. Only the page's **Turn
   on** opens review mode.
@@ -1330,3 +1351,29 @@ name no place), the Activity landing, the `Activity` and `Routines` rail
 counts (replaced by the banner), the `/presence/routines?routine=<id>`
 page (now `/presence/routines/<id>`), and the ungated routine row switch
 (the roster row reads `routineReadOnly`).
+
+Presence copy uses response for these entries. A name condition reads as a channel whose name matches the condition.
+
+### Complete channel summaries (2026-10-23)
+
+Show every channel condition in the response sentence, including exclusions.
+Join separate conditions with `and`, as the event matcher does.
+An exact channel heading does not replace additional channel conditions.
+This also applies to responses that follow a Slack thread.
+Name comparisons say `channel name`. Saved non-exact ID comparisons say
+`channel ID`. The editor explains how these fields differ without changing
+saved conditions.
+
+The overlap notice must fit the side pane. Long response names wrap within
+the reference. They must not hide the rest of the notice or widen the pane.
+
+### Filtered channel groups (2026-10-23)
+
+A single exact channel keeps its channel name as the overview heading.
+Compound channel conditions list at the Slack workspace row.
+Use `Filtered channels` when every response in that row has channel conditions.
+Use `Slack responses` when the row also has an unrestricted response.
+Keep the full conditions in each response sentence.
+This changes display grouping only. Event matching and channel coverage stay the same.
+The channel picker contains no response cards or name-response creation form.
+Use Advanced setup or an existing Presence entry to edit conditions.

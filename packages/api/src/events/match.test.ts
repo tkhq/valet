@@ -109,6 +109,20 @@ describe("Slack channel_name filter", () => {
     expect(filtersMatch(post("alerts-dev"), key, regex, catalog)).toBe(false);
   });
 
+  it("keeps the saved ID prefix and exact ID conditions as an intersection", () => {
+    const saved = [{ field: "channel", op: "prefix" as const, value: "lead-" },
+      { field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    const lead = { channel: "C0CC7CS2WHE", channel_name: "lead-acme" };
+    const biz = { channel: "C0BKL72FS93", channel_name: "biz-dev" };
+    expect(filtersMatch(lead, "slack.app_mention", saved, catalog)).toBe(false);
+    expect(filtersMatch(biz, "slack.app_mention", saved, catalog)).toBe(false);
+    const byName = [{ field: "channel_name", op: "prefix" as const, value: "lead-" }];
+    const exact = [{ field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    expect(filtersMatch(lead, "slack.app_mention", byName, catalog)).toBe(true);
+    expect(filtersMatch(biz, "slack.app_mention", exact, catalog)).toBe(true);
+    expect(filtersMatch(lead, "slack.app_mention", [...byName, ...exact], catalog)).toBe(false);
+  });
+
   it("fails closed when intake has no name for the channel", () => {
     expect(filtersMatch(post(), "slack.bot_message", prefix, catalog)).toBe(false);
     expect(filtersMatch(post(), "slack.bot_message", [{ field: "channel_name", op: "regex", value: ".*" }], catalog)).toBe(false);

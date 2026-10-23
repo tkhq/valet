@@ -620,15 +620,28 @@ the initiating principal from the submission to the tool context. An ungranted
 person cannot use a shared agent as a proxy into the signed-in browser. Background
 work needs an explicitly authorized service principal and grant.
 
-Default both permissions to the owner of a personal session. Browser use is
-disabled by default for a team session. Enabling it requires an administrator's
-explicit grant to the owning team and acknowledgment that browser outputs enter
-the team-readable transcript. This first design does not support a private browser
-inside a team-readable chat: hiding image URLs would not hide extracted text.
-The profile is then a shared session resource, never a personal profile silently
-borrowed from its creator. Sign-in UI shows the audience before credentials are
-entered. Narrower per-person team grants require transcript information-flow
-controls and are deferred.
+Default both permissions to the owner of a personal session. A team session
+follows the same rule as its threads: every current member of the owning team,
+and the assistant acting for a member, can use the browser. A
+nonmember actor, such as an organization-audience Slack mention, cannot. A turn
+with no person behind it runs as the team itself (`team:<id>`), so the browser
+refuses it, although its shell commands still run. Moving a session to another
+owner turns its browser off, because the profile keeps the old owner's sign-ins.
+The new owner or a team admin turns it back on in the Browser panel. Browser
+outputs enter the team-readable transcript, the same as shell and tool output in
+that session. A team or session admin can disable the browser for one session.
+This first design does not support a private browser inside a team-readable chat:
+hiding image URLs would not hide extracted text. The profile is a shared session
+resource, never a personal profile silently borrowed from its creator. A member's
+sign-in stays in that session's profile for the other members, also after
+private sign-in ends. The Browser panel says so, and the browser skill asks the
+person to use a personal session for a personal account. Narrower per-person team
+grants require transcript information-flow controls and are deferred.
+
+Before 2026-10-22, a team session required an admin to select a team audience in
+each session. Every team conversation, including each Slack mention, is its own
+session, so the browser started blocked in every new conversation. The audience
+setting is removed, and stored values are ignored.
 
 Check browser-specific authority when resolving a browser decision gate; existing
 permission to resolve other session gates is insufficient. Revocation blocks
@@ -681,7 +694,7 @@ the host allows observation, navigation, UI mutation, history, and diagnostics b
 default. Normal navigation and UI work need no origin grant or per-operation user
 prompt. This includes opening a permitted preview, `tab.reload`, scrolling, and
 routine form edits within the user's task. The host still checks every typed
-operation. Browser ownership, team audience, membership, and disabled access apply
+operation. Browser ownership, team membership, and disabled access apply
 before these defaults.
 
 The browser skill requires the agent to check consequential effects against the
@@ -1123,7 +1136,7 @@ not the only proof of correctness. Avoid tests that merely mirror dispatch code.
 | Recovery | Crash before dispatch, during effect, after effect and after receipt commit produce distinct safe results |
 | Gates | API replay reattaches; daemon loss returns CELL_LOST; a form counter proves no duplicate submit |
 | Human input | Takeover races, multiple viewers, disconnect/reconnect, IME and stale frames respect the lease |
-| Auth | Ungranted prompts and gate resolutions cannot use the browser; team enablement declares transcript audience; view cannot control; browser ticket cannot open terminal |
+| Auth | Ungranted prompts and gate resolutions cannot use the browser; team sessions admit current members and refuse nonmembers; view cannot control; browser ticket cannot open terminal |
 | Network | Metadata/private IPs, IPv6, redirects, rebinding, WS, service workers and loopback control ports are blocked |
 | Files | Traversal, symlink changes, oversize files, cross-session IDs and MIME mismatch fail safely |
 | Media | Screenshot bytes reach the model immediately and survive live/REST/render/replay without shape drift |
@@ -1210,8 +1223,8 @@ Live JPEG frames travel inline with bounded size, identity, and digest checks.
 Durable evidence retains the file broker.
 See [browser latency](2026-09-24-browser-latency-design.md) for transport ownership and measurements.
 It stops polling when hidden or unmounted.
-The Browser panel exposes audience settings, origin-grant revocation, and installed capability limits.
-The selected audience control is disabled because each policy change closes the browser.
+The Browser panel exposes the disable control, origin-grant revocation, and installed capability limits.
+Each policy change closes the browser.
 Its availability is independent of the Terminal and VS Code profile.
 This implementation does not use a gateway WebSocket or CDP screencast.
 Each request rechecks authorization and a short-lived, purpose-separated viewer ticket.
@@ -1236,7 +1249,7 @@ The API recomputes staleness against the current runtime and document when annot
 ### Policy and recovery
 
 Personal sessions default to owner-only access.
-A team administrator must select the team audience before shared browser use.
+Team sessions admit current members of the owning team.
 Navigation, mutation, uploads, exports, and page tools require an applicable origin grant or an explicit decision.
 Observation and bounded diagnostics are permitted after session authorization.
 The browser daemon binds each decision to the actor, invocation, operation hash, runtime, policy version, and expiry.

@@ -35,14 +35,18 @@ describe("durable browser policy", () => {
   let makeService: () => BrowserPolicy;
   let member: boolean;
   let team: boolean;
+  let org: boolean;
+  let store: ReturnType<typeof pluginStore>;
   beforeEach(async () => {
     const { appDb } = await freshTestPgDb();
+    store = pluginStore(appDb, "browser");
     member = true;
     team = false;
+    org = false;
     makeService = () =>
       new BrowserPolicy({
-        store: pluginStore(appDb, "browser"),
-        owner: async () => ({ type: team ? "team" : "user", id: "u" }),
+        store,
+        owner: async () => ({ type: org ? "org" : team ? "team" : "user", id: "u" }),
         isMember: async () => member,
         isAdmin: async (_owner, actor) => actor === "u",
         blobs: {
@@ -108,7 +112,6 @@ describe("durable browser policy", () => {
       ).resolves.toMatchObject({ decision: "deny" });
       await service.updateSettings(identity, {
         enabled: true,
-        audience: "owner",
         grants: [],
       });
       await expect(
@@ -123,41 +126,65 @@ describe("durable browser policy", () => {
     ).rejects.toThrow("ownership changed");
     const settings = await service.updateSettings(identity, {
       enabled: false,
-      audience: "owner",
       grants: [],
     });
     await expect(
       service.decide({ ...request, policyVersion: settings.policyVersion }),
-    ).rejects.toThrow("disabled");
+    ).rejects.toThrow("turned off");
   });
-  it("denies team use until an admin declares the transcript audience", async () => {
+  it("lets current team members use a team session's browser and refuses nonmembers", async () => {
     team = true;
-    await expect(service.authorize(identity)).rejects.toThrow("team");
-    const settings = await service.updateSettings(identity, {
-      enabled: true,
-      audience: "team",
-      grants: [],
-    });
     await expect(
-      service.decide({
-        ...request,
-        actorId: "member",
-        policyVersion: settings.policyVersion,
-      }),
+      service.decide({ ...request, actorId: "member" }),
     ).resolves.toMatchObject({ decision: "allow" });
     member = false;
     await expect(
-      service.decide({
-        ...request,
-        actorId: "member",
-        policyVersion: settings.policyVersion,
-      }),
-    ).rejects.toThrow("access");
+      service.decide({ ...request, actorId: "member" }),
+    ).rejects.toThrow("Only members");
+  });
+  it("names a person as the fix when a team turn has no author", async () => {
+    team = true;
+    member = false;
+    await expect(
+      service.authorize({ ...identity, actorId: "team:u" }),
+    ).rejects.toThrow("no person behind it");
+  });
+  it("turns the browser off and revokes decisions when the owner changes", async () => {
+    team = true;
+    await service.disableForOwnerChange("s");
+    const settings = await service.settings("s");
+    expect(settings.enabled).toBe(false);
+    expect(settings.policyVersion).not.toBe("default");
+    await expect(
+      service.authorize({ ...identity, actorId: "member" }),
+    ).rejects.toThrow("Ask a team admin to turn it on");
+  });
+  it("refuses a session owned by neither a person nor a team", async () => {
+    org = true;
+    await expect(service.authorize(identity)).rejects.toThrow(
+      "personal or team session",
+    );
+  });
+  it("ignores the audience that older settings rows store", async () => {
+    team = true;
+    await store.session("s").put("settings", "browser", {
+      enabled: true,
+      audience: "owner",
+      policyVersion: "stored",
+      grants: [],
+    });
+    await expect(service.settings("s")).resolves.toEqual({
+      enabled: true,
+      policyVersion: "stored",
+      grants: [],
+    });
+    await expect(
+      service.authorize({ ...identity, actorId: "member" }),
+    ).resolves.toEqual({ policyVersion: "stored" });
   });
   it("retains grants across service reconstruction and revokes old decisions", async () => {
     const settings = await service.updateSettings(identity, {
       enabled: true,
-      audience: "owner",
       grants: [
         {
           id: "g",
@@ -177,7 +204,6 @@ describe("durable browser policy", () => {
     });
     await service.updateSettings(identity, {
       enabled: true,
-      audience: "owner",
       grants: [],
     });
     await expect(service.approve(current, "u")).rejects.toThrow("changed");
@@ -187,7 +213,6 @@ describe("durable browser policy", () => {
     const expiresAt = Date.now() + 30_000;
     const settings = await service.updateSettings(identity, {
       enabled: true,
-      audience: "owner",
       grants: [
         { id: "g", origin: request.origin, operations: ["upload"], expiresAt },
       ],
