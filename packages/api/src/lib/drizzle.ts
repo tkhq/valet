@@ -402,6 +402,8 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
+    sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
   { describe: "attention channel grace", probe: { kind: "column", table: "user_notification_preferences", column: "channel_grace_seconds" }, sql: 'ALTER TABLE user_notification_preferences ADD COLUMN channel_grace_seconds integer' },
   { describe: "personal attention outbox", probe: { kind: "table", table: "pending_channel_deliveries" }, sql: `CREATE TABLE pending_channel_deliveries (
     id text PRIMARY KEY NOT NULL, user_id text NOT NULL, tier_id text NOT NULL, notification_id text,

@@ -309,16 +309,17 @@ export class Session {
   private latestUserTimezone: string | undefined;
   private destroyed = false;
   private reclaiming = false;
+  private retiring = false;
   private claimsInFlight = 0;
   private reclaimRecovery: (() => Promise<void>) | undefined;
   private reclaimRecoveryTail: Promise<void> = Promise.resolve();
 
   /** Reserve claim ownership before any store await. Reclaim and claims cannot cross this synchronous boundary. */
   async claimExecution<T>(claim: () => Promise<T>): Promise<T | null> {
-    if (this.reclaiming || this.destroyed || this.attachment.state === "released") return null;
+    if (this.isExecutionFenced || this.destroyed || this.attachment.state === "released" || this.options.isExecutionCurrent?.() === false) return null;
     this.claimsInFlight++;
     try { return await claim(); }
-    finally { this.claimsInFlight--; }
+    finally { this.claimsInFlight--; this.notifyExecutionIdle(); }
   }
 
   get hasActiveExecution(): boolean {
@@ -326,10 +327,22 @@ export class Session {
   }
 
   get isReclaiming(): boolean { return this.reclaiming; }
+  get isExecutionFenced(): boolean { return this.reclaiming || this.retiring; }
+
+  /** Config invalidation fences new claims immediately but lets already-reserved execution finish. */
+  retireExecution(recover: () => Promise<void>): void {
+    this.retiring = true;
+    this.completeReclaim(recover);
+  }
+
+  /** Also called after normal, gate-replay, and interrupted-resume execution releases local ownership. */
+  notifyExecutionIdle(): void {
+    if (this.retiring && !this.hasActiveExecution) this.notifyReclaimAdmission();
+  }
 
   /** Call under the host cleanup barrier. Fence claims first, then recheck durable and in-process ownership. */
   async beginReclaim(): Promise<boolean> {
-    if (this.reclaiming || this.hasActiveExecution) return false;
+    if (this.isExecutionFenced || this.hasActiveExecution) return false;
     this.reclaiming = true;
     try {
       if ((await this.providers.store.listUnsettledSubmissions(this.id)).length > 0 || this.hasActiveExecution) {
@@ -361,6 +374,7 @@ export class Session {
     });
   }
 
+  private timersStopped = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight: Promise<void> | undefined;
@@ -443,7 +457,7 @@ export class Session {
    * the process alive, and are cleared in `destroy()`.
    */
   ensureTimers(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.timersStopped) return;
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
         // A transient store error inside the tick must not become an
@@ -496,13 +510,11 @@ export class Session {
    * `destroy()`'s store deletion or thread aborts — this instance's
    * transcript and store rows must survive.
    *
-   * The object must not be reused after this without a fresh claim: no
-   * caller should hold a reference across an eviction. If one somehow does,
-   * `ensureTimers` will restart the timers lazily on the next claim (it
-   * checks `this.destroyed`, which `suspendTimers` does not set), so this
-   * is not a poison-pill — just an idle instance.
+   * Permanent suspension is for retired owners: an already-reserved claim that installs after eviction
+   * must not restart timers. Default suspension remains resumable on the next claim.
    */
-  suspendTimers(): void {
+  suspendTimers(opts: { permanent?: boolean } = {}): void {
+    if (opts.permanent) this.timersStopped = true;
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;

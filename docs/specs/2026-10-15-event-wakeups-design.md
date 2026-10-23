@@ -945,6 +945,10 @@ Boot acknowledgement does not reset settled retention or reclaim stamps.
 The delivered types stay `child.settled` and `child.gate_opened`.
 Private transcript input permanently downgrades an automatic reply route.
 Gate updates use manual replies.
+Config-change eviction does not discard an active owner's invalidation.
+It fences later claims and persists a token, lets current execution finish, then rebuilds before queued work can claim.
+Reclaim still refuses active execution. Shutdown fences and evicts all cached owners without deleting durable work.
+
 Delivery intersects the child session, result submission, and delegation submission tool scopes.
 Gate delivery also intersects the gate thread's scope.
 

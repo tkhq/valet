@@ -5,7 +5,8 @@ import { parseIntegrationLimit } from "../assistants/integration-limit.js";
 import { addMember, createTeam } from "../services/teams.js";
 import type { WorkspaceIntegrationLimitResponse } from "../wire/types.js";
 /** Workspace capabilities and persona use owner configuration. */
-import { describe, it, expect, afterEach } from "vitest";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -156,6 +157,41 @@ describe("workspace runtime configuration", () => {
     const provided = await provider!();
     const providedNames = provided.map((s) => s.name).sort();
     expect(providedNames).toEqual(["deploy", "gh-triage", "slack-notes"]);
+  });
+
+  it("rebuilds the catalog before the next claim when an active assistant's integration limit is cleared", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const catalogs: string[] = [];
+    faux.appendResponses([async () => { entered(); await held; return fauxAssistantMessage("done"); }, async () => {
+      catalogs.push(await listToolIds(api!.providers.engineHost.liveSession(session.id)!.options.tools));
+      return fauxAssistantMessage("new catalog");
+    }]);
+    api = await bootTestApi({ plugins: [fixturePlugin] });
+    const { db, engineHost, engineStore } = api.providers;
+    const row = await seedWorkspaceAssistant(db, ORG, { type: "user", id: USER });
+    const behavior = JSON.stringify({ integrations: { mode: "allowlist", entries: [{ service: "github" }] } });
+    await db.execute(sql`UPDATE assistants SET behavior = ${behavior} WHERE id = ${row.id}`);
+    const { session } = await ensureDefaultAssistantSession({ db, engineHost }, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+    await session.setModel("claude-haiku-4-5");
+    expect(await listToolIds(session.options.tools)).not.toContain("slack.post_message");
+    const first = await session.prompt("hold while configuration changes");
+    try {
+      await entering;
+      expect((await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`, { method: "DELETE" })).status).toBe(204);
+      const next = await session.prompt("read the new catalog", { queueMode: "followup" });
+      expect(await engineStore.getQueueItem(session.id, next.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+      release();
+      expect((await session.thread().awaitResult(first.queueItemId)).outcome).toBe("completed");
+      await vi.waitFor(() => expect(catalogs).toHaveLength(1), { timeout: 10000 });
+      expect(catalogs[0]).toContain("slack.post_message");
+      expect((await engineStore.getQueueItem(session.id, next.queueItemId))?.attemptCount).toBe(1);
+      expect(engineHost.liveSession(session.id)).not.toBe(session);
+    } finally { release(); await session.thread().kick(); faux.unregister(); vi.unstubAllEnvs(); }
   });
 
   it("keeps a carried-over integration allow-list until an admin clears it", async () => {

@@ -1256,7 +1256,7 @@ sessionsRouter.patch("/:id", async (c) => {
   // profile is frozen into the sandbox opts, and the owner binds the skills
   // provider and credential context.
   if (nextOwner !== undefined || nextProfile !== undefined) {
-    engineHost.evictCache(id);
+    await engineHost.invalidateSession(id);
   }
 
   // Sends the forced stop's signals into the session as it now is.
@@ -1276,7 +1276,7 @@ sessionsRouter.patch("/:id", async (c) => {
       const recheck = await engineStore.listUnsettledSubmissions(id);
       // The web's confirm dialog reads this sentence to mark the list stopped.
       const alreadyStopped = stopped ? " The background work already stopped." : "";
-      if (recheck.length > 0) {
+      if (recheck.length > 0 || rebuilt.isExecutionFenced) {
         await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("a turn started") + alreadyStopped }, 409);
       }

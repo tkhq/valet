@@ -663,6 +663,12 @@ export const childWatches = pgTable(
   ],
 );
 
+/** Durable config invalidations survive active turns and process restarts. */
+export const sessionConfigInvalidations = pgTable("session_config_invalidations", {
+  sessionId: text("session_id").primaryKey(),
+  token: text("token").notNull(),
+});
+
 /** Internal events waiting for ingestion or acknowledgement. This is not an org event receipt. */
 export const childEventOutbox = pgTable("child_event_outbox", {
   id: text("id").primaryKey(),

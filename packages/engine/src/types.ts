@@ -2652,6 +2652,8 @@ export interface CreateSessionOptions {
   toolScope?: ToolScope;
   initialToolFocus?: (thread: { key: string }) => ToolScope | undefined;
   /** Retain history without admitting or resuming execution. */
+  /** Synchronous host config-generation fence, checked before reserving any execution claim. */
+  isExecutionCurrent?: () => boolean;
   readOnlyReason?: string;
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */

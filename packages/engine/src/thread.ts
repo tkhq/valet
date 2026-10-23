@@ -759,7 +759,7 @@ export class Thread {
       );
     }
     // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
-    const requestedMode = this.session.isReclaiming ? "followup" : opts.queueMode ?? this.mode;
+    const requestedMode = this.session.isExecutionFenced ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -776,7 +776,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect" && !this.session.isReclaiming) {
+    if (effectiveMode === "collect" && !this.session.isExecutionFenced) {
       return this.submitCollect(content, opts);
     }
 
@@ -818,7 +818,7 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" && !this.session.isReclaiming ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isExecutionFenced ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -2781,12 +2781,13 @@ export class Thread {
       })
       .finally(() => {
         unregisterBackgroundDrive(itemId);
+        this.session.notifyExecutionIdle();
       });
     this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
   }
 
   async kick(): Promise<void> {
-    if (this.session.isReclaiming) { this.session.notifyReclaimAdmission(); return; }
+    if (this.session.isExecutionFenced) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -2797,6 +2798,7 @@ export class Thread {
       })
       .finally(() => {
         this.kicking = false;
+        this.session.notifyExecutionIdle();
       });
     return this.kickTail;
   }
@@ -2805,7 +2807,7 @@ export class Thread {
     if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused || this.session.isReclaiming) return;
+      if (this.paused || this.session.isExecutionFenced) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -3486,6 +3488,7 @@ export class Thread {
       // Gate vanished between the decision and here — nothing to re-arm.
       this.runningItem = null;
       this.fence = undefined;
+      this.session.notifyExecutionIdle();
       return;
     }
 
@@ -3501,6 +3504,7 @@ export class Thread {
         this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
         this.runningItem = null;
         this.fence = undefined;
+        this.session.notifyExecutionIdle();
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>

@@ -1289,7 +1289,13 @@ with an earlier entry, the entry below wins.
   If pending release fails, the cached owner remains. Failed destruction retains its durable handle for provider retry.
   A terminal released owner stays fenced after eviction. Its admissions schedule recovery after cleanup, never awaited inside the barrier.
   The host restores the durable queue on fresh compute. Web, signals, CLI, and child sends share this engine behavior.
-  Cache eviction refuses active execution. All session builders replace idle released entries; `liveSession()` is read-only.
+  Reclaim eviction refuses active execution. Config invalidation is not discarded when execution is active.
+  It fences new claims immediately and stores a token in `session_config_invalidations` before acknowledging the request.
+  The active owner drains, then leaves the cache. Queued work restores from current configuration before claiming.
+  Each builder captures a config generation. Claims from an obsolete build are refused, including during startup reconciliation.
+  A fresh build removes only the invalidation token it observed. A newer token survives that deletion.
+  Archive leaves queued work unclaimed. Shutdown fences and evicts every owner without deleting durable rows or destroying compute.
+  All session builders replace idle released entries; `liveSession()` is read-only.
   Retries call the provider with that handle, not the released attachment.
   Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
   Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.

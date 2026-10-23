@@ -685,7 +685,7 @@ describe("buildChildSpawner", () => {
     if (!original) throw new Error("child was not cached");
     await original.thread().abort();
     await vi.waitFor(() => expect(original.hasActiveExecution).toBe(false));
-    api.providers.engineHost.evictAll();
+    api.providers.engineHost.evictAll({ shutdown: false });
     expect(api.providers.engineHost.liveSession(spawned.childSessionId)).toBeNull();
 
     await sender({ childSessionId: spawned.childSessionId, message: "continue" }, ctx);

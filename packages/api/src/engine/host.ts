@@ -1,7 +1,7 @@
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
-import { assistantExecutions } from "../schema/index.js";
+import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
@@ -848,6 +848,7 @@ export class EngineHost {
   private lifecycleEpoch = new Map<string, number>();
 
   private assertSessionBuildAllowed(sessionId: string, epoch = this.lifecycleEpoch.get(sessionId) ?? 0): number {
+    if (this.shuttingDown) throw new Error("Engine host is shutting down.");
     if (this.teardown.has(sessionId) || epoch !== (this.lifecycleEpoch.get(sessionId) ?? 0)) {
       throw new Error("Session teardown interrupted this request. Start a new session and retry.");
     }
@@ -861,6 +862,8 @@ export class EngineHost {
    * row read and its `cache.set` evicts an empty slot, and the stale build
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
+  private configWrites = new Map<string, Promise<void>>();
+  private shuttingDown = false;
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
   /** Repo keys whose dropped-scratch warning is active. */
@@ -1129,6 +1132,7 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // Security runner wiring (Valet Security spec §Tools): a session whose
     // app row carries kind='security' gets the sec_* runner tools, the
     // engagement-runner skill, and the child read/send/status seams —
@@ -1358,6 +1362,7 @@ export class EngineHost {
       ? await engine.restoreSession({
           sessionId,
           options: {
+            isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
             userId: meta.userId,
             orgId: meta.orgId,
             owner: principal,
@@ -1393,6 +1398,7 @@ export class EngineHost {
         })
       : await engine.createSession({
           id: sessionId,
+          isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
           userId: meta.userId,
           orgId: meta.orgId,
           owner: principal,
@@ -1439,7 +1445,7 @@ export class EngineHost {
     }
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
     // durable events for submissions that settled outside the retention
@@ -2940,7 +2946,7 @@ export class EngineHost {
       const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
         .where(eq(agentSessions.id, sessionId)).limit(1) : [];
       if (!assistant || assistant.archivedAt !== null || app?.status === "deleted") {
-        this.evictCache(sessionId);
+        await this.invalidateSession(sessionId);
         throw new ArchivedAssistantError();
       }
       while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
@@ -3126,6 +3132,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && epoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: runtimeUserId,
       orgId: meta.orgId,
       workspace,
@@ -3216,16 +3223,10 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     const epochNow = this.buildEpoch.get(sessionId) ?? 0;
-    if (epochNow !== epoch && attempt < 2) {
-      // A config PATCH evicted the cache while this build was between its
-      // row read and here: the instance in hand was assembled from the
-      // pre-PATCH row. Suspend its timers (they would root it forever, see
-      // evictCache) and rebuild from the current row. CAPPED at two retries:
-      // each rebuild replays the session's durable history, so a caller
-      // PATCHing faster than one build must not livelock the wake. Past the
-      // cap the build in hand is served and cached, and the epoch check
-      // below drops it again if writes are still arriving — bounded
-      // staleness instead of unbounded rebuild.
+    if (epochNow !== epoch && attempt < 2 && !session.hasActiveExecution) {
+      // A generation change during this build invalidates all its claims. Retry an idle build immediately;
+      // an already-reserved execution must drain on this owner before cacheSession can hand it off.
+      session.retireExecution(async () => {});
       session.suspendTimers();
       return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
@@ -3239,20 +3240,9 @@ export class EngineHost {
     builtSession = session;
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
-
-    if (epochNow !== epoch) {
-      // Retry cap reached with the epoch still moving: serve this wake on
-      // the (at most one-PATCH-stale) build, but don't let it outlive the
-      // churn — dropping the cache entry makes the NEXT wake rebuild fresh.
-      console.warn(
-        `EngineHost: assistant ${assistantId} was patched ${attempt + 1}x during one build; ` +
-          `serving the last build uncached`,
-      );
-      this.evictCache(sessionId);
-    }
 
     return session;
   }
@@ -3357,38 +3347,73 @@ export class EngineHost {
     }
   }
 
+  /** Persist invalidation before acknowledging configuration-changing requests. The live fence is synchronous. */
+  async invalidateSession(sessionId: string): Promise<void> {
+    const token = randomUUID();
+    const previous = this.configWrites.get(sessionId);
+    const write = (async () => {
+      await previous;
+      await this.opts.db?.insert(sessionConfigInvalidations).values({ sessionId, token })
+        .onConflictDoUpdate({ target: sessionConfigInvalidations.sessionId, set: { token } });
+    })();
+    this.configWrites.set(sessionId, write);
+    this.evictCache(sessionId);
+    try { await write; }
+    finally { if (this.configWrites.get(sessionId) === write) this.configWrites.delete(sessionId); }
+  }
+
+  private async cacheSession(sessionId: string, entry: CacheEntry): Promise<void> {
+    const db = this.opts.db;
+    const [mark] = db ? await db.select().from(sessionConfigInvalidations).where(eq(sessionConfigInvalidations.sessionId, sessionId)).limit(1) : [];
+    this.cache.set(sessionId, entry);
+    if (this.shuttingDown) {
+      entry.session.retireExecution(async () => {});
+      this.dropCacheEntry(sessionId);
+    } else if (entry.session.options.isExecutionCurrent?.() === false) {
+      this.evictCache(sessionId);
+    } else if (mark && db) {
+      await db.delete(sessionConfigInvalidations).where(and(eq(sessionConfigInvalidations.sessionId, sessionId), eq(sessionConfigInvalidations.token, mark.token)));
+    }
+  }
+
+  private dropCacheEntry(sessionId: string): void {
+    this.cache.get(sessionId)?.session.suspendTimers({ permanent: true });
+    this.cache.delete(sessionId);
+  }
+
   /**
-   * Drop a session's in-process cache entry WITHOUT tearing down engine
-   * state — unlike `destroy()`, this never calls `session.destroy()` (which
-   * deletes the underlying engine session row via
-   * `SessionStore.deleteSession`). Used when a configuration change needs
-   * picking up on the next wake: the next `assistantSessionFor` call misses the cache
-   * and rebuilds `systemPrompt`/`systemContext` from current configuration,
-   * restoring the same durable session (same transcript) rather than
-   * creating a new one. Safe to call on an id that isn't cached — no-op.
-   *
-   * Calls `session.suspendTimers()` before dropping the cache entry: the
-   * evicted `Session` would otherwise be rooted forever by its two
-   * unref'd intervals (heartbeat 10s, sweep 5s — each interval closure
-   * captures `this`), permanently leaking the object and continuing to
-   * sweep/heartbeat against the store even though nothing references it
-   * through the cache anymore. `unref()` only keeps the *process* from
-   * staying alive on these timers; it does nothing to stop them from
-   * keeping this *object* alive or from continuing to fire. Suspending
-   * them first means the evicted instance is a normal orphan, collected
-   * once its last reference (this method's local `entry`) goes away.
+   * Invalidate the cache without deleting durable engine state or destroying compute.
+   * Config eviction retires the owner: current execution drains, but every later admission queues for a fresh build.
+   * The identity-checked reclaim path can drop only an idle owner. Old references remain fenced after either handoff.
    */
   evictCache(sessionId: string, expected?: Session | null): void {
-    // A live execution cannot be replaced: startup restore would steal its running item and repeat side effects.
-    if (this.cache.get(sessionId)?.session.hasActiveExecution) return;
-    if (expected !== undefined && (this.inflight.has(sessionId) || (this.cache.get(sessionId)?.session ?? null) !== expected)) return;
-    // Invalidate any in-flight build too: it read the row before this
-    // eviction's cause committed, and would otherwise re-populate the cache
-    // with the stale config (`buildAssistantSession` checks the epoch before
-    // its `cache.set`).
+    const entry = this.cache.get(sessionId);
+    // Identity-checked eviction is reclaim's terminal step, not config invalidation.
+    if (expected !== undefined && (this.inflight.has(sessionId) || (entry?.session ?? null) !== expected || entry?.session.hasActiveExecution)) return;
     this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
-    this.cache.get(sessionId)?.session.suspendTimers();
-    this.cache.delete(sessionId);
+    if (!entry) return;
+    if (expected !== undefined) { this.dropCacheEntry(sessionId); return; }
+    const retired = entry.session;
+    retired.retireExecution(async () => {
+      await this.configWrites.get(sessionId);
+      if (this.shuttingDown || retired.hasActiveExecution) return;
+      await this.withSandboxCleanup(sessionId, async () => {
+        if (this.cache.get(sessionId)?.session === retired && !retired.hasActiveExecution) this.dropCacheEntry(sessionId);
+      });
+      if (this.shuttingDown || retired.hasActiveExecution) return;
+      const [row] = this.opts.db ? await this.opts.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1) : [];
+      if (row?.status === "deleted") return;
+      if (!(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length) return;
+      try {
+        const data = await retired.toData();
+        const replacement = await this.sessionFor(sessionId, row && this.opts.db ? await loadSessionMeta(this.opts.db, row) : {
+          userId: data.userId, orgId: data.orgId, workspace: data.workspace, ownerType: data.owner.type,
+        });
+        for (const thread of replacement.listThreads()) void thread.kick();
+      } catch (error) { if (!(error instanceof ArchivedAssistantError)) throw error; }
+    });
+    // No active owner exists to protect. Old references remain fenced and recover late admissions.
+    if (!retired.hasActiveExecution) this.dropCacheEntry(sessionId);
   }
 
   /**
@@ -3399,10 +3424,16 @@ export class EngineHost {
    * (reconciliation on next boot) is the designed restart story, and it
    * needs those rows. Sandboxes are left as-is — the workspace survives,
    * the sandbox is disposable (Phase 3), and the next boot re-attaches or
-   * re-provisions.
+   * re-provisions. Shutdown is terminal: late builds cannot claim or repopulate this host.
+   * Explicit cache-reset fixtures can opt out of terminal shutdown, but their old owners stay fenced.
    */
-  evictAll(): void {
-    for (const id of [...this.cache.keys()]) this.evictCache(id);
+  evictAll(opts: { shutdown?: boolean } = {}): void {
+    this.shuttingDown = opts.shutdown ?? true;
+    for (const [id, entry] of this.cache) {
+      this.buildEpoch.set(id, (this.buildEpoch.get(id) ?? 0) + 1);
+      entry.session.retireExecution(async () => {});
+      this.dropCacheEntry(id);
+    }
     this.clearSweepInterval();
   }
 
@@ -4148,6 +4179,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(childSessionId) ?? 0;
     // `opts.owner` is the child's own principal: the `task` tool reads the
     // parent session's principal and hands it to the spawner, which passes
     // it here and on to `createSession` below. A child of a team-owned
@@ -4297,6 +4329,7 @@ export class EngineHost {
       specProvider !== undefined,
     );
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(childSessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
@@ -4390,7 +4423,7 @@ export class EngineHost {
 
     builtSession = session;
     provisionedExtras.bindSession(session);
-    this.cache.set(childSessionId, { engine, session });
+    await this.cacheSession(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
@@ -4447,6 +4480,7 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
     // the scheduler and the event dispatcher copy from the definition row).
     // A run started from a team-owned workflow therefore reads the team's
@@ -4504,6 +4538,7 @@ export class EngineHost {
     // workflow run cannot wait for events (spec 2026-10-15, R9).
     let builtSession: Session | undefined;
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace,
@@ -4573,7 +4608,7 @@ export class EngineHost {
 
     extras.bindSession(session);
     builtSession = session;
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;

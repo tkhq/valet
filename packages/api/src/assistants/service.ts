@@ -257,7 +257,7 @@ async function ensureAssistantSession(
     .where(eq(agentSessions.id, sessionId))
     .limit(1);
   if (existingRows[0]?.status === "deleted") {
-    deps.engineHost.evictCache(sessionId);
+    await deps.engineHost.invalidateSession(sessionId);
     throw new ArchivedAssistantError();
   }
   if (!existingRows[0]) {

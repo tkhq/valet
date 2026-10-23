@@ -11,6 +11,9 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { eq } from "drizzle-orm";
+import { agentSessions, assistants, sessionConfigInvalidations } from "../schema/index.js";
 import { VirtualSandboxProvider } from "@valet/engine";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
@@ -20,6 +23,104 @@ describe("EngineHost.evictAll", () => {
   afterEach(async () => {
     await api?.cleanup();
     api = undefined;
+  });
+
+  it.each(["owner", "claim-in-flight", "archive", "shutdown"] as const)("does not lose %s eviction during an active turn", async kind => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const nextCredentials: Array<string | undefined> = [];
+    faux.appendResponses([async () => { entered(); await held; return fauxAssistantMessage("first done"); }, async () => {
+      const live = api!.providers.engineHost.liveSession(session.id)!;
+      nextCredentials.push((await live.credentialProvider().get("linear"))?.accessToken);
+      return fauxAssistantMessage("next done");
+    }]);
+    api = await bootTestApi();
+    const { engineHost: host, engineStore: store, db, engineCredentials } = api.providers;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const moving = kind === "owner" || kind === "claim-in-flight";
+    const session = moving ? await host.sessionFor("active-owner-move", meta)
+      : await defaultAssistantSessionFor(api.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    await session.setModel("claude-haiku-4-5");
+    await engineCredentials.save({ type: "user", id: "local-user" }, "linear", { type: "api_key", apiKey: "old-owner" });
+    await engineCredentials.save({ type: "user", id: "test-member" }, "linear", { type: "api_key", apiKey: "new-owner" });
+    if (moving) await db.insert(agentSessions).values({ id: session.id, userId: "local-user", orgId: "local-org", workspace: "/tmp",
+      ownerType: "user", ownerId: "local-user", status: "active", createdAt: 1, updatedAt: 1 });
+    let allowClaim!: () => void;
+    const heldClaim = new Promise<void>(resolve => { allowClaim = resolve; });
+    let claimEntered!: () => void;
+    const claiming = new Promise<void>(resolve => { claimEntered = resolve; });
+    const originalClaim = store.claimSubmission.bind(store);
+    const claim = kind === "claim-in-flight" ? vi.spyOn(store, "claimSubmission").mockImplementationOnce(async args => {
+      claimEntered(); await heldClaim; return originalClaim(args);
+    }) : undefined;
+    const first = await session.prompt("hold the active turn");
+    try {
+      if (kind === "claim-in-flight") {
+        await claiming;
+        expect(session.thread().hasActiveRun).toBe(false);
+      } else await entering;
+      expect(session.hasActiveExecution).toBe(true);
+      expect(await session.beginReclaim()).toBe(false);
+      if (moving) await db.update(agentSessions).set({ ownerId: "test-member", userId: "test-member" }).where(eq(agentSessions.id, session.id));
+      if (kind === "archive") await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.sessionId, session.id));
+      if (kind === "shutdown") host.evictAll();
+      else {
+        if (kind === "archive") {
+          const [assistant] = await db.select().from(assistants).where(eq(assistants.sessionId, session.id));
+          await expect(host.assistantSessionFor(assistant!.id, { actorUserId: "local-user", orgId: "local-org" })).rejects.toMatchObject({ code: "assistant_archived" });
+        } else await host.invalidateSession(session.id);
+        expect(await db.select().from(sessionConfigInvalidations)).toHaveLength(1);
+      }
+      const next = await session.prompt("next turn on fresh configuration", { queueMode: "followup" });
+      if (kind === "shutdown") {
+        expect(host.isLive(session.id)).toBe(false);
+        await expect(host.sessionFor(session.id, meta)).rejects.toThrow("shutting down");
+      }
+      else expect(host.liveSession(session.id)).toBe(session);
+      expect(await store.getQueueItem(session.id, next.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+      allowClaim();
+      await entering;
+      release();
+      expect((await session.thread().awaitResult(first.queueItemId)).outcome).toBe("completed");
+      if (moving) {
+        await vi.waitFor(() => expect(nextCredentials).toEqual(["new-owner"]), { timeout: 10000 });
+        expect((await store.getQueueItem(session.id, next.queueItemId))?.attemptCount).toBe(1);
+        expect(host.liveSession(session.id)).not.toBe(session);
+        expect(await db.select().from(sessionConfigInvalidations)).toHaveLength(0);
+      } else {
+        await vi.waitFor(() => expect(session.hasActiveExecution).toBe(false));
+        await vi.waitFor(() => expect(host.liveSession(session.id)).toBeNull());
+        expect(nextCredentials).toEqual([]);
+        expect(await store.getQueueItem(session.id, next.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+      }
+    } finally { allowClaim(); release(); await session.thread().kick(); claim?.mockRestore(); faux.unregister(); vi.unstubAllEnvs(); }
+  });
+
+  it("fences a build that finishes after terminal shutdown", async () => {
+    api = await bootTestApi();
+    const { engineHost: host, engineStore: store } = api.providers;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const getSession = store.getSession.bind(store);
+    const reading = vi.spyOn(store, "getSession").mockImplementationOnce(async id => { entered(); await held; return getSession(id); });
+    const building = host.sessionFor("late-shutdown-build", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    try {
+      await entering;
+      host.evictAll();
+      release();
+      const late = await building;
+      expect(host.liveSession(late.id)).toBeNull();
+      const sent = await late.prompt("must wait for next boot");
+      expect(await store.getQueueItem(late.id, sent.queueItemId)).toMatchObject({ status: "queued", attemptCount: 0 });
+      expect(late.isExecutionFenced).toBe(true);
+      expect(late.hasActiveExecution).toBe(false);
+    } finally { release(); reading.mockRestore(); await building; }
   });
 
   it("keeps the cached owner while pending release can still fail", async () => {
