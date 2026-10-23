@@ -80,12 +80,12 @@ export function proxyPeriodRows(period: ResolvedUsagePeriod): SQL {
     WHERE created_at>=${first} AND created_at<${last} AND (created_at<${firstDay} OR created_at>=${lastDay})
   )`;
   return sql`(
-    SELECT dimensions->>6 AS harness,org_id,user_id,team_id,created_at,
+    SELECT dimensions->>6 AS harness,provider AS provider_kind,org_id,user_id,team_id,created_at,
       total_tokens,cost_total::float8 AS cost_usd,turns
     FROM ${summarySource} summary WHERE source_kind='proxy' AND turns>0
       AND created_at>=${first} AND created_at<${last}
     UNION ALL
-    SELECT harness,org_id,user_id,team_id,created_at,total_tokens,cost_usd,1::bigint AS turns
+    SELECT harness,provider_kind,org_id,user_id,team_id,created_at,total_tokens,cost_usd,1::bigint AS turns
     FROM llm_proxy_requests WHERE total_tokens>0
       AND created_at>=${period.startMs} AND created_at<${period.endMs}
       AND (created_at<${first} OR created_at>=${last})

@@ -4363,7 +4363,7 @@ export interface UsageMemberSummary extends UsageWindow {
 /** A Valet activity kind, derived from the session id in `cost_entries`
  * (`use_case`): `orchestrator`, `session` (interactive chat + child sessions),
  * `workflow`, or `proxy` (external Claude Code / Codex). */
-export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
+export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy" | "tagging";
 
 /** A spend bucket with the full token-type split (input/output/cache) so cache
  * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
@@ -6208,7 +6208,7 @@ export interface ProxyRequestListItem {
   userId: string | null;
   teamId?: string | null;
   apiKeyId: string;
-  providerKind: "anthropic" | "openai";
+  providerKind: "anthropic" | "openai" | "tagging";
   model: string | null;
   harness: string | null;
   endpoint: string;
@@ -6649,5 +6649,7 @@ export interface ToolIntentKeyUsage {
   origin: "seed" | "classifier" | "admin"; calls: number; uniqueUsers: number; errorRate: number;
 }
 export interface ToolIntentUsage {
+  unlabeledCalls?: number;
+  emergingCalls?: number;
   keys: ToolIntentKeyUsage[]; consolidationDue: boolean; canManage: boolean;
 }

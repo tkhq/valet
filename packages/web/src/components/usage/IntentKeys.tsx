@@ -28,11 +28,12 @@ function KeyEditor({ row, keys }: { row: ToolIntentKeyUsage; keys: ToolIntentKey
 }
 
 export function IntentKeys({ data, selected, onSelect }: { data: ToolIntentUsage; selected: string; onSelect: (key: string) => void }) {
-  const active = data.keys.filter(key => key.status !== "merged");
+  const active = data.keys.filter(key => key.status !== "merged" && (data.canManage || key.status !== "provisional"));
   const emerging = active.filter(key => key.status === "provisional");
   const bars = active.filter(key => key.status === "active" && key.calls > 0).map(key => ({ key: key.key, label: key.label, calls: key.calls }));
-  const emergingCalls = emerging.reduce((sum, key) => sum + key.calls, 0);
+  const emergingCalls = data.emergingCalls ?? emerging.reduce((sum, key) => sum + key.calls, 0);
   if (emergingCalls) bars.push({ key: "__emerging", label: "Emerging", calls: emergingCalls });
+  if (data.unlabeledCalls) bars.push({ key: "__unlabeled", label: "Unlabeled", calls: data.unlabeledCalls });
   bars.sort((a, b) => b.calls - a.calls);
   const max = Math.max(1, ...bars.map(bar => bar.calls));
   return <Card className="min-w-0"><CardHeader className="flex flex-wrap items-center justify-between gap-3"><CardTitle>Purpose of tool calls</CardTitle>
@@ -46,7 +47,7 @@ export function IntentKeys({ data, selected, onSelect }: { data: ToolIntentUsage
         <span className="break-words font-medium text-ink">{bar.label}</span>
         <svg className="col-span-2 w-full" height="24" aria-label={`${bar.label}: ${bar.calls} ${bar.calls === 1 ? "call" : "calls"}`}><rect width={`${bar.calls / max * 85}%`} height="20" rx="3" className={bar.key === "__emerging" ? "fill-muted" : "fill-accent-500"} /><text x="98%" y="15" textAnchor="end" className="fill-ink text-xs">{bar.calls.toLocaleString()}</text></svg>
       </button>)}</div>}
-    {emergingCalls > 0 && <details className="mt-4"><summary className="cursor-pointer text-sm text-muted">Emerging keys ({emerging.filter(key => key.calls > 0).length})</summary>
+    {data.canManage && emergingCalls > 0 && <details className="mt-4"><summary className="cursor-pointer text-sm text-muted">Emerging keys ({emerging.filter(key => key.calls > 0).length})</summary>
       <ul className="mt-2 space-y-1">{emerging.filter(key => key.calls > 0).map(key => <li key={key.key}><Button size="sm" variant="ghost" onClick={() => onSelect(key.key)}>{key.label}: {key.calls}</Button><p className="text-xs text-muted">{key.definition}</p></li>)}</ul>
     </details>}
   </CardBody>

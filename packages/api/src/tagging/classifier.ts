@@ -6,10 +6,10 @@ const prediction = z.object({ index: z.number().int().nonnegative(), labels: z.a
   key: z.string().max(100), confidence: z.number().finite().min(0).max(1),
 })).max(100) });
 const output = z.object({ subjects: z.array(prediction).max(50), newKeys: z.array(z.object({
-  key: z.string().max(100), label: z.string().trim().min(1).max(100), definition: z.string().trim().min(1).max(1000),
+  key: z.string().max(100), label: z.string().trim().min(1).max(60), definition: z.string().trim().min(1).max(200),
 })).max(50).default([]) });
 export type ClassifierOutput = z.infer<typeof output>;
-export type Classify = (request: { prompt: string; subjects: readonly TagSubject[]; dimension: string; signal: AbortSignal }) => Promise<{ text: string; model: string }>;
+export type Classify = (request: { prompt: string; subjects: readonly TagSubject[]; dimension: string; signal: AbortSignal }) => Promise<{ text: string; model: string; stopReason?: string }>;
 
 export function classifierPrompt(dimension: Dimension, keys: readonly RegistryKey[], subjects: readonly TagSubject[]): string {
   return [
@@ -26,8 +26,25 @@ export function classifierPrompt(dimension: Dimension, keys: readonly RegistryKe
 }
 
 export function parseClassification(text: string): ClassifierOutput {
-  try {
-    const parsed = output.safeParse(JSON.parse(text));
-    return parsed.success ? parsed.data : { subjects: [], newKeys: [] };
-  } catch { return { subjects: [], newKeys: [] }; }
+  const start = text.indexOf("{");
+  let depth = 0; let quoted = false; let escaped = false;
+  for (let end = start; start >= 0 && end < text.length; end++) {
+    const char = text[end];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{") depth++;
+    else if (char === "}" && --depth === 0) {
+      const envelope = z.object({ subjects: z.array(z.unknown()).max(50), newKeys: z.array(z.unknown()).max(50).default([]) })
+        .parse(JSON.parse(text.slice(start, end + 1)));
+      return { subjects: envelope.subjects.flatMap(row => {
+        const parsed = prediction.safeParse(row); return parsed.success ? [parsed.data] : [];
+      }), newKeys: envelope.newKeys.flatMap(row => {
+        const parsed = output.shape.newKeys.unwrap().element.safeParse(row); return parsed.success ? [parsed.data] : [];
+      }) };
+    }
+  }
+  throw new Error("Invalid classifier JSON. Retry the queued batch.");
 }

@@ -3,9 +3,9 @@
  * Consumes `GET /api/usage/breakdown`, `GET /api/usage/items`.
  * Routed through the central `api` client for 401→login handling.
  */
-import type { ExternalUsageResponse } from "@valet/api/wire";
 import { keepPreviousData, type UseQueryOptions } from "@tanstack/react-query";
 import type {
+  ExternalUsageResponse,
   UsageDrillResponse,
   UsagePeriodSelection,
   UsageBreakdownResponse,

@@ -1576,7 +1576,7 @@ SELECT
         COALESCE(p."team_id", p."user_id") AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case", p."provider_kind" AS "provider"
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", CASE WHEN p.provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END AS "use_case", p."provider_kind" AS "provider"
 FROM "llm_proxy_requests" p
 -- Only rows that carry usage count as billable turns — mirrors the engine
 -- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and
@@ -1763,7 +1763,7 @@ BEGIN
       CASE WHEN team_id IS NOT NULL THEN 'team' ELSE 'user' END,
       COALESCE(team_id,user_id), NULL, NULL,
       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
-      cost_usd, cost_usd IS NOT NULL, 'proxy', provider_kind
+      cost_usd, cost_usd IS NOT NULL, CASE WHEN provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END, provider_kind
     FROM llm_proxy_requests p WHERE total_tokens > 0;
 
   -- usage analytics indexes
@@ -2080,7 +2080,7 @@ CREATE OR REPLACE VIEW usage_daily_entries AS
  WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
- COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
  FROM usage_daily h WHERE h.source_kind='proxy';
 CREATE OR REPLACE VIEW usage_daily_ready AS SELECT 1 AS version FROM usage_daily WHERE false;
 ANALYZE usage_daily;
@@ -2105,7 +2105,7 @@ CREATE OR REPLACE VIEW usage_hourly_entries AS
  WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
- COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
  FROM usage_hourly h WHERE h.source_kind='proxy';
 CREATE OR REPLACE VIEW usage_hourly_ready AS
  SELECT 1 AS version FROM usage_entry_facts f,llm_proxy_requests p,usage_hourly h,usage_hourly_progress progress
@@ -2844,7 +2844,7 @@ CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (cr
 CREATE TABLE IF NOT EXISTS tag_keys (
  org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
  label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
- origin text NOT NULL, status text NOT NULL, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ origin text NOT NULL, status text NOT NULL, edited_at bigint, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
  PRIMARY KEY (org_id, dimension, key)
 );
 --> statement-breakpoint
@@ -2871,11 +2871,11 @@ CREATE TABLE IF NOT EXISTS tag_jobs (
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 );
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS tag_jobs_due ON tag_jobs (next_attempt_at);
+CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS tag_dimension_state (
  org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
- consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+ retry_other boolean NOT NULL DEFAULT false, key_limit integer NOT NULL DEFAULT 100, consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
 );
 --> statement-breakpoint
 
@@ -2891,3 +2891,6 @@ SELECT DISTINCT ON (l.org_id, l.subject_type, l.subject_id, l.dimension, r.key) 
  l.confidence, l.model, l.input_hash, l.classified_at
 FROM tag_labels l JOIN resolved r ON r.org_id = l.org_id AND r.dimension = l.dimension AND r.original_key = l.key
 WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.classified_at DESC, l.confidence DESC;
+
+--> statement-breakpoint
+CREATE OR REPLACE VIEW tagging_accounting_ready AS SELECT 1 AS version WHERE false;

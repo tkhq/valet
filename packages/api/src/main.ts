@@ -1,4 +1,3 @@
-import { configureSlackIngress } from "./channels/slack-inbox.js";
 /**
  * Node server boot.
  *
@@ -10,6 +9,7 @@ import { configureSlackIngress } from "./channels/slack-inbox.js";
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -338,8 +338,7 @@ wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
 // work can settle in the boot chain, so this subscribes before it.
 wireDeliveryTurnFailures(providers.eventStream, providers.db);
-// A restored submission can settle during the first boot-chain step. Subscribe
-// before that work starts so automatic naming does not miss the completion.
+// Subscribe to automatic naming before restored submissions can settle.
 providers.autoTitleHost.start();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs

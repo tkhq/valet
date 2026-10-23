@@ -1,7 +1,3 @@
-import { z } from "zod";
-import { TagRegistry } from "../tagging/registry.js";
-const tagKeyEdit = z.object({ label: z.string().trim().min(1).max(100), definition: z.string().trim().min(1).max(1000) });
-const tagKeyMerge = z.object({ into: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/) });
 /**
  * `/api/org` — settings-shell org surface (split-settings design).
  *
@@ -10,6 +6,8 @@ const tagKeyMerge = z.object({ into: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/) 
  *   GET   /api/org/directory         → org member + gate on: display identity of every
  *                                      member (no role, no join date) — the teams UI's
  *                                      roster names and add-member picker
+ *   PATCH /api/org/tag-keys/:dimension/:key → org admin: edit a key
+ *   POST  /api/org/tag-keys/:dimension/:key/merge → org admin: merge keys
  *   GET   /api/org/members           → org admin + gate on: member roster
  *   PATCH /api/org/members/:userId   → org admin + gate on: set a member's role
  *
@@ -18,6 +16,8 @@ const tagKeyMerge = z.object({ into: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/) 
  * `{error:"organizations not enabled"}` when the gate is off, admin or not
  * (spec: "the gate toggle must always be reachable by admins").
  */
+import { z } from "zod";
+import { RegistryConflict, TagRegistry } from "../tagging/registry.js";
 import { Hono, type Context } from "hono";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
@@ -447,6 +447,9 @@ orgRouter.get("/mcp-servers", async (c) => {
   return c.json(body);
 });
 
+const tagKeyEdit = z.object({ label: z.string().trim().min(1).max(60), definition: z.string().trim().min(1).max(200) });
+const tagKeyMerge = z.object({ into: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/) });
+
 // Uses the same org-settings gate as provider and entitlement changes.
 orgRouter.patch("/tag-keys/:dimension/:key", async c => {
   const forbidden = await requireOrgAdmin(c);
@@ -456,7 +459,10 @@ orgRouter.patch("/tag-keys/:dimension/:key", async c => {
   try {
     await new TagRegistry(c.var.providers.db, c.var.user.orgId).edit(c.req.param("dimension"), c.req.param("key"), parsed.data);
     return c.json({ ok: true });
-  } catch { return c.json({ error: "Tag key could not be edited. Check its label and definition, then reload the registry and retry." }, 400); }
+  } catch (error) {
+    if (error instanceof RegistryConflict) return c.json({ error: error.message }, 409);
+    throw error;
+  }
 });
 
 orgRouter.post("/tag-keys/:dimension/:key/merge", async c => {
@@ -467,5 +473,8 @@ orgRouter.post("/tag-keys/:dimension/:key/merge", async c => {
   try {
     await new TagRegistry(c.var.providers.db, c.var.user.orgId).merge(c.req.param("dimension"), c.req.param("key"), parsed.data.into);
     return c.json({ ok: true });
-  } catch { return c.json({ error: "Tag keys could not be merged. Choose existing keys without a merge cycle and retry after the current tagging batch." }, 400); }
+  } catch (error) {
+    if (error instanceof RegistryConflict) return c.json({ error: error.message }, 409);
+    throw error;
+  }
 });

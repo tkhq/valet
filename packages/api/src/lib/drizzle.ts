@@ -25,7 +25,7 @@ import { normalizeLegacyDefinition } from "@valet/workflow";
 import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
 import { prepareAuxUsageRollups, prepareSkillCompanionUsage, SKILL_COMPANION_USAGE_SQL, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
-import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
+import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql, taggingAccountingPublishSql } from "./usage-analytics-migration.js";
 import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
@@ -412,9 +412,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "tag_keys", probe: { kind: "table", table: "tag_keys" }, sql: `CREATE TABLE IF NOT EXISTS tag_keys (
  org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
  label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
- origin text NOT NULL, status text NOT NULL, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ origin text NOT NULL, status text NOT NULL, edited_at bigint, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
  PRIMARY KEY (org_id, dimension, key)
 )` },
+  { describe: "tag_keys.edited_at and example privacy", probe: { kind: "column", table: "tag_keys", column: "edited_at" },
+    sql: `DO $repair$ BEGIN ALTER TABLE tag_keys ADD COLUMN IF NOT EXISTS edited_at bigint; UPDATE tag_keys SET examples = '[]'::jsonb, edited_at = CASE WHEN origin = 'seed' AND updated_at <> created_at THEN updated_at END; END $repair$` },
   { describe: "tag_labels", probe: { kind: "table", table: "tag_labels" }, sql: `CREATE TABLE IF NOT EXISTS tag_labels (
  org_id text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, dimension text NOT NULL, key text NOT NULL,
  mode text NOT NULL, confidence float8 NOT NULL CHECK (confidence >= 0 AND confidence <= 1), model text NOT NULL,
@@ -433,11 +435,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
  version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 )` },
-  { describe: "tag_jobs_due", probe: { kind: "index", index: "tag_jobs_due" }, sql: `CREATE INDEX IF NOT EXISTS tag_jobs_due ON tag_jobs (next_attempt_at)` },
+  { describe: "tag_jobs_retry_due", probe: { kind: "index", index: "tag_jobs_retry_due" }, sql: `DO $repair$ BEGIN DROP INDEX IF EXISTS tag_jobs_due; CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5; END $repair$` },
   { describe: "tag_dimension_state", probe: { kind: "table", table: "tag_dimension_state" }, sql: `CREATE TABLE IF NOT EXISTS tag_dimension_state (
  org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
- consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+ retry_other boolean NOT NULL DEFAULT false, key_limit integer NOT NULL DEFAULT 100, consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
 )` },
+  { describe: "tag_dimension_state.key_limit", probe: { kind: "column", table: "tag_dimension_state", column: "key_limit" }, sql: `ALTER TABLE tag_dimension_state ADD COLUMN IF NOT EXISTS key_limit integer NOT NULL DEFAULT 100` },
+  { describe: "tag_dimension_state.retry_other", probe: { kind: "column", table: "tag_dimension_state", column: "retry_other" }, sql: `ALTER TABLE tag_dimension_state ADD COLUMN IF NOT EXISTS retry_other boolean NOT NULL DEFAULT false` },
   { describe: "tag resolved labels", probe: { kind: "table", table: "tag_resolved_labels" }, sql: `CREATE OR REPLACE VIEW tag_resolved_labels AS
 WITH RECURSIVE resolved AS (
  SELECT org_id, dimension, key AS original_key, key, status, merged_into, 0 AS depth FROM tag_keys
@@ -2144,6 +2148,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "index", index: "event_deliveries_subscription" },
     sql: 'CREATE INDEX IF NOT EXISTS "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at")',
   },
+
+  { describe: "tagging accounting use case", probe: { kind: "table", table: "tagging_accounting_ready" },
+    sql: `DO $repair$ BEGIN ${taggingAccountingPublishSql} END $repair$` },
 
 ];
 

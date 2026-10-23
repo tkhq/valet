@@ -26,7 +26,7 @@ export const toolIntentDimension = defineDimension({
     if (subject.text.trim() || !subject.command) return undefined;
     const root = subject.command.split(" ")[0];
     if (["threads", "sessions", "send", "chat", "gates"].includes(root ?? "")) return "delegation";
-    if (subject.command === "status") return "deploy_ops";
+    if (subject.command === "status") return "other";
     return undefined;
   },
 });

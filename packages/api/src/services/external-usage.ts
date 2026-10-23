@@ -1,4 +1,6 @@
-import { intentKey, intentKeyFilter, intentLabelJoin, intentLabelOn, toolIntentUsage } from "../tagging/usage.js";
+import { intentKey, intentKeyFilter, intentJoins, toolIntentUsage } from "../tagging/usage.js";
+import { taggingAvailable } from "../tagging/availability.js";
+import { readRegistry } from "../tagging/registry.js";
 import { enqueueTagging } from "../tagging/tagger.js";
 import { canAccessSessionResources } from "./session-access.js";
 import type { Providers } from "../providers/types.js";
@@ -39,7 +41,7 @@ export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise
       },
       setWhere: and(eq(externalCalls.orgId, call.orgId), sql`${externalCalls.userId} IS NOT DISTINCT FROM ${call.userId ?? null}`),
     }).returning({ id: externalCalls.id });
-    if (rows.length) await enqueueTagging(db, call.orgId, "tool_intent", [{ type: "external_call", id: call.id }]);
+    if (rows.length && await taggingAvailable(db, call.orgId)) await enqueueTagging(db, call.orgId, "tool_intent", [{ type: "external_call", id: call.id }]);
   });
 }
 
@@ -89,18 +91,20 @@ export async function getExternalUsage(db: AppDb, opts: {
     sql`${externalCalls.createdAt} >= ${period.startMs} AND ${externalCalls.createdAt} < ${period.endMs}`,
     scope.scope === "me" ? eq(externalCalls.userId, scope.userId) : undefined,
     scope.scope === "team" ? and(eq(externalCalls.ownerType, "team"), eq(externalCalls.ownerId, scope.teamId)) : undefined);
+  const registry = await readRegistry(db, scope.orgId, "tool_intent");
+  const { join: intentLabelJoin, on: intentLabelOn } = intentJoins(registry, scope.orgId, opts.canManage ?? false);
   const where = and(baseWhere, intentKeyFilter(opts.key));
-  const classification = await toolIntentUsage(db, scope.orgId, baseWhere, opts.canManage ?? false);
+  const classification = await toolIntentUsage(db, scope.orgId, baseWhere, opts.canManage ?? false, registry);
   const detailsVisible = scope.scope !== "team" || scope.byMember;
   const [daily, tools, clients] = await Promise.all([
     db.select({ dayMs: sql<number>`floor(${externalCalls.createdAt}::numeric / 86400000) * 86400000`.mapWith(Number),
       surface: externalCalls.surface, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
       .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
-    db.select({ key: intentKey, name: externalCalls.name, surface: externalCalls.surface,
+    db.select({ key: sql<null>`NULL`, name: externalCalls.name, surface: externalCalls.surface,
       calls: sql<number>`count(*)`.mapWith(Number),
       errorRate: sql<number>`coalesce(count(*) filter (where ${externalCalls.outcome} = 'error')::float / nullif(count(*) filter (where ${externalCalls.outcome} in ('ok', 'error')), 0), 0)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number) }).from(externalCalls)
-      .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.name, externalCalls.surface, intentKey).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
+      .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.name, externalCalls.surface).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
     db.select({ surface: externalCalls.surface, name: sql<string>`coalesce(${externalCalls.clientName}, case when ${externalCalls.surface} = 'hosted' then 'Hosted Valet' else 'Unknown client' end)`,
       version: externalCalls.clientVersion, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
       .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.clientName, externalCalls.clientVersion, externalCalls.surface)

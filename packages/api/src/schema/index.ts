@@ -1764,7 +1764,7 @@ export const llmProxyRequests = pgTable(
     userId: text("user_id"),
     teamId: text("team_id"),
     apiKeyId: text("api_key_id").notNull(),
-    providerKind: text("provider_kind", { enum: ["anthropic", "openai"] }).notNull(),
+    providerKind: text("provider_kind", { enum: ["anthropic", "openai", "tagging"] }).notNull(),
     model: text("model"),
     harness: text("harness"),
     endpoint: text("endpoint").notNull(),
@@ -3121,7 +3121,7 @@ export const tagKeys = pgTable("tag_keys", {
   examples: jsonb("examples").$type<string[]>().notNull().default([]),
   origin: text("origin", { enum: ["seed", "classifier", "admin"] }).notNull(),
   status: text("status", { enum: ["provisional", "active", "merged"] }).notNull(),
-  mergedInto: text("merged_into"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  editedAt: bigint("edited_at", { mode: "number" }), mergedInto: text("merged_into"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 }, t => [primaryKey({ columns: [t.orgId, t.dimension, t.key] }), check("tag_key_format", sql`${t.key} ~ '^[a-z][a-z0-9_]{0,31}$'`)]);
 
 export const tagLabels = pgTable("tag_labels", {
@@ -3144,11 +3144,13 @@ export const tagJobs = pgTable("tag_jobs", {
   orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
   version: integer("version").notNull().default(1), attempts: integer("attempts").notNull().default(0),
   force: boolean("force").notNull().default(false), nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
-}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] }), index("tag_jobs_due").on(t.nextAttemptAt)]);
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] }), index("tag_jobs_retry_due").on(t.nextAttemptAt).where(sql`${t.attempts} < 5`)]);
 
 // One serial classifier per org/dimension across API replicas.
 export const tagDimensionState = pgTable("tag_dimension_state", {
   orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), leaseToken: text("lease_token"),
   leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  retryOther: boolean("retry_other").notNull().default(false),
+  keyLimit: integer("key_limit").notNull().default(100),
   consolidationDue: boolean("consolidation_due").notNull().default(false),
 }, t => [primaryKey({ columns: [t.orgId, t.dimension] })]);

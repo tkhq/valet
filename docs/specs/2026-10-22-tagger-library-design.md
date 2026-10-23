@@ -14,7 +14,8 @@ Registries are isolated by organization and dimension in `tag_keys`.
 Labels live in `tag_labels`, not in `external_calls`.
 A partial unique index enforces single-mode assignments.
 Merges retain the original label rows.
-The resolved-label view follows merge chains and deduplicates multi tags.
+Usage resolves a small registry map once per request instead of recursively scanning labels.
+The generic resolved-label view remains available for multi-label library aggregates.
 Classifier keys start provisional and activate at five assignments or two distinct users.
 
 The caller registers a renderer for each subject type.
@@ -29,32 +30,46 @@ Each pair handles at most 50 subjects per run.
 A database lease serializes classification across API replicas.
 Expired workers cannot publish labels.
 Provider failures retry with exponential delay, up to five attempts.
+The fifth failure deletes the job and increments `valet.tagging.dead_letters`.
+Enqueue skips organizations without a tagging model, using a cached provider-resolution check.
+Drains select the four oldest due organization/dimension pairs without an active lease.
 An enqueue during classification survives acknowledgement of the older job version.
 No exception payload or subject text is stored in jobs.
 
 One prompt template serves every dimension.
+Batches contain one owner principal: one team or one personal user.
+New keys require at least two distinct proposing users and no personal subjects.
+Labels are capped at 60 characters and definitions at 200.
+Key examples store subject references, never intent text.
+Retention nulls intent after 90 days but keeps key labels.
+Forced re-tagging skips empty text without deleting existing labels.
 Closed dimensions cannot create keys.
-Invalid single output becomes `other`.
+Malformed or truncated output retries without caching its input hash.
+Valid unknown keys become `other`.
+Invalid individual predictions do not discard valid neighbors.
 Invalid multi keys are dropped.
 Rules bypass the provider and record confidence 1 with model `rule`.
-New key creation schedules one bounded retry for up to 50 existing `other` subjects.
+New key creation schedules durable retries for existing `other` subjects in batches of 50.
 Each such subject is retried at most once.
 The default registry limit is 100 non-merged keys.
 At the limit, proposals stop and the registry reports consolidation due.
 
 The host resolves the configured XS tier through the existing provider path.
 No new API key is required.
-Model usage enters the existing engine usage projection.
+Model usage enters the existing token/cost accounting rail as the separate `tagging` use case.
+Internal accounting facts contain no request or response text.
 A batch's tokens and cost are divided among its user/team billing principals.
-Archived accounting sessions use the `tagger:` prefix.
+No placeholder agent sessions are inserted.
 The same usage and scope queries include that spend.
 Labels retain null actors for automated team calls.
-Their accounting sessions reuse the existing team runtime principal because session rows require an identity.
+Spend keeps the same nullable user and team ownership.
 
 ## Usage UI
 
 The Tool usage view shows a purpose chart and key definitions.
-Provisional keys share an Emerging bar with a per-key drill-down.
+Provisional keys share an Emerging bar.
+Only organization admins can read their labels and definitions.
+Unlabeled calls have a separate bar.
 The key filter applies to call counts, top tools, clients, and recent intents.
 The purpose chart retains its full distribution while a key is selected.
 Surface, period, and personal/team/org filters still apply.

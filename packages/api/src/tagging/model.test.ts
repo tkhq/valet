@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs } from "../schema/index.js";
+import { orgs, agentSessions } from "../schema/index.js";
 import { ensureEnvProviders } from "../proxy/upstream.js";
 import { getUsageBreakdown } from "../services/usage.js";
 import { taggingModel } from "./model.js";
@@ -27,12 +27,14 @@ it("uses the configured XS provider and projects billed tokens with user and tea
       { type: "external_call", id: "automated", text: "Run the scheduled report.", userId: null, ownerType: "team", ownerId: "team" },
     ] });
     expect(result.model).toContain("haiku");
-    const rows = await db.execute(sql`SELECT user_id, owner_type, owner_id, total_tokens FROM cost_entries WHERE session_id LIKE 'tagger:%'`) as { rows: { user_id: string; owner_type: string; owner_id: string; total_tokens: unknown }[] };
+    const rows = await db.execute(sql`SELECT user_id, owner_type, owner_id, total_tokens FROM cost_entries WHERE use_case = 'tagging'`) as { rows: { user_id: string; owner_type: string; owner_id: string; total_tokens: unknown }[] };
     expect(rows.rows).toHaveLength(3);
-    expect(rows.rows).toEqual(expect.arrayContaining([expect.objectContaining({ user_id: "alice", owner_type: "user", owner_id: "alice" }), expect.objectContaining({ user_id: "bob", owner_type: "team", owner_id: "team" }), expect.objectContaining({ user_id: "team:team", owner_type: "team", owner_id: "team" })]));
+    expect(rows.rows).toEqual(expect.arrayContaining([expect.objectContaining({ user_id: "alice", owner_type: "user", owner_id: "alice" }), expect.objectContaining({ user_id: "bob", owner_type: "team", owner_id: "team" }), expect.objectContaining({ user_id: null, owner_type: "team", owner_id: "team" })]));
     expect(rows.rows.reduce((sum, row) => sum + Number(row.total_tokens), 0)).toBeGreaterThan(0);
     const breakdown = await getUsageBreakdown(db, { scope: { scope: "me", orgId: "org", userId: "alice" }, windowMs: 86400000 });
     expect(breakdown.totalTokens).toBeGreaterThan(0);
     expect(breakdown.activeAgents).toBe(0);
+    expect(breakdown.byUseCase.find(row => row.useCase === "tagging")?.totalTokens).toBeGreaterThan(0);
+    expect(await db.select().from(agentSessions)).toHaveLength(0);
   } finally { faux.unregister(); }
 });

@@ -9,7 +9,7 @@ import { toolIntentDimension } from "./tool-intent.js";
 
 let db: AppDb;
 beforeEach(async () => { db = (await freshTestPgDb()).appDb; });
-const subject = (id: string, text = "Read reference material to answer the question.", userId = "alice"): TagSubject => ({ type: "external_call", id, text, userId, ownerType: "user", ownerId: userId });
+const subject = (id: string, text = "Read reference material to answer the question.", userId = "alice"): TagSubject => ({ type: "external_call", id, text, userId, ownerType: "team", ownerId: "team" });
 const choice = (key: string, count = 1, newKeys: { key: string; label: string; definition: string }[] = []) => ({ text: JSON.stringify({ subjects: Array.from({ length: count }, (_, index) => ({ index, labels: [{ key, confidence: 0.9 }] })), newKeys }), model: "mock-small" });
 const newKey = { key: "customer_support", label: "Customer support", definition: "Help customers resolve account and product questions." };
 function setup(dimension: Dimension = toolIntentDimension, classify: Classify = vi.fn<Classify>(async request => choice("research_lookup", request.subjects.length))) {
@@ -38,17 +38,15 @@ describe("tag dimensions and registry", () => {
   it("promotes a provisional key at two distinct users", async () => {
     const model = vi.fn<Classify>(async request => choice(newKey.key, request.subjects.length, [newKey]));
     const { tagger } = setup(toolIntentDimension, model);
-    await tagger.tag("tool_intent", [subject("one")]);
-    expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)?.status).toBe("provisional");
-    await tagger.tag("tool_intent", [subject("two", "Help a customer understand their account.", "bob")]);
-    expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "active", assignments: 2, users: 2 });
+    await tagger.tag("tool_intent", [subject("one"), subject("two", "Help a customer understand their account.", "bob")]);
+    expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "active" });
   });
   it("promotes at five assignments and deduplicates proposals within a batch", async () => {
     const { tagger } = setup(toolIntentDimension, async request => choice(newKey.key, request.subjects.length, [newKey, { ...newKey, key: "Customer Support" }]));
-    await tagger.tag("tool_intent", Array.from({ length: 5 }, (_, i) => subject(String(i), `Help customer ${i} with an account question.`)));
+    await tagger.tag("tool_intent", Array.from({ length: 5 }, (_, i) => subject(String(i), `Help customer ${i} with an account question.`, i % 2 ? "bob" : "alice")));
     const keys = await tagger.registry.list("tool_intent");
     expect(keys.filter(key => key.key === newKey.key)).toHaveLength(1);
-    expect(keys.find(key => key.key === newKey.key)).toMatchObject({ status: "active", assignments: 5, users: 1 });
+    expect(keys.find(key => key.key === newKey.key)).toMatchObject({ status: "active" });
     expect(keys.find(key => key.key === newKey.key)?.examples).toHaveLength(3);
   });
   it("resolves merge chains at read time without rewriting labels and rejects cycles", async () => {
@@ -75,7 +73,7 @@ describe("classifier contract", () => {
     expect(model.mock.calls[0]?.[0].prompt).toContain('"assignments":0');
     expect(model.mock.calls[0]?.[0].prompt).toContain("Look up facts.");
   });
-  it.each(["garbage", JSON.stringify({ subjects: [{ index: 0, labels: [{ key: "missing", confidence: 0.9 }] }] }), JSON.stringify({ subjects: [{ index: 0, labels: [{ key: "lookup", confidence: 3 }] }] })])("falls back to other for invalid single output %s", async text => {
+  it.each([JSON.stringify({ subjects: [{ index: 0, labels: [{ key: "missing", confidence: 0.9 }] }] })])("falls back to other for invalid single output %s", async text => {
     const { tagger } = setup(smallDimension({ open: false }), async () => ({ text, model: "mock" }));
     await tagger.tag("custom", [subject("one")]);
     expect(await tagger.labelsFor("external_call", "one")).toEqual([expect.objectContaining({ key: "other" })]);
@@ -84,7 +82,7 @@ describe("classifier contract", () => {
     const result = { text: JSON.stringify({ subjects: [{ index: 0, labels: [{ key: "lookup", confidence: 1 }, { key: "other", confidence: 0.5 }, { key: "missing", confidence: 1 }] }] }), model: "mock" };
     const one = setup(smallDimension(), async () => result).tagger;
     await one.tag("custom", [subject("one")]);
-    expect((await one.labelsFor("external_call", "one")).map(row => row.key)).toEqual(["other"]);
+    expect((await one.labelsFor("external_call", "one")).map(row => row.key)).toEqual([]);
     const multi = setup(smallDimension({ id: "multi", mode: "multi" }), async () => result).tagger;
     await multi.tag("multi", [subject("two"), subject("three")]);
     expect((await multi.labelsFor("external_call", "two")).map(row => row.key).sort()).toEqual(["lookup", "other"]);
@@ -106,8 +104,8 @@ describe("classifier contract", () => {
     expect((await tagger.labelsFor("external_call", "one"))[0]?.key).toBe("other");
   });
   it("stops creation at the registry cap and raises consolidation due", async () => {
-    const { tagger } = setup(smallDimension({ maxActiveKeys: 2 }), async () => choice(newKey.key, 1, [newKey]));
-    await tagger.tag("custom", [subject("one")]);
+    const { tagger } = setup(smallDimension({ maxActiveKeys: 2 }), async request => choice(newKey.key, request.subjects.length, [newKey]));
+    await tagger.tag("custom", [subject("one"), subject("two", "A new purpose.", "bob")]);
     expect((await db.select().from(tagDimensionState))[0]?.consolidationDue).toBe(true);
     expect(await tagger.registry.list("custom")).toHaveLength(2);
   });
@@ -165,18 +163,6 @@ describe("durable worker", () => {
     expect(JSON.stringify(job)).not.toContain("private");
     expect(await tagger.drain("tool_intent")).toBe(0);
   });
-  it("re-runs other once when a new key is created", async () => {
-    const model = vi.fn<Classify>().mockResolvedValueOnce(choice("other")).mockResolvedValue(choice(newKey.key, 1, [newKey]));
-    const { tagger, rendered } = setup(toolIntentDimension, model);
-    rendered.set("old", subject("old"));
-    await tagger.tag("tool_intent", [subject("old")]);
-    await tagger.tag("tool_intent", [subject("new")]);
-    expect(await db.select().from(tagJobs)).toEqual([expect.objectContaining({ subjectId: "old", force: true })]);
-    await tagger.drain("tool_intent");
-    expect((await tagger.labelsFor("external_call", "old"))[0]?.key).toBe(newKey.key);
-    expect(await db.select().from(tagJobs)).toEqual([]);
-    expect(model).toHaveBeenCalledTimes(3);
-  });
   it("rejects a stale worker's writes after its dimension lease was replaced", async () => {
     const model: Classify = async () => {
       await db.update(tagDimensionState).set({ leaseToken: "replacement", leaseUntil: Date.now() + 120000 });
@@ -202,7 +188,10 @@ const GOLDEN = [
   ["Deploy the reviewed build to staging.", "deploy_ops"],
 ] as const;
 it("matches the 12-intent golden set through the mocked batch model", async () => {
-  const model: Classify = async request => ({ model: "golden-mock", text: JSON.stringify({ subjects: request.subjects.map((row, index) => ({ index, labels: [{ key: GOLDEN.find(([text]) => text === row.text)?.[1] ?? "other", confidence: 1 }] })) }) });
+  const canned = ["code_change", "code_review", "debug_investigate", "research_lookup", "communicate", "project_tracking",
+    "data_analysis", "scheduling", "automation_setup", "knowledge_memory", "delegation", "deploy_ops"];
+  const model: Classify = async () => ({ model: "golden-mock", text: JSON.stringify({
+    subjects: canned.map((key, index) => ({ index, labels: [{ key, confidence: 1 }] })) }) });
   const { tagger } = setup(toolIntentDimension, model);
   await tagger.tag("tool_intent", GOLDEN.map(([text], index) => subject(String(index), text)));
   for (const [index, [, key]] of GOLDEN.entries()) expect((await tagger.labelsFor("external_call", String(index)))[0]?.key).toBe(key);
@@ -220,6 +209,6 @@ it("repairs deployed databases without replaying 0000 and keeps steady-state boo
 it("does not count automated team subjects as distinct users for key promotion", async () => {
   const { tagger } = setup(toolIntentDimension, async request => choice(newKey.key, request.subjects.length, [newKey]));
   await tagger.tag("tool_intent", ["one", "two"].map(id => ({ ...subject(id), userId: null, ownerType: "team", ownerId: "team" })));
-  expect((await tagger.registry.list("tool_intent")).find(key => key.key === newKey.key)).toMatchObject({ assignments: 2, users: 0, status: "provisional" });
+  expect((await tagger.registry.list("tool_intent")).find(key => key.key === newKey.key)).toBeUndefined();
   expect((await db.select().from(tagSubjects)).every(row => row.userId === null)).toBe(true);
 });

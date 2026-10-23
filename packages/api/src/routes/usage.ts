@@ -124,7 +124,7 @@ usageRouter.get("/items", async (c) => {
   const { db } = c.var.providers;
   const useCaseQ = c.req.query("useCase");
   if (!useCaseQ || !isUsageUseCase(useCaseQ)) {
-    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy." }, 400);
+    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy, tagging." }, 400);
   }
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
