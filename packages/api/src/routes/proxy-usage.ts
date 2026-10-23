@@ -151,7 +151,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
   const sinceMs = Date.now() - windowMs;
   // This endpoint backs the personal usage page. It remains personal for
   // admins too: organization and team records must not leak into this scope.
-  const scopeClause = sql`org_id = ${user.orgId} AND user_id = ${user.id}`;
+  const scopeClause = sql`org_id = ${user.orgId} AND user_id = ${user.id} AND provider_kind <> 'tagging'`;
 
   // drizzle's execute() is typed `unknown` for raw SQL; narrow to the
   // node-postgres/PGlite result shape ({ rows }) by casting the awaited value,
@@ -351,6 +351,7 @@ proxyUsageRouter.get("/requests", async (c) => {
   // honor a supplied user filter: both would expose another owner's records.
   conditions.push(eq(llmProxyRequests.orgId, user.orgId));
   conditions.push(eq(llmProxyRequests.userId, user.id));
+  conditions.push(sql`${llmProxyRequests.providerKind} <> 'tagging'`);
 
   if (filterModel) {
     conditions.push(eq(llmProxyRequests.model, filterModel));

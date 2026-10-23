@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/drizzle.js";
@@ -35,18 +36,22 @@ describe("tag dimensions and registry", () => {
     await setup(smallDimension({ id: "second" })).tagger.initialize("second");
     expect((await db.select().from(tagKeys)).filter(key => key.key === "other")).toHaveLength(2);
   });
-  it("promotes a provisional key at two distinct users", async () => {
+  it("keeps a two-user proposal provisional until ten assignments across two owner principals", async () => {
     const model = vi.fn<Classify>(async request => choice(newKey.key, request.subjects.length, [newKey]));
     const { tagger } = setup(toolIntentDimension, model);
     await tagger.tag("tool_intent", [subject("one"), subject("two", "Help a customer understand their account.", "bob")]);
+    expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "provisional", assignments: 2, owners: 1 });
+    await tagger.tag("tool_intent", Array.from({ length: 8 }, (_, i) => subject(`same-${i}`)));
+    expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "provisional", assignments: 10, owners: 1 });
+    await tagger.tag("tool_intent", [{ ...subject("other-owner"), ownerType: "user", ownerId: "team" }]);
     expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "active" });
   });
-  it("promotes at five assignments and deduplicates proposals within a batch", async () => {
+  it("deduplicates proposals and keeps five assignments provisional", async () => {
     const { tagger } = setup(toolIntentDimension, async request => choice(newKey.key, request.subjects.length, [newKey, { ...newKey, key: "Customer Support" }]));
     await tagger.tag("tool_intent", Array.from({ length: 5 }, (_, i) => subject(String(i), `Help customer ${i} with an account question.`, i % 2 ? "bob" : "alice")));
     const keys = await tagger.registry.list("tool_intent");
     expect(keys.filter(key => key.key === newKey.key)).toHaveLength(1);
-    expect(keys.find(key => key.key === newKey.key)).toMatchObject({ status: "active" });
+    expect(keys.find(key => key.key === newKey.key)).toMatchObject({ status: "provisional", assignments: 5 });
     expect(keys.find(key => key.key === newKey.key)?.examples).toHaveLength(3);
   });
   it("resolves merge chains at read time without rewriting labels and rejects cycles", async () => {
@@ -188,14 +193,39 @@ const GOLDEN = [
   ["Delegate the test migration to another assistant.", "delegation"],
   ["Deploy the reviewed build to staging.", "deploy_ops"],
 ] as const;
-it("matches the 12-intent golden set through the mocked batch model", async () => {
-  const canned = ["code_change", "code_review", "debug_investigate", "research_lookup", "communicate", "project_tracking",
-    "data_analysis", "scheduling", "automation_setup", "knowledge_memory", "delegation", "deploy_ops"];
-  const model: Classify = async () => ({ model: "golden-mock", text: JSON.stringify({
-    subjects: canned.map((key, index) => ({ index, labels: [{ key, confidence: 1 }] })) }) });
+// Fixed provider recordings, addressed by input bytes rather than expected position.
+const CANNED: Record<string, string> = {
+  "9da81e15bae235cc57c86a5450a445d803cd9029f21816596988e0222852c890": '{"labels":[{"key":"code_change","confidence":1}]}',
+  "6e4f5c2d0ebd6c75edbe45aeb12dfe20878e2e401cfad3e6f1de04341aa9fbf8": '{"labels":[{"key":"code_review","confidence":1}]}',
+  "eb68d63c3c8201298e7763477ee5894d28001c4003a14b92d5542516e81d2a97": '{"labels":[{"key":"debug_investigate","confidence":1}]}',
+  "1ffe56157f8aaf378578b1f54533bffe27ddd6485c2e73c31a4b570ddeb2c55e": '{"labels":[{"key":"research_lookup","confidence":1}]}',
+  "a7dc78a751ed5a1b3ed81683deaf09e9d9eaf5f3e94cd5ce09fef82c5041b06d": '{"labels":[{"key":"communicate","confidence":1}]}',
+  "e3a830f5ffb6662ef4cec27b9f2b38ffc730a12e05578e11f919d7f4a36fe529": '{"labels":[{"key":"project_tracking","confidence":1}]}',
+  "8ca038f4b71402ecfab1e2d93eedb6598f8eb211ce3d71a92c6ac8252932fbd6": '{"labels":[{"key":"data_analysis","confidence":1}]}',
+  "9c4d5c29aa7fdf254ab746a937b9be8d1583e74b49f01faf2e656c3efe257d2f": '{"labels":[{"key":"scheduling","confidence":1}]}',
+  "e6112259e680efd86d4ce5683eba8530683dd555831a655b496cc645ec22a79e": '{"labels":[{"key":"automation_setup","confidence":1}]}',
+  "60f6f81c3048f14679eb1584a3b7328d406a10b0b0d5c8c4edde04e46475f89a": '{"labels":[{"key":"knowledge_memory","confidence":1}]}',
+  "04d283b7da4d0f30a812731c910d9645b0da1420038e9c0a48b1ac2d8e2ff9b0": '{"labels":[{"key":"delegation","confidence":1}]}',
+  "e3a1ff529bb99178c5a125cefd0b3e0ba3f95ee53ecd835dbd98dec8c0dbda88": '{"labels":[{"key":"deploy_ops","confidence":1}]}',
+};
+it("matches reordered input hashes and handles a deliberately wrong canned answer", async () => {
+  const wrongText = "A deliberately misclassified recording.";
+  const recordings = { ...CANNED, [createHash("sha256").update(wrongText).digest("hex")]: '{"labels":[{"key":"not_registered","confidence":1}]}' };
+  const model: Classify = async request => ({ model: "golden-mock", text: JSON.stringify({
+    subjects: request.subjects.map((item, index) => ({ index, ...JSON.parse(recordings[createHash("sha256").update(item.text).digest("hex")] ?? '{"labels":[{"key":"other","confidence":0}]}') })) }) });
   const { tagger } = setup(toolIntentDimension, model);
-  await tagger.tag("tool_intent", GOLDEN.map(([text], index) => subject(String(index), text)));
-  for (const [index, [, key]] of GOLDEN.entries()) expect((await tagger.labelsFor("external_call", String(index)))[0]?.key).toBe(key);
+  const reordered = [...GOLDEN].reverse();
+  await tagger.tag("tool_intent", reordered.map(([text], index) => subject(String(index), text)));
+  for (const [index, [, key]] of reordered.entries()) expect((await tagger.labelsFor("external_call", String(index)))[0]?.key).toBe(key);
+  await tagger.tag("tool_intent", [subject("wrong", wrongText), subject("changed", GOLDEN[0][0] + " Changed.")]);
+  expect((await tagger.labelsFor("external_call", "wrong"))[0]?.key).toBe("other");
+  expect((await tagger.labelsFor("external_call", "changed"))[0]?.key).not.toBe(GOLDEN[0][1]);
+  // A valid but semantically wrong provider answer must not make the golden check pass.
+  const implementationHash = createHash("sha256").update(GOLDEN[0][0]).digest("hex");
+  recordings[implementationHash] = '{"labels":[{"key":"code_review","confidence":1}]}';
+  await tagger.tag("tool_intent", [subject("semantic-error", GOLDEN[0][0])]);
+  const wrongKey = (await tagger.labelsFor("external_call", "semantic-error"))[0]?.key;
+  expect(wrongKey).toBe("code_review"); expect(wrongKey).not.toBe(GOLDEN[0][1]);
 });
 
 it("repairs deployed databases without replaying 0000 and keeps steady-state boot lock-free", async () => {
@@ -212,4 +242,34 @@ it("does not count automated team subjects as distinct users for key promotion",
   await tagger.tag("tool_intent", ["one", "two"].map(id => ({ ...subject(id), userId: null, ownerType: "team", ownerId: "team" })));
   expect((await tagger.registry.list("tool_intent")).find(key => key.key === newKey.key)).toBeUndefined();
   expect((await db.select().from(tagSubjects)).every(row => row.userId === null)).toBe(true);
+});
+
+it("renews the lease between slow owner groups without reviving an expired token", async () => {
+  const start = Date.now(); let now = start;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const model: Classify = async req => { now += 29_000; return choice("research_lookup", req.subjects.length); };
+  try {
+    const { tagger, rendered } = setup(toolIntentDimension, model);
+    const subjects = Array.from({ length: 6 }, (_, i) => ({ ...subject(String(i)), ownerId: `team-${i}` }));
+    subjects.forEach(item => rendered.set(item.id, item));
+    await tagger.enqueueTagging("tool_intent", subjects);
+    expect(await tagger.drain("tool_intent")).toBe(6);
+    expect(await db.select().from(tagLabels)).toHaveLength(6);
+    expect(now - start).toBeGreaterThan(120_000);
+  } finally { clock.mockRestore(); }
+});
+
+it("requires ten assignments even after a second team principal contributes", async () => {
+  const { tagger } = setup(toolIntentDimension, async req => choice(newKey.key, req.subjects.length, [newKey]));
+  await tagger.tag("tool_intent", [subject("a"), subject("b", "Support the customer.", "bob")]);
+  await tagger.tag("tool_intent", Array.from({ length: 7 }, (_, i) => ({ ...subject(`second-${i}`), ownerId: "second-team" })));
+  expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "provisional", assignments: 9, owners: 2 });
+  await tagger.tag("tool_intent", [{ ...subject("tenth"), ownerId: "second-team" }]);
+  expect((await tagger.registry.list("tool_intent")).find(row => row.key === newKey.key)).toMatchObject({ status: "active" });
+});
+it("repairs owner columns on an existing subject table", async () => {
+  const fixture = await freshTestPgDb();
+  await fixture.pgdb.query("ALTER TABLE tag_subjects DROP COLUMN owner_type, DROP COLUMN owner_id");
+  await applyAppMigrations(fixture.pgdb);
+  expect(await missingSchemaRepairs(fixture.pgdb)).toEqual([]);
 });

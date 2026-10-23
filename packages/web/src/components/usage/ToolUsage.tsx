@@ -55,10 +55,11 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
       </div>
       <FilterChips options={SURFACES.map(s => ({ value: s.id, label: s.label }))} value={surface} onChange={value => { setSurface(value); setOffset(0); }} label="Tool surface" />
     </div>
+        <IntentKeys data={data?.classification ?? { keys: [], canManage: false, consolidationDue: false }} selected={keyFilter} onSelect={key => { setKeyFilter(key); setOffset(0); }} />
     {query.isPending ? <div role="status" className="rounded-lg border border-line p-8 text-sm text-muted">Loading tool usage…</div>
       : query.isError ? <div role="alert" className="rounded-lg border border-line p-5 text-sm text-danger-600">Tool usage could not load. <Button size="sm" variant="ghost" onClick={() => void query.refetch()}>Try again</Button></div>
       : data && <>
-        {data.classification && <IntentKeys data={data.classification} selected={keyFilter} onSelect={key => { setKeyFilter(key); setOffset(0); }} />}
+
         <Card><CardHeader className="flex items-center justify-between gap-3"><CardTitle>Calls over time</CardTitle>
           <span className="text-sm tabular-nums text-muted">{total.toLocaleString()} {total === 1 ? "call" : "calls"}</span></CardHeader>
           <CardBody>{total === 0 ? <p className="py-8 text-center text-sm text-muted">No tool calls in this window.</p> : <>
@@ -69,11 +70,10 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
           <Card className="min-w-0 lg:col-span-2"><CardHeader><CardTitle>Top tools & commands</CardTitle></CardHeader>
             {data.tools.length === 0 ? <CardBody><p className="text-sm text-muted">No tools or commands yet.</p></CardBody> :
               <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-paper-muted text-xs text-muted"><tr>
-                <th className="px-5 py-3 text-left font-medium">Tool / command</th><th className="px-3 py-3 text-left font-medium">Key</th><th className="px-3 py-3 text-right font-medium">Calls</th>
+                <th className="px-5 py-3 text-left font-medium">Tool / command</th><th className="px-3 py-3 text-right font-medium">Calls</th>
                 <th className="px-3 py-3 text-right font-medium">Error rate</th><th className="px-5 py-3 text-right font-medium">Users</th>
-              </tr></thead><tbody>{data.tools.map(row => <tr key={`${row.surface}:${row.name}:${row.key ?? ""}`} className="border-t border-line hover:bg-ink-wash">
+              </tr></thead><tbody>{data.tools.map(row => <tr key={`${row.surface}:${row.name}`} className="border-t border-line hover:bg-ink-wash">
                 <td className="px-5 py-3"><div className="break-all font-medium text-ink">{row.name}</div><div className="mt-1 text-xs text-muted">{LABELS[row.surface]}</div></td>
-                <td className="px-3 py-3 text-xs text-muted">{row.key ? <button type="button" onClick={() => { setKeyFilter(row.key ?? ""); setOffset(0); }} className="underline">{data.classification?.keys.find(key => key.key === row.key)?.label ?? row.key}</button> : "Unlabeled"}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{row.calls.toLocaleString()}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-muted">{(row.errorRate * 100).toFixed(1)}%</td>
                 <td className="px-5 py-3 text-right tabular-nums text-muted">{row.uniqueUsers.toLocaleString()}</td>
@@ -93,7 +93,7 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
           {data.recent.length === 0 ? <CardBody><p className="text-sm text-muted">{search ? "No intents match your search." : "No recent intents in this window."}</p></CardBody> :
             <ul className="divide-y divide-line">{data.recent.map(row => <li key={row.id} className="px-5 py-4">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted">
-                <span className="break-all font-medium text-ink">{row.name}</span><Badge variant={row.outcome === "ok" ? "success" : row.outcome === "denied" ? "warning" : "danger"}>{row.outcome}</Badge>
+                <span className="break-all font-medium text-ink">{row.name}</span><Badge variant={row.outcome === "ok" ? "success" : row.outcome === "denied" ? "warning" : row.outcome === "pending-approval" ? "neutral" : "danger"}>{row.outcome}</Badge>
                 <span>{LABELS[row.surface]}</span>{row.key && <button type="button" className="underline" onClick={() => { setKeyFilter(row.key ?? ""); setOffset(0); }}>{data.classification?.keys.find(key => key.key === row.key)?.label ?? row.key}</button>}<Time ts={row.createdAt} className="sm:ml-auto" />
               </div>
               <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{row.intent ?? (row.intentCleared ? "Intent cleared after 90 days." : row.surface === "cli" ? "CLI commands do not require intent." : "No valid intent was supplied.")}</p>

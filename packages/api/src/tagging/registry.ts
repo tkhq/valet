@@ -5,7 +5,7 @@ import type { Dimension } from "./dimension.js";
 
 export class RegistryConflict extends Error {}
 
-export type RegistryKey = typeof tagKeys.$inferSelect & { assignments: number; users: number };
+export type RegistryKey = typeof tagKeys.$inferSelect & { assignments: number; users: number; owners: number };
 export function dimensionWhere(orgId: string, dimension: string) { return and(eq(tagKeys.orgId, orgId), eq(tagKeys.dimension, dimension)); }
 
 export async function seedRegistry(db: AppQueryable, orgId: string, dimension: Dimension): Promise<void> {
@@ -33,19 +33,21 @@ export async function readRegistry(db: AppQueryable, orgId: string, dimension: s
   const keys = await db.select().from(tagKeys).where(dimensionWhere(orgId, dimension)).orderBy(tagKeys.key);
   const provisional = keys.filter(key => key.status === "provisional").map(key => key.key);
   const counts = provisional.length ? await db.select({ key: tagLabels.key, assignments: sql<number>`count(*)`.mapWith(Number),
-    users: sql<number>`count(distinct ${tagSubjects.userId})`.mapWith(Number) }).from(tagLabels)
+    users: sql<number>`count(distinct ${tagSubjects.userId})`.mapWith(Number),
+    owners: sql<number>`count(distinct jsonb_build_array(${tagSubjects.ownerType}, ${tagSubjects.ownerId}))
+      filter (where ${tagSubjects.ownerType} IS NOT NULL AND ${tagSubjects.ownerId} IS NOT NULL)`.mapWith(Number) }).from(tagLabels)
     .leftJoin(tagSubjects, and(eq(tagSubjects.orgId, tagLabels.orgId), eq(tagSubjects.dimension, tagLabels.dimension),
       eq(tagSubjects.subjectType, tagLabels.subjectType), eq(tagSubjects.subjectId, tagLabels.subjectId)))
     .where(and(eq(tagLabels.orgId, orgId), eq(tagLabels.dimension, dimension), inArray(tagLabels.key, provisional))).groupBy(tagLabels.key) : [];
-  const total = new Map<string, { assignments: number; users: number }>();
+  const total = new Map<string, { assignments: number; users: number; owners: number }>();
   // Only provisional keys need promotion counts. Active keys use scoped usage aggregates.
   for (const row of counts) total.set(row.key, row);
-  return keys.map(key => ({ ...key, assignments: total.get(key.key)?.assignments ?? 0, users: total.get(key.key)?.users ?? 0 }));
+  return keys.map(key => ({ ...key, assignments: total.get(key.key)?.assignments ?? 0, users: total.get(key.key)?.users ?? 0, owners: total.get(key.key)?.owners ?? 0 }));
 }
 
 export async function promoteKeys(db: AppQueryable, orgId: string, dimension: string): Promise<void> {
   for (const key of await readRegistry(db, orgId, dimension)) {
-    if (key.status === "provisional" && (key.assignments >= 5 || key.users >= 2)) {
+    if (key.status === "provisional" && key.assignments >= 10 && key.owners >= 2) {
       await db.update(tagKeys).set({ status: "active", updatedAt: Date.now() }).where(and(dimensionWhere(orgId, dimension), eq(tagKeys.key, key.key), eq(tagKeys.status, "provisional")));
     }
   }

@@ -16,7 +16,8 @@ A partial unique index enforces single-mode assignments.
 Merges retain the original label rows.
 Usage resolves a small registry map once per request instead of recursively scanning labels.
 The generic resolved-label view remains available for multi-label library aggregates.
-Classifier keys start provisional and activate at five assignments or two distinct users.
+Classifier keys start provisional and activate at ten assignments across at least two distinct owner principals.
+Subject caches persist owner type and id across batches. Unknown legacy owners do not count toward promotion.
 
 The caller registers a renderer for each subject type.
 Renderers supply capped text and billing ownership.
@@ -28,6 +29,7 @@ Telemetry writes enqueue durable subject references in `tag_jobs`.
 The existing event dispatcher drains at most four organization/dimension pairs per tick.
 Each pair handles at most 50 subjects per run.
 A database lease serializes classification across API replicas.
+Each owner group renews the lease before its bounded model call.
 Expired workers cannot publish labels.
 Provider failures retry with exponential delay, up to five attempts.
 The fifth failure deletes the job and increments `valet.tagging.dead_letters`.
@@ -61,6 +63,7 @@ Internal accounting facts contain no request or response text.
 A batch's tokens and cost are divided among its user/team billing principals.
 No placeholder agent sessions are inserted.
 The same usage and scope queries include that spend.
+Personal proxy request logs and summaries exclude tagging accounting.
 Labels retain null actors for automated team calls.
 Spend keeps the same nullable user and team ownership.
 
@@ -69,8 +72,11 @@ Spend keeps the same nullable user and team ownership.
 The Tool usage view shows a purpose chart and key definitions.
 Provisional keys share an Emerging bar.
 Only organization admins can read provisional or merged labels and definitions.
+Other members receive only active keys with calls in their selected scope and period.
 Unlabeled calls have a separate bar.
 Top tools group by tool name and surface, not by purpose key.
+Top-tool rows have no key field or key column.
+The Unlabeled filter is accepted by the API; purpose controls remain available after request errors.
 Purpose error rates use only completed `ok` and `error` calls as their denominator.
 The blank CLI `status` rule maps to `other`.
 The key filter applies to call counts, top tools, clients, and recent intents.
@@ -84,8 +90,11 @@ No examples or classifier input text are exposed by the registry API.
 ## Validation limits
 
 The targeted tests cover registry behavior, mocked classification, durable jobs, scope filters, and the UI.
-The 12-intent golden set tests the integration contract, not live-model accuracy.
+The 12-intent golden set uses fixed input-hash recordings, including a wrong answer.
+It tests the integration contract, not live-model accuracy.
 Local smoke calls use the actual HTTP, engine, telemetry, queue, and provider-resolution paths with deterministic completions.
 Live-model accuracy and latency remain unmeasured without an accessible provider credential.
 Desktop is visually checked at 1280 by 800.
 Mobile remains unverified because the installed browser cannot resize.
+
+Pending approval badges are neutral. CLI HTTP 403 records use `forbidden` unless the body declares `policy_denied`.

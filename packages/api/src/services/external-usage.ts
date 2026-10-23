@@ -100,7 +100,7 @@ export async function getExternalUsage(db: AppDb, opts: {
     db.select({ dayMs: sql<number>`floor(${externalCalls.createdAt}::numeric / 86400000) * 86400000`.mapWith(Number),
       surface: externalCalls.surface, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
       .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
-    db.select({ key: sql<null>`NULL`, name: externalCalls.name, surface: externalCalls.surface,
+    db.select({ name: externalCalls.name, surface: externalCalls.surface,
       calls: sql<number>`count(*)`.mapWith(Number),
       errorRate: sql<number>`coalesce(count(*) filter (where ${externalCalls.outcome} = 'error')::float / nullif(count(*) filter (where ${externalCalls.outcome} in ('ok', 'error')), 0), 0)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number) }).from(externalCalls)

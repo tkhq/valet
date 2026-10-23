@@ -34,14 +34,17 @@ describe("intent usage scope and registry administration", () => {
     const mine = await read("");
     expect(mine.classification?.keys.find(key => key.key === "code_review")?.calls).toBe(1);
     expect(mine.classification?.keys.find(key => key.key === "new_purpose")?.calls).toBe(0);
-    expect(mine.tools).toEqual([expect.objectContaining({ key: null, calls: 1 })]);
+    expect(mine.tools).toEqual([expect.objectContaining({ calls: 1 })]);
     const all = await read("&scope=org&surface=hosted&key=__emerging");
     expect(all.recent.map(row => row.id)).toEqual(["theirs"]);
-    expect(all.tools).toEqual([expect.objectContaining({ key: null })]);
+    expect(all.tools[0]).not.toHaveProperty("key");
     const member = await read("&scope=team&teamId=team", "test-member");
     expect(member.recent).toEqual([]); expect(member.classification?.canManage).toBe(false);
     expect(member.classification?.keys.find(key => key.key === "new_purpose")).toBeUndefined();
     expect(member.classification?.emergingCalls).toBe(1);
+    expect(member.classification?.keys).toEqual([]); // Active keys used only outside this scope stay private.
+    await db.update(tagKeys).set({ status: "active" }).where(eq(tagKeys.key, "new_purpose"));
+    expect((await read("&scope=team&teamId=team", "test-member")).classification?.keys.map(row => row.key)).toEqual(["new_purpose"]);
     await tagger.registry.merge("tool_intent", "code_review", "debug_investigate");
     expect((await read("&key=debug_investigate")).recent[0]?.key).toBe("debug_investigate");
     expect((await read("&key=code_review")).recent).toEqual([]);
@@ -69,6 +72,10 @@ it("groups one top-tool row across purpose keys and accounts for unlabeled calls
   expect(response.status).toBe(200); const usage = await response.json() as ExternalUsageResponse;
   expect(usage.tools).toEqual([expect.objectContaining({ name: "call_tool", surface: "mcp", calls: 3 })]);
   expect(usage.classification?.unlabeledCalls).toBe(1);
+  const unlabeled = await fetch(`${api.baseUrl}/api/usage/external?window=7d&key=__unlabeled`);
+  expect(unlabeled.status).toBe(200);
+  expect((await unlabeled.json() as ExternalUsageResponse).recent.map(row => row.id)).toEqual(["unlabeled"]);
+  expect(usage.tools[0]).not.toHaveProperty("key");
   expect((usage.classification?.keys.reduce((sum, key) => sum + key.calls, 0) ?? 0) + (usage.classification?.unlabeledCalls ?? 0))
     .toBe(usage.daily.reduce((sum, day) => sum + day.calls, 0));
 });

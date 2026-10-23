@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ExternalUsageResponse } from "@valet/api/wire";
 import { ToolUsage } from "./ToolUsage";
 
+vi.mock("~/api/tagging", () => ({ useEditTagKey: () => ({}), useMergeTagKey: () => ({}) }));
 const hook = vi.hoisted(() => vi.fn());
 vi.mock("~/api/usage", () => ({ useExternalUsage: hook }));
 const data: ExternalUsageResponse = {
@@ -68,4 +69,23 @@ it("resets pagination on scope and period changes and labels retention and team 
   expect(screen.getByText("Intent cleared after 90 days.")).toBeTruthy();
   expect(screen.getByText("No valid intent was supplied.")).toBeTruthy();
   expect(screen.getByText("Engineering · Claude Code 2.0")).toBeTruthy();
+});
+
+it("keeps the purpose card and clear filter control after a request error", () => {
+  hook.mockReturnValue({ data: { ...data, classification: { keys: [], canManage: false, consolidationDue: false, unlabeledCalls: 1 } } });
+  const view = show();
+  fireEvent.click(screen.getByRole("button", { name: /Unlabeled/ }));
+  expect(hook.mock.calls.at(-1)?.[6]).toBe("__unlabeled");
+  hook.mockReturnValue({ isError: true });
+  view.rerender(<ToolUsage period={{ kind: "lookback", window: "7d" }} scope="me" />);
+  expect(screen.getByText("Purpose of tool calls")).toBeTruthy();
+  expect(screen.getByRole("alert")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Clear key filter" }));
+  expect(hook.mock.calls.at(-1)?.[6]).toBeUndefined();
+});
+it("uses a neutral badge for pending approval and omits a misleading top-tools key column", () => {
+  hook.mockReturnValue({ data: { ...data, recent: [{ ...data.recent[0], outcome: "pending-approval" }] } });
+  show();
+  expect(screen.getByText("pending-approval").className).toContain("bg-neutral-100");
+  expect(screen.queryByRole("columnheader", { name: "Key" })).toBeNull();
 });

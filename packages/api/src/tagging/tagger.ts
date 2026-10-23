@@ -101,6 +101,9 @@ export class Tagger {
 
   private async classifyBatch(dimension: Dimension, provided: readonly TagSubject[], forced: ReadonlySet<string>, token: string): Promise<void> {
     const { db, orgId } = this.deps;
+    const renewed = await db.update(tagDimensionState).set({ leaseUntil: Date.now() + LEASE_MS })
+      .where(and(stateWhere(orgId, dimension.id), eq(tagDimensionState.leaseToken, token), sql`${tagDimensionState.leaseUntil} > ${Date.now()}`)).returning();
+    if (!renewed.length) throw new Error("Tagging lease expired. Retry the batch.");
     const subjects: TagSubject[] = [];
     for (const source of new Map(provided.map(subject => [`${subject.type}:${subject.id}`, subject])).values()) {
       if (!dimension.subjectTypes.includes(source.type)) throw new Error("Unsupported tag subject. Register its subject type first.");
@@ -144,7 +147,7 @@ export class Tagger {
         }
         const [inserted] = await tx.insert(tagKeys).values({ orgId, dimension: dimension.id, key, label: proposal.label, definition: proposal.definition,
           examples, origin: "classifier", status: "provisional", createdAt: Date.now(), updatedAt: Date.now() }).onConflictDoNothing().returning();
-        if (inserted) { keys.push({ ...inserted, assignments: 0, users: 0 }); existing.add(key); created = true; }
+        if (inserted) { keys.push({ ...inserted, assignments: 0, users: 0, owners: 0 }); existing.add(key); created = true; }
       }
       const assignedExamples = new Map<string, Set<string>>();
       for (const subject of subjects) {
@@ -165,8 +168,8 @@ export class Tagger {
           examples.add(`${subject.type}:${subject.id}`); assignedExamples.set(label.key, examples);
         }
         const inputHash = hashInput(dimension.id, subject);
-        await tx.insert(tagSubjects).values({ orgId, dimension: dimension.id, subjectType: subject.type, subjectId: subject.id, userId: subject.userId, inputHash })
-          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId } });
+        await tx.insert(tagSubjects).values({ orgId, dimension: dimension.id, subjectType: subject.type, subjectId: subject.id, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, inputHash })
+          .onConflictDoUpdate({ target: [tagSubjects.orgId, tagSubjects.dimension, tagSubjects.subjectType, tagSubjects.subjectId], set: { inputHash, userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId } });
         await tx.delete(tagLabels).where(labelWhere(orgId, dimension.id, subject));
         if (labels.length) await tx.insert(tagLabels).values(labels.map(label => ({ ...label, orgId, dimension: dimension.id, mode: dimension.mode,
           subjectType: subject.type, subjectId: subject.id, inputHash, model: rule ? "rule" : response.model, classifiedAt: Date.now() })));

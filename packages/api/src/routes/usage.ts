@@ -178,7 +178,7 @@ usageRouter.get("/external", async (c) => {
   const search = c.req.query("q") ?? "";
   const surface = c.req.query("surface");
   const key = c.req.query("key");
-  if (key && key !== "__emerging" && !/^[a-z][a-z0-9_]{0,31}$/.test(key)) return c.json({ error: "Invalid intent key. Choose a registry key or clear the key filter." }, 400);
+  if (key && key !== "__emerging" && key !== "__unlabeled" && !/^[a-z][a-z0-9_]{0,31}$/.test(key)) return c.json({ error: "Invalid intent key. Choose a registry key or clear the key filter." }, 400);
   if (surface !== undefined && surface !== "hosted" && surface !== "mcp" && surface !== "cli") {
     return c.json({ error: "Choose surface hosted, mcp, or cli. Remove surface to see all calls." }, 400);
   }

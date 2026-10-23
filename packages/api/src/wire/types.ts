@@ -6633,7 +6633,7 @@ export interface AgentAccessResponse {
 export interface ExternalUsageResponse {
   classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
-  tools: { key?: string | null; name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
   detailsVisible: boolean;
   recent: {

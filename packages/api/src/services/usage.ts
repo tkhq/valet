@@ -562,7 +562,7 @@ async function queryUsageSessions(
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
     WHERE ce.created_at >= ${period.startMs} AND ce.created_at < ${period.endMs} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
-      AND ce.session_id IS NOT NULL AND ce.session_id NOT LIKE 'tagger:%' AND ce.use_case IN ('orchestrator','session')
+      AND ce.session_id IS NOT NULL AND ce.use_case IN ('orchestrator','session')
       ${useCaseFilter}
     GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
     ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };

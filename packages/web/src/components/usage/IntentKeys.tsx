@@ -39,7 +39,7 @@ export function IntentKeys({ data, selected, onSelect }: { data: ToolIntentUsage
   return <Card className="min-w-0"><CardHeader className="flex flex-wrap items-center justify-between gap-3"><CardTitle>Purpose of tool calls</CardTitle>
     {selected && <Button size="sm" variant="ghost" onClick={() => onSelect("")}>Clear key filter</Button>}
   </CardHeader><CardBody>
-    <p className="mb-4 text-xs text-muted">Keys are assigned automatically. New keys stay emerging until five assignments or two distinct users.</p>
+    <p className="mb-4 text-xs text-muted">Keys are assigned automatically. New keys stay emerging until ten assignments across two distinct owners.</p>
     {data.consolidationDue && <p role="status" className="mb-4 text-sm text-warning-600">Consolidation due. An organization admin can merge overlapping keys to make room.</p>}
     {bars.length === 0 ? <p className="py-5 text-sm text-muted">No tagged calls in this window. Queued calls appear after classification.</p> :
       <div role="group" aria-label="Tool calls by intent key" className="space-y-2">{bars.map(bar => <button type="button" key={bar.key} onClick={() => onSelect(bar.key)} aria-pressed={selected === bar.key}

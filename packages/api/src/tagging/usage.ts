@@ -38,7 +38,7 @@ export async function toolIntentUsage(db: AppDb, orgId: string, where: SQL | und
     unlabeledCalls: counts.find(row => row.key === null)?.calls ?? 0,
     emergingCalls: counts.filter(row => row.key === "__emerging" || registry.some(key => key.key === row.key && key.status === "provisional"))
       .reduce((sum, row) => sum + row.calls, 0),
-    keys: registry.filter(key => canManage || key.status === "active").map(key => ({
+    keys: registry.filter(key => canManage || (key.status === "active" && counts.some(row => row.key === key.key && row.calls > 0))).map(key => ({
       key: key.key, label: key.label, definition: key.definition, status: key.status, origin: key.origin,
       calls: counts.find(row => row.key === key.key)?.calls ?? 0, uniqueUsers: counts.find(row => row.key === key.key)?.uniqueUsers ?? 0,
       errorRate: counts.find(row => row.key === key.key)?.errorRate ?? 0 })) };
