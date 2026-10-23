@@ -7,11 +7,12 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { TOOL_SCOPE_KEY } from "@valet/shared";
 import {
   canDeliverMidTurn,

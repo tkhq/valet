@@ -1,3 +1,4 @@
+import { hostedToolUsageSink } from "../services/external-usage.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
@@ -1359,7 +1360,10 @@ export class EngineHost {
             ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db, personaCell?.persona),
+            } : {}),
           },
         })
       : await engine.createSession({
@@ -1394,7 +1398,10 @@ export class EngineHost {
           ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db, personaCell?.persona),
+            } : {}),
         });
 
     builtSession = session;
@@ -3116,7 +3123,10 @@ export class EngineHost {
       ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
       queueMode,
@@ -4280,7 +4290,10 @@ export class EngineHost {
       ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
       ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
@@ -4487,7 +4500,10 @@ export class EngineHost {
       ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are

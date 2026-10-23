@@ -1,5 +1,6 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
-import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";

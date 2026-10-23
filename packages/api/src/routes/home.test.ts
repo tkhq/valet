@@ -78,7 +78,7 @@ describe("home tasks", () => {
   it("queues a task report without cancelling an open Home question", async () => {
     const test = await boot();
     faux?.setResponses([
-      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?", intent: "Ask which repository to use before starting the task." })], { stopReason: "toolUse" }),
       fauxAssistantMessage("Task done."), fauxAssistantMessage("Home done."), fauxAssistantMessage("Report done."),
     ]);
     const { session, thread } = await ensureHomeThread(test.providers, USER);

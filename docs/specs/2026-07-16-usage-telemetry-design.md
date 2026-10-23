@@ -409,3 +409,121 @@ The read decides which teams a row can name:
 - Every org member reads the home ranking. It names every team for an org admin, and only the viewer's own teams for anyone else.
 
 `byUser[].isTeam` and `org.members[].isTeam` mark a team row. The Usage page and the home usage card show the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.
+
+## Tool intent and surface usage (TKAI-656)
+
+The shared tool contract lives in `@valet/shared`.
+Hosted and MCP tools require `intent`, except broker and pinned tools, which use `summary`.
+The server trims this string and accepts 1 to 500 characters.
+The schema asks for one plain-language sentence about the purpose and reason.
+It does not infer sentence boundaries.
+Intent is metadata, not a provider argument.
+The bridges remove it before policy matching, approval parameter comparison, execution, and idempotency hashing.
+Suspended hosted calls retain intent for replay and approval explanations.
+Broker `call_tool` and pinned tools use their required `summary` as intent.
+They do not add a separate `intent` argument.
+The bridge publishes an added argument only once.
+An action's own `intent` parameter is preserved.
+Non-object schemas remain unchanged.
+A collision skips injected intent and warns once per tool name per process.
+Validation errors name the required field and its `arguments` path.
+
+Tool approval gates carry a separate `agentReason` field.
+The web card labels it "Agent's stated reason" and identifies it as model-authored text.
+Channel prompts render it as an escaped field labelled "Model-authored reason".
+Account-sharing approvals carry the same separate summary outside a thread.
+`ask_question` and `ask_approval` keep their original body without this field.
+Gate persistence and wire projection retain the separate field.
+Restart replay starts a new execution clock and records a fact with the original queue author.
+Approval waiting does not contribute to execution duration.
+Turn end and abort clear transient telemetry state.
+
+Actual sandbox primitives declare `ToolDef.intent: "exempt"`: `bash`, `read`, `write`, `edit`, `process_read`, `watch`, and `sec_fs_*`.
+Exemption does not depend on a tool name.
+A plugin action named `read` does not inherit it.
+Internal native-image receipts also declare exemption and do not fabricate intent.
+Old receipts without intent remain replayable.
+These high-volume file and shell operations keep their existing schemas.
+They do not produce usage facts.
+This avoids repeated model output and schema tokens for low-level I/O.
+
+The `external_calls` table stores all three surfaces: `hosted`, `mcp`, and `cli`.
+Facts contain identity, ownership, tool or command name, outcome, duration, timestamp, and optional intent.
+Hosted facts also contain session, thread, and persona context.
+No fact contains arguments, results, or credentials.
+Telemetry failures are reported without their payload and cannot fail execution.
+Recording promises are not awaited by tool or request execution.
+Hosted lifecycle events include SDK validation failures.
+The test fixtures use a deterministic provider and do not measure live model latency.
+
+CLI requests carry an invocation UUID, normalized command path, and version in headers.
+Command paths exclude positional values and option values.
+The server derives user and organization from authentication.
+An upsert keeps one row per invocation across its HTTP requests.
+Later completion timestamps win when requests finish out of order.
+An earlier-arriving start can extend duration without replacing a newer outcome.
+Invocation IDs are namespaced by authenticated organization and user.
+Health checks skip authentication and usage recording.
+MCP initialization metadata comes from the SDK client version and is stored by organization, user, and OAuth client ID.
+The registration schema observes parsed tool arguments, including invalid intent, without cloning request bodies.
+Unknown broker IDs are stored as `unknown`, never as model-written tool names.
+Only thread routes can supply a thread ID from their response.
+No bearer token is retained in that metadata.
+Client-info writes do not block initialization.
+MCP telemetry observes the final JSON-RPC reply before serialization.
+An inner request error does not override a successful final tool result.
+`pending-approval` is distinct from a denial.
+
+`GET /api/usage/external` uses the existing period and personal, team, or organization scope rules.
+The optional `surface` filter applies to daily counts, tools, clients, and recent intents.
+Daily counts include zero days.
+Recent intents use literal `strpos` text search and offset pagination.
+Personal-workspace rows are excluded from the organization recent-intents feed by default.
+They remain in organization aggregates.
+`ORG_RECENT_INCLUDES_PERSONAL` is the one-line switch for that privacy decision.
+Team automation without a human actor stores a null user and retains team ownership.
+Distinct-user counts exclude null users.
+A team ownership/time index supports scoped reads.
+The event dispatcher nulls intent text older than 90 days in bounded asynchronous batches.
+It retains the usage rows and counts.
+A partial `created_at` index includes only rows with intent.
+A nullable clearing timestamp distinguishes retained-text deletion from missing or invalid intent.
+Retention failures postpone the next attempt by one minute.
+Hosted inserts remain asynchronous per-call writes, not batched writes.
+The search query remains a substring scan within the scoped time range.
+The usage query retains previous data while search changes, so the input keeps focus.
+Team members can see aggregates.
+Team admins can also see individual intents from threads they can read.
+The recent feed uses the existing batched thread visibility check, including private-channel and personal-helper restrictions.
+Text search first selects candidates within the scoped period.
+Each request checks at most five times its visible offset plus page size and lookahead, capped at 500 candidates.
+Visibility is applied before visible offsets, page limits, and `hasMore`.
+Hidden-only matches never set `hasMore`, and the response does not expose candidate offsets.
+This bounded recent feed can omit older matches beyond its candidate window.
+Thread checks deduplicate thread pairs and Slack channels for one viewer/request.
+Session-only team rows use the existing session resource audience check, cached by session for that request.
+Sessionless team MCP/CLI rows normally have no narrower thread audience and remain visible to team admins.
+Workflow-step sessions and team workflow-run operations are exceptions: they remain aggregate-only.
+Their current telemetry facts cannot establish the originating run audience, so recent details exclude them before search.
+Null-user team rows show the team name.
+Changing scope or period resets the recent-feed page.
+Admitted workflow paths resolve ownership from stored definitions or runs for MCP and CLI telemetry.
+Admitted invoke bodies supply team workspace ownership for MCP and CLI calls.
+CLI discovery requests do not overwrite an invocation's resolved team ownership.
+Legacy replay repairs missing or invalid metadata without relaxing fresh-call validation.
+External policy refusals carry `errorCode: "policy_denied"` and record a denied outcome.
+Error rates divide execution errors by completed `ok` and `error` calls only.
+Denied and pending-approval calls do not enter this denominator.
+All surfaces use snake_case error codes, including `policy_denied` and `action_failed`.
+Scope refusals and expired approvals are denied outcomes.
+The Usage page adds a Tool usage view with the same scope and period controls.
+
+Classification is not part of this change.
+The telemetry table has no `intent_category` or `taxonomy_version` columns.
+
+## Upstream thread editing and tool integration
+
+File tools retain their `sideEffect: files` checkpoint markers and remain intent-exempt.
+Planning and skill-file tools use the same required intent contract as other non-exempt tools.
+Replay restores channel and reply-target data from the original durable queue item, alongside its author and metadata.
+Branch editing tests use intent-aware model fixtures so completed external actions remain visible in branch notes.

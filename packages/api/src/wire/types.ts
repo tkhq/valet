@@ -1738,6 +1738,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored text, not policy or approver context. */
+  agentReason?: string;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
@@ -6562,7 +6564,7 @@ export interface ActionInvokeRequest {
 /** `POST /api/actions/:toolId/invoke` response. */
 export type ActionInvokeResponse =
   | { tool_id: string; status: "completed"; result: unknown }
-  | { tool_id: string; status: "failed"; error: string }
+  | { tool_id: string; status: "failed"; error: string; errorCode?: "policy_denied" }
   | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string; allowTeamConsent?: true }; next_step: string }
   /** A call with the same idempotency key, tool, and params is still running. */
   | { tool_id: string; status: "in_progress"; next_step: string };
@@ -6625,4 +6627,18 @@ export interface CliDeviceInfo {
 export interface AgentAccessResponse {
   mcp_apps: Array<{ client_id: string; name: string; connected_at: number | null; expires_at: number | null }>;
   cli_devices: Array<{ id: string; device: string; signed_in_at: number; last_used_at: number | null }>;
+}
+
+/** External MCP and CLI facts. Arguments and results are never included. */
+export interface ExternalUsageResponse {
+  daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
+  detailsVisible: boolean;
+  recent: {
+    id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
+    clientVersion: string | null; userId: string | null; userName: string | null; outcome: "ok" | "error" | "denied" | "pending-approval";
+    intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
+  }[];
+  hasMore: boolean;
 }

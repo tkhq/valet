@@ -1,8 +1,10 @@
+import { toAgentTool } from "../src/tool-bridge.js";
 import { decode } from "@toon-format/toon";
 import { describe, it, expect, vi } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   pluginCatalogTools,
   buildPluginCatalog,
@@ -1353,7 +1355,7 @@ it("refuses a guessed dynamic action before discovering or executing it", async 
   let discoveries = 0;
   const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };
   const result = await invokeAction(buildPluginCatalog([plugin]), "remote.write", {}, makeCtx({ toolScope: { actions: [] } }), "write");
-  expect(result).toMatchObject({ kind: "error" });
+  expect(result).toMatchObject({ kind: "denied-policy", scope: "tool" });
   expect(discoveries).toBe(0);
 });
 
@@ -1368,7 +1370,7 @@ it("allows exact scoped team dynamic discovery without permitting sibling action
   });
   const catalog = buildPluginCatalog([plugin]);
   expect(await invokeAction(catalog, "remote.read", {}, ctx, "read")).toMatchObject({ kind: "ok", result: { data: "evidence" } });
-  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "error" });
+  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "denied-policy", scope: "tool" });
   expect(writes).toBe(0);
 });
 
@@ -1776,6 +1778,7 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
       }),
     );
     expect(result.text).toContain("expired");
+    expect(result.usageOutcome).toMatchObject({ outcome: "denied", errorCode: "expired_approval" });
     expect(result.text).toContain("do not call test.dangerous again");
   });
 
@@ -1957,7 +1960,7 @@ describe("pluginCatalogTools: pinning", () => {
     // The model needs a place to write the sentence the approval gate and
     // the audit record show. `call_tool` takes one; so does this route.
     expect(published.properties.summary).toBeDefined();
-    expect(published.required ?? []).not.toContain("summary");
+    expect(published.required ?? []).toContain("summary");
     expect(pinned?.riskLevel).toBe("medium");
   });
 
@@ -2014,7 +2017,7 @@ describe("pluginCatalogTools: pinning", () => {
     const options = ObjectOptions(published);
     expect(options.additionalProperties).toBe(false);
     expect(options.description).toBe("Patch arguments.");
-    expect(published.required).toEqual(["workflow_id"]);
+    expect(published.required).toEqual(["workflow_id", "summary"]);
   });
 
   it("does not set requiresApproval — the gate belongs to the policy path", () => {
@@ -2369,7 +2372,7 @@ describe("pinned tool: the model's summary", () => {
     expect(records[0]?.summary).toBe("Remove the approval node from the release workflow");
   });
 
-  it("shows the model's own sentence in the approval gate body", async () => {
+  it("labels the model's sentence separately from the approval body", async () => {
     // A person asked to approve an action needs a statement of intent, not
     // a constant that repeats the tool name.
     const { plugin } = makePinnablePlugin();
@@ -2386,12 +2389,13 @@ describe("pinned tool: the model's summary", () => {
       makeCtx({
         policyResolver: resolver,
         requestDecision: async (req): Promise<DecisionResolution> => {
-          bodies.push(req.body ?? "");
+          bodies.push(req.agentReason ?? "");
+          expect(req.body).not.toContain("Delete the nightly backup step");
           return { actionId: "deny", resolvedBy: "tester", resolvedAt: 0 };
         },
       }),
     );
-    expect(bodies[0]?.startsWith("Delete the nightly backup step\n")).toBe(true);
+    expect(bodies[0]).toBe("Delete the nightly backup step");
   });
 
   it("keeps the summary out of the action's arguments and out of the audit params", async () => {
@@ -2508,4 +2512,32 @@ describe("pluginCatalogTools: availability failure containment", () => {
     expect(payload.warnings.map((warning) => warning.service)).toContain("github");
     expect(payload.warnings.map((warning) => warning.service)).not.toContain("linear");
   });
+});
+
+it("preserves a plugin action's own intent argument through the pinned bridge", async () => {
+  const received: unknown[] = [];
+  const plugin: ActionPlugin = { service: "demo", defaultApprovalMode: "allow", actions: [{
+    id: "demo.intent", name: "Intent value", description: "Has a real intent parameter", riskLevel: "low", parameters: Type.Object({ intent: Type.Number() }),
+    execute: async args => { received.push(args); return { success: true, data: {} }; },
+  }] };
+  const def = pluginCatalogTools({ plugins: [plugin], pins: [{ actionId: "demo.intent" }] }).find(tool => tool.scopeAction === "demo.intent");
+  if (!def) throw new Error("Missing pinned action");
+  const tool = toAgentTool(def, () => makeCtx());
+  expect(tool.parameters.properties.intent).toEqual(Type.Number());
+  expect(tool.parameters.required).toEqual(["intent", "summary"]);
+  await tool.execute("own-intent", { intent: 42, summary: "Send the action's numeric intent to check its contract." });
+  expect(received).toEqual([{ intent: 42 }]);
+});
+
+it("keeps account-sharing summary model-authored when invokeAction has no thread runtime", async () => {
+  const { plugin } = makeMockPlugin();
+  let request: DecisionGateRequest | undefined;
+  const ctx = makeCtx({ threadId: undefined, policyResolver: {
+    resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+  }, requestDecision: async req => {
+    request = req;
+    return { actionId: "deny", resolvedBy: "lender", resolvedAt: 1 };
+  } });
+  await invokeAction(buildPluginCatalog([plugin]), "github.create_issue", {}, ctx, "Create an issue for the reported failure.");
+  expect(request).toMatchObject({ agentReason: "Create an issue for the reported failure.", context: { summary: "Create an issue for the reported failure." } });
 });

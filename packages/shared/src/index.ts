@@ -25,3 +25,5 @@ export * from './browser-policy.js';
 export * from './event-match.js';
 export * from './thread-projects.js';
 export * from './thread-recap.js';
+
+export * from "./tool-intent.js";

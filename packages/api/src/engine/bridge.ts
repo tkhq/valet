@@ -49,6 +49,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     type: g.type,
     title: g.title,
     body: g.body,
+    agentReason: g.agentReason,
     actions: g.actions,
     expiresAt: g.expiresAt,
     status: g.status,

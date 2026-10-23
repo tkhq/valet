@@ -79,6 +79,7 @@ export function renderToolEnd(toolName: string, isError: boolean): string {
 export function renderGate(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
+  if (gate.agentReason) lines.push(`Agent's stated reason (model-authored): ${gate.agentReason}`);
   for (const a of gate.actions) lines.push(`  - ${a.id}: ${a.label}`);
   lines.push(`resolve with: valet gates resolve ${gate.id} <actionId> --thread ${gate.threadId}`);
   return lines.join("\n");

@@ -1,3 +1,4 @@
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { afterEach, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import * as piAi from "@earendil-works/pi-ai/compat";
@@ -135,8 +136,8 @@ it.each(limits)("continues a real workflow run with $name", async ({ ceiling, ca
     const { session, sessionId } = await ensureDefaultAssistantSession(p, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
     const thread = await session.createThread(`workflow:${workflow.id}:local-user`);
     responses = [
-      piAi.fauxAssistantMessage([piAi.fauxToolCall("focus_tools", { phase: "validate" })], { stopReason: "toolUse" }),
-      piAi.fauxAssistantMessage([piAi.fauxToolCall("call_tool", { tool_id: "workflows.start_run", params: { workflow_id: workflow.id }, summary: "Run the authorized workflow test" })], { stopReason: "toolUse" }),
+      piAi.fauxAssistantMessage([fauxToolCall("focus_tools", { phase: "validate" })], { stopReason: "toolUse" }),
+      piAi.fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "workflows.start_run", params: { workflow_id: workflow.id }, summary: "Run the authorized workflow test" })], { stopReason: "toolUse" }),
       piAi.fauxAssistantMessage("Waiting for the workflow result."),
     ];
     const start = await thread.submitPrompt("Test this workflow.", { ...(ceiling ? { metadata: { toolScope: ceiling } } : {}) });
@@ -168,8 +169,8 @@ it.each(limits)("continues a real workflow run with $name", async ({ ceiling, ca
     const completion = completions[0];
     if (!completion) throw new Error("Completion report was not queued");
     responses = [
-      piAi.fauxAssistantMessage([piAi.fauxToolCall("focus_tools", { phase: "repair" })], { stopReason: "toolUse" }),
-      piAi.fauxAssistantMessage([piAi.fauxToolCall("workflows__patch_workflow", { workflow_id: workflow.id, name: "Repaired" })], { stopReason: "toolUse" }),
+      piAi.fauxAssistantMessage([fauxToolCall("focus_tools", { phase: "repair" })], { stopReason: "toolUse" }),
+      piAi.fauxAssistantMessage([fauxToolCall("workflows__patch_workflow", { workflow_id: workflow.id, name: "Repaired" })], { stopReason: "toolUse" }),
       piAi.fauxAssistantMessage("Checked the workflow."),
     ];
     await thread.resume();

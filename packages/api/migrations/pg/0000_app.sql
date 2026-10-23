@@ -2812,3 +2812,31 @@ CREATE TABLE IF NOT EXISTS "home_tasks" (
 CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "external_calls" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text,
+  "surface" text NOT NULL, "name" text NOT NULL, "client_name" text, "client_version" text,
+  "session_id" text, "persona" text, "thread_id" text, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "outcome" text NOT NULL, "error_code" text, "duration_ms" integer NOT NULL,
+  "intent" text, "intent_cleared_at" bigint, "created_at" bigint NOT NULL,
+  CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id");
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "mcp_client_info" (
+  "org_id" text NOT NULL, "user_id" text NOT NULL, "client_id" text NOT NULL,
+  "name" text NOT NULL, "version" text NOT NULL, PRIMARY KEY ("org_id", "user_id", "client_id")
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_id, owner_type, owner_id, created_at);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL;
