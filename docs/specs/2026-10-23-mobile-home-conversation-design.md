@@ -158,3 +158,10 @@ Default still clears the override. The desktop button group stays unchanged.
 This follows the single effort entry and list patterns in Claude and Codex.
 The phone field uses an inset chevron and reserves space between the label and arrow.
 Other ReasoningSelect fields keep their native appearance.
+
+The phone dialog opens with five size choices, their resolved model names, and a selected checkmark.
+Thinking uses one plain row. Normal help text and model counts do not appear in this view.
+More models opens the searchable catalog inside the same dialog. Back restores focus to More models.
+Custom current models remain labeled without marking an unrelated size as selected.
+The catalog keeps role and organization restrictions. Restricted size choices require an approved target.
+Search and default actions stay in the catalog view. Desktop keeps its existing picker.

@@ -27,6 +27,7 @@ export function ReasoningSelect({
   id,
   descriptionId,
   chevron = "native",
+  surface = "field",
 }: {
   value: string | null;
   onChange: (level: string | null) => void;
@@ -38,6 +39,7 @@ export function ReasoningSelect({
   id?: string;
   descriptionId?: string;
   chevron?: "native" | "inset";
+  surface?: "field" | "plain";
 }) {
   const orgReasoningQ = useOrgReasoning();
   const levels = levelsUpTo(orgReasoningQ.data?.max).filter(level => allowedLevels === undefined || allowedLevels.includes(level));
@@ -53,7 +55,7 @@ export function ReasoningSelect({
         const next = e.target.value;
         if (next === "" || levels.some(level => level === next)) onChange(next === "" ? null : next);
       }}
-      className={cn("w-full", chevron === "inset" && "appearance-none pr-10")}
+      className={cn("w-full", chevron === "inset" && "appearance-none pr-10", surface === "plain" && "border-transparent bg-transparent text-right")}
       disabled={disabled || (levels.length === 0 && unavailableValue === null)}
     >
       <option value="">{emptyLabel}</option>

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Search, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Search, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -16,6 +16,7 @@ import {
   useOrgReasoning,
 } from "~/api/settings";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
+import { ModelSizeList } from "./model-size-list";
 import { curatedForCatalogId } from "~/lib/models";
 import {
   SIZE_TIERS,
@@ -169,6 +170,10 @@ export function ModelPicker({
   const panel = presentation === "panel";
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [moreModels, setMoreModels] = useState(false);
+  const previousMoreModels = useRef(false);
+  const moreModelsRef = useRef<HTMLButtonElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState("");
   const [highlightIndex, setHighlightIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -209,7 +214,7 @@ export function ModelPicker({
   // Collapse Anthropic aliases by default unless `showAll` or query is
   // active — a search should peek into the wider scope so a user typing
   // "haiku-3-5-2024" can still find that pinned alias without toggling.
-  const revealAll = restricted || showAll || query.trim().length > 0;
+  const revealAll = panel || restricted || showAll || query.trim().length > 0;
   const catalogForRole = revealAll ? roleScoped : approvedScoped;
   const filteredModels = useMemo(() => {
     const baseline = revealAll
@@ -229,9 +234,10 @@ export function ModelPicker({
   // The Size group hides when the query matches no tier label or token —
   // same substring matcher the model list search uses.
   const filteredTiers = useMemo(() => {
+    if (panel) return [];
     if (query.trim().length === 0) return [...SIZE_TIERS];
     return SIZE_TIERS.filter((t) => matchesNeedle(query, [TIER_LABELS[t], t]));
-  }, [query]);
+  }, [query, panel]);
 
   const grouped = useMemo(() => groupByProvider(filteredModels), [filteredModels]);
   const flat: FlatEntry[] = useMemo(
@@ -243,10 +249,17 @@ export function ModelPicker({
   );
   const hiddenCount = fullyRevealedModels.length - filteredModels.length;
 
+  useEffect(() => {
+    if (panel && previousMoreModels.current !== moreModels) {
+      (moreModels ? backRef : moreModelsRef).current?.focus();
+    }
+    previousMoreModels.current = moreModels;
+  }, [panel, moreModels]);
+
   // Reset highlight when the filtered set changes.
   useEffect(() => {
     setHighlightIndex(0);
-  }, [query, showAll, open]);
+  }, [query, showAll, open, moreModels]);
 
   // Auto-focus search when the menu opens; reset filter state on close.
   useEffect(() => {
@@ -310,6 +323,40 @@ export function ModelPicker({
       searchRef.current?.focus();
     }
   }
+
+  const unavailableReasoning = currentReasoning && (!reasoningLevels.some(level => level === currentReasoning) || isLevelDisabled(currentReasoning));
+  const phoneThinkingControl = onSelectReasoning && (
+    <div className="rounded-2xl bg-ink-wash px-4 py-2">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <Label htmlFor={thinkingFieldId} className="shrink-0 text-base text-ink">Thinking</Label>
+        <div className="min-w-0 max-w-40 flex-1">
+          <ReasoningSelect id={thinkingFieldId} descriptionId={unavailableReasoning ? thinkingHelpId : undefined} ariaLabel="Thinking level"
+            value={currentReasoning ?? null} onChange={onSelectReasoning} emptyLabel="Default"
+            allowedLevels={activeThinkingLevels} disabled={disabled} chevron="inset" surface="plain" />
+        </div>
+      </div>
+      {unavailableReasoning && <p id={thinkingHelpId} className="mt-1.5 text-xs text-muted">Choose an available thinking level.</p>}
+    </div>
+  );
+
+  if (panel && !moreModels) return (
+    <div className="min-w-0 space-y-4" role="group" aria-label="Model and thinking settings">
+      {(modelsQ.isLoading || !approvalScopeResolved) && <p className="text-sm text-muted">Loading models…</p>}
+      {(modelsQ.error || approvedModelsQ.error) && <p role="alert" className="text-sm text-muted">Could not load models. Close settings and try again.</p>}
+      <ModelSizeList selectedId={currentId} onSelect={onSelect} choices={SIZE_TIERS.map(tier => ({
+        id: tier,
+        label: TIER_LABELS[tier],
+        description: tierSubtitle(tier, tierMapQ.data, models),
+        disabled: disabled || modelsQ.isLoading || !approvalScopeResolved || (restricted && resolveTierModel(tier, tierMapQ.data, models)?.approved !== true),
+      }))} />
+      {triggerId && !isSizeTier(currentId) && <p className="px-1 text-sm text-muted">Current: {triggerLabel}</p>}
+      {phoneThinkingControl}
+      <button ref={moreModelsRef} type="button" onClick={() => setMoreModels(true)}
+        className="flex min-h-11 w-full items-center justify-between gap-3 rounded-2xl bg-ink-wash px-4 py-3 text-left text-base text-ink hover:bg-moss-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
+        More models <ChevronRight aria-hidden="true" className="h-5 w-5 shrink-0 text-muted" />
+      </button>
+    </div>
+  );
 
   const GroupLabel = panel ? "div" : DropdownMenuLabel;
   const content = <>
@@ -454,23 +501,7 @@ export function ModelPicker({
           ))}
         </div>
         <div className="sticky bottom-0 shrink-0 bg-paper border-t border-line">
-          {onSelectReasoning && (panel ? (
-            <div className="space-y-1.5 border-b border-line px-3 py-3">
-              <div className="flex min-w-0 items-center justify-between gap-3">
-                <Label htmlFor={thinkingFieldId} className="shrink-0 text-sm text-ink">Thinking</Label>
-                <div className="min-w-0 max-w-40 flex-1">
-                  <ReasoningSelect id={thinkingFieldId} descriptionId={thinkingHelpId} ariaLabel="Thinking level"
-                    value={currentReasoning ?? null} onChange={onSelectReasoning} emptyLabel="Default"
-                    allowedLevels={activeThinkingLevels} disabled={disabled} chevron="inset" />
-                </div>
-              </div>
-              <p id={thinkingHelpId} className="text-xs text-muted">
-                {currentReasoning && (!reasoningLevels.some(level => level === currentReasoning) || isLevelDisabled(currentReasoning))
-                  ? "Choose an available thinking level."
-                  : currentReasoning ? "More thinking can take longer." : "Uses the default thinking level."}
-              </p>
-            </div>
-          ) : (
+          {onSelectReasoning && (panel ? phoneThinkingControl : (
             <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
               <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
               <button
@@ -570,8 +601,11 @@ export function ModelPicker({
         </div>
   </>;
   if (panel) return <div className="min-w-0" role="group" aria-label="Model and thinking settings">
+    <Button ref={backRef} variant="ghost" size="sm" aria-label="Back to sizes" onClick={() => { setQuery(""); setMoreModels(false); }}>
+      <ArrowLeft aria-hidden="true" className="h-4 w-4" /> Back
+    </Button>
     <p className="mb-3 shrink-0 text-sm text-muted">{triggerLabel}{triggerReasoning}</p>
-    <div className="overflow-hidden rounded-lg border border-line" onKeyDown={onKeyDown}>{content}</div>
+    <div className="overflow-hidden rounded-2xl" onKeyDown={onKeyDown}>{content}</div>
   </div>;
 
   return (
