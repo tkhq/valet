@@ -1198,7 +1198,7 @@ describe("ChildWatcher", () => {
   });
 
   describe("child event subscriptions", () => {
-    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}) {
+    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}, origin?: ChannelOrigin) {
       api = await bootTestApi();
       const deps = childrenDeps(api, overrides);
       const watcher = testChildWatcher(deps);
@@ -1217,7 +1217,8 @@ describe("ChildWatcher", () => {
       const childThread = child.thread("web:default");
       await child.pause();
       const itemId = `qi-${name}-1`;
-      await engineStore.admitSubmission(`child-${name}`, childThread.id, queuedItem(itemId, childThread.id, "work"));
+      await engineStore.admitSubmission(`child-${name}`, childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
+        metadata: parentDelegationMetadata(parent.id, parentThread.id, origin) });
       await engineStore.settleUnclaimed(`child-${name}`, childThread.id, itemId, { outcome: "completed" });
       await db.insert(agentSessions).values({
         id: `child-${name}`, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
@@ -1418,9 +1419,9 @@ describe("ChildWatcher", () => {
     });
 
     it("does not replay legacy turns or reset retention after an automatic channel reply", async () => {
-      const c = await armedChild("legacy-auto");
+      const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+      const c = await armedChild("legacy-auto", {}, origin);
       const db = api!.providers.db;
-      const origin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
       await db.update(childWatches).set({ originJson: JSON.stringify(origin), replyRoute: "origin" })
         .where(eq(childWatches.childSessionId, c.watch.childSessionId));
       c.watcher.arm(c.watch);
@@ -1606,6 +1607,91 @@ describe("ChildWatcher", () => {
       expect(await db.select().from(eventReceipts)).toEqual([]);
       expect(await db.select().from(events)).toEqual([]);
       expect(await db.select().from(eventDeliveries)).toEqual([]);
+    });
+
+    it.each(["cancel", "archive", "move"] as const)("new bot repro 1: %s completes before a buffered gate lookup returns", async mode => {
+      const c = await armedChild(`cancel-inflight-${mode}`);
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const gate = { id: "cancel-inflight-gate", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: c.watch.queueItemId,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Must not arrive after cancellation", actions: [], status: "pending" as const,
+        createdAt: Date.now(), updatedAt: Date.now() };
+      await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+      await c.watcher.reportGateOpened(c.child.id, gate);
+      const get = c.engineStore.getDecisionGate.bind(c.engineStore);
+      const lookup = vi.spyOn(c.engineStore, "getDecisionGate").mockImplementationOnce(async (session, id) => {
+        const pending = await get(session, id);
+        if (mode === "cancel") await cancelChildDelivery(api!.providers.db, c.engineStore, c.child.id, "Delivery cancelled during gate lookup");
+        else await endChildSubscriptions(c.engineStore, c.parent.id, mode === "archive" ? c.parentThread.id : undefined, api!.providers.db);
+        return pending;
+      });
+      try {
+        await childDelivery!.sweep();
+        expect(lookup).toHaveBeenCalled();
+        expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("cancelled");
+        expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`)).toBeNull();
+      } finally { lookup.mockRestore(); }
+    });
+
+    it("does not admit a stale gate digest after cancellation and explicit reactivation", async () => {
+      const c = await armedChild("cancel-reactivate-gate");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const gate = { id: "stale-gate", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: c.watch.queueItemId,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Cancelled cycle", actions: [], status: "pending" as const,
+        createdAt: Date.now(), updatedAt: Date.now() };
+      await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+      await c.watcher.reportGateOpened(c.child.id, gate);
+      const get = c.engineStore.getDecisionGate.bind(c.engineStore);
+      const lookup = vi.spyOn(c.engineStore, "getDecisionGate").mockImplementationOnce(async (session, id) => {
+        const pending = await get(session, id);
+        await cancelChildDelivery(api!.providers.db, c.engineStore, c.child.id, "End the old delivery cycle");
+        await c.watcher.ensureSubscription(c.watch, true);
+        expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("running");
+        return pending;
+      });
+      try {
+        await childDelivery!.sweep();
+        expect(lookup).toHaveBeenCalled();
+        expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`)).toBeNull();
+      } finally { lookup.mockRestore(); }
+    });
+
+    it.each(["gate", "settlement"] as const)("new bot repro 2: the first private submission protects its own %s route", async event => {
+      const c = await armedChild(`private-own-${event}`);
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      await api!.providers.db.update(childWatches).set({ replyRoute: "origin",
+        originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      const id = "first-private-web-turn";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id,
+        { ...queuedItem(id, c.childThread.id, "Private acquisition numbers"), author: { id: "local-user" } });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: "private", ownerId: "test" });
+      await c.engineStore.appendEntries(c.child.id, c.childThread.id, [{ id: "first-private-entry", sessionId: c.child.id,
+        threadId: c.childThread.id, queueItemId: id, parentId: null, type: "message", role: "user", content: "Private acquisition numbers", createdAt: Date.now() }]);
+      if (event === "gate") {
+        const gate = { id: "first-private-gate", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: id,
+          resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "SECRET acquisition approval", actions: [], status: "pending" as const,
+          createdAt: Date.now(), updatedAt: Date.now() };
+        await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+        await c.watcher.reportGateOpened(c.child.id, gate);
+        const dispatch = `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`;
+        await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch) !== null);
+        const content = (await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch))?.content;
+        expect(content).not.toHaveProperty("origin");
+        expect(JSON.stringify(content)).not.toContain(gate.title);
+      } else {
+        const fence = { itemId: id, attemptId: "private" };
+        await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "completed" }, fence);
+        await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+        await api!.providers.db.update(childWatches).set({ queueItemId: id, settled: false }).where(eq(childWatches.childSessionId, c.child.id));
+        c.watcher.arm({ ...c.watch, queueItemId: id });
+        const dispatch = `${c.child.id}:settled:${c.child.id}:${id}`;
+        await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch) !== null);
+        expect((await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch))?.content).toMatchObject({ origin: { reply: "manual" } });
+        expect(await api!.providers.db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, dispatch))).toHaveLength(0);
+      }
     });
 
     it("bot repro 1: redacts a taken-over gate and omits the saved Slack origin", async () => {
@@ -1806,7 +1892,7 @@ describe("ChildWatcher", () => {
     });
 
     it("does not resurrect a permanently denied signal result after reboot or block later updates", async () => {
-      const c = await armedChild("denied-reboot");
+      const c = await armedChild("denied-reboot", {}, { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" });
       const db = api!.providers.db;
       await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1", reply: "auto" }), replyRoute: "origin" })
         .where(eq(childWatches.childSessionId, c.child.id));
@@ -2168,13 +2254,14 @@ describe("ChildWatcher", () => {
     });
     const childThread = child.thread("web:default");
 
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     const itemId = "qi-origin-settled-1";
-    await engineStore.admitSubmission("child-o", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.admitSubmission("child-o", childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
+      metadata: parentDelegationMetadata(parent.id, parentThread.id, origin) });
     await engineStore.settleUnclaimed("child-o", childThread.id, itemId, { outcome: "completed" });
 
     // The row a spawn from a Slack-addressed turn writes: origin captured at
     // spawn time, durable so the boot rearm() path inherits it too.
-    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     await db.insert(childWatches).values({
       childSessionId: "child-o",
       queueItemId: itemId,
@@ -2445,11 +2532,12 @@ describe("ChildWatcher", () => {
       workspace: "/tmp",
     });
     const childThread = child.thread("web:default");
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
     const itemId = "qi-denied-reply";
-    await engineStore.admitSubmission("child-denied-reply", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.admitSubmission("child-denied-reply", childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
+      metadata: parentDelegationMetadata("parent-does-not-exist", "th-does-not-exist", origin) });
     await engineStore.settleUnclaimed("child-denied-reply", childThread.id, itemId, { outcome: "completed" });
 
-    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
     const watch = {
       childSessionId: "child-denied-reply",
       queueItemId: itemId,
@@ -3256,7 +3344,7 @@ describe("parseTaskRepo", () => {
 // a send is the NEW submission's, never the superseded original's.
 describe("buildChildSender", () => {
   /** Hand-built child + watch row (watcher-test idiom): no LLM turn runs. */
-  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string; teamId?: string; credentialOwnerMode?: "owner" | "actor" }) {
+  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string; teamId?: string; credentialOwnerMode?: "owner" | "actor"; origin?: ChannelOrigin }) {
     const { engineHost, engineStore, db } = a.providers;
     const parent = await engineHost.sessionFor(opts.parentId, {
       userId: "local-user",
@@ -3282,7 +3370,7 @@ describe("buildChildSender", () => {
     // Stamped as the real spawner stamps the delegated work.
     await engineStore.admitSubmission(opts.childId, childThread.id, {
       ...queuedItem(opts.queueItemId, childThread.id, "original task"),
-      metadata: parentDelegationMetadata(opts.parentId, parentThread.id),
+      metadata: parentDelegationMetadata(opts.parentId, parentThread.id, opts.origin),
     });
     if (opts.settled) {
       await engineStore.settleUnclaimed(opts.childId, childThread.id, opts.queueItemId, { outcome: "completed" });
@@ -3666,6 +3754,7 @@ describe("buildChildSender", () => {
 
     const { parentThread, childThread } = await seedChild(api, {
       childId: "child-revive", parentId: "parent-revive", settled: false, queueItemId: "qi-revive",
+      origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" },
     });
     await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), replyRoute: "origin" })
       .where(eq(childWatches.childSessionId, "child-revive"));
@@ -3909,6 +3998,105 @@ describe("child sandbox retention", () => {
       .limit(1);
     return rows[0];
   }
+
+  it("new bot repro 3: retains the sandbox between hold release and lease.expired admission", async () => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "new-bot-hold-gap", "parent-new-bot-hold");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createLease({ id: "ls_new_bot_gap", sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "preserve scratch", createdAt: now, deadlineAt: now + 60_000 });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    let stateAtAdmission: string | undefined;
+    const prompt = vi.spyOn(child, "prompt").mockImplementation(async (content, options) => {
+      expect(await store.countActiveLeases(child.id)).toBe(0);
+      await watcher.sweepRetention();
+      stateAtAdmission = child.attachment.state;
+      await store.admitSubmission(child.id, childThread.id, { ...queuedItem("hold-terminal-turn", childThread.id, ""),
+        content, dispatchId: options?.dispatchId });
+      return { queueItemId: "hold-terminal-turn", sessionId: child.id, threadId: childThread.id, status: "queued" };
+    });
+    try {
+      await childDelivery!.sweep(now + 60_001);
+      expect(prompt).toHaveBeenCalled();
+      expect(stateAtAdmission).toBe("ready");
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      await watcher.sweepRetention();
+      expect(child.attachment.state).toBe("ready");
+      await store.settleUnclaimed(child.id, childThread.id, "hold-terminal-turn", { outcome: "completed" });
+      await watcher.sweepRetention();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+    } finally { prompt.mockRestore(); }
+  });
+
+  it.each([true, false])("bounds released-hold retention across reboot (terminal expected=%s)", async expected => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: 0 });
+    const watcher = testChildWatcher(deps);
+    const { watch, child, childThread } = await seedParkableChild(api, "hold-terminal-bound", "parent-hold-bound");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createLease({ id: "ls_hold_bound", sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "preserve scratch", createdAt: now, deadlineAt: now + 60_000 });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    const prompt = vi.spyOn(child, "prompt").mockRejectedValueOnce(new Error("hold expiry admission unavailable"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      if (expected) {
+        await childDelivery!.sweep(now + 60_001);
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect((await store.getLease("ls_hold_bound"))?.terminalSignalExpected).toBe(true);
+      } else await store.releaseLease("ls_hold_bound", "cancelled", now);
+      prompt.mockRestore();
+      const reboot = testChildWatcher(deps);
+      await reboot.rearm();
+      await reboot.sweepRetention();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt === null).toBe(expected);
+      await reboot.sweepRetention(now + 60_001 + CHILD_TERMINAL_SIGNAL_GRACE_MS + 1);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+      expect(child.attachment.state).toBe("released");
+      expect((await store.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
+      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal never arrived"))).toBe(expected);
+    } finally { prompt.mockRestore(); errors.mockRestore(); }
+  });
+
+  it("new bot repro 4: failed timer admission does not retain a non-hibernating child after rearm and a year", async () => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: 0 });
+    const watcher = testChildWatcher(deps);
+    const { watch, child, childThread } = await seedParkableChild(api, "new-bot-timer-year", "parent-new-bot-timer-year");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createWakeup({ id: "wk_new_bot_timer_year", sessionId: child.id, threadId: childThread.id, kind: "timer", status: "pending",
+      reason: "continue", prompt: "Continue with scratch", fireAt: now + 60_000, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    const prompt = vi.spyOn(child, "prompt").mockRejectedValueOnce(new Error("one failed timer admission"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await childDelivery!.sweep(now + 60_001);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      prompt.mockRestore();
+      const reboot = testChildWatcher(deps);
+      await reboot.rearm();
+      await childDelivery!.sweep(now + 60_002);
+      expect((await store.getWakeup("wk_new_bot_timer_year"))?.status).toBe("done");
+      expect(await store.getQueueItemByDispatchId(child.id, "wakeup:wk_new_bot_timer_year:terminal")).toBeNull();
+      await reboot.sweepRetention(now + 365 * 24 * 60 * 60_000);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+      expect(child.attachment.state).toBe("released");
+      expect((await store.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
+    } finally { prompt.mockRestore(); errors.mockRestore(); }
+  });
 
   it("bot repro 3: retains the sandbox between timer completion and terminal admission", async () => {
     const provider = new HibernatingChildProvider();

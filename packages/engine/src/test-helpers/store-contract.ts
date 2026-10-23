@@ -1062,6 +1062,21 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
 
       const origin = { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" };
 
+      it("releases a hold with its terminal expectation in the same CAS and lists it after release", async () => {
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", ownerId: undefined }));
+        await store.createLease(lease({ id: "ls_other", sessionId: "sess-2" }));
+        expect((await store.listLeases("sess-1")).map(row => row.id)).toEqual(["ls_hold"]);
+        expect(await store.releaseLease("ls_hold", "deadline", 100, { terminalSignalExpected: true }))
+          .toMatchObject({ releasedAt: 100, releaseCause: "deadline", terminalSignalExpected: true });
+        expect(await store.listActiveLeases("sess-1")).toEqual([]);
+        expect(await store.listLeases("sess-1")).toEqual([expect.objectContaining({ id: "ls_hold", terminalSignalExpected: true, releasedAt: 100 })]);
+        expect(await store.releaseLease("ls_hold", "cancelled", 200)).toBeNull();
+        expect((await store.getLease("ls_hold"))?.terminalSignalExpected).toBe(true);
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", ownerId: undefined }));
+        await store.releaseLease("ls_silent", "cancelled", 200);
+        expect((await store.getLease("ls_silent"))?.terminalSignalExpected).not.toBe(true);
+      });
+
       it("round-trips every wakeup and lease field, origin and rate window included", async () => {
         const w = wakeup({ origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
         const l = lease({ threadId: "th-1", origin });

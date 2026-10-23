@@ -40,6 +40,7 @@ import {
   type EventStream,
   type EventMatchDigest,
   type Wakeup,
+  type WakeupKind,
   type NormalizedEvent,
   type Principal,
   type SessionStore,
@@ -290,7 +291,7 @@ export async function childGateOrigin(db: AppDb, store: SessionStore, childSessi
   const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1);
   if (!row || row.replyRoute === "none") return undefined;
   const origin = settlementOrigin(row.originJson, row.replyRoute);
-  if (!origin || await privateInputBefore(store, childSessionId, queueItemId,
+  if (!origin || await privateInputThrough(store, childSessionId, queueItemId,
     { parentThreadId: row.parentThreadId, originThreadKey: origin.threadKey })) return undefined;
   return origin;
 }
@@ -387,8 +388,8 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 
 /**
  * True when input that the automatic route does not cover is in the child's
- * transcript before `itemId`'s own entries. That is input from a person (a
- * prompt while the child was idle, a followup, or a steer), or parent work
+ * transcript through `itemId`, including that submission's own input. That
+ * includes a person's idle prompt, followup, or steer, or parent work
  * that would not keep the route (`nextReplyRoute`), such as work from a
  * private parent thread. A signal from another session does not count.
  * The transcript is the execution order: a run writes its submission there.
@@ -398,7 +399,7 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
  * and queue items, so it covers every way input can reach the child,
  * including parent work whose sender failed to store its route.
  */
-async function privateInputBefore(
+async function privateInputThrough(
   store: SessionStore,
   childSessionId: string,
   itemId: string,
@@ -406,18 +407,17 @@ async function privateInputBefore(
 ): Promise<boolean> {
   const item = await store.getQueueItem(childSessionId, itemId);
   if (!item) return false;
-  const ranBefore = new Set<string>();
+  const ranThrough = new Set<string>([item.id]);
   for (const entry of await store.getEntries(childSessionId, item.threadId)) {
     if (entry.queueItemId === item.id) break;
-    if (entry.queueItemId !== undefined) ranBefore.add(entry.queueItemId);
+    if (entry.queueItemId !== undefined) ranThrough.add(entry.queueItemId);
   }
-  if (ranBefore.size === 0) return false;
   const keepsRoute = (other: { metadata?: Record<string, unknown> }) => isParentDelegation(other)
     && nextReplyRoute("origin", { delegated: true, ...delegationSource(other) }, watch) === "origin";
   return [
     ...(await store.listUnsettledSubmissions(childSessionId)),
     ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
-  ].some((other) => ranBefore.has(other.id) && !keepsRoute(other) && !isSignalSubmission(other));
+  ].some((other) => ranThrough.has(other.id) && !keepsRoute(other) && !isSignalSubmission(other));
 }
 
 function isSignalSubmission(item: { content: unknown }): boolean {
@@ -896,7 +896,11 @@ export class ChildWatcher {
 
   private async attempt(watch: ArmArgs, digest?: EventMatchDigest): Promise<void> {
     const itemId = watch.resultItemId ?? watch.queueItemId;
-    if (await withChildDelivery(this.deps.db, watch.childSessionId, () => this.discardUnavailableChild(watch.childSessionId))) return;
+    // Digest admission holds the cancellation lock; publication acquires it here.
+    const unavailable = digest
+      ? await this.discardUnavailableChild(watch.childSessionId)
+      : await withChildDelivery(this.deps.db, watch.childSessionId, () => this.discardUnavailableChild(watch.childSessionId));
+    if (unavailable) return;
     const childData = await this.deps.engineStore.getSession(watch.childSessionId);
     if (!childData) throw new Error(`child session not found: ${watch.childSessionId}`);
     const turn = await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId);
@@ -1058,7 +1062,7 @@ export class ChildWatcher {
     // Private input in this result's transcript downgrades an automatic
     // route to manual for good. Parent work never restores `origin`.
     let replyRoute = digest.refs?.reply_route ?? row.replyRoute;
-    if (replyRoute === "origin" && await privateInputBefore(this.deps.engineStore, watch.childSessionId, itemId,
+    if (replyRoute === "origin" && await privateInputThrough(this.deps.engineStore, watch.childSessionId, itemId,
       { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey })) {
       replyRoute = "manual" satisfies ChildReplyRoute;
       await this.deps.db.update(childWatches).set({ replyRoute })
@@ -1163,6 +1167,9 @@ export class ChildWatcher {
 
   /** Only an explicit child_send restores a cancelled subscription. */
   async ensureSubscription(watch: Pick<ArmArgs, "childSessionId" | "parentSessionId" | "parentThreadId">, reactivate = false): Promise<void> {
+    // An explicit send to a running subscription changes no delivery state.
+    // Do not block new child work behind an in-flight parent admission.
+    if (reactivate && (await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`))?.status === "running") return;
     return withChildDelivery(this.deps.db, watch.childSessionId, () => this.ensureSubscriptionUnlocked(watch, reactivate));
   }
 
@@ -1407,6 +1414,21 @@ export class ChildWatcher {
   async deliverEvent(row: Wakeup, digest: EventMatchDigest): Promise<void> {
     const child = row.eventMatch?.childSessionId;
     if (!child || digest.refs?.child_session_id !== child) return;
+    const gate = digest.key === "child.gate_opened"
+      ? await this.deps.engineStore.getDecisionGate(child, digest.refs.gate_id ?? "") : null;
+    await withChildDelivery(this.deps.db, child, async () => {
+      // Lookup can outlive cancellation. Hold its lock from this check
+      // through admission, and reject stale digests after explicit reactivation.
+      const current = await this.deps.engineStore.getWakeup(row.id);
+      if (current?.status !== "running" || !current.eventBuffer?.some(event => event.dedupeKey === digest.dedupeKey)) return;
+      await this.deliverBufferedEvent(row, digest, gate);
+    });
+  }
+
+  /** Caller holds the delivery lock until admission and acknowledgement finish. */
+  private async deliverBufferedEvent(row: Wakeup, digest: EventMatchDigest, gate: DecisionGate | null): Promise<void> {
+    const child = row.eventMatch?.childSessionId;
+    if (!child || digest.refs?.child_session_id !== child) return;
     const [stored] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, child)).limit(1);
     if (!stored || stored.parentSessionId !== row.sessionId || stored.parentThreadId !== row.threadId) return;
     const watch = { ...watchRowToArgs(stored), queueItemId: digest.refs.watch_queue_item_id ?? digest.refs.child_queue_item_id ?? stored.queueItemId };
@@ -1419,7 +1441,6 @@ export class ChildWatcher {
     }
     try {
       if (digest.key === "child.gate_opened") {
-        const gate = await this.deps.engineStore.getDecisionGate(child, digest.refs.gate_id ?? "");
         if (gate?.status === "pending") await this.deliverGate(watch, gate);
       } else if (digest.key === "child.settled") {
         await this.attempt({ ...watch, resultItemId: digest.refs.child_queue_item_id }, digest);
@@ -1687,19 +1708,19 @@ export class ChildWatcher {
   }
 
   /**
-   * True while an ended wakeup still owes its terminal signal. The terminal
-   * transition precedes admission, so the ended row and deterministic
+   * True while an ended wakeup or released hold still owes its terminal signal.
+   * The terminal transition precedes admission, so the row and deterministic
    * dispatch ID are the durable evidence, including after a reboot. Only
    * the terminal decision can promise a signal. Refused starts and bad
    * rows never count. Past the grace the signal is lost; count it and proceed.
    */
-  private async owesTerminalSignal(childSessionId: string, wakeup: Wakeup, now: number): Promise<boolean> {
-    if (wakeup.eventMatch?.childSessionId !== undefined || wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) return false;
-    if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost") return false;
-    if (await this.deps.engineStore.getQueueItemByDispatchId(childSessionId, `wakeup:${wakeup.id}:terminal`)) return false;
-    if (now - wakeup.endedAt <= CHILD_TERMINAL_SIGNAL_GRACE_MS) return true;
-    recordChildTerminalSignalAbandoned(wakeup.kind);
-    console.error(`ChildWatcher: ${wakeup.kind} wakeup ${wakeup.id} of child ${childSessionId} ended at ${new Date(wakeup.endedAt).toISOString()} and its terminal signal never arrived; retention proceeds.`);
+  private async owesTerminalSignal(childSessionId: string, terminal: {
+    id: string; kind: WakeupKind | "hold"; endedAt: number; dispatchId: string;
+  }, now: number): Promise<boolean> {
+    if (await this.deps.engineStore.getQueueItemByDispatchId(childSessionId, terminal.dispatchId)) return false;
+    if (now - terminal.endedAt <= CHILD_TERMINAL_SIGNAL_GRACE_MS) return true;
+    recordChildTerminalSignalAbandoned(terminal.kind);
+    console.error(`ChildWatcher: ${terminal.kind} ${terminal.id} of child ${childSessionId} ended at ${new Date(terminal.endedAt).toISOString()} and its terminal signal never arrived; retention proceeds.`);
     return false;
   }
 
@@ -1711,14 +1732,24 @@ export class ChildWatcher {
    */
   private async holdsBackgroundWork(childSessionId: string, now = Date.now()): Promise<boolean> {
     const store = this.deps.engineStore;
-    const leases = await store.countActiveLeases(childSessionId);
+    // One lease snapshot covers release-to-admission, including after restart.
+    const leaseRows = await store.listLeases(childSessionId);
+    const leases = leaseRows.filter(lease => lease.releasedAt === undefined).length;
     // One snapshot covers both open work and terminal rows. Separate reads
     // could miss a transition between the ended-row and open-row scans.
     const wakeups = await store.listWakeups(childSessionId);
     const timers = wakeups.filter(w => w.kind === "timer" && w.status === "pending").length;
     const events = wakeups.filter(w => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
     for (const wakeup of wakeups) {
-      if (await this.owesTerminalSignal(childSessionId, wakeup, now)) return true;
+      if (wakeup.eventMatch?.childSessionId !== undefined || wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) continue;
+      if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost") continue;
+      if (await this.owesTerminalSignal(childSessionId, { id: wakeup.id, kind: wakeup.kind, endedAt: wakeup.endedAt,
+        dispatchId: `wakeup:${wakeup.id}:terminal` }, now)) return true;
+    }
+    for (const lease of leaseRows) {
+      if (lease.ownerKind !== "hold" || lease.releasedAt === undefined || !lease.terminalSignalExpected) continue;
+      if (await this.owesTerminalSignal(childSessionId, { id: lease.id, kind: "hold", endedAt: lease.releasedAt,
+        dispatchId: `lease:${lease.id}:expired` }, now)) return true;
     }
     if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);

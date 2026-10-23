@@ -399,7 +399,8 @@ describe("WakeWatcher", () => {
     await h.watcher().sweep();
 
     expect(await h.store.countActiveLeases("sess-1")).toBe(0);
-    expect(releaseSpy).toHaveBeenCalledWith("ls_h", "deadline", NOW);
+    expect(releaseSpy).toHaveBeenCalledWith("ls_h", "deadline", NOW, { terminalSignalExpected: true });
+    expect(await h.store.getLease("ls_h")).toMatchObject({ releasedAt: NOW, terminalSignalExpected: true });
     const { content, opts } = signalOf(h.prompt.mock.calls[0]);
     expect(content).toMatchObject({
       kind: "signal",

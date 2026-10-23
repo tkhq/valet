@@ -394,8 +394,8 @@ export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
   inst().wakeupSignalsLost.add(1, { kind });
 }
 
-/** A child retention sweep stopped waiting for an ended wakeup's terminal signal. */
-export function recordChildTerminalSignalAbandoned(kind: WakeupKind): void {
+/** A child retention sweep stopped waiting for a wakeup or hold's terminal signal. */
+export function recordChildTerminalSignalAbandoned(kind: WakeupKind | "hold"): void {
   inst().wakeupSignalsLost.add(1, { kind, reason: "child_terminal_grace" });
 }
 

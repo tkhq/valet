@@ -6,7 +6,7 @@ import { childEventOutbox, childReplyDeliveries, childWatches, eventDropLog } fr
 
 const owners = new WeakMap<AppDb, Map<string, Promise<unknown>>>();
 
-/** The host owns publication, cancellation, and idle close through this per-child critical section. */
+/** Publication, admission, cancellation, and idle close share this per-child critical section. */
 export async function withChildDelivery<T>(db: AppDb, child: string, work: () => Promise<T>): Promise<T> {
   let chains = owners.get(db);
   if (!chains) { chains = new Map(); owners.set(db, chains); }

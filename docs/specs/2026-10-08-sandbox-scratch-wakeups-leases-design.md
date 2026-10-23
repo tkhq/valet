@@ -458,12 +458,13 @@ from the UI emits its terminal signal with `cause=cancelled`.
 | `deadline_at` | bigint | NOT NULL |
 | `released_at` | bigint null | |
 | `release_cause` | text null | `owner_ended` \| `cancelled` \| `deadline` |
+| `terminal_signal_expected` | boolean | default false; hold expiry sets it atomically with release |
 | `thread_id` | text null | the thread that created it; `lease.expired` goes there |
 | `origin_json` | text null | the channel origin of the creating turn |
 
-Store methods: `createLease`, `releaseLease(id, cause, releasedAt)` (CAS on
-`released_at IS NULL`), `getLease(id)` (released or not),
-`listActiveLeases(sessionId)`, `listAllActiveLeases()`,
+Store methods: `createLease`, `releaseLease(id, cause, releasedAt, opts?)` (CAS on
+`released_at IS NULL`; expiry sets `opts.terminalSignalExpected`), `getLease(id)` (released or not),
+`listLeases(sessionId)` (one snapshot of active and released rows), `listActiveLeases(sessionId)`, `listAllActiveLeases()`,
 `countActiveLeases(sessionId)`, and `setLeaseSandboxId(id, sandboxId)`
 (fills a missing sandbox id on an active lease).
 
@@ -474,6 +475,8 @@ Store methods: `createLease`, `releaseLease(id, cause, releasedAt)` (CAS on
   with `owner_ended`, `cancelled`, or `deadline`.
 - `hold_sandbox` creates a lease with no owner row. The WakeWatcher
   releases it at `deadline_at` with `deadline` and emits `lease.expired`.
+  Its release CAS records `terminalSignalExpected` and uses the clock at release, not pass start.
+  Silent releases do not promise a signal.
 - `deadline_at` MUST be at most `created_at + leaseMaxHours`.
 - Session delete ends the session's background work.
   `SessionStore.deleteSession` moves its `pending` and `running` wakeups
@@ -1263,6 +1266,8 @@ with an earlier entry, the entry below wins.
   and counts the lost signal, then reclaims. The terminal CAS sets
   `terminalSignalExpected` only if its decision emits a signal. Failed starts,
   bad rows, and silent cancellation never count.
+  Released holds use the same four-tick bound from `releasedAt` for `lease:<id>:expired` admission.
+  Their expectation survives reboot. Past the bound, the sweep logs and counts the lost hold signal.
   With warm retention off, recent human turns defer reclaim for the platform
   idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.

@@ -1680,10 +1680,10 @@ export class PgSessionStore implements SessionStore {
     await insertLease(this.db, lease);
   }
 
-  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
     const r = await this.db.query(
-      `UPDATE engine_leases SET released_at = $2, release_cause = $3 WHERE id = $1 AND released_at IS NULL RETURNING *`,
-      [id, releasedAt, cause],
+      `UPDATE engine_leases SET released_at = $2, release_cause = $3, terminal_signal_expected = $4 WHERE id = $1 AND released_at IS NULL RETURNING *`,
+      [id, releasedAt, cause, opts?.terminalSignalExpected ?? false],
     );
     return r.rows[0] ? rowToLease(rawToLeaseRow(r.rows[0])) : null;
   }
@@ -1700,6 +1700,11 @@ export class PgSessionStore implements SessionStore {
     if (rows.leaseId !== undefined) {
       await this.db.query("DELETE FROM engine_leases WHERE session_id = $1 AND id = $2", [sessionId, rows.leaseId]);
     }
+  }
+
+  async listLeases(sessionId: string): Promise<Lease[]> {
+    const r = await this.db.query("SELECT * FROM engine_leases WHERE session_id = $1 ORDER BY created_at, id", [sessionId]);
+    return mapGoodRows(r.rows, "engine_leases", raw => rowToLease(rawToLeaseRow(raw)));
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
@@ -1859,8 +1864,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
 async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
   await db.query(
     `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at,
-       released_at, release_cause, thread_id, origin_json)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+       released_at, release_cause, thread_id, origin_json, terminal_signal_expected)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
     [
       lease.id,
       lease.sessionId,
@@ -1874,6 +1879,7 @@ async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
       lease.releaseCause ?? null,
       lease.threadId ?? null,
       jsonOrNull(lease.origin),
+      lease.terminalSignalExpected ?? false,
     ],
   );
 }

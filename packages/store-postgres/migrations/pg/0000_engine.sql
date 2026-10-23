@@ -279,6 +279,7 @@ CREATE TABLE "engine_leases" (
 	"deadline_at" bigint NOT NULL,
 	"released_at" bigint,
 	"release_cause" text,
+	"terminal_signal_expected" boolean NOT NULL DEFAULT false,
 	"thread_id" text,
 	"origin_json" text
 );

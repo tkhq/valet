@@ -775,7 +775,7 @@ export class WakeWatcher {
       if (this.stopping) return;
       if (lease.ownerKind === "hold") {
         if (lease.deadlineAt > now) continue;
-        await this.expireHold(now, lease);
+        await this.expireHold(lease);
         continue;
       }
       try {
@@ -818,10 +818,12 @@ export class WakeWatcher {
     return updated !== null;
   }
 
-  private async expireHold(now: number, lease: Lease): Promise<void> {
+  private async expireHold(lease: Lease): Promise<void> {
+    // A pass can take minutes. Start terminal-admission grace at release, not pass start.
+    const now = this.clock();
     let released: Lease | null;
     try {
-      released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now);
+      released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now, { terminalSignalExpected: true });
     } catch (err) {
       console.error(`WakeWatcher: release of hold lease ${lease.id} failed; it stays due for the next tick:`, err);
       return;

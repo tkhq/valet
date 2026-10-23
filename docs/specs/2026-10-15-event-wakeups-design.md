@@ -764,9 +764,11 @@ An event waiter follows the rule for timers:
   A child with an active lease, pending timer, or running event waiter keeps its sandbox.
   The reclaim sweep also runs when warm retention is off.
   It reclaims after cancelled background work stops owing turns.
-  An ended wakeup owes work until its deterministic terminal dispatch ID exists.
+  An ended wakeup or released hold owes work until its deterministic terminal dispatch ID exists.
   This guard survives a restart between the terminal transition and signal admission.
-  The guard is bounded: four WakeWatcher ticks from `endedAt`.
+  The guard is bounded: four WakeWatcher ticks from `endedAt` or the hold's `releasedAt`.
+  Hold expiry commits `terminalSignalExpected` with release, using the clock at release rather than pass start.
+  Silent hold release never sets that flag. Lease snapshots include both active and released rows.
   Past that bound, the sweep logs the lost signal, counts it under `valet.wakeups.signals_lost` with reason `child_terminal_grace`, and proceeds.
   The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal.
   Failed or refused starts, bad rows, and silent cancellation never set it and never count.
@@ -808,12 +810,17 @@ Later signal turns and pending gates can reopen an ended subscription.
 They do not reopen a cancelled subscription.
 Pending gates reach the parent even when the watch is already settled.
 The retention sweep ends idle subscriptions after background work stops without another turn.
-Publication, cancellation, and idle close share a per-child host lock.
+Publication, admission, cancellation, and idle close share a per-child host lock.
+After gate lookup, admission checks that the waiter is running and still buffers the same digest under that lock.
+A completed cancellation prevents in-flight delivery, including after explicit reactivation clears the old buffer.
+An explicit send to a running subscription changes no delivery state and does not wait behind parent admission.
 An idle close checks the outbox under that lock.
 Its store transition also requires an empty buffer.
 A publication after the close restores the ended waiter before ingestion.
 Gate Slack cards resolve the stored origin even after settlement notification.
 Private input and reply-route restrictions still apply.
+The privacy check includes the gate submission itself, not only earlier transcript entries.
+Settlement routing applies the same inclusive check before it permits an automatic channel reply.
 Parent gate signals use the same origin resolver as gate cards.
 If the saved channel route cannot see the gate, the parent signal omits the origin and gate title.
 

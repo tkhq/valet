@@ -447,10 +447,10 @@ export class InMemorySessionStore implements SessionStore {
     this.leases.set(lease.id, { ...lease });
   }
 
-  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
     const l = this.leases.get(id);
     if (!l || l.releasedAt !== undefined) return null;
-    const next: Lease = { ...l, releasedAt, releaseCause: cause };
+    const next: Lease = { ...l, releasedAt, releaseCause: cause, ...(opts?.terminalSignalExpected ? { terminalSignalExpected: true } : {}) };
     this.leases.set(id, next);
     return { ...next };
   }
@@ -467,6 +467,10 @@ export class InMemorySessionStore implements SessionStore {
     if (rows.leaseId !== undefined && this.leases.get(rows.leaseId)?.sessionId === sessionId) {
       this.leases.delete(rows.leaseId);
     }
+  }
+
+  async listLeases(sessionId: string): Promise<Lease[]> {
+    return [...this.leases.values()].filter(lease => lease.sessionId === sessionId).map(lease => ({ ...lease }));
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {

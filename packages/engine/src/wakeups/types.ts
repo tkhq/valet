@@ -173,6 +173,8 @@ export interface Lease {
   deadlineAt: number;
   releasedAt?: number;
   releaseCause?: LeaseReleaseCause;
+  /** Set atomically with hold release only when its expiry signal will be emitted. */
+  terminalSignalExpected?: boolean;
 }
 
 /** Keyset position for paging `listDueWakeups` in (createdAt, id) order. */

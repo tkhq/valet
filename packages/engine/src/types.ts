@@ -2422,8 +2422,8 @@ export interface SessionStore {
     releaseCause: LeaseReleaseCause,
   ): Promise<Wakeup | null>;
   createLease(lease: Lease): Promise<void>;
-  /** CAS release: succeeds only when the lease is not already released. Null when already released. */
-  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
+  /** CAS release: commits any terminal signal expectation with the release. Null when already released. */
+  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null>;
   /** The lease with `id`, released or not, or null for an unknown or unreadable row. */
   getLease(id: string): Promise<Lease | null>;
   /**
@@ -2432,6 +2432,8 @@ export interface SessionStore {
    * removes only what that create wrote, never the session's other rows.
    */
   deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void>;
+  /** One snapshot of active and released leases, including terminal admission expectations. */
+  listLeases(sessionId: string): Promise<Lease[]>;
   listActiveLeases(sessionId: string): Promise<Lease[]>;
   listAllActiveLeases(): Promise<Lease[]>;
   countActiveLeases(sessionId: string): Promise<number>;

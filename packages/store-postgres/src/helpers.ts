@@ -1020,6 +1020,7 @@ export interface LeaseRow {
   deadline_at: number;
   released_at: number | null;
   release_cause: string | null;
+  terminal_signal_expected: boolean;
   thread_id: string | null;
   origin_json: string | null;
 }
@@ -1036,6 +1037,7 @@ export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
     deadline_at: toNum(raw.deadline_at, "deadline_at"),
     released_at: toNumOrNull(raw.released_at, "released_at"),
     release_cause: asStringOrNull(raw.release_cause, "release_cause"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
     thread_id: asStringOrNull(raw.thread_id, "thread_id"),
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
   };
@@ -1069,5 +1071,6 @@ export function rowToLease(row: LeaseRow): Lease {
     deadlineAt: row.deadline_at,
     ...(row.released_at !== null ? { releasedAt: row.released_at } : {}),
     ...(row.release_cause !== null ? { releaseCause: row.release_cause } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
   };
 }
