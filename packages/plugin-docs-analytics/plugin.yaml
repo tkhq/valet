@@ -1,0 +1,5 @@
+name: docs-analytics
+version: 0.0.1
+description: Read-only documentation analytics reports
+icon: "\U0001F4CA"
+v2: true
