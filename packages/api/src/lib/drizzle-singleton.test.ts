@@ -71,6 +71,28 @@ describe("workspace singleton repair on an already migrated database", () => {
       .toEqual([{ indexname: "engine_queue_items_child_delivery" }]);
   });
 
+  it("clears unwatched pending results without rewriting watched or resolved results on repeated repairs", async () => {
+    await db.query(`INSERT INTO child_watches (child_session_id, queue_item_id, parent_session_id, parent_thread_id, actor_user_id, org_id, settled, created_at)
+      VALUES ('repair-watched', 'repair-result-watched', 'p', 't', 'u', 'o', true, 1)`);
+    for (const [session, state] of [["watched", "pending"], ["conversation", "pending"], ["delivered", "delivered"], ["denied", "denied"]]) {
+      await db.query(`INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at, child_result_delivery)
+        VALUES ($1, $2, 't', 'settled', '{}', 1, 10, 100, 1, 1, $3)`, [`repair-result-${session}`, `repair-${session}`, state]);
+    }
+    try {
+      await applyAppMigrations(db);
+      await applyAppMigrations(db);
+      expect((await db.query("SELECT id, child_result_delivery FROM engine_queue_items WHERE id LIKE 'repair-result-%' ORDER BY id")).rows).toEqual([
+        { id: "repair-result-conversation", child_result_delivery: null },
+        { id: "repair-result-delivered", child_result_delivery: "delivered" },
+        { id: "repair-result-denied", child_result_delivery: "denied" },
+        { id: "repair-result-watched", child_result_delivery: "pending" },
+      ]);
+    } finally {
+      await db.query("DELETE FROM engine_queue_items WHERE id LIKE 'repair-result-%'");
+      await db.query("DELETE FROM child_watches WHERE child_session_id = 'repair-watched'");
+    }
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

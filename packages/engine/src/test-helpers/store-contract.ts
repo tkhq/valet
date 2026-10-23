@@ -1238,7 +1238,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
     });
 
     it("marks child signal delivery pending at claim and resolves it without changing execution or activity", async () => {
-      await store.saveSession(newSession({ parentSessionId: "parent" }));
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
       await store.saveThread("sess-1", newThread("sess-1"));
       const item = { ...queueItem("child-signal", Date.now(), Date.now()),
         content: { kind: "signal" as const, signalType: "lease.released", body: "work ended" } };
@@ -1259,6 +1259,17 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       await store.resolveChildResultDelivery("sess-1", "missing", "denied");
     });
 
+    it("does not track team conversation signals just because their session has a parent", async () => {
+      await store.saveSession(newSession({ parentSessionId: "assistant:team", owner: { type: "team", id: "team" } }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("conversation-signal", 100, 100),
+        content: { kind: "signal", signalType: "event.matched", body: "Slack reply" } });
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: "conversation-signal", attemptId: "att", ownerId: "owner" });
+      expect(claimed?.status).toBe("running");
+      expect(claimed?.childResultDelivery).toBeUndefined();
+      expect((await store.getQueueItem("sess-1", "conversation-signal"))?.childResultDelivery).toBeUndefined();
+    });
+
     it("does not mark non-child signals or ordinary prompts as pending child delivery", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));
@@ -1267,7 +1278,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       const claim = { sessionId: "sess-1", threadId: "th-1", itemId: "signal", attemptId: "att", ownerId: "owner" };
       expect((await store.claimSubmission(claim))?.childResultDelivery).toBeUndefined();
       await store.forceSettle("sess-1", "signal", "failed");
-      await store.saveSession(newSession({ parentSessionId: "parent" }));
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
       await store.admitSubmission("sess-1", "th-1", queueItem("prompt", 200, 200));
       expect((await store.claimSubmission({ ...claim, itemId: "prompt" }))?.childResultDelivery).toBeUndefined();
     });

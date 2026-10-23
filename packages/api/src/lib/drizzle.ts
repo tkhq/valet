@@ -130,6 +130,11 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  // Earlier claims treated every parent-linked conversation as a task child.
+  // The partial index bounds this repeat-safe cleanup to pending results.
+  await db.query(`UPDATE engine_queue_items q SET child_result_delivery = NULL
+    WHERE q.child_result_delivery = 'pending'
+      AND NOT EXISTS (SELECT 1 FROM child_watches w WHERE w.child_session_id = q.session_id)`);
   await classifyLegacyRuntimes(db);
   await restoreSharedTeamMemory(db);
   await expandLegacySlackWildcards(db);

@@ -204,7 +204,7 @@ const CLAIM_SQL = `
       timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
       child_result_delivery = CASE WHEN child_result_delivery IS NULL
         AND content::jsonb->>'kind' = 'signal'
-        AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $6 AND parent_session_id IS NOT NULL)
+        AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $6 AND purpose = 'child')
         THEN 'pending' ELSE child_result_delivery END,
       updated_at = $4
   WHERE id = $5 AND session_id = $6 AND thread_id = $7

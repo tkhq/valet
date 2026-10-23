@@ -877,8 +877,14 @@ export class ChildWatcher {
 
   private async attempt(watch: ArmArgs, digest?: EventMatchDigest): Promise<void> {
     const itemId = watch.resultItemId ?? watch.queueItemId;
+    if (await withChildDelivery(this.deps.db, watch.childSessionId, () => this.discardUnavailableChild(watch.childSessionId))) return;
     const childData = await this.deps.engineStore.getSession(watch.childSessionId);
     if (!childData) throw new Error(`child session not found: ${watch.childSessionId}`);
+    const turn = await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId);
+    if (turn && isSignalSubmission(turn) && (turn.outcome?.outcome === "superseded" || turn.outcome?.outcome === "merged")) {
+      await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, itemId, "denied");
+      return;
+    }
 
     // Centralized meta assembly (repo bindings + git identity). The app row
     // supplies the persisted profile, Docker flag, and resource overrides.
@@ -921,6 +927,10 @@ export class ChildWatcher {
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(itemId);
+
+    if (result.outcome === "superseded" || result.outcome === "merged") {
+      await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, itemId, "denied");
+    }
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
     // new submission and arms a fresh watcher on it. A watcher that wakes
@@ -1182,15 +1192,20 @@ export class ChildWatcher {
     return withChildDelivery(this.deps.db, child, () => this.subscriptionActiveUnlocked(row));
   }
 
+  /** A soft-deleted or missing child cannot be rebuilt just to report old results. Caller holds delivery lock. */
+  private async discardUnavailableChild(child: string): Promise<boolean> {
+    const [session] = await this.deps.db.select({ status: agentSessions.status }).from(agentSessions)
+      .where(eq(agentSessions.id, child)).limit(1);
+    if (session?.status !== "archived" && session?.status !== "deleted" && await this.deps.engineStore.getSession(child)) return false;
+    await discardChildDelivery(this.deps.db, this.deps.engineStore, child, "The child is archived, deleted, or no longer exists.");
+    await this.deps.db.update(childWatches).set({ settled: true }).where(eq(childWatches.childSessionId, child));
+    return true;
+  }
+
   private async subscriptionActiveUnlocked(row: Wakeup): Promise<boolean> {
     const child = row.eventMatch?.childSessionId;
     if (!child) return false;
-    const [session] = await this.deps.db.select({ status: agentSessions.status }).from(agentSessions)
-      .where(eq(agentSessions.id, child)).limit(1);
-    if (session?.status === "archived" || session?.status === "deleted" || !(await this.deps.engineStore.getSession(child))) {
-      await discardChildDelivery(this.deps.db, this.deps.engineStore, child, "The child is archived, deleted, or no longer exists.");
-      return false;
-    }
+    if (await this.discardUnavailableChild(child)) return false;
     const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, child)).limit(1);
     if (!watch) return false;
     await this.drainOutbox(watch);
@@ -1443,7 +1458,11 @@ export class ChildWatcher {
       .where(eq(childWatches.childSessionId, childSessionId)).limit(1);
     if (!row || row.queueItemId === queueItemId) return;
     const next = await this.deps.engineStore.getQueueItem(childSessionId, queueItemId);
-    if (!next || !isSignalSubmission(next) || next.outcome?.outcome === "merged" || next.outcome?.outcome === "superseded") return;
+    if (!next || !isSignalSubmission(next)) return;
+    if (next.outcome?.outcome === "merged" || next.outcome?.outcome === "superseded") {
+      await this.deps.engineStore.resolveChildResultDelivery(childSessionId, queueItemId, "denied");
+      return;
+    }
     this.arm(await this.turnWatch(row, queueItemId));
   }
 
@@ -1715,6 +1734,7 @@ export class ChildWatcher {
         if (this.stopping) return;
         after = row.childSessionId;
         try {
+          if (await withChildDelivery(this.deps.db, row.childSessionId, () => this.discardUnavailableChild(row.childSessionId))) continue;
           if (row.eventsStartedAt === null) {
             row.eventsStartedAt = Date.now();
             await this.deps.db.update(childWatches).set({ eventsStartedAt: row.eventsStartedAt })

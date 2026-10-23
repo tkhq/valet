@@ -640,7 +640,7 @@ export class InMemorySessionStore implements SessionStore {
         thread.metadata = { ...thread.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
       }
     }
-    if (r.data.parentSessionId && typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal") {
+    if (r.data.purpose === "child" && typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal") {
       item.childResultDelivery ??= "pending";
     }
     // The execution clock starts when the item first runs, not at admission.

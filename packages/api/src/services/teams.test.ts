@@ -1,10 +1,11 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
   apikey,
+  agentSessions,
   assistants,
   contentSources,
   credentials,
@@ -343,6 +344,20 @@ describe("teams service", () => {
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("deleteTeam denies pending child results without changing another team's results", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    for (const [id, ownerId] of [["deleted-child", team.id], ["other-child", "other-team"]]) {
+      await db.insert(agentSessions).values({ id, userId: "u1", orgId, workspace: "/tmp", ownerType: "team", ownerId,
+        status: "active", createdAt: 1, updatedAt: 1 });
+      await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at, child_result_delivery)
+        VALUES (${id}, ${id}, 't', 'settled', '{}', 1, 10, 100, 1, 1, 'pending')`);
+    }
+    await deleteTeam(db, { teamId: team.id });
+    expect(await db.execute(sql`SELECT id, child_result_delivery FROM engine_queue_items ORDER BY id`)).toMatchObject({ rows: [
+      { id: "deleted-child", child_result_delivery: "denied" }, { id: "other-child", child_result_delivery: "pending" },
+    ] });
   });
 
   it("deleteTeam drops team-owned credential rows including the 1Password grant", async () => {

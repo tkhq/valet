@@ -1,3 +1,4 @@
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono, type Context } from "hono";
@@ -1638,6 +1639,8 @@ sessionsRouter.delete("/:id", async (c) => {
       .set({ status: "deleted", updatedAt: Date.now() })
       .where(eq(agentSessions.id, id));
   });
+
+  await cancelChildDelivery(db, c.var.providers.engineStore, id, "The child session was deleted.");
 
   // Clear any runtime that was reopened between teardown and the row update.
   try {

@@ -1859,6 +1859,83 @@ describe("ChildWatcher", () => {
       expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
     });
 
+    it.each([
+      { outcome: "superseded", via: "observer" }, { outcome: "merged", via: "observer" },
+      { outcome: "superseded", via: "watcher" }, { outcome: "merged", via: "watcher" },
+    ] as const)("resolves a claimed $outcome signal through the $via so the subscription closes without reboot", async ({ outcome, via }) => {
+      const c = await armedChild(`resolved-${outcome}`);
+      const store = c.engineStore;
+      await store.createLease({ id: "ls_background", sessionId: c.child.id, ownerKind: "hold", reason: "terminal open",
+        deadlineAt: Date.now() + 60_000, createdAt: Date.now() });
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const id = "superseded-signal";
+      await store.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, ""),
+        content: { kind: "signal", signalType: "event.matched", body: "CI completed" } });
+      expect((await store.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id,
+        attemptId: "old-attempt", ownerId: "test" }))?.childResultDelivery).toBe("pending");
+      await store.admitSubmission(c.child.id, c.childThread.id, queuedItem("steer", c.childThread.id, "new direction"), { steer: true });
+      const fence = { itemId: id, attemptId: "old-attempt" };
+      await store.reserveSettlement(c.child.id, c.childThread.id, id, { outcome }, fence);
+      await store.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      if (via === "observer") await c.watcher.observeTurn(c.child.id, id);
+      else c.watcher.arm({ ...c.watch, resultItemId: id });
+      await vi.waitFor(async () => expect((await store.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("denied"));
+      await store.settleUnclaimed(c.child.id, c.childThread.id, "steer", { outcome: "aborted" });
+      await store.releaseLease("ls_background", "cancelled", Date.now());
+      const waiter = await store.getWakeup(`wk_child_events:${c.child.id}`);
+      if (!waiter) throw new Error("Missing child subscription");
+      await c.watcher.closeSubscription(waiter);
+      expect((await store.getWakeup(waiter.id))?.status).toBe("done");
+      expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+    });
+
+    it.each(["archived", "deleted", "missing-engine"] as const)("denies unpublished pending results of a %s child during recovery without rebuilding it", async state => {
+      const c = await armedChild(`unavailable-${state}`);
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const id = "unpublished";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, ""),
+        content: { kind: "signal", signalType: "event.matched", body: "CI completed" } });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: "attempt", ownerId: "test" });
+      const fence = { itemId: id, attemptId: "attempt" };
+      await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "completed" }, fence);
+      await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      const sessionFor = vi.spyOn(c.deps.engineHost, "sessionFor");
+      const get = c.engineStore.getSession.bind(c.engineStore);
+      const missing = state === "missing-engine" ? vi.spyOn(c.engineStore, "getSession").mockImplementation(session => session === c.child.id ? Promise.resolve(null) : get(session)) : undefined;
+      if (state !== "missing-engine") await api!.providers.db.update(agentSessions).set({ status: state }).where(eq(agentSessions.id, c.child.id));
+      try {
+        const reboot = testChildWatcher(c.deps);
+        await reboot.rearm();
+        await reboot.rearm();
+        expect(sessionFor).not.toHaveBeenCalled();
+        expect((await c.engineStore.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("denied");
+        expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("cancelled");
+        expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+        expect(await c.engineStore.listUnsettledSubmissions(c.parent.id)).toHaveLength(1);
+      } finally { missing?.mockRestore(); sessionFor.mockRestore(); }
+    });
+
+    it("denies pending child results when the deletion route completes", async () => {
+      const c = await armedChild("delete-pending");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("pending-delete", c.childThread.id, ""),
+        content: { kind: "signal", signalType: "event.matched", body: "CI completed" } });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id,
+        itemId: "pending-delete", attemptId: "attempt", ownerId: "test" });
+      // Keep the engine rows to assert deletion's disposition, separately from resource teardown.
+      const destroy = vi.spyOn(c.deps.engineHost, "destroy").mockResolvedValue(undefined);
+      try {
+        const response = await fetch(`${api!.baseUrl}/api/sessions/${c.child.id}`, { method: "DELETE" });
+        expect(response.status).toBe(200);
+        expect((await c.engineStore.getQueueItem(c.child.id, "pending-delete"))?.childResultDelivery).toBe("denied");
+        expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("cancelled");
+        expect((await api!.providers.db.select().from(agentSessions).where(eq(agentSessions.id, c.child.id)))[0]?.status).toBe("deleted");
+      } finally { destroy.mockRestore(); }
+    });
+
     it("keeps an explicit cancellation across child turns and restart recovery", async () => {
       const c = await armedChild("cancel-subscription");
       await c.watcher.ensureSubscription(c.watch);
@@ -2071,11 +2148,13 @@ describe("ChildWatcher", () => {
     const watcher = testChildWatcher(deps);
     const { db } = api.providers;
 
-    // A watch whose child session doesn't exist — every attempt throws a
-    // generic (non-SignalEdgeDeniedError, non-ValidationError) Error, which
-    // `classifyWatcherError` treats as retryable, not a permanent denial
-    // (decision 20): the row must stay unsettled rather than losing the
-    // signal.
+    // Keep the durable child present. An unknown rebuild failure is retryable;
+    // a missing engine session is now an explicit cancellation condition.
+    await api.providers.engineHost.childSessionFor("child-ghost", {
+      parentSessionId: "parent-ghost", parentThreadId: "th-ghost", actorUserId: "local-user",
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, workspace: "/tmp",
+    });
+    const rebuild = vi.spyOn(api.providers.engineHost, "sessionFor").mockRejectedValue(new Error("temporary rebuild failure"));
     const watch = {
       childSessionId: "child-ghost",
       queueItemId: "qi-ghost",
@@ -2086,10 +2165,10 @@ describe("ChildWatcher", () => {
     };
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
-    watcher.arm(watch);
-
-    // Let both in-process attempts (and the retry delay between them) run out.
-    await new Promise((r) => setTimeout(r, 150));
+    try {
+      watcher.arm(watch);
+      await vi.waitFor(() => expect(rebuild).toHaveBeenCalledTimes(2));
+    } finally { rebuild.mockRestore(); }
 
     const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-ghost")).limit(1);
     expect(rows[0]?.settled).toBe(false);

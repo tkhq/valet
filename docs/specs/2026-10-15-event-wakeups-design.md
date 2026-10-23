@@ -834,9 +834,17 @@ Transient delivery errors keep the event for the next pass.
 Permanent denials write the existing drop-log reasons.
 `engine_queue_items.child_result_delivery` records `pending`, `delivered`, or `denied` for child signal results.
 The claim writes `pending` before the signal turn starts.
+Only sessions with the durable `purpose: child` task marker receive this state.
+A parent link alone does not identify a task child.
+Team assistant conversations do not receive pending child-result markers.
+Startup repair clears unwatched pending markers from earlier claims.
+The repair is safe to run again and preserves watched and resolved results.
 Delivery resolution does not change the turn's execution outcome or activity clock.
 The first resolution wins.
 Recovery treats delivered and denied results as resolved.
+The turn observer and watcher resolve merged and superseded signal results without a restart.
+Deletion and cancellation deny pending results before clearing delivery state.
+Recovery denies results for archived, deleted, or missing children without rebuilding their sessions.
 A consumed source also removes a stale outbox entry without blocking later results.
 
 Internal subscriptions use bounded source history instead of the external output budget.
