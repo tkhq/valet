@@ -1608,40 +1608,46 @@ export class ChildWatcher {
   }
 
   private async destroyChildSandbox(childSessionId: string, sandboxId: string | null | undefined, reason: "child_settled" | "child_retention", cycle: ChildWatchRow, now = Date.now(), deliveryLocked = false): Promise<boolean> {
-    const live = this.deps.engineHost.liveSession(childSessionId);
-    const attachedId = live?.attachment.sandboxId;
-    const [currentCycle] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
-    if (!currentCycle?.settled || currentCycle.queueItemId !== cycle.queueItemId || currentCycle.settledAt !== cycle.settledAt
-      || currentCycle.sandboxReclaimedAt !== null) return false;
-    sandboxId = attachedId ?? sandboxId;
-    if (sandboxId) {
-      const saved = await this.deps.db.update(childWatches).set({ parkedSandboxId: sandboxId })
-        .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, cycle.queueItemId),
-          cycle.settledAt === null ? isNull(childWatches.settledAt) : eq(childWatches.settledAt, cycle.settledAt),
-          eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)))
-        .returning({ id: childWatches.childSessionId });
-      if (!saved.length) return false;
-    }
-    if (attachedId && live) {
-      try {
-        if (!await live.attachment.destroy(reason)) return false;
-      } finally {
-        // A failed destroy tears down the attachment too. Revival must rebuild it.
-        if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId, live);
+    // Lock order: child delivery, then sandbox cleanup. No cleanup owner acquires delivery.
+    const destroy = () => this.deps.engineHost.withSandboxCleanup(childSessionId, async () => {
+      const live = this.deps.engineHost.liveSession(childSessionId);
+      const attachedId = live?.attachment.sandboxId;
+      if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || live?.attachment.state === "provisioning"
+        || (await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length > 0) return false;
+      const [currentCycle] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
+      if (!currentCycle?.settled || currentCycle.queueItemId !== cycle.queueItemId || currentCycle.settledAt !== cycle.settledAt
+        || currentCycle.sandboxReclaimedAt !== null) return false;
+      sandboxId = attachedId ?? sandboxId;
+      if (sandboxId) {
+        const saved = await this.deps.db.update(childWatches).set({ parkedSandboxId: sandboxId })
+          .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, cycle.queueItemId),
+            cycle.settledAt === null ? isNull(childWatches.settledAt) : eq(childWatches.settledAt, cycle.settledAt),
+            eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)))
+          .returning({ id: childWatches.childSessionId });
+        if (!saved.length) return false;
       }
-    } else if (sandboxId) {
-      // Always retry the provider destroy. The pre-check only avoids counting a previously completed destroy twice.
-      const present = (await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released";
-      await this.deps.engineHost.destroySandbox(sandboxId);
-      if (present) recordSandboxDestroyed(reason);
-    }
-    if (sandboxId) {
-      if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
-        throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
+      if (attachedId && live) {
+        try {
+          if (!await live.attachment.destroy(reason)) return false;
+        } finally {
+          // A failed destroy releases its attachment too. Preserve any admitted work's session owner.
+          if (live.attachment.state === "released"
+            && (await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length === 0) {
+            this.deps.engineHost.evictCache(childSessionId, live);
+          }
+        }
+      } else if (sandboxId) {
+        // Always retry the provider destroy. The pre-check only avoids counting a previously completed destroy twice.
+        const present = (await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released";
+        await this.deps.engineHost.destroySandbox(sandboxId);
+        if (present) recordSandboxDestroyed(reason);
       }
-    }
-    const destroyedId = sandboxId;
-    const cleanup = () => this.deps.engineHost.withSandboxCleanup(childSessionId, async () => {
+      if (sandboxId) {
+        if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
+          throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
+        }
+      }
+      const destroyedId = sandboxId;
       const current = this.deps.engineHost.liveSession(childSessionId);
       if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || (current !== null && current !== live)
         || (current?.attachment.sandboxId !== undefined && current.attachment.sandboxId !== destroyedId)
@@ -1658,7 +1664,7 @@ export class ChildWatcher {
       this.deps.engineHost.evictCache(childSessionId, current);
       return true;
     });
-    return deliveryLocked ? cleanup() : withChildDelivery(this.deps.db, childSessionId, cleanup);
+    return deliveryLocked ? destroy() : withChildDelivery(this.deps.db, childSessionId, destroy);
   }
 
   /**
@@ -2246,63 +2252,57 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     const childData = await deps.engineStore.getSession(req.childSessionId);
     if (!childData) return null;
 
-    // Pass the app row as the meta source: it carries the persisted
-    // profile, Docker flag, and resource overrides, so a post-restart
-    // rebuild keeps the child's sandbox shape.
-    const childSession = await deps.engineHost.sessionFor(
-      req.childSessionId,
-      await loadSessionMeta(deps.db, child),
-    );
-    // A child_send is USE: a parked (hibernated) child's row heals to
-    // active even when the revived turn never touches the sandbox.
-    await deps.engineHost.markSessionUsed(req.childSessionId);
-
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
     if (!parentData || parentData.orgId !== watchRow.orgId) return null;
     const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]));
     const promptOptions = childSendPromptOptions({ ...ctx, toolScope,
       ...(ctx.unattendedWorkflow ? { workflowStep: await submissionWorkflowStep(deps.engineStore, ctx.parentSessionId, ctx.parentQueueItemId) } : {}) }, req.queue === true);
+    // Subscription changes take delivery before session use takes cleanup. Never acquire delivery inside the callback.
     await watcher.ensureSubscription(watchRowToArgs(watchRow), true);
-    const receipt = await childSession.prompt(req.message, promptOptions);
+    return deps.engineHost.withSessionFor(req.childSessionId, await loadSessionMeta(deps.db, child), async childSession => {
+      // A send heals a parked child's app row even when the revived turn never uses the sandbox.
+      await deps.engineHost.markSessionUsed(req.childSessionId);
+      const receipt = await childSession.prompt(req.message, promptOptions);
 
-    // Re-point BEFORE arming: the fresh watcher must find the row already
-    // tracking its submission, and the stale watcher (if any) must find it
-    // no longer tracking the old one. Clearing `dismissedAt` keeps a
-    // re-opened child visible in the orchestrator's child list — a hidden
-    // row must never be running.
-    await deps.db.transaction(async (tx) => {
-      // Only a channel turn on the delegating thread keeps automatic posts to
-      // its channel thread (`nextReplyRoute`). Otherwise the parent replies
-      // to the channel thread only when it chooses to (`reply: "manual"`).
-      // Read the route under a row lock: a takeover can change it while
-      // this sender wakes the child.
-      const [current] = await tx.select({ replyRoute: childWatches.replyRoute }).from(childWatches)
-        .where(eq(childWatches.childSessionId, req.childSessionId)).for("update");
-      const replyRoute = nextReplyRoute(current?.replyRoute ?? null, {
-        delegated: true, ...delegationSource({ metadata: promptOptions.metadata }),
-      }, { parentThreadId: watchRow.parentThreadId, originThreadKey: parseOriginJson(watchRow.originJson)?.threadKey });
-      await tx
-        .update(childWatches)
-        .set({
-          queueItemId: receipt.queueItemId,
-          settled: false,
-          sandboxReclaimedAt: null,
-          dismissedAt: null,
-          ...(current && replyRoute !== current.replyRoute ? { replyRoute } : {}),
-        })
-        .where(eq(childWatches.childSessionId, req.childSessionId));
+      // Re-point BEFORE arming: the fresh watcher must find the row already
+      // tracking its submission, and the stale watcher (if any) must find it
+      // no longer tracking the old one. Clearing `dismissedAt` keeps a
+      // re-opened child visible in the orchestrator's child list — a hidden
+      // row must never be running.
+      await deps.db.transaction(async (tx) => {
+        // Only a channel turn on the delegating thread keeps automatic posts to
+        // its channel thread (`nextReplyRoute`). Otherwise the parent replies
+        // to the channel thread only when it chooses to (`reply: "manual"`).
+        // Read the route under a row lock: a takeover can change it while
+        // this sender wakes the child.
+        const [current] = await tx.select({ replyRoute: childWatches.replyRoute }).from(childWatches)
+          .where(eq(childWatches.childSessionId, req.childSessionId)).for("update");
+        const replyRoute = nextReplyRoute(current?.replyRoute ?? null, {
+          delegated: true, ...delegationSource({ metadata: promptOptions.metadata }),
+        }, { parentThreadId: watchRow.parentThreadId, originThreadKey: parseOriginJson(watchRow.originJson)?.threadKey });
+        await tx
+          .update(childWatches)
+          .set({
+            queueItemId: receipt.queueItemId,
+            settled: false,
+            sandboxReclaimedAt: null,
+            dismissedAt: null,
+            ...(current && replyRoute !== current.replyRoute ? { replyRoute } : {}),
+          })
+          .where(eq(childWatches.childSessionId, req.childSessionId));
+      });
+
+      watcher.arm({
+        childSessionId: req.childSessionId,
+        queueItemId: receipt.queueItemId,
+        parentSessionId: ctx.parentSessionId,
+        parentThreadId: watchRow.parentThreadId,
+        actorUserId: ctx.actorUserId,
+        orgId: watchRow.orgId,
+      });
+
+      return { queueItemId: receipt.queueItemId };
     });
-
-    watcher.arm({
-      childSessionId: req.childSessionId,
-      queueItemId: receipt.queueItemId,
-      parentSessionId: ctx.parentSessionId,
-      parentThreadId: watchRow.parentThreadId,
-      actorUserId: ctx.actorUserId,
-      orgId: watchRow.orgId,
-    });
-
-    return { queueItemId: receipt.queueItemId };
   };
 
   return async (req, ctx) => {

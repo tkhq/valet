@@ -812,13 +812,26 @@ export class EngineHost {
   private inflight = new Map<string, Promise<Session>>();
   private sandboxCleanups = new Map<string, Promise<unknown>>();
 
-  /** Final reclaim writes exclude new session builds. Provider destroy and status checks run outside this barrier. */
+  /** Child reclaim takes delivery before this barrier and holds both through destroy and cleanup. Barrier owners never acquire delivery. */
   async withSandboxCleanup<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     const prior = this.sandboxCleanups.get(sessionId) ?? Promise.resolve();
     const next = prior.catch(() => undefined).then(work);
     this.sandboxCleanups.set(sessionId, next);
     try { return await next; }
     finally { if (this.sandboxCleanups.get(sessionId) === next) this.sandboxCleanups.delete(sessionId); }
+  }
+
+  /** Resolve and admit on one cached session. The callback must not acquire the child delivery lock. */
+  async withSessionFor<T>(sessionId: string, meta: SessionMeta, work: (session: Session) => Promise<T>): Promise<T> {
+    while (true) {
+      const session = await this.sessionFor(sessionId, meta);
+      const used = await this.withSandboxCleanup(sessionId, async () => {
+        // A reclaim can start after resolution and finish before this admission gets the barrier.
+        if (this.liveSession(sessionId) !== session) return null;
+        return { value: await work(session) };
+      });
+      if (used) return used.value;
+    }
   }
 
   sessionBuildInFlight(sessionId: string): boolean { return this.inflight.has(sessionId); }

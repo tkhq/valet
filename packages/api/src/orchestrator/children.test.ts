@@ -23,6 +23,7 @@ import type {
   PluginActionContext,
   SignalContent,
   SessionStore,
+  Session,
   Wakeup,
 } from "@valet/engine";
 import { cancelChildDelivery } from "./child-delivery.js";
@@ -4173,7 +4174,88 @@ describe("child sandbox retention", () => {
     return rows[0];
   }
 
-  it("review reclaim repro: a stale status confirmation cannot reclaim a revived replacement", async () => {
+  it.each(["retention", "eager"] as const)("review destroy-window repro: %s reclaim admits a concurrent send on one rebuilt session", async mode => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = mode === "retention";
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: mode === "retention" ? RETENTION_MS : 0 });
+    const watcher = testChildWatcher(deps);
+    const { child, watch } = await seedParkableChild(api, `destroy-window-${mode}`, "parent-destroy-window");
+    await child.pause();
+    if (mode === "retention") {
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      await vi.waitFor(() => expect(provider.suspendCalls).toHaveLength(1));
+    }
+    let entered!: () => void;
+    const destroying = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void;
+    const destroyRelease = new Promise<void>(resolve => { release = resolve; });
+    const destroy = child.attachment.destroy.bind(child.attachment);
+    const blocked = vi.spyOn(child.attachment, "destroy").mockImplementation(async reason => {
+      entered();
+      await destroyRelease;
+      return destroy(reason);
+    });
+    const originalPrompt = vi.spyOn(child, "prompt");
+    const create = vi.spyOn(provider, "create");
+    const host = api.providers.engineHost;
+    const resolveSession = host.sessionFor.bind(host);
+    const resolutions: Session[] = [];
+    const resolving = vi.spyOn(host, "sessionFor").mockImplementation(async (id, meta) => {
+      const session = await resolveSession(id, meta);
+      if (id === child.id) resolutions.push(session);
+      return session;
+    });
+    const reclaim = mode === "retention" ? watcher.sweepRetention(Date.now() + RETENTION_MS + 1)
+      : (watcher.arm(watch), waitFor(async () => {
+        const row = await watchRow(api!, child.id);
+        return row?.settled === true || row?.queueItemId !== watch.queueItemId;
+      }));
+    try {
+      await destroying;
+      resolutions.length = 0;
+      const send = buildChildSender(deps, watcher)({ childSessionId: child.id, message: "revive during destroy" },
+        { parentSessionId: watch.parentSessionId, parentThreadId: watch.parentThreadId, actorUserId: "local-user" });
+      const waking = host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+      // Give admission and direct session resolution their windows while destruction is held open.
+      const waitWindow = () => new Promise<false>(resolve => setTimeout(() => resolve(false), 100));
+      const [admittedBeforeRelease, wokeBeforeRelease] = await Promise.all([
+        Promise.race([send.then(() => true), waitWindow()]),
+        Promise.race([waking.then(() => true), waitWindow()]),
+      ]);
+      release();
+      await reclaim;
+      const sent = await send;
+      if (!sent) throw new Error("the concurrent send was not admitted");
+      const replacement = host.liveSession(child.id);
+      expect(replacement).not.toBeNull();
+      if (!replacement) throw new Error("the send was stranded without a cached session");
+      expect(replacement).not.toBe(child);
+      expect(await waking).toBe(replacement);
+      expect(admittedBeforeRelease).toBe(false);
+      expect(wokeBeforeRelease).toBe(false);
+      expect(originalPrompt).not.toHaveBeenCalled();
+      expect(child.attachment.state).toBe("released");
+      await replacement.attachment.ensureReady({ timeoutMs: 5000 });
+      expect(replacement.attachment.state).toBe("ready");
+      expect((await replacement.sandbox.exec("echo revived")).stdout).toBe("revived\n");
+      expect((await provider.status(replacement.attachment.sandboxId!)).state).toBe("ready");
+      expect((await watchRow(api, child.id))?.queueItemId).toBe(sent.queueItemId);
+      expect((await watchRow(api, child.id))?.settled).toBe(false);
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      expect((await api.providers.engineStore.getQueueItem(child.id, sent.queueItemId))?.status).toBe("queued");
+      // Another watcher resolution and a direct wake must reuse the admitting session.
+      const resolvedBeforeWatcher = resolutions.length;
+      watcher.arm({ ...watch, queueItemId: sent.queueItemId });
+      await vi.waitFor(() => expect(resolutions.length).toBeGreaterThan(resolvedBeforeWatcher));
+      expect(await host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toBe(replacement);
+      expect(new Set(resolutions)).toEqual(new Set([replacement]));
+      expect(create).toHaveBeenCalledTimes(1);
+    } finally { release(); await reclaim; blocked.mockRestore(); originalPrompt.mockRestore(); create.mockRestore(); resolving.mockRestore(); }
+  });
+
+  it("review reclaim repro: status confirmation fences revival before replacement cleanup", async () => {
     const provider = new HibernatingChildProvider();
     api = await bootTestApi({ sandboxProvider: provider });
     const deps = childrenDeps(api, { retentionMs: RETENTION_MS });
@@ -4196,8 +4278,14 @@ describe("child sandbox retention", () => {
     const sweep = watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
     try {
       await statusEntered;
-      const sent = await buildChildSender(deps, watcher)({ childSessionId: child.id, message: "revive" },
+      const sending = buildChildSender(deps, watcher)({ childSessionId: child.id, message: "revive" },
         { parentSessionId: watch.parentSessionId, parentThreadId: watch.parentThreadId, actorUserId: "local-user" });
+      let admittedBeforeRelease = false;
+      await Promise.race([sending.then(() => { admittedBeforeRelease = true; }), new Promise<void>(resolve => setTimeout(resolve, 100))]);
+      expect(admittedBeforeRelease).toBe(false);
+      release();
+      await sweep;
+      const sent = await sending;
       if (!sent) throw new Error("the child send did not revive the child");
       const replacement = api.providers.engineHost.liveSession(child.id);
       if (!replacement) throw new Error("the replacement is not cached");
@@ -4209,8 +4297,6 @@ describe("child sandbox retention", () => {
       const data = await api.providers.engineStore.getSession(child.id);
       if (!data) throw new Error("the replacement session is missing");
       await api.providers.engineStore.saveSession({ ...data, sandboxId: newId });
-      release();
-      await sweep;
       expect(api.providers.engineHost.liveSession(child.id)).toBe(replacement);
       expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
       expect((await api.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.id, "replacement-token")))[0]?.revokedAt).toBeNull();

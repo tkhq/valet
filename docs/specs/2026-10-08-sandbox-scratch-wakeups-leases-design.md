@@ -1282,14 +1282,16 @@ with an earlier entry, the entry below wins.
   idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
   Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
-  A failed attachment destroy evicts the cached session but retains its durable handle for retry and revival.
+  A failed attachment destroy evicts the cached session only without unsettled work, but retains its durable handle for retry and revival.
   Retries call the provider with that handle, not the released attachment.
   Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
   Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.
   Final cleanup compares the current attachment, durable handle, watched item, and settlement timestamp with the destroyed cycle.
   A replacement or newer cycle skips eviction, token revocation, and the reclaim stamp.
-  New session builds wait only for the final cleanup writes, not for provider destruction or status checks.
-  The child delivery lock serializes those writes with sender repoints.
+  Both reclaim paths take the child delivery lock before the cleanup barrier, through provider destruction, status confirmation, and final writes.
+  New session resolutions wait for this barrier before using the cache.
+  Senders update subscriptions first, then resolve outside cleanup and validate cached identity inside cleanup before admission and watch repoint.
+  A changed identity retries resolution. Cleanup owners never acquire delivery, and senders do not hold delivery through admission.
   Retries still call provider destroy, but do not count resources that status already reports absent.
 - **Claim lock order.** `claimSubmission` locks the thread row before the
   item CAS, the same order steer admission uses, so claim and steer cannot

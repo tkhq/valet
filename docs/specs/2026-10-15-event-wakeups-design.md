@@ -796,15 +796,18 @@ An event waiter follows the rule for timers:
   Queued work always blocks reclaim.
   Reclaim stamps follow successful sandbox-token revocation.
   A failed revoke leaves the row eligible for retry.
-  A failed attachment destroy evicts the cached session so later prompts can rebuild it.
+  A failed attachment destroy evicts the cached session only when it has no unsettled submissions, so later prompts can rebuild it.
   The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
   A retry uses that handle directly, never the released attachment's no-op destroy.
   Both the parked handle and the session handle are cleared after confirmation, before revoke.
   Handle clearing uses a compare-and-set against the destroyed ID.
   Final cleanup checks the attachment identity, durable handle, watched item, and settlement timestamp.
   It skips cache eviction, session-token revocation, and the reclaim stamp when a replacement or newer cycle exists.
-  A per-session cleanup barrier excludes new builds during these final writes, not during provider destruction or status checks.
-  The child delivery lock serializes cleanup with sender repoints.
+  Eager and retention reclaim acquire the child delivery lock before the per-session cleanup barrier.
+  Both locks cover provider destruction, status confirmation, and final cleanup. Session resolution waits for cleanup before using the cache.
+  Senders update subscriptions before taking the cleanup barrier. They resolve outside it, then validate cached identity inside it before admission and watch repoint.
+  If reclaim replaced the resolved session, the sender resolves again. Cleanup owners never acquire the delivery lock.
+  The sender does not hold delivery through admission, so in-flight parent result admission cannot block new child work.
   A retry calls provider destroy again but does not recount a resource already confirmed absent.
 - Event waiters on hidden threads are counted and never named.
 
