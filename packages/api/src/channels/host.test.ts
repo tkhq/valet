@@ -378,6 +378,17 @@ describe("ChannelHost.handleUpdate", () => {
     expect((await session.threadByKey("fake:99"))?.id).toBe(threads[0]?.id);
   });
 
+  it("publishes shared progress through a capable non-Slack transport", async () => {
+    const publish = vi.fn(async () => ({ messageId: "progress-1" }));
+    Object.assign(keyedTransport, { publishProgress: publish });
+    await linkIdentity(testDb.appDb, { provider: "keyed", externalId: "77", userId: USER_ID });
+    await host.handleUpdate("keyed", inbound({ conversationKey: "keyed:R1:99", text: "Check the change" }));
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(
+      "keyed:R1:99", expect.objectContaining({ turnId: expect.any(String), revision: expect.any(String), tasks: expect.any(Array) }),
+      expect.objectContaining({ idempotencyKey: expect.any(String), threadTs: "99" }),
+    ), { timeout: 5000 });
+  });
+
   it("preserves origin, sender, and attachments on direct-message ingress", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     fakeTransport.fetchedMedia = {

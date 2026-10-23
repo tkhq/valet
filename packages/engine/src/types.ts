@@ -789,7 +789,7 @@ export interface ToolContext {
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
-  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;

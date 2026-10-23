@@ -3,7 +3,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
-export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
+export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus, type TurnProgress, type ProgressTask, type ProgressStatus } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
 export { boundEventDigest, cutUtf8 } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
@@ -288,6 +288,7 @@ export {
   type FilterOptionResolver,
   type PluginValidationIssue,
   ChannelDeliveryRejectedError,
+  ChannelProgressRejectedError,
   type ChannelTransport,
   type ChannelTransportFactory,
   type TransportContext,
@@ -412,3 +413,4 @@ export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttac
 
 export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
 export { sniffImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";
+export { projectTurnProgress, readTurnProgress, readLatestTurnProgress } from "./turn-progress.js";

@@ -77,6 +77,7 @@ import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { ChannelProgressPublisher } from "./channel-progress.js";
 import { ChannelProcessingStatus } from "./processing-status.js";
 import { restoreProcessingStatus, trackProcessingItem } from "./processing-status-recovery.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
@@ -433,6 +434,7 @@ export class ChannelHost {
    * whole start/append/stop triple ever reach it. */
   private readonly streamBridge: ChannelStreamBridge;
   private readonly processingStatus: ChannelProcessingStatus;
+  private readonly progressPublisher: ChannelProgressPublisher;
   private readonly childReplies: ChildReplyDispatcher;
 
   constructor(private readonly deps: ChannelHostDeps) {
@@ -449,6 +451,19 @@ export class ChannelHost {
       },
     });
     this.processingStatus = new ChannelProcessingStatus(deps.eventStream, channelType => this.transportFor(channelType));
+    this.progressPublisher = new ChannelProgressPublisher({
+      db: deps.db, engineStore: deps.engineStore, eventStream: deps.eventStream,
+      resolveOrgId: async () => this.orgId ?? await deps.resolveOrgId(),
+      transportFor: (channelType) => {
+        const transport = this.transportFor(channelType);
+        if (!transport?.publishProgress) return undefined;
+        return {
+          publishProgress: transport.publishProgress.bind(transport),
+          conversationKeyFromThreadKey: transport.conversationKeyFromThreadKey?.bind(transport),
+          threadKeyFromConversationKey: transport.threadKeyFromConversationKey?.bind(transport),
+        };
+      },
+    });
     this.streamBridge = new ChannelStreamBridge({
       eventStream: deps.eventStream,
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
@@ -756,6 +771,7 @@ export class ChannelHost {
     // Before the transports go away: a stream closed here is one the next
     // boot does not have to apologise for.
     await this.processingStatus.stop();
+    await this.progressPublisher.stop();
     await this.streamBridge.stop();
     this.stopOutbound();
     await this.childReplies.drain();
@@ -798,6 +814,7 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.processingStatus.start();
+    this.progressPublisher.start();
     this.childReplies.start();
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
@@ -843,6 +860,7 @@ export class ChannelHost {
 
   stopOutbound(): void {
     void this.processingStatus.stop();
+    void this.progressPublisher.stop().catch(error => console.error("[channels] could not stop progress publishing", error));
     this.childReplies.stop();
     this.outboundUnsub?.();
     this.outboundUnsub = null;

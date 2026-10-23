@@ -19,8 +19,13 @@
  * Under `agent_view` the thread root is the user's own message and carries no
  * `assistant_app_thread` subtype. Nothing here keys off that subtype.
  */
+import { createHash } from "node:crypto";
+import type { TurnProgress } from "@valet/engine";
+import { progressBlocks } from "./progress-blocks.js";
 import {
   ChannelLookupError,
+  ChannelDeliveryRejectedError,
+  ChannelProgressRejectedError,
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
@@ -59,6 +64,11 @@ import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackDelivery } from "./verify.js";
+
+const PROGRESS_CREATE_REJECTIONS = new Set([
+  "invalid_blocks", "invalid_arguments", "missing_scope", "not_in_channel", "channel_not_found", "not_authed",
+  "token_revoked", "account_inactive", "rate_limited", "ratelimited", "msg_blocks_too_long", "msg_blocks_too_many", "no_permission",
+]);
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
@@ -809,6 +819,38 @@ export class SlackTransport implements ChannelTransport {
   }
 
   // ─── Assistant thread controls ────────────────────────────────────────
+
+  async publishProgress(
+    conversationKey: string, progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null> {
+    const target = this.mustParse(conversationKey);
+    if (target.threadTs !== options.threadTs) throw new Error("The progress destination does not match the conversation. Check the thread mapping.");
+    const key = createHash("sha256").update(options.idempotencyKey).digest("hex");
+    const rendered = progressBlocks(progress, key);
+    let messageId = options.messageId;
+    if (!messageId && options.recoverOnly) {
+      const identity = this.botUserId || this.botId ? { userId: this.botUserId, botId: this.botId } : await this.api.authTest();
+      const found = await this.api.findProgressMessage(target.channelId, options.threadTs, key, identity);
+      if (!found) return null;
+      return { messageId: found };
+    }
+    if (messageId) {
+      await this.api.updateMessage({ channel: target.channelId, ts: messageId, text: rendered.text, blocks: rendered.blocks, parse: "none", attention: true });
+      return { messageId };
+    }
+    try {
+      const created = await this.api.postMessage({ channel: target.channelId, threadTs: options.threadTs, text: rendered.text, blocks: rendered.blocks, progressDeliveryId: key });
+      return { messageId: created.ts };
+    } catch (error) {
+      // Only documented no-write rejections permit another creation attempt.
+      // Internal, fatal, network, and unknown failures can have side effects.
+      const rejected = error instanceof ChannelDeliveryRejectedError ||
+        (error instanceof SlackApiError && error.providerRejected && PROGRESS_CREATE_REJECTIONS.has(error.detail));
+      if (rejected) throw new ChannelProgressRejectedError("Slack rejected task progress. Check the app's access and block configuration.");
+      throw error;
+    }
+  }
 
   async setStatus(conversationKey: string, threadTs: string, status: string): Promise<void> {
     const target = this.mustParse(conversationKey);

@@ -50,11 +50,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderSocketHook(sessionId: string) {
+function renderSocketHook(sessionId: string, sharedThreadId?: string) {
   const queryClient = new QueryClient();
   const wrapper = ({ children }: PropsWithChildren) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
-  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId), { wrapper }) };
+  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId, sharedThreadId), { wrapper }) };
 }
 
 describe("useSessionWebSocket", () => {
@@ -190,7 +190,8 @@ describe("useSessionWebSocket", () => {
       }),
     );
 
-    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenCalledTimes(4);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["thread-progress"] });
     expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
     unmount();
   });
@@ -395,4 +396,25 @@ it("makes an unloaded execution thread reachable in its root workspace without r
   expect(list.mock.calls.filter(([, opts]) => opts?.limit)).toHaveLength(1);
   expect(list).toHaveBeenLastCalledWith("s1", { fixedOnly: true, fixedIds: ["old"] });
   unmount(); client.clear(); vi.restoreAllMocks();
+});
+
+it.each(["queue.state", "tool_start", "tool_end", "decision_gate", "decision_gate_resolved", "decision_gate_expired", "decision_gate_withdrawn", "turn_end", "submission.settled", "branch_switched"])("invalidates progress for %s events", type => {
+  const { queryClient } = renderSocketHook("s1");
+  queryClient.setQueryData(["thread-progress", "t"], { progress: null });
+  queryClient.setQueryData(["thread-progress", "other"], { progress: null });
+  act(() => FakeWebSocket.instances[0]?.onmessage?.({ data: JSON.stringify({ type, seq: 1, ts: 1, threadId: "t", gate: { id: "g", type: "approval", title: "Approve" }, gateId: "g", resolution: { actionId: "approve" }, state: { pending: [] }, toolName: "read", callId: "c" }) }));
+  expect(queryClient.getQueryState(["thread-progress", "t"])?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(["thread-progress", "other"])?.isInvalidated).toBe(false);
+});
+
+it("invalidates owner progress through the guest's targeted thread socket", () => {
+  const { queryClient } = renderSocketHook("owner-session", "shared-thread");
+  queryClient.setQueryData(["thread-progress", "shared-thread"], { progress: null });
+  const socket = FakeWebSocket.instances[0];
+  if (!socket) throw new Error("Missing guest socket");
+  const url = new URL(socket.url);
+  expect(url.pathname).toBe("/api/sessions/owner-session/ws");
+  expect(url.searchParams.get("threadId")).toBe("shared-thread");
+  act(() => socket?.onmessage?.({ data: JSON.stringify({ type: "submission.settled", seq: 1, ts: 1, threadId: "shared-thread", itemId: "owner-turn", outcome: { outcome: "aborted" } }) }));
+  expect(queryClient.getQueryState(["thread-progress", "shared-thread"])?.isInvalidated).toBe(true);
 });

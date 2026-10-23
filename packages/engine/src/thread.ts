@@ -3,7 +3,7 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -6642,9 +6642,25 @@ export class Thread {
   }
 
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
-  async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
-    const plan: ThreadPlan = { items, updatedAt: Date.now() };
-    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_PLAN_KEY]: plan }), "after-save");
+  async setPlan(items: ThreadPlanItem[], title?: string): Promise<ThreadPlan> {
+    const turnId = this.runningItem?.id;
+    const safeTitle = title?.trim().slice(0, 200);
+    let plan: ThreadPlan = { items: [], updatedAt: Date.now(), ...(turnId ? { turnId } : {}), ...(safeTitle ? { title: safeTitle } : {}) };
+    await this.patchThreadMetadata((current) => {
+      if (plan.items.length === 0) {
+        const previous = readThreadPlan(current);
+        const retainedTitle = !safeTitle && turnId && previous?.turnId === turnId ? previous.title : undefined;
+        const available = [...(previous?.items ?? [])];
+        plan = { ...plan, ...(retainedTitle ? { title: retainedTitle } : {}), items: items.map((item) => {
+          const index = available.findIndex((step) => step.text === item.text);
+          const match = index >= 0 ? available.splice(index, 1)[0] : undefined;
+          return { text: item.text, status: item.status, id: match?.id ?? uid("plan") };
+        }) };
+      }
+      const history = readTurnPlans(current).filter((entry) => entry.turnId !== turnId);
+      if (turnId) history.push(plan);
+      return { ...current, [THREAD_PLAN_KEY]: plan, [TURN_PLAN_HISTORY_KEY]: history.slice(-TURN_PLAN_HISTORY_LIMIT) };
+    }, "after-save");
     return plan;
   }
 
@@ -6676,7 +6692,7 @@ export class Thread {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
-      setThreadPlan: (items) => this.setPlan(items),
+      setThreadPlan: (items, title) => this.setPlan(items, title),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.

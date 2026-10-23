@@ -2812,3 +2812,29 @@ CREATE TABLE IF NOT EXISTS "home_tasks" (
 CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (
+  "id" text PRIMARY KEY,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "turn_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_ts" text,
+  "message_id" text,
+  "last_revision" text,
+  "create_started" boolean NOT NULL DEFAULT false,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text,
+  "lease_until" bigint NOT NULL DEFAULT 0,
+  "completed_at" bigint,
+  "failed_at" bigint,
+  "last_error" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_progress_scope" ON "channel_progress_deliveries" ("org_id", "session_id", "thread_id", "turn_id", "channel_type", "conversation_key");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_progress_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at");
