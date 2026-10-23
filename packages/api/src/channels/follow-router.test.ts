@@ -10,7 +10,7 @@ import { ensureAssistantExecution } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { linkIdentity } from "./identity-links.js";
-import { followRouteFor, handleFollowedMessage, slackMessageFields } from "./follow-router.js";
+import { followRouteFor, handleFollowedMessage, slackEditFields, slackMessageFields } from "./follow-router.js";
 
 import { eq, sql } from "drizzle-orm";
 import { eventSubscriptions, sessionThreads, teams, teamMembers, orgMembers } from "../schema/index.js";
@@ -496,6 +496,38 @@ describe("handleFollowedMessage", () => {
       reply: "manual",
       messageTs: "1.7",
     });
+  });
+
+  it("records an edit in a followed thread for the assistant, with no reply", async () => {
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2", ownerType: "org", ownerId: ORG, createdBy: USER,
+    });
+    const deps = { db: testDb.appDb, engineHost };
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "ship it monday" }, "EvMsg") });
+    const session = await defaultAssistantSessionFor(deps, { type: "org", id: ORG }, { actorUserId: USER, orgId: ORG });
+    const threadId = session.thread("slack:C1:1.2").id;
+    const replies = async () => (await session.providers.store.getEntries(session.id, threadId)).filter((e) => e.type === "message" && e.role === "assistant");
+    await vi.waitFor(async () => expect(await replies()).toHaveLength(1));
+
+    await handleFollowedMessage(deps, {
+      orgId: ORG,
+      raw: envelope({
+        type: "message", subtype: "message_changed", channel: "C1",
+        message: { user: "U9", text: "ship it tuesday", ts: "1.7", thread_ts: "1.2" },
+        previous_message: { user: "U9", text: "ship it monday", ts: "1.7", thread_ts: "1.2" },
+      }, "EvEdit"),
+    });
+
+    await vi.waitFor(async () => {
+      const notes = (await session.providers.store.getEntries(session.id, threadId))
+        .filter((e): e is MessageEntry => e.type === "message" && e.signal?.signalType === "slack.message_changed");
+      expect(notes).toHaveLength(1);
+      expect(notes[0]?.content).toContain("Before: ship it monday\nAfter: ship it tuesday");
+    });
+    // The edit made no model call: still one reply.
+    expect(await replies()).toHaveLength(1);
+    // A link preview loading sends message_changed with the same text: not an edit.
+    expect(slackEditFields(envelope({ type: "message", subtype: "message_changed", channel: "C1", message: { text: "x", ts: "1.8", thread_ts: "1.2" }, previous_message: { text: "x" } }))).toBeNull();
   });
 
   it("routes a followed message to the thread the binding mention landed in", async () => {

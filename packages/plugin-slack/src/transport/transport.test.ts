@@ -347,6 +347,24 @@ describe("parseUpdate — the agent surface events", () => {
     }
   });
 
+  it("reads a person's DM edit as an edit with the text before and after", () => {
+    const transport = makeTransport();
+    const edit = transport.parseUpdate(envelope({
+      type: "message",
+      subtype: "message_changed",
+      channel_type: "im",
+      channel: CHANNEL,
+      message: { user: "U1", text: "deploy to staging", ts: "1700000000.000100" },
+      previous_message: { user: "U1", text: "deploy to prod", ts: "1700000000.000100" },
+    }, "EvEdit"));
+    expect(edit).toMatchObject({ kind: "edit", text: "deploy to staging", previousText: "deploy to prod", dispatchId: "slack:EvEdit", sender: { externalId: "U1" } });
+    // A link preview loading changes no text.
+    expect(transport.parseUpdate(envelope({
+      type: "message", subtype: "message_changed", channel_type: "im", channel: CHANNEL,
+      message: { user: "U1", text: "same", ts: "1.1" }, previous_message: { text: "same" },
+    }))).toBeNull();
+  });
+
   it("keeps a file_share, which carries a real user turn", () => {
     const transport = makeTransport();
     const event = transport.parseUpdate(

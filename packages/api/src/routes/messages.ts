@@ -29,7 +29,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import { readBranchNote, readThreadEdit, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -38,6 +38,7 @@ import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  EditPreviewResponse,
   ForkThreadResponse,
   ListCommandsResponse,
   WireCommandInfo,
@@ -228,9 +229,31 @@ function branchNoteToMessage(
       moreActions: note?.moreActions ?? 0,
       filesChanged: note?.filesChanged ?? false,
       canReturn: kind !== "fork" && e.branchLeafId !== "",
+      grants: note?.grants ?? [],
+      ...(note?.files ? {
+        files: {
+          changed: note.files.flatMap((repo) => [...repo.restored, ...repo.removed].map((path) => repoPath(repo.repo, path))),
+          skipped: note.files.flatMap((repo) => repo.skipped.map((path) => repoPath(repo.repo, path))),
+          failed: note.files.flatMap((repo) => (repo.failed ? [repo.repo] : [])),
+          canBringBack: note.files.some((repo) => repo.restorePoint !== undefined && Object.keys(repo.bases ?? {}).length > 0),
+        },
+      } : {}),
       ...(note?.source ? { source: { threadId: note.source.threadId, sameWorkingDirectory: note.source.sameWorkingDirectory } } : {}),
+      ...(note?.seed || note?.seedSkipped ? {
+        seed: {
+          repos: (note.seedResult ?? note.seed ?? []).filter((repo) => !("failed" in repo) || !repo.failed).map((repo) => repo.repo),
+          pending: note.seedResult === undefined && (note.seed?.length ?? 0) > 0,
+          failed: (note.seedResult ?? []).flatMap((repo) => (repo.failed ? [repo.repo] : [])),
+          ...(note.seedSkipped ? { skipped: note.seedSkipped } : {}),
+        },
+      } : {}),
     },
   };
+}
+
+/** A file path for people, relative to the working directory. */
+function repoPath(repo: string, path: string): string {
+  return repo === "." ? path : `${repo.replace(/\/+$/, "")}/${path}`;
 }
 
 /**
@@ -1194,9 +1217,11 @@ export async function submitSessionPrompt(
     replyTo?: MessageReplyReference;
     /** The sender's earlier user message that this text replaces (`Thread.editMessage`). */
     editEntryId?: string;
+    /** With `editEntryId`: also undo the files the replaced turns changed. */
+    undoFiles?: boolean;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId, undoFiles } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -1337,7 +1362,7 @@ export async function submitSessionPrompt(
       ? await thread.editMessage(editEntryId, withAttachments(promptText), {
           metadata: continuationMetadata,
           ...(author ? { author } : {}),
-        })
+        }, { undoFiles: undoFiles === true })
       : outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
@@ -1457,6 +1482,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       return c.json({ error: "An edit cannot also reply, promote, or set a queue mode. Send the edit alone." }, 400);
     }
   }
+  if (body.undoFiles !== undefined && (typeof body.undoFiles !== "boolean" || body.editEntryId === undefined)) {
+    return c.json({ error: "undoFiles must be true or false, and only with editEntryId." }, 400);
+  }
   if (row.ownerType === "team" && body.threadId !== undefined) {
     const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
@@ -1516,7 +1544,7 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       ...(promoteItemId ? { promoteItemId } : {}),
       author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
       ...(replyTo ? { replyTo } : {}),
-      ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId } : {}),
+      ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId, undoFiles: body.undoFiles === true } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);
@@ -1611,18 +1639,42 @@ export async function abortThread(c: Context<AppEnv>, sessionId: string, threadI
 // leaf back to the version a branch note left. A fork copies the active path
 // into a new thread in the same workspace.
 
+export async function editPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const entryId = c.req.query("entryId");
+  if (!entryId) return c.json({ error: "entryId must name one of your messages in this thread." }, 400);
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  const preview = await thread.previewEdit(entryId, promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia).id);
+  const body: EditPreviewResponse = {
+    ...(preview.refusal ? { refusal: preview.refusal } : {}),
+    turns: preview.turns,
+    actions: preview.actions.map(({ label, count, urls }) => ({ label, count, urls })),
+    moreActions: preview.moreActions,
+    grants: preview.grants,
+    files: preview.files.map((file) => repoPath(file.repo, file.path)),
+    pushed: preview.pushed,
+  };
+  return c.json(body);
+}
+
 export async function returnToBranch(c: Context<AppEnv>, sessionId: string, threadId: string) {
   const body = await readOptionalJsonObject(c);
   const noteEntryId = body?.noteEntryId;
   if (typeof noteEntryId !== "string" || noteEntryId.length === 0) {
     return c.json({ error: "noteEntryId must name a version note in this thread." }, 400);
   }
+  const restoreFiles = body?.restoreFiles;
+  if (restoreFiles !== undefined && typeof restoreFiles !== "boolean") {
+    return c.json({ error: "restoreFiles must be true or false." }, 400);
+  }
   const loaded = await loadEngineSession(c, sessionId);
   if ("error" in loaded) return loaded.error;
   const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
   try {
-    const result: ReturnToBranchResponse = await thread.returnToBranch(noteEntryId, { id: c.var.user.id });
+    const result: ReturnToBranchResponse = await thread.returnToBranch(noteEntryId, { id: c.var.user.id }, { restoreFiles: restoreFiles === true });
     return c.json(result);
   } catch (err) {
     if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
@@ -1672,12 +1724,42 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
   const title = titled?.title ? `${titled.title} (branch)`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined;
 
   const { thread, summary } = await openThread(c, home, { source, title });
-  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id });
+  // A fork in its own working directory (a team conversation) takes the
+  // source's files at the fork point along, as git bundles in the blob store.
+  const seed = summary.sessionId !== sessionId ? await exportForkSeed(c, loaded.engineSession, path, thread.id) : undefined;
+  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}) });
   const response: ForkThreadResponse = {
     thread: summary,
     ...(typed && entry.type === "message" ? { draft: entry.content } : {}),
   };
   return c.json(response, 201);
+}
+
+/**
+ * The source thread's files at a fork point, one git bundle per repository
+ * that the copied turns changed, saved under the fork's id. Undefined when no
+ * copied turn changed files; a reason when the files cannot come along.
+ */
+async function exportForkSeed(
+  c: Context<AppEnv>,
+  source: EngineSession,
+  path: readonly SessionEntry[],
+  forkThreadId: string,
+): Promise<{ repos: ForkSeedRecord[] } | { skipped: string } | undefined> {
+  const plan = planForkSeed(path);
+  if (plan.length === 0) return undefined;
+  try {
+    const repos: ForkSeedRecord[] = [];
+    for (const [index, repo] of plan.entries()) {
+      const bundle = await exportSeedBundle(source.sandbox, source.options.workspace, repo);
+      const blobKey = `fork-seed/${forkThreadId}/${index}`;
+      await c.var.providers.blobs.put(blobKey, bundle, { contentType: "application/x-git-bundle" });
+      repos.push({ repo: repo.repo, snapshot: repo.snapshot, blobKey, ...(repo.branch ? { branch: repo.branch } : {}) });
+    }
+    return { repos };
+  } catch (err) {
+    return { skipped: `the files could not be read from the original thread: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 messagesRouter.post("/:id/threads/:threadId/queue/:itemId/cancel", (c) => cancelQueuedItem(c, c.req.param("id"), c.req.param("threadId")));

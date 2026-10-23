@@ -1553,8 +1553,35 @@ export interface MessageBranchNote {
   filesChanged: boolean;
   /** The version this note left is in this thread, so a person can go back to it. */
   canReturn: boolean;
+  /** Approval choices made on the version this note left that still apply. */
+  grants: string[];
+  /**
+   * File changes the edit undid, or the return brought back. `canBringBack`
+   * is true when "Go back" can put the undone files back.
+   */
+  files?: { changed: string[]; skipped: string[]; failed: string[]; canBringBack: boolean };
   /** Fork notes only: the thread the history was copied from. */
   source?: { threadId: string; sameWorkingDirectory: boolean };
+  /**
+   * Fork notes only: repositories whose files come to this thread's own
+   * working directory. `pending` until the first turn copies them.
+   */
+  seed?: { repos: string[]; pending: boolean; failed: string[]; skipped?: string };
+}
+
+/** `GET /api/threads/:threadId/edit-preview?entryId=`: what an edit would replace. */
+export interface EditPreviewResponse {
+  /** Why the edit is refused, when it is. */
+  refusal?: string;
+  /** Typed messages the edit replaces: the edited one and the later ones. */
+  turns: number;
+  actions: Array<{ label: string; count: number; urls: string[] }>;
+  moreActions: number;
+  grants: string[];
+  /** Files the replaced turns changed, relative to the working directory. The edit can undo them. */
+  files: string[];
+  /** The replaced turns pushed commits or opened a pull request; a file undo does not reach those. */
+  pushed: boolean;
 }
 
 export interface ListMessagesResponse {
@@ -1603,6 +1630,8 @@ export interface ForkThreadResponse {
 export interface ReturnToBranchRequest {
   /** The branch note whose earlier version to go back to. */
   noteEntryId: string;
+  /** Also undo this version's file changes and bring back the ones the note's edit undid. */
+  restoreFiles?: boolean;
 }
 
 export interface ReturnToBranchResponse {
@@ -1648,6 +1677,8 @@ export interface SendPromptRequest {
    * messages run after the edit. The old version stays in the store.
    */
   editEntryId?: string;
+  /** With `editEntryId`: also undo the files the replaced turns changed. */
+  undoFiles?: boolean;
 }
 
 export interface SendPromptResponse {

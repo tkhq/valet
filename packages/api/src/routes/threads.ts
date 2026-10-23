@@ -10,7 +10,7 @@ import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-acc
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, cancelQueuedItem, createThread, forkThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
+  abortThread, cancelQueuedItem, createThread, editPreview, forkThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
   listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
@@ -155,6 +155,7 @@ threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", 
 // A guest who may reply may go back past their own edit. A fork creates a
 // thread in the owner's workspace, so it is the owner's (and members') alone.
 threadsRouter.post("/:threadId/branch/return", c => inThread(c, returnToBranch, "content", "reply"));
+threadsRouter.get("/:threadId/edit-preview", c => inThread(c, editPreview, "content", "reply"));
 threadsRouter.post("/:threadId/fork", c => inThread(c, forkThread, "content"));
 threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));

@@ -1,4 +1,5 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
+import { slackEditSignal } from "./slack-edit.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -1517,6 +1518,11 @@ export class ChannelHost {
       return;
     }
 
+    if (event.kind === "edit") {
+      await this.handleEdit(channelType, transport, event, userId, orgId);
+      return;
+    }
+
     if (event.kind === "gate_callback") {
       const callback = event.gateCallback;
       const callbackRef = callback && isGatePromptRef(callback.ref) ? callback.ref : undefined;
@@ -1618,6 +1624,36 @@ export class ChannelHost {
     await transport?.send(conversationKey, {
       markdown: "Link your Valet account to chat here: open Integrations in the Valet web app.",
     });
+  }
+
+  /**
+   * A person changed a message that already reached their assistant thread.
+   * The change is recorded for the model with no reply (`slackEditSignal`).
+   * An edit in a conversation with no thread yet has nothing to correct.
+   */
+  private async handleEdit(
+    channelType: string,
+    transport: ChannelTransport | undefined,
+    event: InboundChannelEvent,
+    userId: string,
+    orgId: string,
+  ): Promise<void> {
+    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
+      actorUserId: userId,
+      orgId,
+    });
+    const threadKey =
+      transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
+      `${channelType}:${chatIdFromKey(event.conversationKey)}`;
+    const thread = await session.threadByKey(threadKey);
+    if (!thread) {
+      await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
+      return;
+    }
+    await thread.recordSignal(
+      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType } }),
+      { dispatchId: event.dispatchId, author: { id: userId } },
+    );
   }
 
   private async handleMessage(

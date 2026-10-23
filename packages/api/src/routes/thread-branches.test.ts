@@ -9,6 +9,7 @@ import type { MessageEntry, SessionEntry, Thread } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type {
   CreateSessionResponse,
+  EditPreviewResponse,
   ForkThreadResponse,
   ListMessagesResponse,
   ReturnToBranchResponse,
@@ -116,6 +117,32 @@ describe("thread edit over the send route", () => {
 
     const mixed = await h.post(`/threads/${h.thread.id}/messages`, { text: "x", editEntryId: "u1", replyToMessageId: "a1" });
     expect(mixed.status).toBe(400);
+  });
+});
+
+describe("edit preview", () => {
+  it("says what an edit replaces, and why one is refused", async () => {
+    const h = await setup();
+    await api!.providers.engineStore.appendEntries(h.sessionId, h.thread.id, [
+      entry(h.thread, "u3", "a2", "user", "from a guest", { id: "guest-user", name: "Guest" }),
+    ]);
+    const preview = async (entryId: string) => {
+      const res = await fetch(`${api!.baseUrl}/api/threads/${h.thread.id}/edit-preview?entryId=${entryId}`);
+      expect(res.status).toBe(200);
+      return (await res.json()) as EditPreviewResponse;
+    };
+    expect(await preview("u3")).toMatchObject({ refusal: expect.stringContaining("Only the person who wrote") });
+    expect(await preview("u1")).toMatchObject({ refusal: expect.stringContaining("Guest wrote after this message") });
+
+    const fresh = await setup();
+    expect(await (await fetch(`${api!.baseUrl}/api/threads/${fresh.thread.id}/edit-preview?entryId=u1`)).json())
+      .toEqual({ turns: 2, actions: [], moreActions: 0, grants: [], files: [], pushed: false });
+  });
+
+  it("refuses undoFiles without an edit, and a non-boolean restoreFiles", async () => {
+    const h = await setup();
+    expect((await h.post(`/threads/${h.thread.id}/messages`, { text: "x", undoFiles: true })).status).toBe(400);
+    expect((await h.post(`/threads/${h.thread.id}/branch/return`, { noteEntryId: "n", restoreFiles: "yes" })).status).toBe(400);
   });
 });
 
