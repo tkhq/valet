@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { DecisionGate } from "@valet/engine";
 import { afterEach, expect, it, vi } from "vitest";
 import { agentSessions, childWatches } from "../schema/index.js";
-import { wireChildGateReports } from "../orchestrator/children.js";
+import { parentDelegationMetadata, wireChildGateReports } from "../orchestrator/children.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { bootTestApi, type TestApi } from "./_setup.js";
 
@@ -30,7 +30,10 @@ it("signals the parent thread once when its child opens a gate", async () => {
     toolScope: { tools: ["ask_question"], actions: ["workflows.get_run"] },
   });
   await child.pause();
-  const receipt = await child.prompt("Wait for a question", { metadata: { toolScope: { actions: [] } } });
+  const receipt = await child.prompt("Wait for a question", { metadata: {
+    ...parentDelegationMetadata(parent.id, parentThread.id, { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }),
+    toolScope: { actions: [] },
+  } });
   await p.db.insert(childWatches).values({
     childSessionId: childId, queueItemId: receipt.queueItemId, parentSessionId: parent.id, parentThreadId: parentThread.id,
     actorUserId: "local-user", orgId: "local-org", settled: false,

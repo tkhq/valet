@@ -47,6 +47,7 @@ import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { parentDelegationMetadata } from "../orchestrator/children.js";
 import { CHILD_REPLY_MAX_ATTEMPTS, childReplyRetryDelayMs } from "./child-replies.js";
 
 const ORG_ID = "local-org";
@@ -2227,7 +2228,10 @@ describe("ChannelHost outbound delivery", () => {
       fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-origin-action" })], { stopReason: "toolUse" }),
       fauxAssistantMessage("child finished"),
     ]);
-    await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+    await child.thread().submitPrompt({ text: "perform the child action" }, {
+      dispatchId: `child:${randomUUID()}`,
+      metadata: parentDelegationMetadata(parent.id, parent.thread().id, { channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }),
+    });
     await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1), { timeout: 5000 });
     const prompt = fakeTransport.gatePrompts[0]!;
     // The same conversation the parent's own channel thread posts to.
