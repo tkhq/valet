@@ -503,7 +503,8 @@ fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
   const found = engineSession.threadById(c.req.param("threadId"));
   const thread = found && await threadsVisibleTo(c, row)(threadRef(found)) ? found : undefined;
   const path = c.req.query("path");
-  const entries = thread && path ? await thread.readEntries() : [];
+  // Every branch: an attachment on a version an edit left stays downloadable.
+  const entries = thread && path ? await thread.readEntries({ allBranches: true }) : [];
   const file = entries
     .flatMap((entry) => (entry.type === "message" ? entry.attachments ?? [] : []))
     .find((att) => att.type === "file" && att.path === path);

@@ -2271,6 +2271,29 @@ export class Thread {
     return append;
   }
 
+  /**
+   * `appendEntry`, but only while the active path still holds `anchorId`.
+   * Returns false, with nothing written, when an edit or a return moved the
+   * thread to another branch since the caller read `anchorId`.
+   */
+  private async appendOnPath(entry: SessionEntry, anchorId: string | undefined, fence?: WriteFence): Promise<boolean> {
+    let appended = false;
+    const append = this.entryAppendTail.then(async () => {
+      const store = this.session.providers.store;
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) return;
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      if (anchorId !== undefined && !walkTranscriptDag(snapshot.entries, leaf ?? undefined).some((e) => e.id === anchorId)) return;
+      entry.parentId = leaf;
+      if (!(await store.appendBranch(this.session.id, this.id, [entry], { expectedLeafId: leaf, fence }))) return;
+      this.activeLeafEntryId = entry.id;
+      appended = true;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    await append;
+    return appended;
+  }
+
   // ── Branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──────
 
   /**
@@ -2304,8 +2327,12 @@ export class Thread {
     if (later) {
       throw new ValidationError(`${later} wrote after this message, and an edit would remove that message. Branch into a new thread instead.`);
     }
+    // An edit that already wrote its branch note has started; its turn may
+    // run on, or wait for an approval, without blocking the next edit.
     const unsettled = await store.listUnsettledSubmissions(this.session.id);
-    if (unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata))) {
+    const waiting = unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata)
+      && !snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id));
+    if (waiting) {
       throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
     }
     return { active, index };
@@ -5437,7 +5464,8 @@ export class Thread {
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
     const snapshot = await this.transcriptSnapshot();
-    const entries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
+    const leafAtSnapshot = this.activeLeafEntryId;
+    const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -5755,8 +5783,14 @@ export class Thread {
         "valet.compaction.head_entries_deferred": deferredHead.length,
         "valet.compaction.head_tokens_deferred": estimateTotalTokens(deferredHead),
       });
-      // Fenced under the current turn's attempt (compaction is always in-turn).
-      await this.appendEntry(compactionEntry, this.fence);
+      // Fenced under the current turn's attempt. An edit or a return that
+      // moved the thread to another branch while the summarizer ran makes
+      // this summary describe the branch the thread left, so drop it.
+      if (!(await this.appendOnPath(compactionEntry, leafAtSnapshot, this.fence))) {
+        span?.setAttribute("valet.compaction.dropped", "branch_switched");
+        console.warn(`[engine] compaction dropped: the thread switched branches while it ran session=${session.id} thread=${this.id}`);
+        return "noop";
+      }
       // A persisted summary closes the failure circuit breaker — any mode's
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;

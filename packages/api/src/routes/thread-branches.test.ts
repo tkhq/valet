@@ -7,6 +7,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { MessageEntry, SessionEntry, Thread } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
+import { slackChannelPrivacy, teamMembers, teams } from "../schema/index.js";
+import { SLACK_CHANNELS_METADATA_KEY } from "../services/thread-access.js";
 import type {
   CreateSessionResponse,
   EditPreviewResponse,
@@ -200,5 +203,51 @@ describe("thread fork", () => {
     const h = await setup();
     const res = await h.post(`/threads/${h.thread.id}/fork`, { entryId: "nope" });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("team fork audience", () => {
+  async function teamThread(key: string) {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "fork-team", orgId: "local-org", name: "Fork", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values([
+      { teamId: "fork-team", userId: "local-user", role: "admin" },
+      { teamId: "fork-team", userId: "test-member", role: "member" },
+    ]);
+    const owner = { type: "team" as const, id: "fork-team" };
+    const meta = { orgId: "local-org", actorUserId: "local-user" };
+    await ensureDefaultAssistantSession(api.providers, owner, meta);
+    const execution = await ensureAssistantExecution(api.providers, owner, meta, key);
+    const thread = await execution.session.createThread(key);
+    await api.providers.engineStore.appendEntries(execution.sessionId, thread.id, [
+      entry(thread, "u1", null, "user", "first"),
+      entry(thread, "a1", "u1", "assistant", "first answer"),
+    ]);
+    const fork = () => fetch(`${api!.baseUrl}/api/threads/${thread.id}/fork`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entryId: "a1" }),
+    });
+    return { thread, fork };
+  }
+
+  it("refuses to branch a thread private to one person", async () => {
+    const { fork } = await teamThread("app-assistant:local-user");
+    const res = await fork();
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("private to you");
+  });
+
+  it("keeps the Slack channels that gate the source thread", async () => {
+    const { thread, fork } = await teamThread("web:gated");
+    // Public today, so this viewer sees the source. The fork records the
+    // channel too, so it stays gated like the source if the channel changes.
+    await api!.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C-team", isPrivate: false, checkedAt: Date.now() });
+    await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "C-team");
+    const res = await fork();
+    expect(res.status).toBe(201);
+    const { thread: summary } = (await res.json()) as ForkThreadResponse;
+    const stored = await api!.providers.engineStore.getThread(summary.sessionId, summary.id);
+    expect(stored?.metadata?.[SLACK_CHANNELS_METADATA_KEY]).toEqual(["C-team"]);
   });
 });

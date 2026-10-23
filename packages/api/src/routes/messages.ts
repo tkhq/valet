@@ -12,7 +12,7 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
-import { threadRef } from "../services/thread-access.js";
+import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
@@ -1711,9 +1711,16 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
     throw err;
   }
 
+  // A team fork keeps the source's audience. A private thread cannot keep
+  // it in a new thread, so it is refused; Slack channel gates are copied.
+  const { db } = c.var.providers;
+  const audience = loaded.session.ownerType === "team" ? await threadAudience(db, sessionId, threadId) : undefined;
+  if (audience?.privateTo !== undefined) {
+    return c.json({ error: "This thread is private to you, and a branch would show its history to your team. Copy what you need into a new thread instead." }, 400);
+  }
+
   // A team conversation runs in its own execution session. Its fork starts
   // from the team runtime, as a new team thread does.
-  const { db } = c.var.providers;
   const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
     .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
     .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
@@ -1724,6 +1731,8 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
   const title = titled?.title ? `${titled.title} (branch)`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined;
 
   const { thread, summary } = await openThread(c, home, { source, title });
+  // Before any history is copied, so the fork is never wider than its source.
+  for (const channel of audience?.channels ?? []) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
   // A fork in its own working directory (a team conversation) takes the
   // source's files at the fork point along, as git bundles in the blob store.
   const seed = summary.sessionId !== sessionId ? await exportForkSeed(c, loaded.engineSession, path, thread.id) : undefined;

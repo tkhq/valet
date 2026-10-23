@@ -26,6 +26,7 @@ import {
   type Thread,
   type ToolDef,
 } from "../src/index.js";
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 
 const PERSON = { id: "u1", name: "Owner", interactive: true };
 const TEAMMATE = { id: "u2", name: "Teammate", interactive: true };
@@ -419,6 +420,71 @@ describe("thread edit", () => {
     const busy = await h.userEntry("busy");
     await h.thread.editMessage(busy.id, "busy, edited", { author: PERSON });
     await expect(h.thread.editMessage(busy.id, "busy, again", { author: PERSON })).rejects.toThrow(/Another edit is waiting/);
+  });
+
+  it("takes a second edit while the first edit's turn still runs", async () => {
+    const { tool, entered } = blockingTool();
+    const respond: FauxResponseStep = (context) => {
+      const last = context.messages[context.messages.length - 1];
+      if (last?.role === "toolResult") return fauxAssistantMessage("stopped");
+      const text = userTexts(context).at(-1) ?? "";
+      if (text === "v2") return fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-2" })], { stopReason: "toolUse" });
+      return fauxAssistantMessage(`did ${text}`);
+    };
+    const h = await setup("edit-twice", Array.from({ length: 6 }, () => respond), [tool]);
+    await h.send("v1");
+    const second = await h.thread.editMessage((await h.userEntry("v1")).id, "v2", { author: PERSON });
+    // The first edit started: its note is written and its turn waits in a tool.
+    await entered;
+    const third = await h.thread.editMessage((await h.userEntry("v2")).id, "v3", { author: PERSON });
+    await waitFor(() => h.settled(third.queueItemId));
+
+    expect(await h.outcome(second.queueItemId)).toBe("superseded");
+    const path = await h.path();
+    expect(path.slice(-2)).toEqual(["user:v3", "assistant:did v3"]);
+    expect(path).not.toContain("user:v2");
+  });
+});
+
+describe("compaction during a branch switch", () => {
+  it("drops a summary of the branch an edit left", async () => {
+    const summarizing = latch();
+    const finish = latch();
+    const faux = registerFauxProvider({ provider: "compact-edit" });
+    faux.setResponses([
+      fauxAssistantMessage("old answer"),
+      fauxAssistantMessage("second answer"),
+      async () => {
+        summarizing.open();
+        await finish.promise;
+        return fauxAssistantMessage(COMPLETE_SUMMARY);
+      },
+      fauxAssistantMessage("new answer"),
+    ]);
+    const store = new InMemorySessionStore();
+    const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = await session.ensureDefaultThread();
+    const settled = async (id: string) => (await store.getQueueItem(session.id, id))?.status === "settled";
+    for (const text of ["old topic", "second"]) {
+      const receipt = await thread.submitPrompt(text, { author: PERSON });
+      await waitFor(() => settled(receipt.queueItemId));
+    }
+
+    const compacting = thread.compactThread({ mode: "manual" });
+    await summarizing.promise;
+    const target = (await thread.readEntries()).find((e) => e.type === "message" && e.role === "user" && e.content === "old topic")!;
+    const edit = await thread.editMessage(target.id, "new topic", { author: PERSON });
+    await waitFor(() => settled(edit.queueItemId));
+    finish.open();
+
+    expect(await compacting).toBe("noop");
+    expect((await thread.readEntries({ allBranches: true })).some((e) => e.type === "compaction")).toBe(false);
+    expect((await thread.readEntries()).map(line)).toEqual(["note:edit", "user:new topic", "assistant:new answer"]);
+    faux.unregister();
   });
 });
 

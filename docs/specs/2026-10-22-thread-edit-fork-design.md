@@ -98,6 +98,13 @@ note names the source thread, and it says the copied actions already ran. A
 team thread runs in its own execution session and sandbox, so its fork gets
 the source's files at the fork point (decision 9).
 
+A team fork keeps the source's audience, by the rules the thread read gate
+uses (`threadAudience`). The fork records every Slack channel that gates the
+source, including those of the threads above it, before any history is
+copied. A thread private to one person, such as an Ask Valet or workflow
+editor thread, cannot keep that audience as a new team thread, so its fork
+is refused with the reason.
+
 The fork keeps the source thread's model and reasoning level.
 
 ### 5. No "2 of 3" version arrows
@@ -366,6 +373,20 @@ message. The client hides those rows at Send, and a refetch before the
 claim must not bring them back. Another viewer sees the old version go at
 the same moment.
 
+One edit waits at a time. A second edit is refused only while an earlier
+edit has not written its note. Once the note exists, that edit has started,
+and its turn can run on or wait for an approval while the person edits again.
+
+### Compaction during a branch switch
+
+Compaction reads the active path, summarizes it, then appends its entry. A
+manual `/compact` can run outside a claimed turn, so an edit or a return can
+move the thread while the summarizer runs. The append then checks, under the
+store's compare-and-swap, that the active path still holds the leaf the
+compaction read. If it does not, the summary describes the branch the thread
+left, so the compaction drops it, returns `noop`, and sets
+`valet.compaction.dropped` on its span.
+
 ## API
 
 - An edit is a send: `POST /api/threads/:threadId/messages` with
@@ -438,9 +459,12 @@ the same moment.
   repository that the source thread created. The test sandbox refuses file
   paths outside the working directory, as docker does. The rendered prefix is
   the same before and after an edit. A record-only signal makes no model
-  call. Approval choices appear in the note.
+  call. Approval choices appear in the note. A second edit while the first
+  edit's turn runs, and a compaction that an edit overtakes.
 - API: authorship rules, guests, Slack messages, fork of each message kind,
-  the preview, and Slack edits from a DM and from a followed thread.
+  the preview, and Slack edits from a DM and from a followed thread. A team
+  fork of a private thread is refused, a fork keeps its source's Slack
+  channels, and an attachment on a version an edit left still downloads.
 - Web: the edit bar, the hidden rows, the note divider, fork navigation.
 - Local check with two accounts at desktop and phone width, in docker
   sandboxes: an edit with "Also undo file changes" left the agent reading
