@@ -323,3 +323,11 @@ it("shows the channel-name pattern on the Slack workspace place row", () => {
   }));
   expect(screen.getByRole("link", { name: /channel whose name starts with lead-/ })).toBeTruthy();
 });
+
+it("keeps an extra channel condition beside the exact channel heading", () => {
+  renderRow(block({ service: "slack", subject: "slack:T1/C_BIZ", label: "#biz-dev", serviceWide: false, lines: [line("intersection", { eventKeys: ["slack.app_mention"], filters: [
+    { field: "channel", op: "eq", value: "C_BIZ", label: "#biz-dev" },
+    { field: "channel", op: "prefix", value: "lead" },
+  ], target: { kind: "assistant", follow: true } })] }));
+  expect(screen.getByRole("link", { name: /#biz-dev and a channel ID that starts with lead/ })).toBeTruthy();
+});

@@ -588,20 +588,16 @@ function presencePlace(
   names: SentenceNames,
 ): SentencePart[] | null {
   if (service === null) return null;
-  for (const field of SENTENCE_PLACE_FIELDS[service]) {
-    const filter = filters.find((f) => f.field === field && isPlaceFilter(f));
-    if (filter && filterEntries(filter).length > 0) return placeParts(service, filter, names);
-  }
-  // A place field with another op narrows the place without naming one:
-  // `on a repository that starts with acme/`, never `on any repository`.
-  for (const field of SENTENCE_PLACE_FIELDS[service]) {
-    const filter = filters.find((f) => f.field === field);
-    if (filter && filterEntries(filter).length > 0) {
+  const groups = filters.filter((filter) => SENTENCE_PLACE_FIELDS[service].includes(filter.field))
+    .filter((filter) => filterEntries(filter).length > 0)
+    .map((filter): SentencePart[] => {
+      if (isPlaceFilter(filter)) return placeParts(service, filter, names);
       const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
-      const place = field === "channel_name" ? "a channel whose name" : `${article(fieldWords(field))} that`;
+      const place = filter.field === "channel_name" ? "a channel whose name"
+        : filter.field === "channel" ? "a channel ID that" : `${article(fieldWords(filter.field))} that`;
       return [text(`${place} ${opWords(filter.op)} ${values}`)];
-    }
-  }
+    });
+  if (groups.length > 0) return groups.flatMap((group, index) => index === 0 ? group : [text(" and "), ...group]);
   return [text(ANY_PLACE[service])];
 }
 
@@ -725,8 +721,9 @@ export function presenceWhenParts(
 ): SentencePart[] {
   const withPlace = options.place ?? true;
   if (followsSlackThread(sub)) {
-    const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
-    const where = channel === undefined || !withPlace ? [] : [text(" in "), ...placeParts("slack", channel, names)];
+    const hasChannel = sub.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name");
+    const place = hasChannel && withPlace ? presencePlace("slack", sub.filters, names) : null;
+    const where = place === null ? [] : [text(" in "), ...place];
     return tidy([text("someone replies in the Slack thread"), ...where]);
   }
   const service = serviceOf(sub.eventKeys);

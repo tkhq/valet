@@ -238,7 +238,7 @@ describe("WhenSection", () => {
     expect(conditionWords({ id: "2", field: "channel", op: "eq", value: "C1", label: "C1" }, names)).toBe("channel is #incidents");
     expect(conditionWords({ id: "3", field: "channel", op: "in", value: "C1, C2", inLabels: { field: "channel", values: ["C1", "C2"], labels: ["C1", "C2"] } }, names))
       .toBe("channel is #incidents or C2");
-    expect(conditionWords({ id: "4", field: "channel", op: "prefix", value: "C1" }, names)).toBe("channel starts with C1");
+    expect(conditionWords({ id: "4", field: "channel", op: "prefix", value: "C1" }, names)).toBe("channel ID starts with C1");
   });
 });
 

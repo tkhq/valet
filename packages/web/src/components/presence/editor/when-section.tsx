@@ -43,8 +43,8 @@ const SERVICE_CHOICES: readonly EditorService[] = [...EVENT_SERVICES, "schedule"
  * no label (`channelWords`), the same words the sentence shows.
  */
 export function conditionWords(row: UiFilterRow, names: SentenceNames = {}): string {
-  const field = fieldLabel(row.field).toLowerCase();
   const exactChannel = row.field === "channel" && (row.op === "eq" || isListOp(row.op));
+  const field = row.field === "channel" && !exactChannel ? "channel ID" : fieldLabel(row.field).toLowerCase();
   let value: string;
   if (isListOp(row.op)) {
     const values = row.value.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
@@ -352,6 +352,9 @@ function Conditions({ draft, mode, onChange, services, names }: {
       <p className="mt-1.5 text-xs text-muted">
         {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : `All conditions must match. ${conditionHint(service)} Use separate responses for alternative channels.`}
       </p>
+      {service === "slack" && rows.some((row) => row.field === "channel" && !["eq", "in", "not_in"].includes(row.op)) && (
+        <p className="mt-1.5 text-xs text-muted">Channel ID comparisons use IDs such as C123. For channel names, use Channel name.</p>
+      )}
       {adding && (
         <AddCondition
           fields={fields}

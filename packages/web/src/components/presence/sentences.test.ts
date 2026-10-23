@@ -1064,3 +1064,22 @@ it("names a channel-name prefix in the response rule sentence", () => {
   const rule = sub({ filters: [{ field: "channel_name", op: "prefix", value: "lead-" }], target: { kind: "assistant", follow: true } });
   expect(presenceSentence(rule, catalog, workflows, threads)).toContain("channel whose name starts with lead-");
 });
+
+it("keeps every channel comparison in a response summary", () => {
+  const response = sub({ filters: [
+    { field: "channel", op: "eq", value: "C_BIZ", label: "#biz-dev" },
+    { field: "channel", op: "prefix", value: "lead" },
+    { field: "channel_name", op: "regex", value: "^lead-" },
+  ], target: { kind: "assistant", follow: true } });
+  const summary = presenceSentence(response, catalog, workflows, threads);
+  expect(summary).toContain("#biz-dev and a channel ID that starts with lead and a channel whose name matches ^lead-");
+});
+
+it("shows channel exclusions on a followed Slack thread", () => {
+  const response = sub({ target: { kind: "assistant", thread: { mode: "own" } }, eventKeys: ["slack.message"], filters: [
+    { field: "thread_ts", op: "eq", value: "123.45" },
+    { field: "channel", op: "eq", value: "C1", label: "#lead-main" },
+    { field: "channel_name", op: "not_prefix", value: "lead-private" },
+  ] });
+  expect(presenceSentence(response, catalog, workflows, threads)).toContain("#lead-main and a channel whose name doesn't start with lead-private");
+});

@@ -7,26 +7,61 @@
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import { selectsSlackMention } from "./slack-mention";
 
-export type ChannelListener =
+export type ChannelListener = (
   | { kind: "this-team" }
-  | { kind: "other"; owner: string };
+  | { kind: "other"; owner: string }
+) & { conditional?: true };
+
+/**
+ * Mirrors api/src/events/match.ts, which is not a browser package export.
+ * Keep its write-time regex policy and 2,000-character match bound here.
+ */
+function channelFilterMatches(filter: EventSubscriptionWire["filters"][number], actual: string | undefined): boolean {
+  const { op, value } = filter;
+  let regex: RegExp | undefined;
+  if (op === "regex" || op === "not_regex") {
+    if (typeof value !== "string" || value.length > 200 || /\([^()]*[*+][^()]*\)[*+]/.test(value)) return false;
+    try { regex = new RegExp(value); } catch { return false; }
+  }
+  if (actual === undefined) return op === "not_in" || op === "not_prefix" || op === "not_regex";
+  switch (op) {
+    case "eq": return actual === value;
+    case "in": return Array.isArray(value) && value.includes(actual);
+    case "not_in": return Array.isArray(value) && !value.includes(actual);
+    case "prefix": return typeof value === "string" && actual.startsWith(value);
+    case "not_prefix": return typeof value === "string" && !actual.startsWith(value);
+    case "contains": return typeof value === "string" && actual.includes(value);
+    case "regex":
+    case "not_regex": return regex !== undefined && regex.test(actual.slice(0, 2_000)) === (op === "regex");
+    default: return false;
+  }
+}
+
+/** Only channel regex conditions need isolated evaluation. Other fields remain potential coverage. */
+export function hasSlackListenerRegex(subscriptions: readonly EventSubscriptionWire[]): boolean {
+  return subscriptions.some((rule) => rule.enabled && selectsSlackMention(rule.eventKeys) && rule.target.kind === "assistant"
+    && rule.filters.some((filter) => (filter.field === "channel" || filter.field === "channel_name")
+      && (filter.op === "regex" || filter.op === "not_regex")));
+}
 
 /** Only an exact match names channels; a prefix or pattern reaches channels no id list shows. */
 function isChannelIdFilter(filter: EventSubscriptionWire["filters"][number]): boolean {
   return filter.field === "channel" && (filter.op === "eq" || filter.op === "in");
 }
 
-/** `ALL_CHANNELS` marks a rule with no channel filter: it listens everywhere. */
+/** `ALL_CHANNELS` marks potential coverage with no channel restrictions. */
 export const ALL_CHANNELS = "*";
 
 /**
  * Maps channel id → who listens there, from the enabled mention rules the
  * caller can see. `teamName` resolves another team's display name.
+ * UI callers use useSlackChannelListeners to isolate regex execution.
  */
 export function slackChannelListeners(
   subscriptions: readonly EventSubscriptionWire[],
   teamId: string,
   teamName: (id: string) => string | undefined,
+  catalog: readonly { id: string; name?: string }[] = [],
 ): Map<string, ChannelListener> {
   const listeners = new Map<string, ChannelListener>();
   for (const rule of subscriptions) {
@@ -34,10 +69,23 @@ export function slackChannelListeners(
     const ownTeam = rule.ownerType === "team" && rule.ownerId === teamId;
     const listener: ChannelListener = ownTeam ? { kind: "this-team" }
       : { kind: "other", owner: rule.ownerType === "team" ? `${teamName(rule.ownerId) ?? "Another team"}'s Valet` : "A personal Valet" };
-    const channels = rule.filters.filter(isChannelIdFilter)
-      .flatMap((filter) => (Array.isArray(filter.value) ? filter.value : [filter.value]));
-    const scoped = rule.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name");
-    for (const channel of channels.length > 0 ? channels : scoped ? [] : [ALL_CHANNELS]) {
+    const channelFilters = rule.filters.filter((filter) => filter.field === "channel" || filter.field === "channel_name");
+    // Other conditions can still match a future mention. Reserve the channel,
+    // but do not describe that potential coverage as unconditional listening.
+    if (channelFilters.length !== rule.filters.length) listener.conditional = true;
+    const candidates = new Map(catalog.map((channel) => [channel.id, channel]));
+    // Exact IDs remain useful before the catalog loads. Stored labels are not
+    // current channel names, so never use them to evaluate name conditions.
+    for (const filter of channelFilters.filter(isChannelIdFilter)) {
+      for (const id of Array.isArray(filter.value) ? filter.value : [filter.value]) {
+        if (!candidates.has(id)) candidates.set(id, { id });
+      }
+    }
+    const channels = channelFilters.length === 0 ? [ALL_CHANNELS] : [...candidates.values()]
+      .filter((channel) => channelFilters.every((filter) =>
+        channelFilterMatches(filter, filter.field === "channel" ? channel.id : channel.name)))
+      .map((channel) => channel.id);
+    for (const channel of channels) {
       // This team's own listener wins the label: it is the one it can edit.
       if (!listeners.has(channel) || listener.kind === "this-team") listeners.set(channel, listener);
     }
@@ -47,7 +95,12 @@ export function slackChannelListeners(
 
 /** Who listens in one channel, counting a listener on every channel. */
 export function listenerFor(listeners: Map<string, ChannelListener>, channel: string): ChannelListener | undefined {
-  return listeners.get(channel) ?? listeners.get(ALL_CHANNELS);
+  const specific = listeners.get(channel);
+  const everywhere = listeners.get(ALL_CHANNELS);
+  // Own-team precedence applies across both entries, not just within one key.
+  if (specific?.kind === "this-team") return specific;
+  if (everywhere?.kind === "this-team") return everywhere;
+  return specific ?? everywhere;
 }
 
 /** A channel this team listens in, with the name the rule stored for it. */
@@ -83,7 +136,7 @@ export function teamListening(subscriptions: readonly EventSubscriptionWire[], t
     ...(editable ? { editable } : {}),
     editableChannels: editable ? channelsOf(editable) : [],
     channels: [...seen.values()],
-    everywhere: own.some((rule) => !rule.filters.some((filter) => filter.field === "channel" || filter.field === "channel_name")),
+    everywhere: own.some((rule) => rule.filters.length === 0),
     patterns: own.filter((rule) => rule.filters.some((filter) => filter.field === "channel_name" || (filter.field === "channel" && !isChannelIdFilter(filter)))),
   };
 }

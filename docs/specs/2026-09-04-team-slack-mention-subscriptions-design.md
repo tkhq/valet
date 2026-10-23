@@ -215,3 +215,19 @@ Later exact additions use the existing collision workflow.
 Saved ID conditions retain their original meaning until a person edits them.
 An existing exact condition and a name prefix in one rule remain an intersection.
 To create alternatives, keep the exact rule and add a separate name rule.
+
+### Channel picker coverage (2026-10-23)
+
+Match enabled channel conditions against the current channel catalog.
+Use channel IDs for ID conditions and current names for name conditions.
+Apply all channel conditions together, including exclusions.
+A matching response for this team keeps the channel selected and locked.
+A matching response for another team marks the channel as taken.
+Other conditions can limit a response, so label this coverage as conditional.
+An unrestricted response for this team takes precedence over another team's
+specific response when the picker shows ownership.
+
+Run stored regular expressions in a worker with a deadline. A slow expression
+must not stop the page. During a check, or if the check fails, block new channel
+selections and saving. Show the status and a retry action. Do not present
+unknown coverage as an available channel.

@@ -1353,3 +1353,16 @@ page (now `/presence/routines/<id>`), and the ungated routine row switch
 (the roster row reads `routineReadOnly`).
 
 Presence copy uses response for these entries. A name condition reads as a channel whose name matches the condition.
+
+### Complete channel summaries (2026-10-23)
+
+Show every channel condition in the response sentence, including exclusions.
+Join separate conditions with `and`, as the event matcher does.
+An exact channel heading does not replace additional channel conditions.
+This also applies to responses that follow a Slack thread.
+Name comparisons say `channel name`. Saved non-exact ID comparisons say
+`channel ID`. The editor explains how these fields differ without changing
+saved conditions.
+
+The overlap notice must fit the side pane. Long response names wrap within
+the reference. They must not hide the rest of the notice or widen the pane.

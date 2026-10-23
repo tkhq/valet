@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import type { ReactNode } from "react";
+import { ListenerWorkerDouble } from "~/lib/slack-listeners-worker.test-utils";
 
 const state = vi.hoisted(() => ({
   connected: true,
@@ -54,7 +55,7 @@ vi.mock("~/api/integrations", async (importOriginal) => ({
 const createMutate = vi.fn();
 const patchMutate = vi.fn();
 const deleteMutate = vi.fn();
-function mentionRule(id: string, ownerId: string, channel: string, enabled = true) {
+function mentionRule(id: string, ownerId: string, channel: string, enabled = true): EventSubscriptionWire {
   return {
     id, name: `${ownerId} replies`, enabled, ownerType: "team", ownerId, createdBy: "u", createdAt: 1, updatedAt: 1,
     eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: channel, label: channel === "C1" ? "#general" : "#design" }],
@@ -75,9 +76,12 @@ vi.mock("~/api/events", async (importOriginal) => ({
   useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),
 }));
 vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
-import { ListenButton, TeamSlackSetupCard } from "./team-slack-setup";
+import { ListenButton, TeamSlackChannelPicker, TeamSlackSetupCard } from "./team-slack-setup";
 
-beforeEach(() =>
+beforeEach(() => {
+  ListenerWorkerDouble.instances = [];
+  ListenerWorkerDouble.autoRespond = true;
+  vi.stubGlobal("Worker", ListenerWorkerDouble);
   Object.assign(state, {
     connected: true,
     member: true,
@@ -86,8 +90,9 @@ beforeEach(() =>
     existing: false,
     patterns: [],
     orgAdmin: true,
-  }),
-);
+  });
+});
+afterEach(() => vi.unstubAllGlobals());
 function open() {
   if (state.existing) render(<ListenButton teamId="a">Listen in channels</ListenButton>);
   else render(<TeamSlackSetupCard teamId="a" />);
@@ -106,6 +111,101 @@ describe("team homepage Slack setup", () => {
     expect(screen.getByText(/Separate responses cover alternative channels/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit Lead replies" }));
     expect(screen.getByTestId("line-editor").textContent).toContain("edit Lead replies");
+  });
+
+  it.each(["prefix", "regex"] as const)("blocks pattern-covered channels for %s without changing the pattern on save", async (op) => {
+    state.existing = true;
+    patchMutate.mockClear(); createMutate.mockClear(); deleteMutate.mockClear();
+    state.patterns = [
+      { ...mentionRule("mine-pattern", "a", "C1"), filters: [{ field: "channel_name", op, value: op === "prefix" ? "laun" : "^launch$" }] },
+      { ...mentionRule("other-pattern", "b", "C2"), filters: [{ field: "channel_name", op, value: op === "prefix" ? "des" : "^design$" }] },
+    ];
+    open();
+    await waitFor(() => expect(screen.queryByText("Checking channel coverage…")).toBeNull());
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("checked", true);
+    expect(screen.getByText("Listening (advanced setup)")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: /design/ })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /general/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop listening" }));
+    expect(deleteMutate).toHaveBeenCalledWith("mine", expect.anything());
+    expect(patchMutate).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("reserves conditional pattern coverage without claiming unconditional listening", () => {
+    state.existing = true;
+    state.patterns = [{ ...mentionRule("conditional", "a", "C3"), filters: [
+      { field: "channel_name", op: "eq", value: "launch" },
+      { field: "user", op: "eq", value: "U1" },
+    ] }];
+    open();
+    expect(screen.getByText("May listen (advanced setup)")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("disabled", true);
+  });
+
+  it("keeps own unrestricted coverage checked and locked over another team's pattern", () => {
+    state.existing = true;
+    state.patterns = [
+      { ...mentionRule("own-all", "a", "C1"), filters: [] },
+      { ...mentionRule("other-prefix", "b", "C3"), filters: [{ field: "channel_name", op: "prefix", value: "laun" }] },
+    ];
+    open();
+    const launch = screen.getByRole("checkbox", { name: /launch/ });
+    expect(launch).toHaveProperty("checked", true);
+    expect(launch).toHaveProperty("disabled", true);
+    expect(launch.closest("li")?.textContent).toContain("Listening (advanced setup)");
+  });
+
+  it("blocks channel changes and saving while regex coverage is unknown, and retries errors", async () => {
+    state.existing = true;
+    ListenerWorkerDouble.autoRespond = false;
+    patchMutate.mockClear(); deleteMutate.mockClear(); createMutate.mockClear();
+    state.patterns = [{ ...mentionRule("regex", "b", "C3"), filters: [
+      { field: "channel_name", op: "regex", value: "^(a|aa)+$" },
+    ] }];
+    open();
+    expect(screen.getByText("Checking channel coverage…")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: /general/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Listen in 1 channel" })).toHaveProperty("disabled", true);
+    const first = ListenerWorkerDouble.instances[0];
+    expect(first).toBeDefined();
+    act(() => first?.send({ kind: "error" }));
+    expect(screen.getByRole("alert").textContent).toContain("Retry");
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Listen in 1 channel" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: "Retry coverage check" }));
+    expect(screen.getByText("Checking channel coverage…")).toBeTruthy();
+    const second = ListenerWorkerDouble.instances[1];
+    act(() => second?.send({ kind: "ready", listeners: [] }));
+    expect(screen.queryByText("Checking channel coverage…")).toBeNull();
+    expect(screen.getByRole("checkbox", { name: /launch/ })).toHaveProperty("disabled", false);
+    expect(patchMutate).not.toHaveBeenCalled();
+    expect(deleteMutate).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("removes only editable exact membership when a name pattern covers the same channel", () => {
+    deleteMutate.mockClear(); patchMutate.mockClear(); createMutate.mockClear();
+    const exact = mentionRule("exact", "a", "C1");
+    const pattern: EventSubscriptionWire = { ...mentionRule("pattern", "a", "C1"), filters: [
+      { field: "channel_name", op: "prefix", value: "gen" },
+    ] };
+    const props = { team: { id: "a", name: "Alpha" }, teamName: () => "Alpha", onOpenChange: vi.fn(),
+      onAdvanced: vi.fn(), onAddPattern: vi.fn(), onEditPattern: vi.fn() };
+    const view = render(<TeamSlackChannelPicker {...props} subscriptions={[exact, pattern]} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /general/ }));
+    expect(screen.getByText(/channel name starts with gen/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop listening" }));
+    expect(deleteMutate).toHaveBeenCalledExactlyOnceWith("exact", expect.anything());
+    expect(patchMutate).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+    // A refresh after the exact rule is removed still reports pattern coverage.
+    view.rerender(<TeamSlackChannelPicker {...props} subscriptions={[pattern]} />);
+    expect(screen.getByRole("checkbox", { name: /general/ })).toHaveProperty("checked", true);
+    expect(screen.getByRole("checkbox", { name: /general/ })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Listening (advanced setup)")).toBeTruthy();
   });
 
   it("offers a separate channel-name response rule", () => {
