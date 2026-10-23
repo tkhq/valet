@@ -136,13 +136,13 @@ export default function UiStressGallery() {
                   <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
                     <MessageList messages={stressThreadMessages} threadId={THREAD_ID} viewerId={stressMe.id} ratings={false} />
                   </div>
-                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} collapsible />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}
               {stressThreadGates.slice(2).map((gate) => (
                 <Frame key={gate.id} label={`Gate card: ${gate.type}${gate.approver ? " (shared account)" : ""}`}>
-                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} collapsible={gate.type === "credential_request"} />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}
