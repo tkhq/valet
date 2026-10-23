@@ -1282,10 +1282,14 @@ with an earlier entry, the entry below wins.
   idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
   Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
   Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
-  A released attachment always evicts the cached session, including when a direct caller admitted work during destruction.
-  Eviction keeps durable submissions. Later session resolution restores queued work with a fresh attachment, without deleting history.
-  All session builders and live-cache reads reject released entries. A release-status listener also evicts them immediately.
-  Failed attachment destruction retains its durable handle for retry and revival.
+  Under cleanup, the engine session fences claims before destruction and rechecks durable submissions and active execution.
+  A running turn or an in-flight claim aborts reclaim. Each claim reserves execution across its store await and local ownership installation.
+  Admissions on a fenced session stay queued. No caller can start a turn on its retiring attachment.
+  The destroy caller owns eviction after the operation returns. A temporary release status does not evict during pending release.
+  If pending release fails, the cached owner remains. Failed destruction retains its durable handle for provider retry.
+  A terminal released owner stays fenced after eviction. Its admissions schedule recovery after cleanup, never awaited inside the barrier.
+  The host restores the durable queue on fresh compute. Web, signals, CLI, and child sends share this engine behavior.
+  Cache eviction refuses active execution. All session builders replace idle released entries; `liveSession()` is read-only.
   Retries call the provider with that handle, not the released attachment.
   Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
   Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.

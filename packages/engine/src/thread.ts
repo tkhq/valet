@@ -758,7 +758,8 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const requestedMode = opts.queueMode ?? this.mode;
+    // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
+    const requestedMode = this.session.isReclaiming ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -775,7 +776,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect") {
+    if (effectiveMode === "collect" && !this.session.isReclaiming) {
       return this.submitCollect(content, opts);
     }
 
@@ -817,7 +818,7 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isReclaiming ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -1079,6 +1080,7 @@ export class Thread {
       item,
     );
     await this.emitQueueState();
+    this.session.notifyReclaimAdmission();
     if (wasAdmitted) {
       this.armCollectTimer(
         typeof admittedItem.metadata?.collectDeadline === "number"
@@ -2784,6 +2786,7 @@ export class Thread {
   }
 
   async kick(): Promise<void> {
+    if (this.session.isReclaiming) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -2802,7 +2805,7 @@ export class Thread {
     if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused) return;
+      if (this.paused || this.session.isReclaiming) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -2828,17 +2831,17 @@ export class Thread {
       }
 
       const attemptId = uid("att");
-      const claimed = await store.claimSubmission({
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: head.id,
-        attemptId,
-        ownerId: this.session.ownerId,
+      const claimed = await this.session.claimExecution(async () => {
+        const item = await store.claimSubmission({
+          sessionId: this.session.id, threadId: this.id, itemId: head.id,
+          attemptId, ownerId: this.session.ownerId,
+        });
+        if (!item) return null;
+        await store.insertAttemptMarker(item.id, attemptId);
+        this.runningItem = item;
+        return item;
       });
-      if (!claimed) return; // lost the race or head is not actually claimable
-
-      await store.insertAttemptMarker(claimed.id, attemptId);
-      this.runningItem = claimed;
+      if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
       // no repair path can leak one turn's escalation into the next.
@@ -3453,22 +3456,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    });
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -3528,22 +3535,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    });
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;

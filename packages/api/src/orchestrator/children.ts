@@ -1612,7 +1612,7 @@ export class ChildWatcher {
     const destroy = () => this.deps.engineHost.withSandboxCleanup(childSessionId, async () => {
       const live = this.deps.engineHost.liveSession(childSessionId);
       const attachedId = live?.attachment.sandboxId;
-      if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || live?.attachment.state === "provisioning"
+      if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || live?.hasActiveExecution || live?.attachment.state === "provisioning"
         || (await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length > 0) return false;
       const [currentCycle] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
       if (!currentCycle?.settled || currentCycle.queueItemId !== cycle.queueItemId || currentCycle.settledAt !== cycle.settledAt
@@ -1626,40 +1626,52 @@ export class ChildWatcher {
           .returning({ id: childWatches.childSessionId });
         if (!saved.length) return false;
       }
-      if (attachedId && live) {
-        try {
-          if (!await live.attachment.destroy(reason)) return false;
-        } finally {
-          // Released attachments cannot execute queued work. Restore it from durable state on the next session resolution.
-          if (live.attachment.state === "released") this.deps.engineHost.evictCache(childSessionId, live);
+      if (live && !await live.beginReclaim()) return false;
+      try {
+        if (live && !await live.attachment.destroy(reason)) return false;
+        if (!attachedId && sandboxId) {
+          // Always retry the provider destroy. The pre-check only avoids recounting a previously completed destroy.
+          const present = (await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released";
+          await this.deps.engineHost.destroySandbox(sandboxId);
+          if (present) recordSandboxDestroyed(reason);
         }
-      } else if (sandboxId) {
-        // Always retry the provider destroy. The pre-check only avoids counting a previously completed destroy twice.
-        const present = (await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released";
-        await this.deps.engineHost.destroySandbox(sandboxId);
-        if (present) recordSandboxDestroyed(reason);
-      }
-      if (sandboxId) {
-        if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
-          throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
+        if (sandboxId) {
+          if ((await this.deps.engineHost.sandboxStatus(sandboxId)).state !== "released") {
+            throw new Error(`Sandbox ${sandboxId} is still present after destroy. Retention will retry the provider destroy.`);
+          }
         }
+        const destroyedId = sandboxId;
+        const current = this.deps.engineHost.liveSession(childSessionId);
+        if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || (current !== null && current !== live)
+          || (current?.attachment.sandboxId !== undefined && current.attachment.sandboxId !== destroyedId)
+          || current?.attachment.state === "provisioning") return false;
+        const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
+        if (!watch?.settled || watch.queueItemId !== cycle.queueItemId || watch.settledAt !== cycle.settledAt
+          || watch.sandboxReclaimedAt !== null) return false;
+        const durable = await this.deps.engineStore.getSession(childSessionId);
+        if (durable?.sandboxId !== undefined && durable.sandboxId !== destroyedId) return false;
+        if ((await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length > 0) return false;
+        if (destroyedId && !await this.forgetDestroyedSandbox(childSessionId, destroyedId)) return false;
+        await revokeSandboxTokens(this.deps.db, childSessionId);
+        await this.markReclaimed(childSessionId, now, cycle);
+        if (!live) this.deps.engineHost.evictCache(childSessionId, current);
+        return true;
+      } finally {
+        if (live?.attachment.state === "released") {
+          this.deps.engineHost.evictCache(childSessionId, live);
+          live.completeReclaim(async () => {
+            if (!(await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length) return;
+            const data = await this.deps.engineStore.getSession(childSessionId);
+            if (!data) return;
+            const [app] = await this.deps.db.select().from(agentSessions).where(eq(agentSessions.id, childSessionId));
+            const session = await this.deps.engineHost.sessionFor(childSessionId, await loadSessionMeta(this.deps.db, app ?? {
+              id: childSessionId, userId: data.userId, orgId: data.orgId, workspace: data.workspace,
+              ownerType: data.owner.type, ownerId: data.owner.id,
+            }));
+            for (const thread of session.listThreads()) void thread.kick();
+          });
+        } else live?.cancelReclaim();
       }
-      const destroyedId = sandboxId;
-      const current = this.deps.engineHost.liveSession(childSessionId);
-      if (this.deps.engineHost.sessionBuildInFlight(childSessionId) || (current !== null && current !== live)
-        || (current?.attachment.sandboxId !== undefined && current.attachment.sandboxId !== destroyedId)
-        || current?.attachment.state === "provisioning") return false;
-      const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId));
-      if (!watch?.settled || watch.queueItemId !== cycle.queueItemId || watch.settledAt !== cycle.settledAt
-        || watch.sandboxReclaimedAt !== null) return false;
-      const durable = await this.deps.engineStore.getSession(childSessionId);
-      if (durable?.sandboxId !== undefined && durable.sandboxId !== destroyedId) return false;
-      if ((await this.deps.engineStore.listUnsettledSubmissions(childSessionId)).length > 0) return false;
-      if (destroyedId && !await this.forgetDestroyedSandbox(childSessionId, destroyedId)) return false;
-      await revokeSandboxTokens(this.deps.db, childSessionId);
-      await this.markReclaimed(childSessionId, now, cycle);
-      this.deps.engineHost.evictCache(childSessionId, current);
-      return true;
     });
     return deliveryLocked ? destroy() : withChildDelivery(this.deps.db, childSessionId, destroy);
   }

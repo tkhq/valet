@@ -839,7 +839,7 @@ export class EngineHost {
   /** Released attachments are terminal. Eviction keeps durable submissions for the next session restore. */
   private reusableCacheEntry(sessionId: string): CacheEntry | undefined {
     const entry = this.cache.get(sessionId);
-    if (entry?.session.attachment.state !== "released") return entry;
+    if (entry?.session.attachment.state !== "released" || entry.session.isReclaiming || entry.session.attachment.isDestroying || entry.session.hasActiveExecution) return entry;
     this.evictCache(sessionId);
     return undefined;
   }
@@ -1018,11 +1018,6 @@ export class EngineHost {
   private trackHibernationWake(sessionId: string, session: Session): void {
     let wasSuspended = false;
     session.attachment.onStatus((status) => {
-      if (status.state === "released") {
-        // A caller can admit after resolving but before reclaim. Never retain its terminal attachment, even with queued work.
-        if (this.cache.get(sessionId)?.session === session) this.evictCache(sessionId);
-        return;
-      }
       if (status.state === "suspended") {
         wasSuspended = true;
         return;
@@ -3384,6 +3379,8 @@ export class EngineHost {
    * once its last reference (this method's local `entry`) goes away.
    */
   evictCache(sessionId: string, expected?: Session | null): void {
+    // A live execution cannot be replaced: startup restore would steal its running item and repeat side effects.
+    if (this.cache.get(sessionId)?.session.hasActiveExecution) return;
     if (expected !== undefined && (this.inflight.has(sessionId) || (this.cache.get(sessionId)?.session ?? null) !== expected)) return;
     // Invalidate any in-flight build too: it read the row before this
     // eviction's cause committed, and would otherwise re-populate the cache
@@ -3530,7 +3527,7 @@ export class EngineHost {
   }
 
   liveSession(sessionId: string): Session | null {
-    return this.reusableCacheEntry(sessionId)?.session ?? null;
+    return this.cache.get(sessionId)?.session ?? null;
   }
 
   /**

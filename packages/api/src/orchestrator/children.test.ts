@@ -62,6 +62,7 @@ import { PendingCapError, ValidationError as EngineValidationError } from "@vale
 import { isScratchRequestError } from "@valet/shared";
 import { admitSignal, SignalEdgeDeniedError } from "./signals.js";
 import { submitSessionPrompt } from "../routes/messages.js";
+import { InstanceClient } from "../cli/client.js";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
@@ -679,7 +680,11 @@ describe("buildChildSpawner", () => {
       resources: { cpu: 2 },
     }, ctx);
 
-    // Simulate an api restart: the cached session dies; the row survives.
+    // Drain the old owner before simulating a graceful restart. Active owners cannot be cache-evicted.
+    const original = api.providers.engineHost.liveSession(spawned.childSessionId);
+    if (!original) throw new Error("child was not cached");
+    await original.thread().abort();
+    await vi.waitFor(() => expect(original.hasActiveExecution).toBe(false));
     api.providers.engineHost.evictAll();
     expect(api.providers.engineHost.liveSession(spawned.childSessionId)).toBeNull();
 
@@ -4176,14 +4181,114 @@ describe("child sandbox retention", () => {
     return rows[0];
   }
 
+  it("engine reclaim fence aborts when a running claim wins before destruction", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let finish!: () => void;
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    let modelCalls = 0;
+    faux.setResponses([async () => { modelCalls++; await held; return fauxAssistantMessage("done"); }]);
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: RETENTION_MS }));
+    const { child, childThread, watch } = await seedParkableChild(api, "active-fence", "parent-active-fence");
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await vi.waitFor(() => expect(provider.suspendCalls).toHaveLength(1));
+    const destroy = vi.spyOn(child.attachment, "destroy");
+    // The outer retention checks see an idle session. A claim wins inside cleanup before beginReclaim.
+    const host = api.providers.engineHost;
+    const cleanup = host.withSandboxCleanup.bind(host);
+    let itemId!: string;
+    const race = vi.spyOn(host, "withSandboxCleanup").mockImplementationOnce((id, work) => cleanup(id, async () => {
+      itemId = (await childThread.submitPrompt("hold the running turn", {})).queueItemId;
+      await vi.waitFor(() => expect(modelCalls).toBe(1));
+      return work();
+    }));
+    try {
+      await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+      expect(destroy).not.toHaveBeenCalled();
+      expect(childThread.hasActiveRun).toBe(true);
+      expect(child.isReclaiming).toBe(false);
+      host.evictCache(child.id);
+      expect(host.liveSession(child.id)).toBe(child);
+      expect(await host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toBe(child);
+      expect((await api.providers.engineStore.getQueueItem(child.id, itemId))?.attemptCount).toBe(1);
+      finish();
+      expect((await childThread.awaitResult(itemId)).outcome).toBe("completed");
+      expect(modelCalls).toBe(1);
+    } finally { finish(); race.mockRestore(); destroy.mockRestore(); faux.unregister(); vi.unstubAllEnvs(); }
+  });
+
+  it.each(["fast", "held-model"] as const)("engine reclaim repro: unpaused %s admission runs once on fresh compute", async variant => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let modelRelease!: () => void;
+    const modelGate = new Promise<void>(resolve => { modelRelease = resolve; });
+    let modelCalls = 0;
+    faux.setResponses([
+      async () => { modelCalls++; if (variant === "held-model") await modelGate;
+        return fauxAssistantMessage([fauxToolCall("write", { path: "/tmp/unpaused-marker", content: "exactly once" }, { id: "unpaused-write" })], { stopReason: "toolUse" }); },
+      () => { modelCalls++; return fauxAssistantMessage("done"); },
+      () => { modelCalls++; return fauxAssistantMessage("duplicate"); },
+    ]);
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: 0 });
+    const watcher = testChildWatcher(deps);
+    const { child, childThread, watch } = await seedParkableChild(api, `unpaused-${variant}`, "parent-unpaused");
+    const host = api.providers.engineHost;
+    const resolved = await host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    let entered!: () => void;
+    const destroying = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const destroy = child.attachment.destroy.bind(child.attachment);
+    const blocked = vi.spyOn(child.attachment, "destroy").mockImplementation(async reason => { entered(); await held; return destroy(reason); });
+    watcher.arm(watch);
+    const reclaim = waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    let restoreResolution: (() => void) | undefined;
+    try {
+      await destroying;
+      const resolving = vi.spyOn(host, "sessionFor").mockResolvedValueOnce(resolved);
+      restoreResolution = () => resolving.mockRestore();
+      const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, child.id));
+      if (!row) throw new Error("child row missing");
+      const sent = await submitSessionPrompt(api.providers, row, "write the marker", { author: { id: "local-user" } });
+      if (!sent?.messageId) throw new Error("prompt not admitted");
+      resolving.mockRestore(); restoreResolution = undefined;
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+      const before = await api.providers.engineStore.getQueueItem(child.id, sent.messageId);
+      release();
+      await vi.waitFor(() => expect(child.attachment.state).toBe("released"));
+      const recovered = await host.sessionFor(child.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+      if (variant === "held-model") {
+        await new Promise<void>(resolve => setTimeout(resolve, 100));
+        expect(childThread.hasActiveRun).toBe(false);
+        expect((await api.providers.engineStore.getQueueItem(child.id, sent.messageId))?.attemptCount).toBe(1);
+      }
+      modelRelease();
+      const thread = recovered.threadById(childThread.id);
+      if (!thread) throw new Error("restored thread missing");
+      await thread.awaitResult(sent.messageId);
+      expect(before?.status).toBe("queued");
+      expect((await api.providers.engineStore.getQueueItem(child.id, sent.messageId))?.attemptCount).toBe(1);
+      expect(modelCalls).toBe(2);
+      expect(await recovered.sandbox.readFile("/tmp/unpaused-marker")).toBe("exactly once");
+    } finally { release(); modelRelease(); await reclaim; restoreResolution?.(); blocked.mockRestore(); faux.unregister(); vi.unstubAllEnvs(); }
+  });
+
   it.each([
     ["retention", "web"], ["eager", "web"], ["retention", "signal"], ["eager", "signal"],
+    ["retention", "cli"], ["eager", "cli"], ["retention", "child_send"], ["eager", "child_send"],
   ] as const)("review released-cache repro: %s reclaim preserves queued %s work on a usable session", async (mode, caller) => {
     vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
     const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let modelCalls = 0;
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("write", { path: "/tmp/reclaimed-prompt.txt", content: "prompt ran" }, { id: "reclaimed-write" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("recovered"),
+      () => { modelCalls++; return fauxAssistantMessage([fauxToolCall("write", { path: "/tmp/reclaimed-prompt.txt", content: "prompt ran" }, { id: "reclaimed-write" })], { stopReason: "toolUse" }); },
+      () => { modelCalls++; return fauxAssistantMessage("recovered"); },
     ]);
     const provider = new HibernatingChildProvider();
     provider.hibernation = mode === "retention";
@@ -4191,7 +4296,6 @@ describe("child sandbox retention", () => {
     const deps = childrenDeps(api, { retentionMs: mode === "retention" ? RETENTION_MS : 0 });
     const watcher = testChildWatcher(deps);
     const { child, childThread, watch } = await seedParkableChild(api, `released-${mode}-${caller}`, "parent-released-cache");
-    await child.pause();
     if (mode === "retention") {
       watcher.arm(watch);
       await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
@@ -4217,28 +4321,36 @@ describe("child sandbox retention", () => {
       restoreResolution = () => resolving.mockRestore();
       const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, child.id));
       if (!row) throw new Error("the child app row is missing");
-      const receipt = caller === "web"
-        ? await submitSessionPrompt(api.providers, row, "write the recovery marker", { author: { id: "local-user" } })
-        : await admitSignal(deps, { from: { sessionId: watch.parentSessionId, owner: { type: "user", id: "local-user" } },
+      const admission = caller === "web"
+        ? submitSessionPrompt(api.providers, row, "write the recovery marker", { author: { id: "local-user" } })
+        : caller === "signal" ? admitSignal(deps, { from: { sessionId: watch.parentSessionId, owner: { type: "user", id: "local-user" } },
           to: child.id, threadKey: childThread.id, dispatchId: `released-${mode}`,
-          content: { kind: "signal", signalType: "test.recovery", body: "write the recovery marker" } });
-      const itemId = receipt && ("messageId" in receipt ? receipt.messageId : receipt.queueItemId);
+          content: { kind: "signal", signalType: "test.recovery", body: "write the recovery marker" } })
+        : caller === "cli" ? new InstanceClient({ url: api.baseUrl }).sendPrompt(child.id, { text: "write the recovery marker" })
+        : buildChildSender(deps, watcher)({ childSessionId: child.id, message: "write the recovery marker", queue: true }, {
+          parentSessionId: watch.parentSessionId, parentThreadId: watch.parentThreadId, actorUserId: "local-user",
+        });
+      // Every thread is unpaused. Resolved references may admit, but no caller can start on the retiring attachment.
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+      expect(childThread.hasActiveRun).toBe(false);
+      expect(modelCalls).toBe(0);
+      release();
+      const receipt = await admission;
+      const itemId = receipt && ("messageId" in receipt ? receipt.messageId : "queueItemId" in receipt ? receipt.queueItemId : undefined);
       if (!itemId) throw new Error("the prompt was not admitted");
       resolving.mockRestore();
       restoreResolution = undefined;
-      expect((await api.providers.engineStore.getQueueItem(child.id, itemId))?.status).toBe("queued");
-      release();
       await reclaim;
-      expect(host.liveSession(child.id)).toBeNull();
+      await vi.waitFor(async () => expect((await api!.providers.engineStore.getQueueItem(child.id, itemId))?.status).toBe("settled"));
       const recovered = await resolveSession(child.id, meta);
       expect(recovered).not.toBe(resolved);
       await expect(recovered.attachment.ensureReady({ timeoutMs: 5000 })).resolves.toBeDefined();
-      // The fixture pauses admission so the queued-at-destroy window is deterministic. Resume without a new prompt.
       const thread = recovered.threadById(childThread.id);
       if (!thread) throw new Error("the admitted thread was lost during recovery");
-      await thread.resume();
       expect((await thread.awaitResult(itemId)).outcome).toBe("completed");
       expect(await recovered.sandbox.readFile("/tmp/reclaimed-prompt.txt")).toBe("prompt ran");
+      expect(modelCalls).toBe(2);
+      expect((await api.providers.engineStore.getQueueItem(child.id, itemId))?.attemptCount).toBe(1);
       expect(await host.sessionFor(child.id, meta)).toBe(recovered);
       await expect((await host.sessionFor(child.id, meta)).attachment.ensureReady({ timeoutMs: 1000 })).resolves.toBeDefined();
     } finally { release(); await reclaim; restoreResolution?.(); blocked.mockRestore(); faux.unregister(); vi.unstubAllEnvs(); }

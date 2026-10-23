@@ -11,6 +11,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { VirtualSandboxProvider } from "@valet/engine";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 describe("EngineHost.evictAll", () => {
@@ -19,6 +20,36 @@ describe("EngineHost.evictAll", () => {
   afterEach(async () => {
     await api?.cleanup();
     api = undefined;
+  });
+
+  it("keeps the cached owner while pending release can still fail", async () => {
+    let rejectRelease!: (error: Error) => void;
+    let releaseStarted = false;
+    class PendingReleaseProvider extends VirtualSandboxProvider {
+      async release(_id: string): Promise<void> {
+        if (releaseStarted) return;
+        releaseStarted = true;
+        return new Promise<void>((_resolve, reject) => { rejectRelease = reject; });
+      }
+    }
+    api = await bootTestApi({ sandboxProvider: new PendingReleaseProvider() });
+    const host = api.providers.engineHost;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const session = await host.sessionFor("pending-release-failure", meta);
+    await session.attachment.ensureReady({ timeoutMs: 5000 });
+    session.attachment.reportFailure(session.attachment.currentEpoch(), new Error("test liveness failure"));
+    const destroying = session.attachment.destroy();
+    // Install the rejection handler before rejecting the provider's pending release.
+    const failed = expect(destroying).rejects.toThrow("test release failure");
+    await vi.waitFor(() => expect(session.attachment.state).toBe("released"));
+    expect(session.attachment.isDestroying).toBe(true);
+    expect(host.liveSession(session.id)).toBe(session);
+    expect(await host.sessionFor(session.id, meta)).toBe(session);
+    rejectRelease(new Error("test release failure"));
+    await failed;
+    expect(session.attachment.isDestroying).toBe(false);
+    expect(session.attachment.state).toBe("error");
+    expect(host.liveSession(session.id)).toBe(session);
   });
 
   it.each(["regular", "assistant", "child", "workflow"] as const)("does not reuse a released %s attachment with queued work", async kind => {
@@ -40,11 +71,11 @@ describe("EngineHost.evictAll", () => {
       }
     };
     const original = await resolve();
-    await original.pause();
+    await original.thread().pause();
     const receipt = await original.prompt("queued across release");
     await original.attachment.ensureReady({ timeoutMs: 5000 });
     await original.attachment.destroy("child_retention");
-    expect(engineHost.liveSession(original.id)).toBeNull();
+    expect(engineHost.liveSession(original.id)).toBe(original);
     const replacement = await resolve();
     expect(replacement).not.toBe(original);
     await expect(replacement.attachment.ensureReady({ timeoutMs: 5000 })).resolves.toBeDefined();

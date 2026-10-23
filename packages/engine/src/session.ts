@@ -308,6 +308,59 @@ export class Session {
   /** Last known user timezone (TKAI-584). Stamped into each new thread. */
   private latestUserTimezone: string | undefined;
   private destroyed = false;
+  private reclaiming = false;
+  private claimsInFlight = 0;
+  private reclaimRecovery: (() => Promise<void>) | undefined;
+  private reclaimRecoveryTail: Promise<void> = Promise.resolve();
+
+  /** Reserve claim ownership before any store await. Reclaim and claims cannot cross this synchronous boundary. */
+  async claimExecution<T>(claim: () => Promise<T>): Promise<T | null> {
+    if (this.reclaiming || this.destroyed || this.attachment.state === "released") return null;
+    this.claimsInFlight++;
+    try { return await claim(); }
+    finally { this.claimsInFlight--; }
+  }
+
+  get hasActiveExecution(): boolean {
+    return this.claimsInFlight > 0 || this.listThreads().some(thread => thread.hasActiveRun);
+  }
+
+  get isReclaiming(): boolean { return this.reclaiming; }
+
+  /** Call under the host cleanup barrier. Fence claims first, then recheck durable and in-process ownership. */
+  async beginReclaim(): Promise<boolean> {
+    if (this.reclaiming || this.hasActiveExecution) return false;
+    this.reclaiming = true;
+    try {
+      if ((await this.providers.store.listUnsettledSubmissions(this.id)).length > 0 || this.hasActiveExecution) {
+        this.cancelReclaim();
+        return false;
+      }
+      return true;
+    } catch (error) { this.cancelReclaim(); throw error; }
+  }
+
+  /** A refused reclaim leaves this attachment usable. Never clear the fence after a terminal release. */
+  cancelReclaim(): void {
+    if (this.attachment.state === "released") return;
+    this.reclaiming = false;
+    for (const thread of this.threads.values()) void thread.kick();
+  }
+
+  /** Keep old references fenced. The host schedules recovery after its cleanup barrier, never inside a claim. */
+  completeReclaim(recover: () => Promise<void>): void {
+    this.reclaimRecovery = recover;
+    this.notifyReclaimAdmission();
+  }
+
+  notifyReclaimAdmission(): void {
+    if (!this.reclaimRecovery) return;
+    const recover = this.reclaimRecovery;
+    this.reclaimRecoveryTail = this.reclaimRecoveryTail.then(recover).catch(error => {
+      console.error(`Session ${this.id}: reclaim recovery failed; resolve the session to retry:`, error);
+    });
+  }
+
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight: Promise<void> | undefined;

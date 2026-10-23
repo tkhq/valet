@@ -796,9 +796,13 @@ An event waiter follows the rule for timers:
   Queued work always blocks reclaim.
   Reclaim stamps follow successful sandbox-token revocation.
   A failed revoke leaves the row eligible for retry.
-  A released attachment always evicts its cached session, even when a caller admitted work after resolving the session but before destruction.
-  Eviction suspends old timers without deleting submissions. The next resolution restores queued work on a fresh attachment.
-  All host session builders and live-cache reads reject released cache entries. The release-status listener removes them immediately.
+  Under cleanup, the engine session sets a reclaim fence before destruction and rechecks durable submissions and active execution.
+  A running turn or an in-flight claim aborts reclaim. The claim reservation spans the store await and local ownership installation.
+  All thread admissions remain durable while fenced. They cannot inject into a retiring turn or claim its attachment.
+  After destroy returns, the caller evicts the terminal session without deleting submissions. A pending-release failure keeps its cached owner.
+  The old reference stays fenced. Admissions on it schedule recovery after cleanup, without awaiting that recovery inside the barrier.
+  Recovery builds one fresh session and kicks its durable queue. No admission caller needs its own reclaim protocol.
+  Cache eviction refuses active execution. Session builders replace idle released entries; `liveSession()` only reads the cache.
   The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
   A retry uses that handle directly, never the released attachment's no-op destroy.
   Both the parked handle and the session handle are cleared after confirmation, before revoke.
