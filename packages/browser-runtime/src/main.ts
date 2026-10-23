@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { BrowserDaemon } from './daemon.js';
 import { confinedLaunch, EgressPolicy, serveEgress } from './confinement.js';
 import { serveDaemon } from './transport.js';
+import { clearRelocatedChromiumLocks } from './profile-locks.js';
 process.umask(0o077);
 const state = process.env.VALET_BROWSER_STATE ?? '/var/lib/valet/browser';
 if (process.env.VALET_BROWSER_ENABLED !== '1' || !process.env.VALET_SESSION_ID)
@@ -34,6 +35,7 @@ if (!process.argv.includes('--owned')) {
   // The kernel lock proves the previous owner exited. Stale sockets are a normal crash artifact.
   await rm(join(state, 'browser.sock'), { force: true });
   await rm(join(state, 'broker.sock'), { force: true });
+  await clearRelocatedChromiumLocks(join(state, 'profile'));
   const launch = await confinedLaunch(state);
   const ports = (process.env.VALET_BROWSER_DEV_PORTS ?? '')
     .split(',')
