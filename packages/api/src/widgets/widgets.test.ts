@@ -39,6 +39,27 @@ describe("widget catalog", () => {
     for (const name of ["Card", "Stat", "Table", "Quote", "Event", "Heatmap", "Button"]) expect(WIDGET_TOOL_DESCRIPTION).toContain(`- ${name}(`);
     expect(WIDGET_TOOL_DESCRIPTION).toContain("Quote(text, speaker, time?, source?, takeaway?)");
   });
+
+  it("rejects direct and indirect cycles", () => {
+    expect(widgetSpecProblems({ root: "a", elements: { a: { type: "Card", props: {}, children: ["a"] } } })).toMatch(/cycle/);
+    expect(widgetSpecProblems({ root: "a", elements: {
+      a: { type: "Card", props: {}, children: ["b"] }, b: { type: "Stack", props: {}, children: ["a"] },
+    } })).toMatch(/cycle/);
+  });
+
+  it("bounds nesting and repeated subtree expansion", () => {
+    const chain = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [String(i), { type: "Card", props: {}, children: i < 39 ? [String(i + 1)] : [] }]));
+    expect(widgetSpecProblems({ root: "0", elements: chain })).toMatch(/nesting/);
+    const doubling = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [String(i), { type: "Card", props: {}, children: i < 9 ? [String(i + 1), String(i + 1)] : [] }]));
+    expect(widgetSpecProblems({ root: "0", elements: doubling })).toMatch(/expanded/);
+  });
+
+  it.each([{ statePath: "/rows" }, null])("rejects repeat instructions before rendering (%j)", repeat => {
+    expect(widgetSpecProblems({ root: "a", state: { rows: Array(10).fill("row") }, elements: {
+      a: { type: "Card", props: {}, children: ["b"], repeat },
+      b: { type: "Text", props: { text: "Row" }, children: [] },
+    } })).toMatch(/repeat/i);
+  });
 });
 
 describe("show_widget", () => {

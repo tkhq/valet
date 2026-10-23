@@ -121,6 +121,7 @@ export function widgetSpecProblems(spec: unknown): string | undefined {
   // element's props must also match its own component.
   const propIssues: string[] = [];
   for (const [key, element] of Object.entries(parsed.data.elements)) {
+    if (element.repeat !== undefined) return "The widget cannot use repeat. Write the items as explicit elements and call show_widget again.";
     const def = components[element.type as WidgetComponent];
     const result = def.props.safeParse(element.props);
     if (!result.success) {
@@ -129,6 +130,31 @@ export function widgetSpecProblems(spec: unknown): string | undefined {
   }
   if (propIssues.length) {
     return `The widget spec does not match the components. Fix these and call ${WIDGET_TOOL_NAME} again:\n${propIssues.slice(0, 6).join("\n")}`;
+  }
+  const elements = parsed.data.elements;
+  const keys = Object.keys(elements);
+  if (keys.length > 100) return "The widget has too many elements. Use at most 100 elements and call show_widget again.";
+  // Check every subtree, including unused ones. Reused children count each
+  // time they render, so a small DAG cannot expand into an unbounded tree.
+  for (const key of keys) {
+    let expanded = 0;
+    const path = new Set<string>();
+    const visit = (id: string, depth: number): string | undefined => {
+      if (path.has(id)) return "The widget has a cycle. Remove the circular child reference and call show_widget again.";
+      if (depth > 24) return "The widget has too much nesting. Use at most 24 levels and call show_widget again.";
+      if (++expanded > 256) return "The widget has too many expanded elements. Reduce repeated children and call show_widget again.";
+      const element = elements[id];
+      if (!element) return undefined;
+      path.add(id);
+      for (const child of element.children ?? []) {
+        const problem = visit(child, depth + 1);
+        if (problem) return problem;
+      }
+      path.delete(id);
+      return undefined;
+    };
+    const problem = visit(key, 0);
+    if (problem) return problem;
   }
   const structure = validateSpec(parsed.data);
   if (!structure.valid) {

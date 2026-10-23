@@ -4,7 +4,7 @@
  * in flight, and send a follow-up into a task it started.
  *
  * They act for the person, so `start_task` and `message_task` run only on a
- * turn the person wrote themself (`interactiveActor`), never on a signal, a
+ * turn the person wrote themself (`interactiveActor`), never on a background signal, a
  * routine, a workflow step, or another sender's message.
  */
 import { Type, type TSchema } from "typebox";

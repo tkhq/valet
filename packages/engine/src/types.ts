@@ -33,8 +33,11 @@ export interface PromptAuthor {
    * the turn runs as; `name` is the sender. Tools the sender may not use on
    * their own refuse such a turn (`ToolContext.externalSender`). */
   externalSender?: boolean;
-  /** The host verified a direct human submission, rather than a token or channel sender. */
+  /** The host verified direct human input, not a token caller or unattended event. */
   interactive?: boolean;
+  /** The host verified a linked person's direct channel message. Never set
+   * from an event payload or inherited by a background signal. */
+  directChannel?: boolean;
 }
 
 export interface ChannelTarget {
@@ -770,8 +773,8 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
-  /** Authenticated author of a direct interactive prompt, never a signal creator
-   * or delegated workflow/child actor. Does not confer any resource role. */
+  /** Authenticated author of a direct prompt or host-verified direct channel
+   * message, never a background signal or delegated actor. Confers no role. */
   interactiveActor?: { id: string };
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */

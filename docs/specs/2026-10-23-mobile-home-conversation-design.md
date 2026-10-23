@@ -165,3 +165,21 @@ More models opens the searchable catalog inside the same dialog. Back restores f
 Custom current models remain labeled without marking an unrelated size as selected.
 The catalog keeps role and organization restrictions. Restricted size choices require an approved target.
 Search and default actions stay in the catalog view. Desktop keeps its existing picker.
+
+### Home delivery and routine preferences
+
+Home queues new turns as follow-ups across web and direct messages. Task reports never supersede active work.
+A plain-text question reply from Slack must match the question submission's original conversation.
+The host marks a linked person's direct channel input separately from background signals.
+Only that verified input supplies an interactive actor; replay retains its original channel context.
+Workflow and child turns cannot inherit this authority.
+
+Home records the morning-brief offer in persistent thread metadata before provisioning it once.
+Opening Home never overwrites an existing prompt or restores a renamed or deleted routine.
+If initial provisioning fails, Home remains available and logs the failure without retrying on later opens.
+
+Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
+The web checks persisted widget specs with the same validator before rendering them.
+Desktop keeps its dashboard, but an explicit private Home thread link remains reachable through the chat route.
+
+The Home queue default persists before admission and survives engine restarts. Widgets use explicit elements; state-driven repeat expansion is rejected.

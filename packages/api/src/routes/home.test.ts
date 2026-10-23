@@ -1,10 +1,10 @@
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { homeTasks, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
-import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
+import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -37,6 +37,8 @@ describe("home conversation", () => {
     expect(thread?.key).toBe(HOME_THREAD_KEY);
     const listed = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=50`)).json() as ListThreadsResponse;
     expect(listed.threads.map((t) => t.id)).not.toContain(first.threadId);
+    const selected = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=50&threadId=${first.threadId}`)).json() as ListThreadsResponse;
+    expect(selected.threads.map(t => t.id)).toContain(first.threadId);
   });
 
   it("creates the morning brief routine once, posting into home at 08:00", async () => {
@@ -47,11 +49,57 @@ describe("home conversation", () => {
       .where(and(eq(workflowSchedules.ownerId, USER.id), eq(workflowSchedules.name, "Morning brief")));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.cron).toBe("0 8 * * *");
+    expect(rows[0]?.prompt).toBe(MORNING_BRIEF_PROMPT);
     expect(rows[0]?.threadPolicy).toEqual({ mode: "existing", sessionId: home.sessionId, threadId: home.threadId });
+  });
+
+  it("does not recreate a renamed or deleted brief", async () => {
+    const test = await boot();
+    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
+    const owner = and(eq(workflowSchedules.orgId, USER.orgId), eq(workflowSchedules.ownerId, USER.id));
+    await test.providers.db.update(workflowSchedules).set({ name: "My summary" }).where(owner);
+    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
+    expect(await test.providers.db.select().from(workflowSchedules).where(owner)).toHaveLength(1);
+    await test.providers.db.delete(workflowSchedules).where(owner);
+    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
+    expect(await test.providers.db.select().from(workflowSchedules).where(owner)).toHaveLength(0);
+  });
+
+  it("provisions one brief across concurrent Home opens", async () => {
+    const test = await boot();
+    await Promise.all(Array.from({ length: 3 }, () => fetch(`${test.baseUrl}/api/home`, { method: "POST" })));
+    const rows = await test.providers.db.select().from(workflowSchedules)
+      .where(and(eq(workflowSchedules.orgId, USER.orgId), eq(workflowSchedules.ownerId, USER.id)));
+    expect(rows).toHaveLength(1);
   });
 });
 
 describe("home tasks", () => {
+  it("queues a task report without cancelling an open Home question", async () => {
+    const test = await boot();
+    faux?.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Task done."), fauxAssistantMessage("Home done."), fauxAssistantMessage("Report done."),
+    ]);
+    const { session, thread } = await ensureHomeThread(test.providers, USER);
+    const active = await thread.submitPrompt("Help me choose", { author: { id: USER.id, interactive: true } });
+    await vi.waitFor(() => expect(thread.pendingDecisionGates()).toHaveLength(1), { timeout: 10_000 });
+    const gate = thread.pendingDecisionGates()[0];
+    if (!gate) throw new Error("Expected Home question");
+    const stop = wireHomeTaskReports(test.providers.eventStream, test.providers, { viewersOf: () => [] });
+    try {
+      const [workspace] = await homeWorkspaces(test.providers.db, USER);
+      if (!workspace) throw new Error("Expected personal workspace");
+      const task = await startHomeTask(test.providers, USER, { workspace, title: "Task", instructions: "Finish this task." });
+      const [row] = await test.providers.db.select().from(homeTasks).where(eq(homeTasks.id, task.id));
+      await vi.waitFor(async () => expect(await test.providers.engineStore.getQueueItemByDispatchId(session.id, `home-report:${task.id}:${row?.queueItemId}`)).not.toBeNull(), { timeout: 10_000 });
+      expect((await test.providers.engineStore.getQueueItem(session.id, active.queueItemId))?.status).toBe("blocked_on_decision_gate");
+      expect(thread.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
+    } finally {
+      stop();
+      if (thread.pendingDecisionGates().some(g => g.id === gate.id)) await session.resolveDecision(gate.id, { value: "org/repo", resolvedBy: USER.id, resolvedAt: Date.now() });
+    }
+  });
   it("starts a task in a team workspace as the person and lists it under Tasks with its workspace", async () => {
     const test = await boot(1);
     await addTeam(test, "team-ops", "Ops Team");
@@ -176,14 +224,15 @@ describe("home task outputs and brief", () => {
     expect(row?.outputs).toEqual([{ kind: "pull_request", title: "o/r #7", href: "https://github.com/o/r/pull/7", state: "merged", updatedAt: 2 }]);
   });
 
-  it("upgrades a brief prompt it wrote earlier and keeps one the person edited", async () => {
+  it("keeps edits even when the person retains the generated opening sentence", async () => {
     const test = await boot();
     const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
     const brief = and(eq(workflowSchedules.ownerId, USER.id), eq(workflowSchedules.name, "Morning brief"));
-    await test.providers.db.update(workflowSchedules).set({ prompt: "Write the person's morning brief in this conversation.\nOld steps." }).where(brief);
+    const edited = "Write the person's morning brief in this conversation.\nNever read my email or calendar.";
+    await test.providers.db.update(workflowSchedules).set({ prompt: edited }).where(brief);
     await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
     const [upgraded] = await test.providers.db.select().from(workflowSchedules).where(brief);
-    expect(upgraded?.prompt).toBe(MORNING_BRIEF_PROMPT);
+    expect(upgraded?.prompt).toBe(edited);
     expect(upgraded?.threadPolicy).toEqual({ mode: "existing", sessionId: home.sessionId, threadId: home.threadId });
     await test.providers.db.update(workflowSchedules).set({ prompt: "Just tell me my meetings." }).where(brief);
     await fetch(`${test.baseUrl}/api/home`, { method: "POST" });

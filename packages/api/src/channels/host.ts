@@ -1715,6 +1715,7 @@ export class ChannelHost {
       orgId,
       workspace: session.options.workspace,
     });
+    if (thread.key === HOME_THREAD_KEY) await thread.setMode("followup");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1769,7 +1770,8 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId },
+          queueMode: thread.key === HOME_THREAD_KEY ? "followup" : undefined,
+          author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say
           // whether a given turn started on the channel or in the web UI. The

@@ -1582,6 +1582,8 @@ export class Thread {
       id: suspended.queueItemId,
       metadata: priorActive?.metadata,
       author: priorActive?.author,
+      channel: priorActive?.channel,
+      replyTarget: priorActive?.replyTarget,
       threadId: this.id,
       content: priorActive?.content ?? "",
       status: "running",
@@ -2305,8 +2307,12 @@ export class Thread {
     return this.session.owner.type !== "user" || { ownerId: this.session.owner.id };
   }
 
-  setMode(mode: QueueMode): void {
+  /** Persist before admission so a restored thread keeps its queue policy. */
+  setMode(mode: QueueMode): Promise<void> {
     this.mode = mode;
+    const write = this.metadataWrites.then(() => this.session.providers.store.saveThread(this.session.id, this.toThreadData()));
+    this.metadataWrites = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   toThreadData(): ThreadData {
@@ -5790,8 +5796,14 @@ export class Thread {
    * no-op. Hosts use it to record a lasting fact about a thread, such as
    * that a person now takes part in it.
    */
-  async setMetadataFlag(key: string): Promise<void> {
-    await this.patchThreadMetadata((current) => current?.[key] === true ? undefined : { ...current, [key]: true }, "before-save");
+  async setMetadataFlag(key: string): Promise<boolean> {
+    let added = false;
+    await this.patchThreadMetadata((current) => {
+      if (current?.[key] === true) return undefined;
+      added = true;
+      return { ...current, [key]: true };
+    }, "before-save");
+    return added;
   }
 
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
@@ -5822,6 +5834,8 @@ export class Thread {
     const actorId = this.runningItem?.author?.id ?? this.defaultActorId();
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
+    const directChannel = this.runningItem?.author?.directChannel === true && origin !== undefined &&
+      this.runningItem.channel !== undefined && this.runningItem.channel.channelType === origin.channelType;
     const thread = this;
     return {
       get toolScope() { return thread.effectiveToolScope(); },
@@ -5834,7 +5848,7 @@ export class Thread {
       nativeImageGeneration: this.nativeImages.offered,
       userId: actorId,
       ...(this.runningItem?.author?.interactive === true && !this.runningItem.author.externalSender &&
-        runningContent !== undefined && !isSignalContent(runningContent) &&
+        runningContent !== undefined && (!isSignalContent(runningContent) || directChannel) &&
         session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
       ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),

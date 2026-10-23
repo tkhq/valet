@@ -14,6 +14,9 @@ import { drawableSpec, widgetRenderer } from "../tool-renderers/widget";
 import { WidgetView } from "./widget-view";
 
 describe("WidgetView", () => {
+  it("refuses a cyclic persisted widget before replay renders it", () => {
+    expect(drawableSpec({ spec: { root: "a", elements: { a: { type: "Card", props: {}, children: ["a"] } } } })).toBeUndefined();
+  });
   it("draws a stat and a table with right-aligned amounts", () => {
     render(<WidgetView spec={transactionsWidget} title="Transactions" />);
     const figure = screen.getByRole("figure", { name: "Transactions" });

@@ -20,7 +20,7 @@ homeRouter.post("/", async (c) => {
   const home = { sessionId: session.id, threadId: thread.id };
   const { db, engineCredentials, plugins, onePassword } = c.var.providers;
   // The brief is a convenience: a failure here must not block home.
-  await ensureMorningBrief(db, person, home, (input) =>
+  await ensureMorningBrief(db, person, home, thread, (input) =>
     createWorkflowSchedule({ db, credentials: engineCredentials, plugins, onePassword }, { userId: person.id, orgId: person.orgId }, input),
   ).catch((err: unknown) => console.error("[home] could not create the morning brief routine", err));
   return c.json(home satisfies HomeConversationResponse);

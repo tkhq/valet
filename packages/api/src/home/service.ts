@@ -6,7 +6,7 @@
  * gathers what is in flight and what needs the person across all of them.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { EventStream, Principal, QueueItem, Session, SessionStore, Thread } from "@valet/engine";
 import { planProgress, readThreadPlan } from "@valet/shared";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
@@ -90,6 +90,7 @@ export async function ensureHomeThread(deps: HomeDeps, user: HomeUser): Promise<
   const data = await session.toData();
   const thread = await deps.engineHost.ensureFreshThread(session, HOME_THREAD_KEY,
     { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, user.id, { title: "Home" });
+  await thread.setMode("followup");
   return { session, thread };
 }
 
@@ -384,20 +385,18 @@ export const MORNING_BRIEF_PROMPT = [
  * pauses it like any routine. Returns true when this call created it.
  */
 export async function ensureMorningBrief(db: AppDb, user: HomeUser, home: { sessionId: string; threadId: string },
+  thread: Thread,
   createSchedule: (input: { name: string; cron: string; timezone: string; prompt: string;
     thread: { mode: "existing"; sessionId: string; threadId: string } }) => Promise<unknown>): Promise<boolean> {
+  // The offer survives a schedule rename or deletion. Claim it before creating
+  // the convenience routine; failures are logged by the caller, never retried
+  // by opening Home or mistaken for permission to restore a deleted routine.
+  if (!await thread.setMetadataFlag("homeMorningBriefOffered")) return false;
   const existing = await db.select({ id: workflowSchedules.id, prompt: workflowSchedules.prompt }).from(workflowSchedules)
     .where(and(eq(workflowSchedules.orgId, user.orgId), eq(workflowSchedules.ownerType, "user"), eq(workflowSchedules.ownerId, user.id),
-      eq(workflowSchedules.name, BRIEF_NAME))).limit(1);
-  if (existing.length > 0) {
-    // An earlier version of this prompt is upgraded in place. A prompt the
-    // person edited no longer starts with ours, so it stays as they wrote it.
-    const [row] = existing;
-    if (row && row.prompt !== MORNING_BRIEF_PROMPT && row.prompt?.startsWith(BRIEF_PROMPT_OPENING)) {
-      await db.update(workflowSchedules).set({ prompt: MORNING_BRIEF_PROMPT }).where(eq(workflowSchedules.id, row.id));
-    }
-    return false;
-  }
+      or(eq(workflowSchedules.name, BRIEF_NAME),
+        sql`${workflowSchedules.threadPolicy}->>'sessionId'=${home.sessionId} AND ${workflowSchedules.threadPolicy}->>'threadId'=${home.threadId}`))).limit(1);
+  if (existing.length > 0) return false;
   const [person] = await db.select({ timezone: users.timezone }).from(users).where(eq(users.id, user.id)).limit(1);
   await createSchedule({
     name: BRIEF_NAME, cron: "0 8 * * *", timezone: person?.timezone || "UTC", prompt: MORNING_BRIEF_PROMPT,
@@ -466,7 +465,7 @@ async function reportSettled(deps: HomeDeps, viewers: Pick<ActiveViewers, "viewe
       "If they need to do nothing, start the line with \"FYI:\". " +
       "Call read_task only if you need the task's result. Do not start new work.",
     attributes: { task_id: row.id, thread_id: row.threadId, outcome, title: row.title },
-  }, { dispatchId: `home-report:${row.id}:${queueItemId}` });
+  }, { dispatchId: `home-report:${row.id}:${queueItemId}`, queueMode: "followup" });
 }
 
 /**

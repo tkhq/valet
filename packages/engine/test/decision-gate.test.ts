@@ -1533,7 +1533,7 @@ describe("decision gates: durable expiry sweep", () => {
 
 
 describe("interactive actor provenance", () => {
-  it.each(["direct", "legacy", "agent", "authorless", "external", "signal", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
+  it.each(["direct", "legacy", "agent", "authorless", "external", "signal", "channel", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
     const faux = registerFauxProvider({ provider: `interactive-author-${kind}` });
     const seen: Array<ToolContext["interactiveActor"]> = [];
     const tool: ToolDef = {
@@ -1550,15 +1550,16 @@ describe("interactive actor provenance", () => {
       purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator",
       workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
     });
-    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
-    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "external" ? { externalSender: true } : {}) };
-    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author });
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" }
+      : kind === "channel" ? { kind: "signal", signalType: "test.message", body: "inspect", origin: { channelType: "test", threadKey: "test:dm" } } : "inspect";
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "channel" ? { directChannel: true } : {}), ...(kind === "external" ? { externalSender: true } : {}) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author, ...(kind === "channel" ? { channel: { channelType: "test", channelId: "dm" } } : {}) });
     await session.thread().awaitResult(receipt.queueItemId);
-    expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
     faux.unregister();
   });
 
-  it.each(["direct", "legacy", "agent", "authorless", "signal", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
+  it.each(["direct", "legacy", "agent", "authorless", "signal", "channel", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
     const faux = registerFauxProvider({ provider: `interactive-replay-${kind}` });
     const seen: Array<ToolContext["interactiveActor"]> = [];
     const tool: ToolDef = {
@@ -1582,9 +1583,10 @@ describe("interactive actor provenance", () => {
     // A workflow session refuses new gates, so this gate opens before that
     // rule (as an orchestrator) and must still resolve after the restart.
     const session = await engine.createSession(kind === "workflow" ? { ...options, purpose: "orchestrator" as const } : options);
-    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
-    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }) };
-    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author });
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" }
+      : kind === "channel" ? { kind: "signal", signalType: "test.message", body: "inspect", origin: { channelType: "test", threadKey: "test:dm" } } : "inspect";
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "channel" ? { directChannel: true } : {}) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author, ...(kind === "channel" ? { channel: { channelType: "test", channelId: "dm" } } : {}) });
     await waitFor(() => gatesFrom(events).length > 0);
     const gate = gatesFrom(events)[0];
     if (!gate) throw new Error("Missing replay gate");
@@ -1594,7 +1596,7 @@ describe("interactive actor provenance", () => {
     const restored = await restarted.restoreSession({ sessionId: session.id, options });
     await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() });
     await restored.thread(receipt.threadId).awaitResult(receipt.queueItemId);
-    expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
     expect(events.flatMap(({ event }) => event.type === "tool_end" && event.callId === "replay-author" ? [event] : []))
       .toMatchObject([{ tool: "approved_context", result: "checked", isError: false }]);
     restored.suspendTimers();
