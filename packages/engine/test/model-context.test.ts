@@ -1,3 +1,4 @@
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as pi from "@earendil-works/pi-ai/compat";
@@ -56,7 +57,7 @@ async function run(session: Session, opts: PromptOptions = {}) {
 }
 
 const switchTo = (model: string) => pi.fauxAssistantMessage(
-  [pi.fauxToolCall("switch_model", { model })], { stopReason: "toolUse" },
+  [fauxToolCall("switch_model", { model })], { stopReason: "toolUse" },
 );
 
 describe("runtime model context delivered to the provider", () => {
@@ -148,7 +149,7 @@ describe("runtime model context delivered to the provider", () => {
       async (ctx) => {
         s.prompts.push(getCurrentSystemPrompt(ctx.messages));
         await thread.setModel("m", "set_via_api");
-        return pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" });
+        return pi.fauxAssistantMessage([fauxToolCall("list_threads", {})], { stopReason: "toolUse" });
       },
       s.capture(),
     ]);
@@ -401,7 +402,7 @@ describe("runtime model context delivered to the provider", () => {
         return reply;
       };
       s.small.setResponses([
-        record(pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
+        record(pi.fauxAssistantMessage([fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
         record(pi.fauxAssistantMessage("done")),
       ]);
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -439,7 +440,7 @@ describe("runtime model context delivered to the provider", () => {
         return reply;
       };
       s.small.setResponses([
-        record(pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
+        record(pi.fauxAssistantMessage([fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
         record(pi.fauxAssistantMessage("done")),
         record(pi.fauxAssistantMessage("done")),
       ]);

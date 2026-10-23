@@ -858,3 +858,8 @@ describe("sec_fs_read / sec_fs_list", () => {
     expect(missing.text).toContain("sec_fs_list");
   });
 });
+
+it("marks only real security file primitives exempt from intent", () => {
+  expect(buildSecurityRunnerTools().filter(tool => tool.intent === "exempt").map(tool => tool.name).sort()).toEqual(["sec_fs_list", "sec_fs_read"]);
+  expect(buildSecurityPersonaTools({ review: false }).filter(tool => tool.intent === "exempt").map(tool => tool.name).sort()).toEqual(["sec_fs_list", "sec_fs_read", "sec_fs_write"]);
+});

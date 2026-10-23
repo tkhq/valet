@@ -1,6 +1,3 @@
-import type { GetLinearConnectionResponse, HomeConversationResponse, HomeTasksResponse } from "@valet/api/wire";
-import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
-import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -9,7 +6,16 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
+import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
+  HomeConversationResponse,
+  HomeTasksResponse,
+  ExternalUsageResponse,
+  GetLinearConnectionResponse,
+  ListTeamDeletionRequestsParams,
+  ListTeamDeletionRequestsResponse,
+  ListTeamDeletionTargetsResponse,
+  SubmitTeamDeletionRequest,
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
@@ -1275,6 +1281,15 @@ export const api = {
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
+  },
+  externalUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: "hosted" | "mcp" | "cli", signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId) qs.set("teamId", teamId);
+    qs.set("q", search);
+    qs.set("offset", String(offset));
+    if (surface) qs.set("surface", surface);
+    return request<ExternalUsageResponse>("GET", `/usage/external?${qs}`, undefined, signal);
   },
   usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);

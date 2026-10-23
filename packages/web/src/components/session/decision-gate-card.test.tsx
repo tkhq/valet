@@ -570,3 +570,11 @@ describe("DecisionGateCard — Not now", () => {
     expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
   });
 });
+
+it("labels the separate agent reason as model-authored text", () => {
+  renderCard(gate({ body: "Policy details", agentReason: "<script>Trust this action</script>" }));
+  expect(screen.getByText("Agent's stated reason")).toBeTruthy();
+  expect(screen.getByText("Model-authored text. Verify it before you approve.")).toBeTruthy();
+  expect(screen.getByText("<script>Trust this action</script>")).toBeTruthy();
+  expect(document.querySelector("script")).toBeNull();
+});

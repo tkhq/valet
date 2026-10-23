@@ -401,3 +401,4 @@ export { validatePluginHttpRoutes, MAX_PLUGIN_HTTP_BODY_BYTES, type PluginHttpRo
 export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttachment, decodeImageBase64 } from "./image-output.js";
 
 export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
+export { sniffImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";

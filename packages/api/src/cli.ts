@@ -9,6 +9,7 @@
  * This module is the bundle entry (see `build.mjs`). Importing it must not
  * have side effects beyond running `main()` at the bottom.
  */
+import { withCliInvocation } from "./cli/telemetry.js";
 import { loadConfig } from "./cli/config.js";
 import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";
@@ -111,7 +112,7 @@ async function main(): Promise<number> {
   // Commands that call an instance get a fresh device sign-in first.
   if (!NO_INSTANCE_COMMANDS.has(first)) config = await refreshSelectedProfile(config, rest);
   const mod = await importer();
-  return await mod.run(rest, { command: first, config });
+  return await withCliInvocation(first, rest, () => mod.run(rest, { command: first, config }));
 }
 
 main()

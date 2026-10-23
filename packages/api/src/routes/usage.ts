@@ -4,6 +4,7 @@
  * the `services/usage` library, which owns the SQL over the one `cost_entries`
  * definition (so the dashboard and Grafana cannot drift).
  */
+import { getExternalUsage } from "../services/external-usage.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
@@ -164,4 +165,22 @@ usageRouter.get("/export.csv", async (c) => {
     return c.body(createUsageTurnExportStream(c.var.providers.db, { period, scope }));
   }
   return c.body(await getUsageAggregateExportCsv(c.var.providers.db, { period, scope, granularity }));
+});
+
+usageRouter.get("/external", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const offset = Number(c.req.query("offset") ?? "0");
+  const limit = Number(c.req.query("limit") ?? "20");
+  const search = c.req.query("q") ?? "";
+  const surface = c.req.query("surface");
+  if (surface !== undefined && surface !== "hosted" && surface !== "mcp" && surface !== "cli") {
+    return c.json({ error: "Choose surface hosted, mcp, or cli. Remove surface to see all calls." }, 400);
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isInteger(limit) || limit < 1 || limit > 100 || search.length > 500) {
+    return c.json({ error: "Use offset 0 to 100000, limit 1 to 100, and search text of 500 characters or fewer." }, 400);
+  }
+  return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface }));
 });

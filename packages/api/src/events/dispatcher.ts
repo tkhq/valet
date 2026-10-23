@@ -1,4 +1,3 @@
-import type { Appearance } from "@valet/shared";
 /**
  * Event-delivery dispatcher: drains `event_deliveries` rows into their
  * subscription targets (workflow run start / assistant signal prompt /
@@ -25,6 +24,7 @@ import type { Appearance } from "@valet/shared";
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
+import type { Appearance } from "@valet/shared";
 import { slackEventChannel } from "../services/thread-access.js";
 import type { EventHead } from "../services/event-columns.js";
 import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
@@ -111,6 +111,8 @@ export interface AssistantDeliverFn {
 }
 
 export interface EventDispatcherDeps {
+  /** Clear expired intent text without blocking event delivery. */
+  retainExternalUsage?: () => Promise<void>;
   /** Drain the durable personal attention outbox on the existing event rail. */
   drainAttention?: () => Promise<void>;
   db: AppDb;
@@ -360,6 +362,7 @@ export class EventDispatcher {
         void this.deps.drainAttention()
           .catch(err => console.error("attention outbox drain failed:", err));
       }
+      void this.deps.retainExternalUsage?.().catch(() => console.warn("Intent retention failed. Check database availability."));
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.

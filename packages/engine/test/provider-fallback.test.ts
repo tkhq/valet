@@ -1,6 +1,7 @@
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type BusEvent, type CreateSessionOptions, type ResolvedModel, type ToolDef } from "../src/index.js";
 
 const cleanups: Array<() => void> = [];

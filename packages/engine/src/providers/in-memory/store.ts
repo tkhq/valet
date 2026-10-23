@@ -29,7 +29,7 @@ import type {
   WriteFence,
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
-import { boundEventDigest } from "../../wakeups/digest.js";
+import { stripNul, boundEventDigest } from "../../wakeups/digest.js";
 import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -154,7 +154,7 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async saveDecisionGate(sessionId: string, _threadId: string, gate: DecisionGate): Promise<void> {
-    this.row(sessionId).gates.set(gate.id, { ...gate });
+    this.row(sessionId).gates.set(gate.id, { ...gate, ...(gate.agentReason !== undefined ? { agentReason: stripNul(gate.agentReason) } : {}) });
   }
 
   async saveDecisionGateRef(

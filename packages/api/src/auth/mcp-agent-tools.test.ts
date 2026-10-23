@@ -8,7 +8,8 @@
  * only through the `/api` routes, so these tests also prove that route
  * access rules hold for MCP callers.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
@@ -65,7 +66,7 @@ async function rpc(baseUrl: string, token: string, method: string, params: unkno
 interface ToolResult { isError?: boolean; text: string; data: Record<string, unknown> }
 
 async function tool(baseUrl: string, token: string, name: string, args: Record<string, unknown>): Promise<ToolResult> {
-  const { result, error } = await rpc(baseUrl, token, "tools/call", { name, arguments: args });
+  const { result, error } = await rpc(baseUrl, token, "tools/call", { name, arguments: { [name === "call_tool" ? "summary" : "intent"]: "Exercise this tool in the integration test.", ...args } });
   expect(error).toBeUndefined();
   const content = (result?.content as Array<{ type: string; text: string }> | undefined) ?? [];
   const text = content.map((c) => c.text).join("\n");
@@ -307,7 +308,7 @@ describe("stop_thread", () => {
       origin: "https://valet.test",
       sleep: async () => undefined,
     });
-    const res = await client.callTool({ name: "stop_thread", arguments: { thread_id: "t" } });
+    const res = await client.callTool({ name: "stop_thread", arguments: { intent: "Inspect the test thread.", thread_id: "t" } });
     // The route needs the turn's id, so a Stop can never hit a turn queued later.
     expect(posted).toEqual([{ path: "/api/threads/t/abort", body: { targetItemId: "q-live" } }]);
     expect(res.structuredContent).toMatchObject({ thread_id: "t", message_id: "q-live", status: "aborted" });
@@ -325,7 +326,7 @@ describe("stop_thread", () => {
       latestQueueItem: async () => undefined,
       origin: "https://valet.test",
     });
-    const res = await client.callTool({ name: "stop_thread", arguments: { thread_id: "t" } });
+    const res = await client.callTool({ name: "stop_thread", arguments: { intent: "Inspect the test thread.", thread_id: "t" } });
     expect(res.structuredContent).toMatchObject({ status: "idle" });
     expect(posts).toBe(0);
     await client.close();
@@ -375,7 +376,7 @@ describe("get_thread turn targeting", () => {
     await server.connect(serverSide);
     const client = new Client({ name: "test", version: "0" });
     await client.connect(clientSide);
-    const res = await client.callTool({ name: "get_thread", arguments: { thread_id: "t" } });
+    const res = await client.callTool({ name: "get_thread", arguments: { intent: "Inspect the test thread.", thread_id: "t" } });
     expect(res.structuredContent).toMatchObject({ status: "running" });
     await client.close();
   });
@@ -418,10 +419,10 @@ describe("resolve_decision turn targeting", () => {
       sleep: async () => undefined,
     });
     // A typed answer, with no option id.
-    const res = await client.callTool({ name: "resolve_decision", arguments: { thread_id: "t", gate_id: "g", value: "staging", wait_seconds: 5 } });
+    const res = await client.callTool({ name: "resolve_decision", arguments: { intent: "Inspect the test thread.", thread_id: "t", gate_id: "g", value: "staging", wait_seconds: 5 } });
     expect(posted).toEqual([{ value: "staging" }]);
     expect(res.structuredContent).toMatchObject({ message_id: "A", reply: "answer to A" });
-    const empty = await client.callTool({ name: "resolve_decision", arguments: { thread_id: "t", gate_id: "g" } });
+    const empty = await client.callTool({ name: "resolve_decision", arguments: { intent: "Inspect the test thread.", thread_id: "t", gate_id: "g" } });
     expect(empty.isError).toBe(true);
     await client.close();
   });
@@ -455,7 +456,7 @@ describe("slash command prompts", () => {
       origin: "https://valet.test",
     });
     for (const [name, args] of [["send_message", { thread_id: "t", prompt: "/model haiku" }], ["start_thread", { prompt: "/model haiku" }]] as const) {
-      const res = await client.callTool({ name, arguments: args });
+      const res = await client.callTool({ name, arguments: { intent: "Exercise this tool in the integration test.", ...args } });
       expect(res.structuredContent).toEqual({
         thread_id: "t",
         status: "command_ran",

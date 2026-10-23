@@ -1,3 +1,4 @@
+import { stripNul } from "./wakeups/digest.js";
 import type {
   DecisionGate,
   DecisionGateRequest,
@@ -382,6 +383,7 @@ export function fromRequest(
     type: req.type,
     title: req.title,
     body: req.body,
+    agentReason: req.agentReason === undefined ? undefined : stripNul(req.agentReason),
     actions:
       req.actions ??
       (req.type === "approval"

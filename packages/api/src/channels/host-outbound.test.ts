@@ -11,10 +11,11 @@ import { Type } from "typebox";
 import {
   fauxAssistantMessage,
   fauxText,
-  fauxToolCall,
+
   registerFauxProvider,
   type FauxProviderRegistration,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import {
   namespaceInternalDispatchId,
   VirtualSandboxProvider,

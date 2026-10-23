@@ -519,6 +519,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         type: "approval",
         status: "pending",
         title: "x",
+        agentReason: "Check\u0000 the \ud800requested\udfff action 😀",
         actions: [],
         createdAt: 1,
         updatedAt: 1,
@@ -528,6 +529,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list).toHaveLength(1);
       const single = await store.getDecisionGate("sess-1", "g-1");
       expect(single?.title).toBe("x");
+      expect(single?.agentReason).toBe("Check the requested action 😀");
       await store.saveDecisionGate("sess-1", "th-1", { ...gate, id: "resolved-gate", status: "resolved" });
       expect((await store.listDecisionGates("sess-1", undefined, "pending")).map((g) => g.id)).toEqual(["g-1"]);
       expect(await store.listDecisionGates("sess-1", "other-thread", "pending")).toEqual([]);

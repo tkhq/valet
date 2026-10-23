@@ -206,3 +206,28 @@ describe("InstanceClient typed round-trips", () => {
     expect(lastRequest?.url).toBe("/api/health");
   });
 });
+
+describe("CLI invocation telemetry headers", () => {
+  it("uses one id for all requests and excludes positional arguments", async () => {
+    const { withCliInvocation } = await import("./telemetry.js");
+    const ids: string[] = [];
+    handler = (req, res) => { ids.push(String(req.headers["x-valet-cli-invocation"])); res.end("{}"); };
+    await withCliInvocation("threads", ["show", "private-thread-id", "--json"], async () => {
+      const client = new InstanceClient({ url: baseUrl });
+      await client.me();
+      await client.me();
+    });
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[0]).toBe(ids[1]);
+    expect(lastRequest?.headers["x-valet-cli-command"]).toBe("threads show");
+    expect(lastRequest?.headers["x-valet-cli-version"]).toBe("0.0.1");
+    expect(JSON.stringify(lastRequest?.headers)).not.toContain("private-thread-id");
+  });
+});
+
+it("records prebuild plan without its working-directory argument", async () => {
+  const { cliCommandPath } = await import("./telemetry.js");
+  expect(cliCommandPath("prebuild", ["plan", "/private/repo"])).toBe("prebuild plan");
+  expect(cliCommandPath("prebuild", ["build", "/private/repo"])).toBe("prebuild build");
+  expect(cliCommandPath("prebuild", ["private-value"])).toBe("prebuild");
+});

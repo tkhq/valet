@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { createAssistantMessageEventStream, fauxAssistantMessage, fauxToolCall, registerApiProvider, registerFauxProvider, type Api, type Model } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, fauxAssistantMessage, registerApiProvider, registerFauxProvider, type Api, type Model } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
   InMemoryEventStream,

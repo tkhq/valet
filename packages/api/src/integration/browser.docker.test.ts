@@ -8,9 +8,10 @@ import browserPlugin from "@valet/plugin-browser/plugin";
 import { browserRequest } from "@valet/plugin-browser";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { BrowserArtifact, BrowserResponse } from "@valet/shared";
 import { bootTestApi } from "./_setup.js";
 import type {

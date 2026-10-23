@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
   GATE_EXPIRY_DEFAULT_MS,
@@ -15,6 +16,7 @@ import {
   type DecisionResolution,
   type WriteFence,
 } from "../src/index.js";
+import type { ToolUsageFact } from "@valet/shared";
 import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
@@ -1594,6 +1596,7 @@ describe("interactive actor provenance", () => {
 
   it.each(["direct", "legacy", "agent", "authorless", "signal", "channel", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
     const faux = registerFauxProvider({ provider: `interactive-replay-${kind}` });
+    const facts: ToolUsageFact[] = [];
     const seen: Array<ToolContext["interactiveActor"]> = [];
     const tool: ToolDef = {
       name: "approved_context", description: "Inspect replayed context", parameters: Type.Object({}), policyChecked: true,
@@ -1611,7 +1614,7 @@ describe("interactive actor provenance", () => {
     const options = {
       userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" } as const,
       purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator" as const,
-      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool], recordToolUsage: (fact: ToolUsageFact) => { facts.push(fact); },
     };
     // A workflow session refuses new gates, so this gate opens before that
     // rule (as an orchestrator) and must still resolve after the restart.
@@ -1630,9 +1633,33 @@ describe("interactive actor provenance", () => {
     await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() });
     await restored.thread(receipt.threadId).awaitResult(receipt.queueItemId);
     expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
+    expect(facts).toEqual([expect.objectContaining({ userId: kind === "authorless" ? null : "admin", outcome: "ok" })]);
     expect(events.flatMap(({ event }) => event.type === "tool_end" && event.callId === "replay-author" ? [event] : []))
       .toMatchObject([{ tool: "approved_context", result: "checked", isError: false }]);
     restored.suspendTimers();
     faux.unregister();
   });
+});
+
+it.each(["ask_question", "ask_approval"] as const)("does not change %s prompts with telemetry intent", async name => {
+  const faux = registerFauxProvider({ provider: `no-reason-${name}` });
+  const params = name === "ask_question" ? { question: "Choose?", detail: "Original details" } : { title: "Approve?", body: "Original details" };
+  faux.setResponses([fauxAssistantMessage([fauxToolCall(name, params)], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+  const { engine, events } = makeEngine();
+  const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+  try {
+    const receipt = await session.prompt("Ask the person.");
+    await waitFor(() => gatesFrom(events).length > 0);
+    const gate = gatesFrom(events)[0];
+    if (!gate) throw new Error("Missing gate");
+    expect(gate.body).toBe("Original details"); expect(gate.agentReason).toBeUndefined();
+    await session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() });
+    await session.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+  } finally { session.suspendTimers(); faux.unregister(); }
+});
+
+it("sanitizes the model-authored reason before the durable gate is published", () => {
+  const gate = fromRequest({ type: "approval", title: "Approve?", resumeKey: "reason", agentReason: "Check\u0000 \ud800this\udfff 😀" },
+    { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "reason", ordinal: 0 });
+  expect(gate.agentReason).toBe("Check this 😀");
 });

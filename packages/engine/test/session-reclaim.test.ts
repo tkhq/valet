@@ -1,5 +1,6 @@
+import { fauxToolCall } from "../src/test-helpers/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 function fixture() {
@@ -106,6 +107,7 @@ describe("session reclaim fence", () => {
       const a = await original.prompt("gate A");
       await vi.waitFor(() => expect(original.thread().pendingDecisionGates()).toHaveLength(1));
       const gate = original.thread().pendingDecisionGates()[0]!;
+      expect(gate.agentReason).toBe("Exercise ask in this test.");
       await store.saveDecisionGate(original.id, original.thread().id, { ...gate, expiresAt: undefined });
       original.retireExecution(async () => {});
       await vi.waitFor(() => expect(original.hasOwnActiveExecution).toBe(false));
@@ -120,6 +122,7 @@ describe("session reclaim fence", () => {
         rebuilt = await new Engine({ providers: { store, stream, sandboxProvider } }).restoreSession({ sessionId: original.id, options, predecessor: previous });
       }
       expect(rebuilt.thread().isPendingGate(gate.id)).toBe(true);
+      expect((await store.getDecisionGate(original.id, gate.id))?.agentReason).toBe(gate.agentReason);
       expect(original.thread().isPendingGate(gate.id)).toBe(false);
       const b = await (await rebuilt.createThread("B")).submitPrompt("B", {});
       expect((await rebuilt.thread("B").awaitResult(b.queueItemId)).outcome).toBe("completed");

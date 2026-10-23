@@ -53,6 +53,7 @@ const PROMPT = "you › ";
 export function renderGatePrompt(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
+  if (gate.agentReason) lines.push(`Agent's stated reason (model-authored): ${gate.agentReason}`);
   if (gate.type === "question") {
     lines.push("(type your answer)");
   } else {

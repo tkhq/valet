@@ -4,7 +4,8 @@
  * the signed-in session cookie driving the routes the `/cli/device` page
  * calls.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { like } from "drizzle-orm";
 import { Type } from "typebox";

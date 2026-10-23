@@ -12,6 +12,7 @@
  * decision, or the time runs out. A timed-out wait is not an error: the
  * result says `running`, and the agent calls `get_thread` to wait again.
  */
+import { registerTool } from "./mcp-intent.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Providers } from "../providers/types.js";
@@ -107,6 +108,7 @@ function gateView(gate: DecisionGate) {
     type: gate.type,
     title: gate.title,
     ...(gate.body ? { body: clip(gate.body) } : {}),
+    ...(gate.agentReason ? { agent_reason: { label: "Agent's stated reason (model-authored)", text: gate.agentReason } } : {}),
     options: gate.actions.map((action) => ({ action_id: action.id, label: action.label })),
   };
 }
@@ -247,7 +249,7 @@ function run<A>(fn: (args: A) => Promise<unknown>, capNote?: string): (args: A) 
 }
 
 export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
-  server.registerTool(
+  registerTool(server,
     "list_workspaces",
     {
       description: "Lists the Valet workspaces you can delegate work to: your personal workspace and the teams you belong to.",
@@ -265,7 +267,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "list_threads",
     {
       description: "Lists recent threads (conversations) in a workspace, newest activity first. Use the thread id with get_thread or send_message.",
@@ -295,7 +297,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }, "Set a smaller limit or a query to see fewer threads."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "start_thread",
     {
       description:
@@ -315,7 +317,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "send_message",
     {
       description:
@@ -331,7 +333,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       sendAndWait(deps, thread_id, prompt, wait_seconds ?? DEFAULT_WAIT_SECONDS)),
   );
 
-  server.registerTool(
+  registerTool(server,
     "get_thread",
     {
       description:
@@ -367,7 +369,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }, "Set messages to a smaller number to see fewer, or open the thread url."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "stop_thread",
     {
       description:
@@ -392,7 +394,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "search_tools",
     {
       description:
@@ -417,7 +419,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }, "Set a smaller limit, a more specific query, or a service to see fewer tools."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "describe_tool",
     {
       description:
@@ -440,7 +442,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     }, "The tool description is too long to return in full. If call_tool rejects your params, its error names the problem."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "call_tool",
     {
       description:
@@ -465,7 +467,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       }), "The tool returned more than Valet can pass back. To get the rest, call it again with narrower params, such as a filter, a smaller limit, or a page."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "list_decisions",
     {
       description: "Lists decisions (approvals and questions) waiting for you in a thread.",
@@ -475,7 +477,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     run(async ({ thread_id }: { thread_id: string }) => ({ thread_id, decisions: (await pendingGates(deps, thread_id)).map(gateView) })),
   );
 
-  server.registerTool(
+  registerTool(server,
     "resolve_decision",
     {
       description:

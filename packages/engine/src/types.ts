@@ -1,8 +1,7 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -719,6 +718,8 @@ export interface PluginStore {
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ToolDef<TParams extends TSchema = TSchema> {
+  /** Sandbox primitives opt out. Broker tools reuse summary without adding intent. */
+  intent?: "exempt" | "summary" | "passthrough";
   /** Integration action behind a direct tool. Scope checks use its canonical ID. */
   scopeAction?: string;
   name: string;
@@ -760,6 +761,7 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
+  usageOutcome?: { outcome: "ok" | "error" | "denied" | "pending-approval"; errorCode: string | null; name?: string };
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
@@ -1107,6 +1109,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
@@ -1130,6 +1134,8 @@ export interface DecisionGateRequest {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions?: DecisionAction[];
   expiresAt?: number;
   context?: Record<string, unknown>;
@@ -2849,6 +2855,7 @@ export interface CreateSessionOptions {
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
   skillTelemetry?: SkillTelemetrySink;
+  recordToolUsage?: (fact: ToolUsageFact) => void;
   /**
    * Optional host-provided org-policy resolver. Absent === the engine's
    * built-in fallback: `call_tool` derives approval from each action's

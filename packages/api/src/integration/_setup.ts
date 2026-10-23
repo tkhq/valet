@@ -1,4 +1,3 @@
-import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -10,6 +9,8 @@ import { drainAttentionDeliveries } from "../events/attention-delivery.js";
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import { externalUsageRetention } from "../services/external-usage.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -556,6 +557,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,

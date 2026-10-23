@@ -18,6 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
+import { ToolUsage } from "~/components/usage/ToolUsage";
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
@@ -42,6 +43,7 @@ const VIEWS = [
   { id: "overview", label: "Overview" },
   { id: "breakdown", label: "Breakdown" },
   { id: "activity", label: "Activity" },
+  { id: "tools", label: "Tool usage" },
 ] as const;
 /** Marks the field that holds the applied period: the month, or both custom dates. */
 const ACTIVE_PERIOD = "border-moss bg-moss-wash font-medium text-moss";
@@ -559,6 +561,7 @@ export function UsagePage() {
             </div>
 
             </div>
+            {view === "tools" && scopeKnown && <ToolUsage key={JSON.stringify([period, scope, teamId])} period={period} scope={scope} teamId={teamId} />}
             <div hidden={view !== "breakdown"} className="space-y-8">
             <div>
               <h2 className="text-sm font-medium text-ink mb-2">Tool work per model token</h2>

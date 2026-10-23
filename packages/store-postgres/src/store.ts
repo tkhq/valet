@@ -1,5 +1,6 @@
 import {
   boundEventDigest,
+  stripNul,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
   EVENT_DELIVERED_MAX_KEYS,
@@ -572,12 +573,13 @@ export class PgSessionStore implements SessionStore {
       `INSERT INTO engine_decision_gates (
          id, session_id, thread_id, queue_item_id, resume_key, ordinal, type,
          status, title, body, actions, origin, context, resolution, expires_at,
-         created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         created_at, updated_at, agent_reason
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
          title = EXCLUDED.title,
          body = EXCLUDED.body,
+         agent_reason = EXCLUDED.agent_reason,
          actions = EXCLUDED.actions,
          context = EXCLUDED.context,
          resolution = EXCLUDED.resolution,
@@ -600,6 +602,7 @@ export class PgSessionStore implements SessionStore {
         gate.expiresAt ?? null,
         gate.createdAt,
         gate.updatedAt,
+        gate.agentReason === undefined ? null : stripNul(gate.agentReason),
       ],
     );
   }

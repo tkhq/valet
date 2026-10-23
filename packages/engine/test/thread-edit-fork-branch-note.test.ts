@@ -1,7 +1,8 @@
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { describe, expect, it } from "vitest";
 import { branchNoteText, readBranchNote, summarizeBranchActions, type BranchNote } from "../src/branch-note.js";
 import type { BranchSummaryEntry, MessageEntry, SessionEntry } from "../src/types.js";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 const tools = { silent: new Set<string>(), files: new Set(["write_file"]), plugin: new Set(["call_tool"]) };
@@ -96,7 +97,7 @@ describe("branch notes across later edits", () => {
     const store = new InMemorySessionStore();
     const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
     const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [{
-      name: "call_tool", description: "Posts an update", parameters: Type.Object({}), policyChecked: true,
+      name: "call_tool", intent: "summary", description: "Posts an update", parameters: Type.Object({ summary: Type.String() }), policyChecked: true,
       execute: async () => ({ text: "posted", outcome: { url: "https://example.test/posted" } }),
     }] });
     const thread = await session.ensureDefaultThread();

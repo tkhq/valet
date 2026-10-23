@@ -640,6 +640,7 @@ export interface GateRow {
   status: string;
   title: string;
   body: string | null;
+  agentReason: string | null;
   actions: string;
   origin: string | null;
   context: string | null;
@@ -661,6 +662,7 @@ export function rawToGateRow(raw: Record<string, unknown>): GateRow {
     status: asString(raw.status, "status"),
     title: asString(raw.title, "title"),
     body: asStringOrNull(raw.body, "body"),
+    agentReason: asStringOrNull(raw.agent_reason, "agent_reason"),
     actions: asString(raw.actions, "actions"),
     origin: asStringOrNull(raw.origin, "origin"),
     context: asStringOrNull(raw.context, "context"),
@@ -683,6 +685,7 @@ export function rowToGate(row: GateRow): DecisionGate {
     status: row.status as DecisionGate["status"],
     title: row.title,
     body: row.body ?? undefined,
+    agentReason: row.agentReason ?? undefined,
     actions: parseJson(row.actions) ?? [],
     origin: parseJson(row.origin),
     context: parseJson(row.context),

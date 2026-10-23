@@ -20,6 +20,7 @@ CREATE TABLE "engine_decision_gates" (
 	"status" text NOT NULL,
 	"title" text NOT NULL,
 	"body" text,
+	"agent_reason" text,
 	"actions" text NOT NULL,
 	"origin" text,
 	"context" text,

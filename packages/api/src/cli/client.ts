@@ -12,6 +12,7 @@
  *   - Local stub instances (`VALET_LOCAL_AUTH=1`) need no credential — when
  *     `apiKey` is undefined the header is simply omitted.
  */
+import { cliTelemetryHeaders } from "./telemetry.js";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
 import { latestCredential } from "./token-refresh.js";
 import type {
@@ -72,6 +73,7 @@ export class InstanceClient {
 
   private headers(json: boolean): Record<string, string> {
     return {
+      ...cliTelemetryHeaders(),
       // A FormData body sets its own multipart content-type (with boundary);
       // only JSON bodies get one here.
       ...(json ? { "content-type": "application/json" } : {}),

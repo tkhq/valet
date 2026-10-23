@@ -3096,3 +3096,39 @@ export const homeTasks = pgTable("home_tasks", {
   reportedAt: bigint("reported_at", { mode: "number" }),
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+// Hosted, MCP, and CLI usage facts. Never add arguments or results.
+export const externalCalls = pgTable("external_calls", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id"),
+  surface: text("surface", { enum: ["hosted", "mcp", "cli"] }).notNull(),
+  name: text("name").notNull(),
+  clientName: text("client_name"),
+  clientVersion: text("client_version"),
+  sessionId: text("session_id"),
+  persona: text("persona"),
+  threadId: text("thread_id"),
+  ownerType: text("owner_type", { enum: ["user", "team"] }).notNull(),
+  ownerId: text("owner_id").notNull(),
+  outcome: text("outcome", { enum: ["ok", "error", "denied", "pending-approval"] }).notNull(),
+  errorCode: text("error_code"),
+  durationMs: integer("duration_ms").notNull(),
+  intent: text("intent"),
+  intentClearedAt: bigint("intent_cleared_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  index("external_calls_intent_retention").on(t.createdAt).where(sql`${t.intent} IS NOT NULL`),
+  index("external_calls_org_created").on(t.orgId, t.createdAt, t.id),
+  index("external_calls_owner_created").on(t.orgId, t.ownerType, t.ownerId, t.createdAt),
+  index("external_calls_user_created").on(t.orgId, t.userId, t.createdAt),
+  check("external_calls_intent_length", sql`length(${t.intent}) <= 500`),
+]);
+
+// Stateless MCP requests recover initialize metadata without retaining a bearer token.
+export const mcpClientInfo = pgTable("mcp_client_info", {
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  clientId: text("client_id").notNull(),
+  name: text("name").notNull(),
+  version: text("version").notNull(),
+}, (t) => [primaryKey({ columns: [t.orgId, t.userId, t.clientId] })]);

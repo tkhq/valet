@@ -226,6 +226,12 @@ describe("TelegramTransport", () => {
     expect(refused).toBeNull();
   });
 
+  it("fetchMedia reports the type the photo bytes show, not the extension default", async () => {
+    fake.addFile("f3", "photos/p.jpg", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]));
+    const out = await transport.fetchMedia({ kind: "photo", fileId: "f3" });
+    expect(out?.mimeType).toBe("image/png");
+  });
+
   it("fetchMedia returns null when download fails despite a small size hint", async () => {
     fake.addFile("f2", "documents/d.bin", new Uint8Array([1, 2, 3]));
     fake.breakDownload("f2");

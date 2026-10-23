@@ -1,3 +1,4 @@
+import { externalUsageRetention } from "../services/external-usage.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeDeps } from "../home/service.js";
@@ -839,6 +840,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
