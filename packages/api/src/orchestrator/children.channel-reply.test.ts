@@ -76,10 +76,12 @@ function delegatedItem(id: string, threadId: string, parent: { sessionId: string
 /** Every `child.settled` submission on a session, oldest first, settled or not. */
 async function childSettledSignals(sessionId: string): Promise<Array<QueueItem & { content: SignalContent }>> {
   const { engineStore } = api!.providers;
-  const items = [
+  // A parent turn can settle between these reads. Count each durable item once.
+  const byId = new Map([
     ...(await engineStore.listUnsettledSubmissions(sessionId)),
     ...(await engineStore.listSettledSubmissionsBefore(sessionId, Number.MAX_SAFE_INTEGER)),
-  ].sort((a, b) => a.createdAt - b.createdAt);
+  ].map(item => [item.id, item]));
+  const items = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
   return items.filter(
     (item): item is QueueItem & { content: SignalContent } =>
       typeof item.content === "object" && item.content !== null && "kind" in item.content &&

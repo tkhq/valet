@@ -1259,6 +1259,17 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       await store.resolveChildResultDelivery("sess-1", "missing", "denied");
     });
 
+    it.each([true, false])("tracks claimed child delegation results but not human work (delegated=%s)", async delegated => {
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item = { ...queueItem("child-prompt", Date.now(), Date.now()),
+        metadata: delegated ? { parentDelegation: { parentSessionId: "parent", parentThreadId: "parent-thread" } } : undefined };
+      await store.admitSubmission("sess-1", "th-1", item);
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id, attemptId: "att", ownerId: "owner" });
+      expect(claimed?.status).toBe("running");
+      expect(claimed?.childResultDelivery).toBe(delegated ? "pending" : undefined);
+    });
+
     it("does not track team conversation signals just because their session has a parent", async () => {
       await store.saveSession(newSession({ parentSessionId: "assistant:team", owner: { type: "team", id: "team" } }));
       await store.saveThread("sess-1", newThread("sess-1"));

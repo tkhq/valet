@@ -69,7 +69,7 @@ export async function listBackgroundWork(engineStore: SessionStore, sessionId: s
 
 /** Stops delivery subscriptions without treating them as agent-owned work. */
 export async function endChildSubscriptions(store: Pick<SessionStore, "listWakeups" | "getWakeup" | "transitionWakeup">, sessionId: string, threadId: string | undefined, db: AppDb): Promise<void> {
-  for (const row of await store.listWakeups(sessionId, ["running"])) {
+  for (const row of await store.listWakeups(sessionId, ["running", "done"])) {
     if (row.eventMatch?.childSessionId === undefined || (threadId !== undefined && row.threadId !== threadId)) continue;
     await cancelChildDelivery(db, store, row.eventMatch.childSessionId, "The parent thread was archived or its session moved.");
   }

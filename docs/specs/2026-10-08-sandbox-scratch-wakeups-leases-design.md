@@ -1258,6 +1258,11 @@ with an earlier entry, the entry below wins.
 - **A3: child retention and leases.** The retention sweep skips a child
   while it holds an active lease or a pending timer, at both checks, and
   logs once per child (INV-8).
+  An ended wakeup without its terminal dispatch ID also keeps the child sandbox.
+  The check excludes cancelled rows, which do not always send a signal.
+  With warm retention off, recent human turns defer reclaim for 60 seconds.
+  Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
+  Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
 - **A3: job logs on scratch.** The seam caps a detached log at
   `min(jobLogMaxBytes, scratch / 4)` when the host passes `scratchBytes`.
   A capped kubernetes log ends with `[valet: log capped at <n> bytes;

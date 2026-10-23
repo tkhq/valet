@@ -26,6 +26,9 @@ import type {
   Wakeup,
 } from "@valet/engine";
 import { cancelChildDelivery } from "./child-delivery.js";
+import { childGateOrigin } from "./children.js";
+import { endChildSubscriptions } from "../engine/wakeups-admin.js";
+import * as sandboxTokenAuth from "../auth/sandbox-tokens.js";
 import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
@@ -1602,6 +1605,92 @@ describe("ChildWatcher", () => {
       expect(await db.select().from(eventReceipts)).toEqual([]);
       expect(await db.select().from(events)).toEqual([]);
       expect(await db.select().from(eventDeliveries)).toEqual([]);
+    });
+
+    it("bot repro 1: redacts a taken-over gate and omits the saved Slack origin", async () => {
+      const c = await armedChild("bot-gate-privacy");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      await api!.providers.db.update(childWatches).set({ replyRoute: "none",
+        originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      const id = "web-private";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id,
+        { ...queuedItem(id, c.childThread.id, "Private web work"), author: { id: "local-user" } });
+      await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: "web", ownerId: "test" });
+      const gate = { id: "private-gate", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: id,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "SECRET acquisition approval", actions: [], status: "pending" as const,
+        createdAt: Date.now(), updatedAt: Date.now() };
+      await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+      expect(await childGateOrigin(api!.providers.db, c.engineStore, c.child.id, id)).toBeUndefined();
+      await c.watcher.reportGateOpened(c.child.id, gate);
+      const dispatch = `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`;
+      await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch) !== null);
+      const content = (await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch))?.content;
+      expect(content).not.toHaveProperty("origin");
+      expect(JSON.stringify(content)).not.toContain(gate.title);
+    });
+
+    it.each(["archive", "move", "run-archive"] as const)("bot repro 2: %s cancels an idle subscription before a later gate", async mode => {
+      const c = await armedChild(`bot-idle-${mode}`);
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("done");
+      if (mode === "archive") {
+        for (const item of await c.engineStore.listUnsettledSubmissions(c.parent.id)) {
+          await c.engineStore.settleUnclaimed(c.parent.id, c.parentThread.id, item.id, { outcome: "completed" });
+        }
+        await api!.providers.db.insert(agentSessions).values({ id: c.parent.id, userId: "local-user", orgId: "local-org",
+          workspace: "/tmp", status: "active", ownerType: "user", ownerId: "local-user", createdAt: Date.now(), updatedAt: Date.now() });
+        const response = await fetch(`${api!.baseUrl}/api/sessions/${c.parent.id}/threads/${c.parentThread.id}`,
+          { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived: true }) });
+        expect(response.status).toBe(200);
+      } else await endChildSubscriptions(c.engineStore, c.parent.id, mode === "move" ? undefined : c.parentThread.id, api!.providers.db);
+      const gate = { id: "after-archive", sessionId: c.child.id, threadId: c.childThread.id, queueItemId: c.watch.queueItemId,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Must not reach archived parent", actions: [], status: "pending" as const,
+        createdAt: Date.now(), updatedAt: Date.now() };
+      await c.engineStore.saveDecisionGate(c.child.id, c.childThread.id, gate);
+      await c.watcher.reportGateOpened(c.child.id, gate);
+      await childDelivery!.sweep();
+      expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:gate-opened:${c.child.id}:${gate.id}`)).toBeNull();
+      expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.status).toBe("cancelled");
+    });
+
+    it.each(["observer", "reboot"] as const)("bot repro 4: queued child_send preserves the running delegation result and its narrow scope through %s", async via => {
+      const c = await armedChild("bot-running-delegation");
+      await c.engineStore.createLease({ id: "bot-hold", sessionId: c.child.id, ownerKind: "hold", reason: "retain fixture",
+        createdAt: Date.now(), deadlineAt: Date.now() + 60_000 });
+      const prompt = vi.spyOn(c.child, "prompt").mockImplementation(async (content, options) => {
+        const item = { ...queuedItem(`send-${options?.queueMode}`, c.childThread.id, ""), content, metadata: options?.metadata };
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, item);
+        return { queueItemId: item.id, sessionId: c.child.id, threadId: c.childThread.id, status: "queued" };
+      });
+      const arm = via === "reboot" ? vi.spyOn(c.watcher, "arm").mockImplementation(() => undefined) : undefined;
+      try {
+        const send = buildChildSender(c.deps, c.watcher);
+        const a = await send({ childSessionId: c.child.id, message: "A" }, { parentSessionId: c.parent.id,
+          parentThreadId: c.parentThread.id, actorUserId: "local-user", toolScope: { tools: ["read"] } });
+        if (!a) throw new Error("Missing A");
+        await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id, itemId: a.queueItemId, attemptId: "A", ownerId: "test" });
+        const b = await send({ childSessionId: c.child.id, message: "B", queue: true }, { parentSessionId: c.parent.id,
+          parentThreadId: c.parentThread.id, actorUserId: "local-user", toolScope: { tools: ["read", "bash"] } });
+        if (!b) throw new Error("Missing B");
+        const fence = { itemId: a.queueItemId, attemptId: "A" };
+        await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, a.queueItemId, { outcome: "failed", error: "A truthful result" }, fence);
+        await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, a.queueItemId, fence);
+        if (via === "observer") await c.watcher.observeTurn(c.child.id, a.queueItemId);
+        else await testChildWatcher(c.deps).rearm();
+        await waitFor(async () => await c.engineStore.getQueueItemByDispatchId(c.parent.id,
+          `${c.child.id}:settled:${c.child.id}:${a.queueItemId}`) !== null);
+        expect((await api!.providers.db.select().from(childWatches))[0]).toMatchObject({ queueItemId: b.queueItemId, settled: false });
+        await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, b.queueItemId, { outcome: "failed", error: "B result" });
+        await waitFor(c.settled);
+        const resultA = await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${a.queueItemId}`);
+        const resultB = await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${b.queueItemId}`);
+        expect(resultA?.content).toMatchObject({ body: expect.stringContaining("A truthful result") });
+        expect(resultA?.metadata?.toolScope).toEqual({ tools: ["read"] });
+        expect(resultB?.content).toMatchObject({ body: expect.stringContaining("B result") });
+      } finally { prompt.mockRestore(); arm?.mockRestore(); }
     });
 
     it("reports a pending gate even after the child was notified as settled", async () => {
@@ -3819,6 +3908,106 @@ describe("child sandbox retention", () => {
       .limit(1);
     return rows[0];
   }
+
+  it("bot repro 3: retains the sandbox between timer completion and terminal admission", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "bot-timer-gap", "parent-bot-timer");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createWakeup({ id: "wk_bot_timer", sessionId: child.id, threadId: childThread.id, kind: "timer", status: "pending",
+      reason: "follow up", prompt: "Continue with workspace", fireAt: now + 1000, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await store.transitionWakeup("wk_bot_timer", ["pending"], "done", { endedAt: Date.now() }, Date.now());
+    await watcher.sweepRetention();
+    expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+    await store.admitSubmission(child.id, childThread.id, { ...queuedItem("timer-turn", childThread.id, ""),
+      dispatchId: "wakeup:wk_bot_timer:terminal", content: { kind: "signal", signalType: "timer.fired", body: "Continue with workspace" } });
+    await watcher.sweepRetention();
+    expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
+    await store.settleUnclaimed(child.id, childThread.id, "timer-turn", { outcome: "completed" });
+    await watcher.sweepRetention();
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it("retains an ended timer across reboot and a failed terminal admission", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: 0 });
+    const watcher = testChildWatcher(deps);
+    const { watch, child, childThread } = await seedParkableChild(api, "bot-timer-reboot", "parent-bot-timer-reboot");
+    const store = api.providers.engineStore;
+    const now = Date.now();
+    await store.createWakeup({ id: "wk_bot_reboot", sessionId: child.id, threadId: childThread.id, kind: "timer", status: "pending",
+      reason: "follow up", prompt: "Continue with workspace", fireAt: now + 60_000, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    const prompt = vi.spyOn(child, "prompt").mockImplementation(async () => {
+      expect((await store.getWakeup("wk_bot_reboot"))?.status).toBe("done");
+      await watcher.sweepRetention();
+      expect(api!.providers.engineHost.liveSession(child.id)).not.toBeNull();
+      throw new Error("terminal admission unavailable");
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await childDelivery!.sweep(now + 60_001);
+      expect(prompt).toHaveBeenCalled();
+      const reboot = testChildWatcher(deps);
+      await reboot.sweepRetention();
+      expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+      expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
+    } finally { prompt.mockRestore(); errors.mockRestore(); }
+  });
+
+  it.each([false, true])("bot repro 5: retention off preserves a recently finished human turn after skipped park (takeover=%s)", async takeover => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: 0 }));
+    const { watch, child, childThread } = await seedParkableChild(api, "bot-human-gap", "parent-bot-human");
+    const store = api.providers.engineStore;
+    await store.admitSubmission(child.id, childThread.id, { ...queuedItem("human-followup", childThread.id, "Human followup"), author: { id: "local-user" } });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    await store.settleUnclaimed(child.id, childThread.id, "human-followup", { outcome: "completed" });
+    if (takeover) await api.providers.db.update(childWatches).set({ queueItemId: "human-followup" })
+      .where(eq(childWatches.childSessionId, child.id));
+    await watcher.sweepRetention();
+    expect(api.providers.engineHost.liveSession(child.id)).not.toBeNull();
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
+    await watcher.sweepRetention(Date.now() + 60_001);
+    expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
+  });
+
+  it.each(["eager", "sweep"] as const)("bot repro 8: retries token revocation before stamping %s reclaim", async mode => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: mode === "eager" ? 0 : RETENTION_MS }));
+    const { watch, child } = await seedParkableChild(api, `bot-revoke-${mode}`, `parent-bot-revoke-${mode}`);
+    const original = sandboxTokenAuth.revokeSandboxTokens;
+    const revoke = vi.spyOn(sandboxTokenAuth, "revokeSandboxTokens");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      if (mode === "eager") revoke.mockRejectedValue(new Error("token store unavailable"));
+      watcher.arm(watch);
+      await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+      if (mode === "sweep") {
+        await vi.waitFor(() => expect(provider.suspendCalls).toHaveLength(1));
+        revoke.mockRejectedValue(new Error("token store unavailable"));
+        await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+      } else await vi.waitFor(() => expect(revoke).toHaveBeenCalled());
+      expect((await watchRow(api!, child.id))?.sandboxReclaimedAt).toBeNull();
+      const [token] = await api!.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, child.id));
+      expect(token?.revokedAt).toBeNull();
+      revoke.mockImplementation(original);
+      await watcher.sweepRetention(Date.now() + RETENTION_MS + 60_000);
+      expect((await watchRow(api!, child.id))?.sandboxReclaimedAt).not.toBeNull();
+      const [retried] = await api!.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, child.id));
+      expect(retried?.revokedAt).not.toBeNull();
+    } finally { revoke.mockRestore(); errors.mockRestore(); }
+  });
 
   it("parks a settled child by suspending its sandbox: cache kept, tokens kept, status hibernated", async () => {
     const provider = new HibernatingChildProvider();

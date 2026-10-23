@@ -238,7 +238,7 @@ export interface QueueItem {
   /** Role name to apply for this one prompt (system-prompt overlay + optional model override). */
   role?: string;
   metadata?: Record<string, unknown>;
-  /** Host delivery state for a claimed signal in a purpose=child task session, not every parent-linked conversation. */
+  /** Host delivery state for a claimed signal or delegation in a purpose=child task session, not every parent-linked conversation. */
   childResultDelivery?: "pending" | "delivered" | "denied";
   // Durable execution lifecycle
   status: SubmissionStatus;

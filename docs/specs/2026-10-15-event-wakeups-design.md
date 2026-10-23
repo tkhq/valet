@@ -764,6 +764,13 @@ An event waiter follows the rule for timers:
   A child with an active lease, pending timer, or running event waiter keeps its sandbox.
   The reclaim sweep also runs when warm retention is off.
   It reclaims after cancelled background work stops owing turns.
+  An ended wakeup still owes work until its deterministic terminal dispatch ID exists.
+  This guard survives a restart between the terminal transition and signal admission.
+  Cancelled wakeups do not owe an automatic terminal signal.
+  With warm retention off, recent human activity gets a 60-second idle grace period.
+  Queued work always blocks reclaim.
+  Reclaim stamps follow successful sandbox-token revocation.
+  A failed revoke leaves the row eligible for retry.
 - Event waiters on hidden threads are counted and never named.
 
 ### F3. Internal child events (TKAI-657)
@@ -779,6 +786,8 @@ Host-created subscriptions do not consume the agent background-work quota.
 They do not block archive, owner move, busy checks, or workflow run archive.
 Archiving the parent thread or moving its session cancels these subscriptions.
 Workflow run archive also cancels them.
+These operations cancel idle `done` subscriptions as well as `running` subscriptions.
+Only an explicit `child_send` can restore a cancelled subscription.
 Cancellation removes buffered events and outbox rows.
 It advances the recovery boundary so a later send does not replay cancelled history.
 A drop-log row records owed results that cancellation discards.
@@ -798,6 +807,8 @@ Its store transition also requires an empty buffer.
 A publication after the close restores the ended waiter before ingestion.
 Gate Slack cards resolve the stored origin even after settlement notification.
 Private input and reply-route restrictions still apply.
+Parent gate signals use the same origin resolver as gate cards.
+If the saved channel route cannot see the gate, the parent signal omits the origin and gate title.
 
 Child events use `ingestEvent`, subject matching, `appendEventMatch`, and WakeWatcher delivery.
 Internal events do not create org event receipts or match user subscriptions.
@@ -806,6 +817,9 @@ The digest keeps the bounded result and internal string refs.
 Published events retain their delegation generation and reply route.
 A later `child_send` does not discard an earlier truthful result or its automatic reply.
 Only the reported generation can mark its watch settled.
+A claimed parent delegation keeps its own generation after a queued send moves the watch.
+Its durable pending-result state supports recovery without the live watcher.
+Its result uses its own tool scope, not the later queued send's scope.
 At claim, a signal captures the delegation source from its thread's last started turn.
 The claim also persists the inherited tool scope.
 A queued `child_send` cannot replace that source or widen that scope.
@@ -833,7 +847,7 @@ A retry returns the same parent submission.
 Transient delivery errors keep the event for the next pass.
 Permanent denials write the existing drop-log reasons.
 `engine_queue_items.child_result_delivery` records `pending`, `delivered`, or `denied` for child signal results.
-The claim writes `pending` before the signal turn starts.
+The claim writes `pending` before a signal or parent-delegated turn starts.
 Only sessions with the durable `purpose: child` task marker receive this state.
 A parent link alone does not identify a task child.
 Team assistant conversations do not receive pending child-result markers.

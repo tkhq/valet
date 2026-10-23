@@ -791,6 +791,8 @@ export class ChildWatcher {
       ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]),
         readToolScope((await this.deps.engineStore.getQueueItem(childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY]))
       : { tools: [], actions: [] };
+    const origin = await childGateOrigin(this.deps.db, this.deps.engineStore, childSessionId, gate.queueItemId);
+    const privateGate = watch.origin !== undefined && origin === undefined;
     await admitSignal(this.deps, {
       from: { sessionId: childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
@@ -799,11 +801,12 @@ export class ChildWatcher {
         kind: "signal",
         signalType: "child.gate_opened",
         body:
-          `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}". ` +
+          (privateGate ? `Child ${childSessionId} is paused on a private request. `
+            : `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}". `) +
           "The request was sent to the person who can answer it. The child resumes when it is answered. " +
           "Do not answer it for them; mention it only if the person is waiting on this work.",
         attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
-        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
+        ...(origin !== undefined ? { origin: { ...origin, reply: "manual" } } : {}),
       },
       toolScope,
       dispatchId: `gate-opened:${childSessionId}:${gate.id}`,
@@ -927,25 +930,17 @@ export class ChildWatcher {
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(itemId);
+    if (isParentDelegation(turn) && result.outcome !== "superseded" && result.outcome !== "merged") {
+      watch = { ...watch, queueItemId: itemId, resultItemId: itemId };
+    }
 
     if (result.outcome === "superseded" || result.outcome === "merged") {
       await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, itemId, "denied");
     }
 
-    // Re-point guard (`child_send`): the sender moves the watch row to its
-    // new submission and arms a fresh watcher on it. A watcher that wakes
-    // for a submission the row no longer tracks must stay silent — the
-    // settlement the parent is owed belongs to the row's current item.
-    //
-    // A followup send has a benign race: the original submission can
-    // complete between the sender's prompt() and its row update, and the
-    // stale watcher then reports that completion. That signal is truthful
-    // — the child really finished the original work — and is the same
-    // two-signal sequence the parent gets when a send lands just after
-    // settlement (the re-open path). Admission and the row update cannot
-    // be one transaction: the engine store and the app db are separate
-    // pluggable contracts (the spawner's prompt-then-insert window is the
-    // same shape).
+    // A queued send cannot suppress a started delegation's result. Its own
+    // item supplies its generation and scope. Legacy unclaimed stale watches
+    // still defer to the current watch pointer.
     const rows = await this.deps.db
       .select({
         queueItemId: childWatches.queueItemId, settled: childWatches.settled,
@@ -1323,7 +1318,7 @@ export class ChildWatcher {
     const turns = await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1);
     for (const turn of turns) {
       if (turn.childResultDelivery === "denied" || turn.childResultDelivery === "delivered") continue;
-      if (turn.updatedAt < row.eventsStartedAt || !isSignalSubmission(turn)
+      if (turn.updatedAt < row.eventsStartedAt || (!isSignalSubmission(turn) && !isParentDelegation(turn))
         || turn.outcome?.outcome === "merged" || turn.outcome?.outcome === "superseded") {
         if (turn.childResultDelivery === "pending") await this.deps.engineStore.resolveChildResultDelivery(row.childSessionId, turn.id, "denied");
         continue;
@@ -1444,6 +1439,7 @@ export class ChildWatcher {
 
   private async turnWatch(row: ChildWatchRow, queueItemId: string): Promise<ArmArgs> {
     const turn = await this.deps.engineStore.getQueueItem(row.childSessionId, queueItemId);
+    if (isParentDelegation(turn)) return { ...watchRowToArgs(row), queueItemId, resultItemId: queueItemId };
     const source = turn?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY];
     if (typeof source === "string") return { ...watchRowToArgs(row), queueItemId: source, resultItemId: queueItemId };
     // Legacy turns without a claim snapshot cannot acknowledge queued delegations.
@@ -1452,13 +1448,13 @@ export class ChildWatcher {
     return { ...watchRowToArgs(row), queueItemId: generation, resultItemId: queueItemId };
   }
 
-  /** A signal uses the delegation captured by its store claim, never the current watch pointer. */
+  /** Started delegations keep their own generation. Signals use their claim-time delegation snapshot. */
   async observeTurn(childSessionId: string, queueItemId: string): Promise<void> {
     const [row] = await this.deps.db.select().from(childWatches)
       .where(eq(childWatches.childSessionId, childSessionId)).limit(1);
     if (!row || row.queueItemId === queueItemId) return;
     const next = await this.deps.engineStore.getQueueItem(childSessionId, queueItemId);
-    if (!next || !isSignalSubmission(next)) return;
+    if (!next || (!isSignalSubmission(next) && !isParentDelegation(next))) return;
     if (next.outcome?.outcome === "merged" || next.outcome?.outcome === "superseded") {
       await this.deps.engineStore.resolveChildResultDelivery(childSessionId, queueItemId, "denied");
       return;
@@ -1528,6 +1524,7 @@ export class ChildWatcher {
       if (await this.holdsBackgroundWork(childSessionId)) return;
 
       const retentionMs = this.deps.retentionMs ?? 0;
+      if (retentionMs <= 0 && watch && await this.recentHumanActivity(childSessionId, watch.queueItemId, Date.now())) return;
       const retainable = retentionMs > 0 && this.deps.engineHost.sandboxHibernationCapable();
       const action = childParkAction(live.attachment.state, retainable);
       if (action === "skip") return;
@@ -1571,8 +1568,8 @@ export class ChildWatcher {
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
       // `EngineHost.destroy` does.
-      await this.markReclaimed(childSessionId, Date.now());
       await revokeSandboxTokens(this.deps.db, childSessionId);
+      await this.markReclaimed(childSessionId, Date.now());
     } catch (err) {
       console.error(`ChildWatcher: sandbox park failed for settled child ${childSessionId}:`, err);
     }
@@ -1619,6 +1616,7 @@ export class ChildWatcher {
         if (unsettled.length > 0) continue;
         const activityAt = await this.deps.engineStore.latestActivityAt(row.childSessionId);
         if (activityAt != null && activityAt > cutoff) continue;
+        if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
         if (await this.holdsBackgroundWork(row.childSessionId)) continue;
         const live = this.deps.engineHost.liveSession(row.childSessionId);
         const sandboxId = (await this.deps.engineStore.getSession(row.childSessionId))?.sandboxId ?? row.parkedSandboxId;
@@ -1628,6 +1626,7 @@ export class ChildWatcher {
           // the check above wins and the reclaim waits for the next pass.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
+          if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
           if (await this.holdsBackgroundWork(row.childSessionId)) continue;
           await live.attachment.destroy("child_retention");
           this.deps.engineHost.evictCache(row.childSessionId);
@@ -1644,12 +1643,19 @@ export class ChildWatcher {
             `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
           );
         }
-        await this.markReclaimed(row.childSessionId, now);
         await revokeSandboxTokens(this.deps.db, row.childSessionId);
+        await this.markReclaimed(row.childSessionId, now);
       } catch (err) {
         console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
       }
     }
+  }
+
+  /** With warm retention off, a person's completed turn still gets an idle grace period. */
+  private async recentHumanActivity(childSessionId: string, delegationId: string, now: number): Promise<boolean> {
+    const recent = await this.deps.engineStore.listSettledSubmissionsBefore(childSessionId, now + 1);
+    return recent.some(item => (item.id !== delegationId || item.author !== undefined) && item.updatedAt >= now - 60_000
+      && !isSignalSubmission(item) && !isParentDelegation(item));
   }
 
   /**
@@ -1661,11 +1667,17 @@ export class ChildWatcher {
   private async holdsBackgroundWork(childSessionId: string): Promise<boolean> {
     const store = this.deps.engineStore;
     const leases = await store.countActiveLeases(childSessionId);
-    // An event waiter holds no lease (INV-E3) and is always "running", never
-    // "pending" (spec 2026-10-15, F2), so it needs its own count.
-    const open = leases > 0 ? [] : await store.listWakeups(childSessionId, ["pending", "running"]);
-    const timers = open.filter((w) => w.kind === "timer" && w.status === "pending").length;
-    const events = open.filter((w) => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
+    // One snapshot covers both open work and terminal rows. Separate reads
+    // could miss a transition between the ended-row and open-row scans.
+    const wakeups = await store.listWakeups(childSessionId);
+    const timers = wakeups.filter(w => w.kind === "timer" && w.status === "pending").length;
+    const events = wakeups.filter(w => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
+    // Terminal transitions precede signal admission. The ended row and deterministic
+    // dispatch ID are durable evidence of work still owed, including after reboot.
+    for (const wakeup of wakeups) {
+      if (wakeup.eventMatch?.childSessionId !== undefined || !["done", "expired", "lost"].includes(wakeup.status)) continue;
+      if (!await store.getQueueItemByDispatchId(childSessionId, `wakeup:${wakeup.id}:terminal`)) return true;
+    }
     if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);
       return false;

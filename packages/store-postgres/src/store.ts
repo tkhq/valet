@@ -203,7 +203,7 @@ const CLAIM_SQL = `
       lease_expires_at = $3, attempt_count = attempt_count + 1,
       timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
       child_result_delivery = CASE WHEN child_result_delivery IS NULL
-        AND content::jsonb->>'kind' = 'signal'
+        AND (content::jsonb->>'kind' = 'signal' OR jsonb_typeof(metadata::jsonb->'parentDelegation') = 'object')
         AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $6 AND purpose = 'child')
         THEN 'pending' ELSE child_result_delivery END,
       updated_at = $4
