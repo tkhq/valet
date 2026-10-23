@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, channelConversationBindings } from "../schema/index.js";
 import { HOME_THREAD_KEY } from "../home/context.js";
@@ -76,29 +76,38 @@ export async function findPriorConversationThread(db: AppDb, scope: Conversation
   return home && await hasLegacyHomeConversation(db, scope, home.id, threadKey) ? home.id : undefined;
 }
 
+/** Engine TEXT can contain plaintext or JSON that Postgres cannot decode. */
+function persistedJson(column: SQL): SQL {
+  const text = sql`replace(${column}, chr(92)||'u0000', chr(92)||'uFFFD')`;
+  return sql`(CASE WHEN pg_input_is_valid(${text}, 'jsonb') THEN ${text}::jsonb END)`;
+}
+
 /** Any prior channel submission proves continuity, even without a queue row or message timestamp. */
 export async function hasLegacyHomeConversation(db: AppDb, scope: ConversationScope, homeThreadId: string, threadKey: string): Promise<boolean> {
-  // Replace escaped NUL before extraction, as workspace-outcomes does for engine JSON text.
+  const queueChannel = persistedJson(sql`q.channel`);
+  const queueContent = persistedJson(sql`q.content`);
+  const entryChannel = persistedJson(sql`e.channel`);
+  const entrySignal = persistedJson(sql`e.signal`);
   const [match] = await db.select({ id: agentSessions.id }).from(agentSessions).where(and(
     ownedThread(scope, homeThreadId),
     sql`(
       EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = ${scope.sessionId} AND q.thread_id = ${homeThreadId}
-          AND replace(q.channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelType' = ${scope.channelType}
-          AND replace(q.channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelId' = ${scope.conversationKey})
+          AND ${queueChannel} ->> 'channelType' = ${scope.channelType}
+          AND ${queueChannel} ->> 'channelId' = ${scope.conversationKey})
       OR EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = ${scope.sessionId} AND q.thread_id = ${homeThreadId}
-          AND replace(q.content, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'kind' = 'signal'
-          AND replace(q.content, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'channelType' = ${scope.channelType}
-          AND replace(q.content, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'threadKey' = ${threadKey})
+          AND ${queueContent} ->> 'kind' = 'signal'
+          AND ${queueContent} -> 'origin' ->> 'channelType' = ${scope.channelType}
+          AND ${queueContent} -> 'origin' ->> 'threadKey' = ${threadKey})
       OR EXISTS (SELECT 1 FROM engine_entries e
         WHERE e.session_id = ${scope.sessionId} AND e.thread_id = ${homeThreadId}
-          AND replace(e.channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelType' = ${scope.channelType}
-          AND replace(e.channel, chr(92)||'u0000', chr(92)||'uFFFD')::json ->> 'channelId' = ${scope.conversationKey})
+          AND ${entryChannel} ->> 'channelType' = ${scope.channelType}
+          AND ${entryChannel} ->> 'channelId' = ${scope.conversationKey})
       OR EXISTS (SELECT 1 FROM engine_entries e
         WHERE e.session_id = ${scope.sessionId} AND e.thread_id = ${homeThreadId}
-          AND replace(e.signal, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'channelType' = ${scope.channelType}
-          AND replace(e.signal, chr(92)||'u0000', chr(92)||'uFFFD')::json -> 'origin' ->> 'threadKey' = ${threadKey})
+          AND ${entrySignal} -> 'origin' ->> 'channelType' = ${scope.channelType}
+          AND ${entrySignal} -> 'origin' ->> 'threadKey' = ${threadKey})
     )`,
   )).limit(1);
   return match !== undefined;
