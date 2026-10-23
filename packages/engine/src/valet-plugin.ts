@@ -12,6 +12,7 @@
  * See the "Channel transports" section below for the v2 ChannelTransport
  * contract (Telegram, Phase 7).
  */
+import type { TurnProgress } from "@valet/shared";
 import { validatePluginHttpRoutes, type PluginHttpRoute } from "./plugin-http.js";
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
@@ -450,6 +451,14 @@ export class ChannelDeliveryRejectedError extends Error {
   }
 }
 
+/** A confirmed rejection created no progress message. Retrying creation is safe. */
+export class ChannelProgressRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelProgressRejectedError";
+  }
+}
+
 export interface ChannelTransport {
   readonly channelType: string;
   /**
@@ -566,6 +575,12 @@ export interface ChannelTransport {
   appendStream?(ref: StreamRef, markdown: string): Promise<void>;
   /** Close a stream. `final` carries the last markdown and any trailing blocks. */
   stopStream?(ref: StreamRef, final?: { markdown?: string }): Promise<void>;
+  /** Create or update a durable task-progress message. Recovery only finds existing messages. */
+  publishProgress?(
+    conversationKey: string,
+    progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null>;
   /** Show a transient working indicator on a thread. */
   setStatus?(conversationKey: string, threadTs: string, status: string): Promise<void>;
   /** Offer starter prompts. `threadTs` omitted = the conversation's entry point. */
