@@ -329,3 +329,17 @@ it("bounds visibility to search candidates and caches session-only team audience
   const data = await (await read(api, "&scope=team&teamId=team&limit=1")).json() as ExternalUsageResponse;
   expect(data.recent[0]).toMatchObject({ id: "cleared", teamName: "Engineering", intentCleared: true });
 });
+
+it("keeps workflow-derived team calls aggregate-only when the originating audience is unavailable", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  await db.insert(teams).values({ id: "team", name: "Team", orgId: "local-org", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: "team", userId: "local-user", role: "admin" });
+  await seed(api, "step", { ownerType: "team", ownerId: "team", sessionId: "wf:private-run:step", threadId: "default",
+    intent: "Inspect private candidate notes." });
+  for (const name of ["run_workflow", "get_workflow_run", "cancel_workflow_run", "retry_workflow_run", "workflows run"]) {
+    await seed(api, name, { ownerType: "team", ownerId: "team", name, intent: "Inspect private candidate notes." });
+  }
+  const data = await (await read(api, "&scope=team&teamId=team&q=candidate")).json() as ExternalUsageResponse;
+  expect(data.daily.reduce((sum, day) => sum + day.calls, 0)).toBe(6);
+  expect(data.recent).toEqual([]); expect(data.hasMore).toBe(false);
+});

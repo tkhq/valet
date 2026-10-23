@@ -502,7 +502,9 @@ Hidden-only matches never set `hasMore`, and the response does not expose candid
 This bounded recent feed can omit older matches beyond its candidate window.
 Thread checks deduplicate thread pairs and Slack channels for one viewer/request.
 Session-only team rows use the existing session resource audience check, cached by session for that request.
-Sessionless team MCP/CLI rows have no narrower thread audience and remain visible to team admins.
+Sessionless team MCP/CLI rows normally have no narrower thread audience and remain visible to team admins.
+Workflow-step sessions and team workflow-run operations are exceptions: they remain aggregate-only.
+Their current telemetry facts cannot establish the originating run audience, so recent details exclude them before search.
 Null-user team rows show the team name.
 Changing scope or period resets the recent-feed page.
 Admitted workflow paths resolve ownership from stored definitions or runs for MCP and CLI telemetry.

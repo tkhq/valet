@@ -109,7 +109,11 @@ export async function getExternalUsage(db: AppDb, opts: {
     }
   }
   if (!detailsVisible) return { daily: filledDaily, tools, clients, detailsVisible, recent: [], hasMore: false };
+  // Workflow-step threads do not carry the run's originating audience. Fail closed on details.
   const feedWhere = and(where,
+    sql`NOT (${externalCalls.ownerType} = 'team' AND (coalesce(${externalCalls.sessionId}, '') LIKE 'wf:%'
+      OR ${externalCalls.name} IN ('run_workflow', 'get_workflow_run', 'cancel_workflow_run', 'retry_workflow_run')
+      OR ${externalCalls.name} LIKE 'workflows %'))`,
     scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined);
   // Search first, then check a bounded candidate window. Hidden matches never set hasMore.
   const candidates = await db.select({ call: externalCalls, userName: users.name, teamName: teams.name }).from(externalCalls)
