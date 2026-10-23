@@ -197,6 +197,20 @@ describe("browser pane control", () => {
     expect(state.start).toHaveBeenCalledOnce();
   });
 
+  it("keeps a failed start visible after status polling and allows retry", async () => {
+    const message = "The browser daemon did not start. Retry starting the browser.";
+    state.start.mockResolvedValueOnce({ error: message });
+    const view = render(<BrowserPane sessionId="session" />);
+    fireEvent.click(screen.getByRole("button", { name: "Start browser" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message));
+    expect(screen.queryByRole("button", { name: "Retry browser input" })).toBeNull();
+    view.rerender(<BrowserPane sessionId="session" />);
+    expect(screen.getByRole("alert").textContent).toContain(message);
+    fireEvent.click(screen.getByRole("button", { name: "Start browser" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(state.start).toHaveBeenCalledTimes(2);
+  });
+
   it("lets an admin disable browser access without an audience choice", () => {
     state.status = ready();
     render(<BrowserPane sessionId="session" />);

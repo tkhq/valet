@@ -1259,6 +1259,10 @@ A policy update closes the browser and its egress connections.
 The next authorized start launches a new runtime generation with fresh origin authority.
 A daemon crash marks outstanding cells lost and dispatched effects uncertain.
 Cookies and website storage remain in the private session profile.
+A replaced sandbox can leave Chromium's SingletonLock, SingletonCookie, and SingletonSocket links in that profile after a forced stop.
+After taking owner.lock, the daemon removes those links only if SingletonLock names a different hostname.
+Same-host locks remain for Chromium to validate. Cookies and other profile files remain unchanged.
+The Browser panel keeps a failed start response visible across status polls and permits a retry.
 Old handles cannot target new documents.
 
 Audit records exclude page text, typed input, cookies, and result bodies.
