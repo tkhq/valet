@@ -604,7 +604,10 @@ export class WakeWatcher {
       } catch (err) {
         // The row is already terminal or advanced, so this signal is lost.
         // The counter and the log line are the only record (spec Deviations).
-        this.metrics.signalLost(updated.kind);
+        if (signal.dispatchId !== `wakeup:${row.id}:terminal`
+          || await this.deps.engineStore.claimTerminalSignalLoss(updated.sessionId, updated.id, Math.max(updated.terminalSignalStartedAt ?? 0, at))) {
+          this.metrics.signalLost(updated.kind);
+        }
         console.error(`WakeWatcher: delivery of ${signal.signalType} for wakeup ${row.id} failed; the signal is lost:`, err);
       }
     }
@@ -833,7 +836,7 @@ export class WakeWatcher {
       await this.deliver(lease.sessionId, lease.threadId, holdExpiredSignal(lease, now), lease.origin);
     } catch (err) {
       // The lease is already released, so this signal is lost (spec Deviations).
-      this.metrics.signalLost("hold");
+      if (await this.deps.engineStore.claimTerminalSignalLoss(lease.sessionId, lease.id, now)) this.metrics.signalLost("hold");
       console.error(`WakeWatcher: delivery of lease.expired for lease ${lease.id} failed; the signal is lost:`, err);
     }
   }

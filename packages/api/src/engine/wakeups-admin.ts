@@ -351,7 +351,7 @@ async function deliverCancelSignal(
   target: { threadId: string | undefined; origin: Wakeup["origin"]; dispatchId: string; kind: WakeupKind | "hold" },
   build: (ownThread: boolean) => SignalContent,
   opts: HumanCancelOptions,
-  beforeSubmit: () => Promise<void>,
+  admission: { store: SessionStore; sessionId: string; id: string },
 ): Promise<void> {
   const { origin, dispatchId, kind } = target;
   const wanted = opts.deliverTo === "main" ? undefined : target.threadId;
@@ -362,15 +362,30 @@ async function deliverCancelSignal(
   const signal: SignalContent =
     ownThread && origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
   const base: PromptOptions = { dispatchId, queueMode: "followup" };
+  const readAdmissionAt = async () => {
+    const row = admission.id.startsWith("wk_") ? await admission.store.getWakeup(admission.id) : await admission.store.getLease(admission.id);
+    const endedAt = row ? ("status" in row ? row.endedAt : row.releasedAt) : undefined;
+    return endedAt === undefined ? undefined : Math.max(row?.terminalSignalStartedAt ?? 0, endedAt);
+  };
+  let admissionAt: number | undefined;
   try {
-    await beforeSubmit();
+    // Keep the loss claim tied to this cancellation, even if the subscription is re-enabled during delivery.
+    admissionAt = await readAdmissionAt();
+    await admission.store.startTerminalSignalAdmission(admission.sessionId, admission.id, (opts.now ?? Date.now)());
+    admissionAt = await readAdmissionAt();
     if (threadId !== undefined) {
       await session.prompt(signal, { threadId, ...base });
     } else {
       await session.prompt(signal, base);
     }
   } catch (err) {
-    (opts.signalLost ?? recordWakeupSignalLost)(kind);
+    try {
+      if (admissionAt !== undefined && await admission.store.claimTerminalSignalLoss(admission.sessionId, admission.id, admissionAt)) {
+        (opts.signalLost ?? recordWakeupSignalLost)(kind);
+      }
+    } catch (claimError) {
+      console.error(`wakeups: loss reporting for ${dispatchId} failed; retention can retry the loss claim:`, claimError);
+    }
     console.error(`wakeups: the human-cancel signal ${dispatchId} failed to submit; the work is already cancelled:`, err);
   }
 }
@@ -409,7 +424,7 @@ export async function cancelWorkAsHuman(
         { threadId: lease.threadId, origin: lease.origin, dispatchId: `lease:${lease.id}:released`, kind: "hold" },
         () => signal,
         opts,
-        () => engineStore.startTerminalSignalAdmission(sessionId, lease.id, now()),
+        { store: engineStore, sessionId, id: lease.id },
       ),
     );
     return {
@@ -433,7 +448,7 @@ export async function cancelWorkAsHuman(
       { threadId: row.threadId, origin: row.origin, dispatchId: `wakeup:${row.id}:terminal`, kind: row.kind },
       (ownThread) => wakeupCancelledSignal(row, opts, at, ownThread),
       opts,
-      () => engineStore.startTerminalSignalAdmission(sessionId, row.id, now()),
+      { store: engineStore, sessionId, id: row.id },
     ),
   );
   return { kind: "cancelled", work: { id, kind: row.kind, reason: row.reason, threadId: row.threadId }, ...routed };

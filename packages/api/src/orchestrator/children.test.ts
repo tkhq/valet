@@ -33,6 +33,7 @@ import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { VirtualSandbox } from "@valet/engine";
+import * as engineMetrics from "@valet/engine";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
@@ -4066,6 +4067,63 @@ describe("child sandbox retention", () => {
     } finally { destroy.mockRestore(); retry.mockRestore(); errors.mockRestore(); }
   });
 
+  it.each((["timer", "hold"] as const).flatMap(kind =>
+    (["failed", "human-failed", "admitted", "unsubmitted"] as const).map(outcome => ({ kind, outcome })),
+  ))("counts a $kind $outcome terminal expectation once across retention watchers", async ({ kind, outcome }) => {
+    const provider = new HibernatingChildProvider();
+    provider.hibernation = false;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: 0 });
+    const watcher = testChildWatcher(deps);
+    const { watch, child, childThread } = await seedParkableChild(api, `loss-once-${kind}-${outcome}`, "parent-loss-once");
+    const store = api.providers.engineStore;
+    let now = Date.now();
+    const id = kind === "hold" ? "ls_loss_once" : "wk_loss_once";
+    if (kind === "hold") await store.createLease({ id, sessionId: child.id, threadId: childThread.id, ownerKind: "hold",
+      reason: "continue", createdAt: now, deadlineAt: now + 60_000 });
+    else await store.createWakeup({ id, sessionId: child.id, threadId: childThread.id, kind: "timer", status: "pending",
+      reason: "continue", prompt: "continue", fireAt: now + 60_000, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    watcher.arm(watch);
+    await waitFor(async () => (await watchRow(api!, child.id))?.settled === true);
+    now = Date.now();
+    const grace = vi.spyOn(engineMetrics, "recordChildTerminalSignalAbandoned").mockImplementation(() => undefined);
+    const lost = vi.fn();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const prompt = vi.spyOn(child, "prompt").mockImplementation(async () => {
+      await watcher.sweepRetention();
+      throw new Error("injected admission failure");
+    });
+    try {
+      if (outcome === "failed") {
+        const wake = new WakeWatcher({ engineStore: store, engineHost: api.providers.engineHost, db: api.providers.db,
+          provider, limits: resolveWakeupLimits(process.env), metrics: { signalLost: lost } });
+        await wake.sweep(now + 60_001);
+        expect(lost).toHaveBeenCalledTimes(1);
+      } else if (outcome === "human-failed") {
+        expect((await cancelWorkAsHuman(store, child, child.id, id,
+          { actorUserId: "local-user", signal: "deliver", signalLost: lost })).kind).toBe("cancelled");
+        expect(lost).toHaveBeenCalledTimes(1);
+      } else {
+        if (kind === "hold") await store.releaseLease(id, "deadline", now, { terminalSignalExpected: true });
+        else await store.transitionWakeup(id, ["pending"], "done", { cause: "fired", endedAt: now, terminalSignalExpected: true }, now);
+        await watcher.sweepRetention(now + 1);
+      }
+      prompt.mockRestore();
+      if (outcome === "admitted") {
+        await store.admitSubmission(child.id, childThread.id, { ...queuedItem("admitted-terminal", childThread.id, ""),
+          dispatchId: kind === "hold" ? `lease:${id}:expired` : `wakeup:${id}:terminal`, content: { kind: "signal", signalType: kind === "hold" ? "lease.expired" : "timer.fired", body: "continue" } });
+        await store.settleUnclaimed(child.id, childThread.id, "admitted-terminal", { outcome: "completed" });
+      }
+      const reboot = testChildWatcher(deps);
+      await reboot.sweepRetention(now + 2);
+      await watcher.sweepRetention(now + 15 * 60_000);
+      await reboot.sweepRetention(now + 15 * 60_000 + 1);
+      await watcher.sweepRetention(now + 365 * 24 * 60 * 60_000);
+      expect(grace).toHaveBeenCalledTimes(outcome === "unsubmitted" ? 1 : 0);
+      expect(lost.mock.calls.length + grace.mock.calls.length).toBe(outcome === "admitted" ? 0 : 1);
+    } finally { prompt.mockRestore(); grace.mockRestore(); errors.mockRestore(); }
+  });
+
   it.each([0, RETENTION_MS].flatMap(retentionMs =>
     (["hold", "timer", "process", "watch"] as const).map(kind => ({ retentionMs, kind })),
   ))("human cancel retains $kind until admission with retention=$retentionMs", async ({ retentionMs, kind }) => {
@@ -4337,7 +4395,8 @@ describe("child sandbox retention", () => {
       expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
       expect(child.attachment.state).toBe("released");
       expect((await store.getWakeup(`wk_child_events:${child.id}`))?.status).not.toBe("running");
-      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal admission was not observed"))).toBe(expected);
+      expect(errors.mock.calls.some(args => String(args[0]).includes("terminal signal admission was not observed"))).toBe(false);
+      if (expected) expect((await store.getLease("ls_hold_bound"))?.terminalSignalLossReportedAt).toBeDefined();
     } finally { prompt.mockRestore(); errors.mockRestore(); }
   });
 

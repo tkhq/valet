@@ -447,6 +447,25 @@ export class InMemorySessionStore implements SessionStore {
     this.leases.set(lease.id, { ...lease });
   }
 
+  async claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean> {
+    const wakeup = this.wakeups.get(id);
+    if (wakeup?.sessionId === sessionId && wakeup.endedAt !== undefined && wakeup.terminalSignalExpected
+      && ["done", "expired", "lost", "cancelled"].includes(wakeup.status)
+      && Math.max(wakeup.terminalSignalStartedAt ?? 0, wakeup.endedAt) === admissionAt
+      && wakeup.terminalSignalLossReportedAt !== wakeup.endedAt) {
+      this.wakeups.set(id, { ...wakeup, terminalSignalLossReportedAt: wakeup.endedAt });
+      return true;
+    }
+    const lease = this.leases.get(id);
+    if (lease?.sessionId === sessionId && lease.ownerKind === "hold" && lease.releasedAt !== undefined && lease.terminalSignalExpected
+      && Math.max(lease.terminalSignalStartedAt ?? 0, lease.releasedAt) === admissionAt
+      && lease.terminalSignalLossReportedAt !== lease.releasedAt) {
+      this.leases.set(id, { ...lease, terminalSignalLossReportedAt: lease.releasedAt });
+      return true;
+    }
+    return false;
+  }
+
   async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
     const wakeup = this.wakeups.get(id);
     if (wakeup?.sessionId === sessionId && wakeup.status === "cancelled" && wakeup.terminalSignalExpected && (wakeup.terminalSignalStartedAt === undefined || wakeup.terminalSignalStartedAt < (wakeup.endedAt ?? 0))) {

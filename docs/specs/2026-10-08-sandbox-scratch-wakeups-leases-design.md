@@ -1265,7 +1265,11 @@ with an earlier entry, the entry below wins.
   An ended wakeup without its terminal dispatch ID also keeps the child sandbox,
   for at most four WakeWatcher ticks after `endedAt`.
   The sweep filters historical expectations before reading dispatch IDs.
-  It logs and counts observed admission gaps that exceed this bound.
+  Before reporting an observed gap after this bound, it checks that dispatch ID again.
+  A durable, session-scoped loss claim permits one report for each terminal transition.
+  Its admission-clock comparison rejects stale claims after reactivation.
+  WakeWatcher and human cancellation use the same claim for known delivery failures.
+  A successful admission or a previously counted failure produces no additional loss report.
   The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal. Failed starts,
   bad rows, and silent cancellation never count.
   Released holds use the same bound from `releasedAt`.

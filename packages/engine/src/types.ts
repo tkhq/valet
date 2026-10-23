@@ -2423,6 +2423,8 @@ export interface SessionStore {
   ): Promise<Wakeup | null>;
   /** Starts human terminal admission grace once per cancellation, only for this session's expected signal. */
   startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void>;
+  /** Claims loss reporting once for this terminal transition, checked against its admission clock. Stale, foreign, and silent rows cannot claim. */
+  claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean>;
   createLease(lease: Lease): Promise<void>;
   /** CAS release: commits any terminal signal expectation with the release. Null when already released. */
   releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null>;

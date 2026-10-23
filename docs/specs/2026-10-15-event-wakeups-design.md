@@ -773,7 +773,13 @@ An event waiter follows the rule for timers:
   Deferred replacement, profile-change, and owner-move signals receive a full grace after provisioning, regardless of provisioning duration.
   A provisioning attachment also blocks reclaim. Silent agent cancellation sets no expectation or admission timestamp.
   Lease snapshots include both active and released rows. Historical expectations outside grace do not trigger dispatch reads.
-  The sweep logs observed admission gaps that exceed grace and counts `valet.wakeups.signals_lost` with reason `child_terminal_grace`.
+  Before reporting an observed gap after grace, the sweep checks its dispatch ID again.
+  Successful admission clears the gap, even when no sweep ran inside grace.
+  Loss reporters share `claimTerminalSignalLoss`, scoped to the session, work ID, and terminal admission clock.
+  The durable `terminalSignalLossReportedAt` marker stores the terminal timestamp and permits one reporter for each expectation.
+  A later admission-clock write cannot reopen the same transition's loss claim.
+  WakeWatcher and human cancellation claim known failures before counting them.
+  The sweep counts only unreported gaps, with reason `child_terminal_grace` on `valet.wakeups.signals_lost`.
   Historical rows unseen within grace do not produce that diagnostic.
   The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal.
   Failed or refused starts, bad rows, and silent cancellation never set it and never count.

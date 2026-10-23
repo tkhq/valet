@@ -787,7 +787,7 @@ export class ChildWatcher {
   private retentionTimer: SweepTimer | undefined;
   /** Children the retention sweep already logged as kept by background work. */
   private readonly keptForWork = new Set<string>();
-  private readonly pendingTerminalAdmissions = new Map<string, { child: string; id: string; kind: WakeupKind | "hold"; at: number }>();
+  private readonly pendingTerminalAdmissions = new Map<string, { child: string; id: string; kind: WakeupKind | "hold"; at: number; dispatchId: string }>();
 
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
@@ -1732,9 +1732,17 @@ export class ChildWatcher {
     for (const [key, gap] of this.pendingTerminalAdmissions) {
       if (now - gap.at <= CHILD_TERMINAL_SIGNAL_GRACE_MS
         || this.deps.engineHost.liveSession(gap.child)?.attachment.state === "provisioning") continue;
-      this.pendingTerminalAdmissions.delete(key);
-      recordChildTerminalSignalAbandoned(gap.kind);
-      console.error(`ChildWatcher: ${gap.kind} ${gap.id} of child ${gap.child}: terminal signal admission was not observed before its grace elapsed; retention proceeds.`);
+      try {
+        // Only observed gaps reach this lookup. Historical rows remain read-free.
+        const admitted = await this.deps.engineStore.getQueueItemByDispatchId(gap.child, gap.dispatchId);
+        if (!admitted && await this.deps.engineStore.claimTerminalSignalLoss(gap.child, gap.id, gap.at)) {
+          recordChildTerminalSignalAbandoned(gap.kind);
+          console.error(`ChildWatcher: ${gap.kind} ${gap.id} of child ${gap.child}: terminal signal admission was not observed before its grace elapsed; retention proceeds.`);
+        }
+        this.pendingTerminalAdmissions.delete(key);
+      } catch (err) {
+        console.error(`ChildWatcher: terminal signal loss check failed for ${gap.id}; the next retention sweep will retry:`, err);
+      }
     }
   }
 
@@ -1763,7 +1771,7 @@ export class ChildWatcher {
       this.pendingTerminalAdmissions.delete(key);
       return false;
     }
-    this.pendingTerminalAdmissions.set(key, { child: childSessionId, id: terminal.id, kind: terminal.kind, at: terminal.endedAt });
+    this.pendingTerminalAdmissions.set(key, { child: childSessionId, id: terminal.id, kind: terminal.kind, at: terminal.endedAt, dispatchId: terminal.dispatchId });
     return true;
   }
 
@@ -1789,12 +1797,12 @@ export class ChildWatcher {
     for (const wakeup of wakeups) {
       if (wakeup.endedAt === undefined || !wakeup.terminalSignalExpected) continue;
       if (wakeup.status !== "done" && wakeup.status !== "expired" && wakeup.status !== "lost" && wakeup.status !== "cancelled") continue;
-      if (await this.owesTerminalSignal(childSessionId, { id: wakeup.id, kind: wakeup.kind, endedAt: wakeup.terminalSignalStartedAt ?? wakeup.endedAt,
+      if (await this.owesTerminalSignal(childSessionId, { id: wakeup.id, kind: wakeup.kind, endedAt: Math.max(wakeup.terminalSignalStartedAt ?? 0, wakeup.endedAt),
         dispatchId: `wakeup:${wakeup.id}:terminal` }, now)) return true;
     }
     for (const lease of leaseRows) {
       if (lease.ownerKind !== "hold" || lease.releasedAt === undefined || !lease.terminalSignalExpected) continue;
-      if (await this.owesTerminalSignal(childSessionId, { id: lease.id, kind: "hold", endedAt: lease.terminalSignalStartedAt ?? lease.releasedAt,
+      if (await this.owesTerminalSignal(childSessionId, { id: lease.id, kind: "hold", endedAt: Math.max(lease.terminalSignalStartedAt ?? 0, lease.releasedAt),
         dispatchId: `lease:${lease.id}:${lease.releaseCause === "cancelled" ? "released" : "expired"}` }, now)) return true;
     }
     if (leases === 0 && timers === 0 && events === 0) {

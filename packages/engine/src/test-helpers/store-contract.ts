@@ -1100,6 +1100,37 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.getWakeup("wk_a")).toMatchObject({ endedAt: 400, terminalSignalStartedAt: 500 });
       });
 
+      it("claims a terminal loss once across concurrent reporters and rejects silent, foreign, and stale claims", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled", terminalSignalExpected: true }));
+        await store.createWakeup(wakeup({ id: "wk_silent", status: "done", endedAt: 10 }));
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled" }));
+        for (const id of ["wk_a", "ls_hold"]) {
+          await store.startTerminalSignalAdmission("sess-1", id, 20);
+          expect(await store.claimTerminalSignalLoss("sess-2", id, 20)).toBe(false);
+          expect(await store.claimTerminalSignalLoss("sess-1", id, 10)).toBe(false);
+          const claims = await Promise.all(Array.from({ length: 8 }, () => store.claimTerminalSignalLoss("sess-1", id, 20)));
+          expect(claims.filter(Boolean)).toHaveLength(1);
+          const row = id.startsWith("wk_") ? await store.getWakeup(id) : await store.getLease(id);
+          expect(row?.terminalSignalLossReportedAt).toBe(10);
+        }
+        for (const id of ["wk_silent", "ls_silent", "wk_missing"]) expect(await store.claimTerminalSignalLoss("sess-1", id, 10)).toBe(false);
+        await store.transitionWakeup("wk_a", ["cancelled"], "running", {}, 30);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+        await store.transitionWakeup("wk_a", ["running"], "cancelled", { endedAt: 40, terminalSignalExpected: true }, 40);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 50);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 50)).toBe(true);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 50)).toBe(false);
+      });
+
+      it("does not report a cancellation twice when an admission-clock write is retried", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 10)).toBe(true);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 20);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+      });
+
       it("round-trips every wakeup and lease field, origin and rate window included", async () => {
         const w = wakeup({ origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
         const l = lease({ threadId: "th-1", origin });

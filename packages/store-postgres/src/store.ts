@@ -1680,6 +1680,23 @@ export class PgSessionStore implements SessionStore {
     await insertLease(this.db, lease);
   }
 
+  async claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean> {
+    const sql = id.startsWith("wk_")
+      ? `UPDATE engine_wakeups SET terminal_signal_loss_reported_at = ended_at
+        WHERE session_id = $1 AND id = $2 AND terminal_signal_expected
+          AND status IN ('done', 'expired', 'lost', 'cancelled') AND ended_at IS NOT NULL
+          AND GREATEST(terminal_signal_started_at, ended_at) = $3
+          AND terminal_signal_loss_reported_at IS DISTINCT FROM ended_at RETURNING id`
+      : id.startsWith("ls_")
+        ? `UPDATE engine_leases SET terminal_signal_loss_reported_at = released_at
+          WHERE session_id = $1 AND id = $2 AND owner_kind = 'hold' AND terminal_signal_expected AND released_at IS NOT NULL
+            AND GREATEST(terminal_signal_started_at, released_at) = $3
+            AND terminal_signal_loss_reported_at IS DISTINCT FROM released_at RETURNING id`
+        : undefined;
+    if (!sql) return false;
+    return (await this.db.query(sql, [sessionId, id, admissionAt])).rows.length > 0;
+  }
+
   async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
     if (id.startsWith("wk_")) {
       await this.db.query(`UPDATE engine_wakeups SET terminal_signal_started_at = $3
@@ -1835,8 +1852,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
        origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
-       event_seen, event_source_seen, terminal_signal_expected, terminal_signal_started_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)`,
+       event_seen, event_source_seen, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`,
     [
       w.id,
       w.sessionId,
@@ -1870,6 +1887,7 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       jsonOrNull(w.eventSourceSeen),
       w.terminalSignalExpected ?? false,
       w.terminalSignalStartedAt ?? null,
+      w.terminalSignalLossReportedAt ?? null,
     ],
   );
 }
@@ -1877,8 +1895,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
 async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
   await db.query(
     `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at,
-       released_at, release_cause, thread_id, origin_json, terminal_signal_expected, terminal_signal_started_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+       released_at, release_cause, thread_id, origin_json, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       lease.id,
       lease.sessionId,
@@ -1894,6 +1912,7 @@ async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
       jsonOrNull(lease.origin),
       lease.terminalSignalExpected ?? false,
       lease.terminalSignalStartedAt ?? null,
+      lease.terminalSignalLossReportedAt ?? null,
     ],
   );
 }

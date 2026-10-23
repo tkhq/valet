@@ -258,6 +258,7 @@ CREATE TABLE "engine_wakeups" (
 	"event_seen" text,
 	"event_source_seen" text,
 	"terminal_signal_started_at" bigint,
+	"terminal_signal_loss_reported_at" bigint,
 	"terminal_signal_expected" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
@@ -281,6 +282,7 @@ CREATE TABLE "engine_leases" (
 	"released_at" bigint,
 	"release_cause" text,
 	"terminal_signal_started_at" bigint,
+	"terminal_signal_loss_reported_at" bigint,
 	"terminal_signal_expected" boolean NOT NULL DEFAULT false,
 	"thread_id" text,
 	"origin_json" text
