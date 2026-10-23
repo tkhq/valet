@@ -39,6 +39,7 @@ import {
   type SuggestedPrompt,
   type TransportContext,
   credentialSecret,
+  sniffImageMediaType,
 } from "@valet/engine";
 import {
   buildContentBlocks,
@@ -1192,12 +1193,9 @@ export class SlackTransport implements ChannelTransport {
       return null;
     }
     if (data === null) return null;
-    // When we served a Slack-generated thumbnail (images), the bytes are a
-    // JPEG/PNG derivative, not the original encoding — report a matching
-    // mimeType so a downstream decoder/vision API isn't handed e.g. image/heic
-    // bytes that are actually JPEG. Full-file downloads keep the real mime.
-    const servedThumb = isImage && ref.thumb !== undefined && url === ref.thumb;
-    const mimeType = servedThumb ? "image/jpeg" : ref.mimeType;
+    // Slack serves thumbnails in the original's format (PNG for a PNG
+    // screenshot), so a declared type is unreliable. The bytes win.
+    const mimeType = (isImage ? sniffImageMediaType(data) : undefined) ?? ref.mimeType;
     return { data, mimeType, name: ref.name };
   }
 
