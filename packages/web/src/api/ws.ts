@@ -215,14 +215,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
   // socket schedule a zombie reconnect — two live sockets, duplicated
   // chunk rendering.
   let cancelled = false;
-  // Fresh mount (no durable offset seen yet for this session) resets the
-  // slice and relies on REST to bootstrap history/gates. A resumed
-  // connection (lastOffset non-empty — either a reconnect within this
-  // mount's lifetime, or a remount that still has store state e.g. a
-  // route revisit) must NOT reset: state is continuous and the server
-  // replays the gap via `?fromOffset=`, so wiping here would cause a
-  // flash back to empty before replay refills it.
-  if (!useStreamStore.getState().bySession[sessionId]?.lastOffset) {
+  // REST can hydrate an idle session before its first durable event. An
+  // absent cursor does not mean the transcript is empty. A new socket must
+  // retain that history, including when another scoped view already uses it.
+  if (!useStreamStore.getState().bySession[sessionId]) {
     reset(sessionId);
   }
   setConnection(sessionId, "connecting");
