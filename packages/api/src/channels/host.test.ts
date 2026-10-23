@@ -452,7 +452,7 @@ describe("ChannelHost.handleUpdate", () => {
         entry = found?.type === "message" ? found : undefined;
         if (!entry) await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
+      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1", reply: "auto" } });
       expect(entry?.author).toMatchObject({ id: USER_ID, interactive: true, directChannel: true });
       await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
       const replies = (await engineStore.getEntries(session.id, home!.id)).filter(e => e.type === "message" && e.role === "assistant").length;

@@ -12,6 +12,7 @@ import type {
   LeaseOwnerKind,
   LeaseReleaseCause,
   MessageEntry,
+  PromptContent,
   SessionEntry,
   SettlePatchRef,
   Wakeup,
@@ -33,6 +34,23 @@ export function parseJson<T>(value: string | null | undefined): T | undefined {
 /** Like parseJson, but for NOT NULL columns where the value is guaranteed present. */
 export function parseJsonRequired<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+/** Restore byte-backed queued media after Uint8Array JSON serialization. Invalid shapes remain rejectable at admission. */
+export function restorePromptBytes(content: PromptContent): PromptContent {
+  if (typeof content === "string" || !content.attachments) return content;
+  return { ...content, attachments: content.attachments.map(attachment => {
+    const encoded: unknown = attachment.data;
+    if (!encoded || typeof encoded !== "object" || encoded instanceof Uint8Array || Array.isArray(encoded)) return attachment;
+    const entries = Object.entries(encoded);
+    const bytes: number[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const [key, value] = entries[i];
+      if (key !== String(i) || typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255) return attachment;
+      bytes.push(value);
+    }
+    return { ...attachment, data: new Uint8Array(bytes) };
+  }) };
 }
 
 /**

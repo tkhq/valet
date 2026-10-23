@@ -1799,7 +1799,7 @@ export class ChannelHost {
         kind: "signal",
         signalType: `${channelType}.message`,
         body: text === "" ? "(media message)" : text,
-        origin: { channelType, threadKey },
+        origin: { channelType, threadKey, reply: "auto" },
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
       };

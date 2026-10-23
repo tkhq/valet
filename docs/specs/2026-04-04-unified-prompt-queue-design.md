@@ -304,3 +304,30 @@ The existing thread-wide abort remains available for session and thread cancella
 
 The engine rechecks durable abort intent after asynchronous model resolution and before starting or resuming a model call.
 Cancellation during turn setup must not start new provider work after the setup resolves.
+
+
+## Slack corrections and queued inputs
+
+An attended human Slack reply with explicit `origin.reply: "auto"` can interrupt the active input from the same external conversation.
+The active input must already have a user entry in history. Manual follows, unspecified reply policies, bot events, and rehydrated context retain injection behavior.
+The dispatcher forwards the normalized bot flag and checks bot payload fields on older event rows. Direct channel input stamps `reply: "auto"`.
+
+The store admits each correction in one atomic operation. It selects only eligible queued human inputs from the same session, engine thread, and Slack origin.
+It persists ordered, transitive `metadata.carriedInputIds` on the correction and settles those queued receipts as `superseded`, pointing to their successor.
+An older queued deploy request therefore cannot execute separately before or after a newer stop correction.
+Unrelated inputs keep their state and order. An unrelated active turn keeps its decision gates.
+The pending cap counts the inputs that remain after replacement.
+
+Original queue rows retain their exact content, authors, attachments, and metadata. The correction keeps its own author and authority metadata.
+Caller metadata cannot supply carry references, including on ordinary queued submissions. Dispatch deduplication compares the unchanged original content.
+Before rendering, `Thread` verifies each referenced row's session, thread, origin, eligibility, settled outcome, and supersession chain to the correction.
+It renders readable author names, IDs, and quoted bodies before the correction, inside the escaped signal envelope.
+It feeds original images and files through the normal attachment path. It does not copy older permission grants or expose internal attributes in chat text.
+
+A promotion rebuilds carry references from its locked source. Internal `carriedInputBridgeIds` retain source provenance without displaying the correction twice.
+The reader checks every supersession path through those bridges. Caller-supplied bridge metadata is stripped.
+Postgres restores byte-backed image attachments from their persisted indexed JSON representation before model conversion.
+
+The carry limit is 128 original inputs and promotion bridges combined. An overflow or unsupported attachment rejects admission before any row changes; the error directs the caller to stop and retry.
+No inputs are silently dropped. A crash after admission leaves both the context references and superseded receipts durable.
+A retry returns the same correction and ordered references. A restored thread reads the original inputs once and persists one combined user entry.

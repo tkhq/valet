@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
-import { sameSubmissionOrigin, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
+import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, sameSubmissionOrigin, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
 import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -509,6 +509,7 @@ export class InMemorySessionStore implements SessionStore {
     opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
+    item = withoutCarriedInputs(item);
 
     // Normalize an empty-string dispatchId to "absent" so it never dedups — the
     // SQLite backend's partial unique index treats "" as a present value, so
@@ -545,6 +546,7 @@ export class InMemorySessionStore implements SessionStore {
       }
     }
 
+    let promotionSource: QueueItem | undefined;
     if (opts?.promoteFromItemId) {
       const source = r.queueItems.get(opts.promoteFromItemId);
       if (
@@ -557,6 +559,7 @@ export class InMemorySessionStore implements SessionStore {
           "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
         );
       }
+      promotionSource = source;
     }
 
     const promotionScope = opts?.steerScope === "active-and-source";
@@ -568,14 +571,16 @@ export class InMemorySessionStore implements SessionStore {
     if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
       throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
     }
-    const matchingActive = !originScope || [...r.queueItems.values()].some(candidate =>
+    const carried = originScope ? queuedOriginInputs(r.queueItems.values(), item) : [];
+    const carriedIds = new Set(carried.map(candidate => candidate.id));
+    const matchingActive = !originScope || (isInteractiveSlackInput(item) && [...r.queueItems.values()].some(candidate =>
       candidate.threadId === threadId && !candidate.supersededByItemId &&
       (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
-      sameSubmissionOrigin(candidate.content, item.content) &&
-      (r.entriesByThread.get(threadId) ?? []).some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === candidate.id));
+      isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, item.content) &&
+      (r.entriesByThread.get(threadId) ?? []).some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === candidate.id)));
     if (originScope && opts?.maxPending !== undefined) {
       const unsettled = [...r.queueItems.values()].filter(candidate => candidate.status !== "settled");
-      const remaining = countPendingForCap(unsettled, threadId) - (matchingActive ? 1 : 0);
+      const remaining = countPendingForCap(unsettled, threadId) - (matchingActive ? 1 : 0) - carried.length;
       if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
     }
     const headScope = promotionScope || (activeScope && matchingActive);
@@ -595,7 +600,9 @@ export class InMemorySessionStore implements SessionStore {
     const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
       ? Math.min(...queuedCreatedAt) - 1
       : item.createdAt;
-    const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt };
+    const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt,
+      ...((originScope || promotionSource) ? { metadata: carryInputMetadata(item, carried, promotionSource) } : {}),
+    };
     r.queueItems.set(stored.id, stored);
     if (stored.dispatchId) {
       r.dispatchIndex.set(stored.dispatchId, stored.id);
@@ -605,12 +612,13 @@ export class InMemorySessionStore implements SessionStore {
     if (opts?.steer) {
       for (const other of r.queueItems.values()) {
         if (other.id === stored.id) continue;
-        if (originScope && (!matchingActive || !sameSubmissionOrigin(other.content, item.content))) continue;
+        if (originScope && !carriedIds.has(other.id) &&
+          (!matchingActive || !isInteractiveSlackInput(other) || !sameSubmissionOrigin(other.content, item.content))) continue;
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
         if (
-          headScope &&
+          headScope && !carriedIds.has(other.id) &&
           other.id !== opts.promoteFromItemId &&
           other.status !== "running" &&
           other.status !== "blocked_on_decision_gate"
@@ -621,9 +629,14 @@ export class InMemorySessionStore implements SessionStore {
         // callers construct items with monotonic timestamps in practice, and
         // Map insertion order (== admission order) breaks any tie the same
         // way the SQL backends' insertion-ordered scan will.
-        if (!headScope && other.createdAt > stored.createdAt) continue;
+        if (!headScope && !carriedIds.has(other.id) && other.createdAt > stored.createdAt) continue;
         other.supersededByItemId = stored.id;
         other.updatedAt = Date.now();
+        if (carriedIds.has(other.id)) {
+          other.status = "settled";
+          other.outcome = { outcome: "superseded" };
+          other.settlePatch = { status: "skipped", reason: "no_work" };
+        }
         supersededItemIds.push(other.id);
       }
     }

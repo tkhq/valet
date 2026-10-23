@@ -2169,6 +2169,13 @@ export interface SessionStore {
    * inserts the promoted successor at the runnable head. "active" does the
    * same without a source item: a message edit stops the running turn and
    * runs next, and queued messages run after it.
+   * "active-origin" requires an explicit auto-reply human Slack signal. It
+   * interrupts only a matching active input already in history. In the same
+   * transaction, it carries matching queued inputs by durable, ordered IDs
+   * and settles them superseded. Caller metadata cannot create carry IDs.
+   * The successor keeps its own author, content, and authority metadata.
+   * Unrelated inputs retain their order and status. Carry overflow or an
+   * unsupported attachment rejects the entire admission without changing rows.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,

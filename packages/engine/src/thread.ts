@@ -53,6 +53,11 @@ import {
   namespaceInternalDispatchId,
   overheardCoalesceKey,
   renderSignalEnvelope,
+  carriedInputIds,
+  carriedInputBridgeIds,
+  MAX_CARRIED_INPUTS,
+  isInteractiveSlackInput,
+  sameSubmissionOrigin,
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
@@ -1080,7 +1085,7 @@ export class Thread {
       this.agent.abort();
     }
     for (const g of this.pendingDecisionGates()) {
-      this.withdrawDecision(g.id, "steer");
+      if (supersededItemIds.includes(g.queueItemId)) this.withdrawDecision(g.id, "steer");
     }
     for (const id of supersededItemIds) {
       await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
@@ -4463,6 +4468,42 @@ export class Thread {
     );
   }
 
+  /** Validate durable carry links before exposing original content or attachments. */
+  private async carriedInputs(item: QueueItem): Promise<QueueItem[]> {
+    const ids = carriedInputIds(item);
+    const bridgeIds = carriedInputBridgeIds(item);
+    const allIds = [...ids, ...bridgeIds];
+    if (!allIds.length) return [];
+    if (!isInteractiveSlackInput(item) || allIds.length > MAX_CARRIED_INPUTS || new Set(allIds).size !== allIds.length) {
+      throw new ValidationError("Invalid carried Slack inputs. Restore the original submission, then retry.");
+    }
+    const originals = new Map<string, QueueItem>();
+    for (const id of allIds) {
+      const original = await this.session.providers.store.getQueueItem(this.session.id, id);
+      const bridge = bridgeIds.includes(id);
+      const superseded = original?.status === "settled" && original.outcome?.outcome === "superseded";
+      if (!original || original.threadId !== this.id || !isInteractiveSlackInput(original) ||
+          !sameSubmissionOrigin(original.content, item.content) ||
+          (!superseded && !(bridge && original.status === "queued" && original.supersededByItemId))) {
+        throw new ValidationError("Carried input is unavailable. Restore the original submission, then retry.");
+      }
+      originals.set(id, original);
+    }
+    // Every reference must reach this correction. Bridges retain promotion provenance without repeating its body.
+    for (const id of allIds) {
+      let next: string | undefined = id;
+      const visited = new Set<string>();
+      while (next !== item.id) {
+        if (!next || visited.has(next)) {
+          throw new ValidationError("Invalid carried input relationship. Restore the original submission, then retry.");
+        }
+        visited.add(next);
+        next = originals.get(next)?.supersededByItemId;
+      }
+    }
+    return [...originals.values()].filter(original => ids.includes(original.id));
+  }
+
   /**
    * Build and persist the turn's user MessageEntry (signal envelope handling
    * included) under the current fence, and return the text the model actually
@@ -4482,29 +4523,39 @@ export class Thread {
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
     // function, two call sites).
+    const originals = await this.carriedInputs(item);
     let signalMeta: MessageEntry["signal"];
     let text: string;
     let entryContent: string;
     if (isSignalContent(item.content)) {
       signalMeta = buildSignalMeta(item.content, item.metadata);
-      text = renderSignalEnvelope(signalMeta, item.content.body);
       entryContent = item.content.body;
+      if (originals.length) {
+        const quote = (value: string) => value.split(/\r?\n/).map(line => `> ${line}`).join("\n");
+        const blocks = originals.map(original => {
+          const author = original.author;
+          const label = [author?.name, author?.id].filter(Boolean).join(" · ") || "Unknown sender";
+          return quote(label) + "\n" + quote(isSignalContent(original.content) ? original.content.body : promptText(original.content));
+        });
+        entryContent = "Earlier queued inputs (the latest correction takes precedence):\n\n" +
+          blocks.join("\n\n") + "\n\nLatest correction:\n" + entryContent;
+      }
+      text = renderSignalEnvelope(signalMeta, entryContent);
     } else {
       text = promptText(item.content);
       entryContent = text;
     }
 
-    // Extract attachments if the prompt content has them.
+    // Preserve carried images and files through the normal model attachment path.
+    const contentInputs = [...originals, item].map(input => input.content);
+    const inputAttachments = contentInputs.flatMap(content =>
+      typeof content === "object" && content !== null && "attachments" in content && Array.isArray(content.attachments)
+        ? content.attachments : []);
     let attachments: MessageEntry["attachments"];
-    if (
-      typeof item.content === "object" &&
-      item.content !== null &&
-      "attachments" in item.content &&
-      Array.isArray(item.content.attachments)
-    ) {
+    if (inputAttachments.length) {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
-      for (const att of item.content.attachments) {
+      for (const att of inputAttachments) {
         if (typeof att !== "object" || att === null) continue;
         if (att.type === "file") {
           // Sandbox file (upload subsystem): persist path/size/hash so the
