@@ -14,6 +14,7 @@ import { useStreamStore } from "~/stores/stream";
 import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
+import { qkThreadProgress } from "./thread-progress";
 import { qkThreadPlan } from "./thread-plan";
 
 const MAX_RETRY_MS = 8_000;
@@ -261,6 +262,13 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         }
         if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
           void qc.invalidateQueries({ queryKey: ["settings"] });
+        }
+        if (wire.type === "queue.state" || wire.type === "tool_start" || wire.type === "tool_end"
+          || wire.type === "decision_gate" || wire.type === "decision_gate_resolved"
+          || wire.type === "decision_gate_expired" || wire.type === "decision_gate_withdrawn"
+          || wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "branch_switched"
+          || wire.type === "error" || wire.type === "init") {
+          void qc.invalidateQueries({ queryKey: "threadId" in wire && wire.threadId ? qkThreadProgress(wire.threadId) : ["thread-progress"] });
         }
         // Only `update_plan` changes a thread's plan.
         if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {

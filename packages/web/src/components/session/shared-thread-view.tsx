@@ -9,6 +9,7 @@ import { useActiveViewers } from "~/api/active-viewers";
 import { TypingLine, ViewerFaces } from "./viewer-faces";
 import { Badge, LoadingRow } from "~/components/primitives";
 import { Composer } from "~/components/session/composer";
+import { PinnedPlan } from "~/components/session/thread-plan";
 import { MessageList } from "~/components/session/message-list";
 import { useThreadEdit } from "~/components/session/use-thread-edit";
 import { errorText } from "~/lib/error-text";
@@ -86,9 +87,12 @@ export function SharedThreadView({ address, guest }: {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <MessageList header={header} messages={stream.messages} threadId={threadId} agentBusy={busy}
         pendingIds={queueState?.pendingIds} viewerId={me.data?.id} ratings={false} {...edit.list} />
+      <PinnedPlan threadId={threadId} />
       {pendingGate && (
         <p role="status" className="border-t border-line px-4 py-2 text-xs text-muted">
-          Waiting for {guest.ownerName} to answer an approval.
+          Waiting for {guest.ownerName} to {pendingGate.type === "approval"
+            ? "approve this action."
+            : pendingGate.type === "question" ? "answer a question." : "respond to a request."}
         </p>
       )}
       <TypingLine viewers={viewers} />

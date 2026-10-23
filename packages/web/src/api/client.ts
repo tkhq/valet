@@ -20,6 +20,7 @@ import type {
   ThreadContextResponse,
   ActiveViewersResponse,
   ThreadPlanResponse,
+  ThreadProgressResponse,
   ThreadRecapResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -661,6 +662,9 @@ export const api = {
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
   /** The checklist the model keeps with `update_plan`. */
+  getThreadProgress: (threadId: string) =>
+    request<ThreadProgressResponse>("GET", `/threads/${encodeURIComponent(threadId)}/progress`),
+
   getThreadPlan: (threadId: string) =>
     request<ThreadPlanResponse>("GET", `/threads/${encodeURIComponent(threadId)}/plan`),
   getThreadRecap: (threadId: string, since?: number) =>
