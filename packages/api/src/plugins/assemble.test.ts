@@ -104,18 +104,18 @@ describe("pluginSessionExtras", () => {
   it("keeps catalog tools when there are zero action plugins", () => {
     const plugins = [makePlugin("skills-only", { skills: [{ name: "s", content: "c" }] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool", "skill"]);
+    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool", "skill", "skill_script"]);
   });
 
   it("keeps catalog tools for an inert plugin set", () => {
     const { tools } = pluginSessionExtras([makePlugin("inert")]);
-    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill", "skill_script"]);
   });
 
   it("keeps catalog and skill discovery when action plugins exist", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools", "skill"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools", "skill", "skill_script"]);
   });
 
   it("concatenates skills and roles across plugins", () => {

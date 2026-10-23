@@ -620,6 +620,20 @@ describe("compaction: planPrune", () => {
     expect(plan.toElide.has("a1")).toBe(false);
   });
 
+  it("prunes skill path reads while preserving SKILL.md bodies", () => {
+    const reference = tcResult("reference", "file", "skill", 17_000);
+    const part = reference.parts?.[0];
+    if (!part || part.type !== "tool_call") throw new Error("Missing reference tool call");
+    part.args = { name: "alert-triage", path: "references/examples.md", offset: 0 };
+    const entries = [tcResult("body", "body", "skill", 17_000), reference];
+    for (const protectedTools of [undefined, new Set(["skill"])]) {
+      const result = planPrune({ entries, protectedTools,
+        cfg: { pruneProtectTokens: 0, pruneMinimumTokens: 1, protectedTools: ["skill"] } });
+      expect(result.toElide.get("reference")).toEqual(["file"]);
+      expect(result.toElide.has("body")).toBe(false);
+    }
+  });
+
   it("skips already-elided parts", () => {
     const entries = [
       user("u1", ""),

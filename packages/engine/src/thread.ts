@@ -1,4 +1,5 @@
 import { normalizeGatePath } from "./builtin-tools/index.js";
+import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
@@ -1344,7 +1345,7 @@ export class Thread {
         throw new Error(`skill "${name}" args failed validation:\n${errors}`);
       }
     }
-    const rendered = renderTemplate(skill.content, args);
+    const rendered = renderTemplate(skill.content, args) + skillFileManifest(skill);
     return this.submitPrompt(rendered, {
       author: opts.author,
       channel: opts.channel,
@@ -1399,7 +1400,7 @@ export class Thread {
 
   private async recordModelToolSkillInvocation(
     skill: SkillSource,
-    path: "model_tool",
+    path: "model_tool" | "file_read" | "script_run",
     injectedText: string,
     toolCallId: string,
   ): Promise<SkillInvocationFact> {

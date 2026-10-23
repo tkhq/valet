@@ -827,7 +827,7 @@ export interface ToolContext {
   /** Record a model-tool skill invocation in the current thread. */
   recordSkillInvocation?: (
     skill: SkillSource,
-    path: "model_tool",
+    path: "model_tool" | "file_read" | "script_run",
     injectedText: string,
   ) => Promise<SkillInvocationFact>;
   /**
@@ -2559,6 +2559,15 @@ export interface RoleSpec {
   source?: "session" | "thread" | "prompt" | "plugin" | "sandbox";
 }
 
+export interface SkillFile {
+  path: string;
+  blobSha: string;
+  size: number;
+  mode: string;
+  /** Absent in inventories. Load bytes only when a file is used. */
+  bytes?: Uint8Array;
+}
+
 /**
  * One skill, in the Agent Skills format
  * (https://agentskills.io/specification). `name`, `description`, and the
@@ -2570,6 +2579,10 @@ export interface RoleSpec {
  * them. See `docs/specs/2026-08-05-agent-skills-design.md`.
  */
 export interface SkillSource {
+  /** Companion files stored by repository sync. */
+  files?: SkillFile[];
+  /** Reads one companion by this skill's immutable stored ID and blob SHA. */
+  readFile?: (file: SkillFile) => Promise<Uint8Array | undefined>;
   name: string;
   description?: string;
   content: string;
@@ -2588,7 +2601,7 @@ export interface SkillSource {
   storedSkillId?: string;
   /** Plugin manifest name. Present only for plugin skills. */
   pluginName?: string;
-  /** SHA-256 of the injected body. */
+  /** SHA-256 of the body and stored companion file identities. */
   contentSha?: string;
   /** Product-facing source label. */
   origin?: "plugin" | "local" | "repo";
@@ -2606,6 +2619,8 @@ export interface SkillSource {
 
 export type SkillInvocationPath =
   | "model_tool"
+  | "file_read"
+  | "script_run"
   | "host_thread_skill"
   | "slash_context"
   | "slash_prompt";

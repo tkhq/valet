@@ -23,7 +23,7 @@ import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, t
 import { readFileSync } from "node:fs";
 import { normalizeLegacyDefinition } from "@valet/workflow";
 import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
-import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
+import { prepareAuxUsageRollups, prepareSkillCompanionUsage, SKILL_COMPANION_USAGE_SQL, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
 import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
@@ -397,6 +397,17 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
+  { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
+  { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
+  "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
+  "path" text NOT NULL,
+  "blob_sha" text NOT NULL,
+  "size" integer NOT NULL,
+  "mode" text NOT NULL,
+  "bytes" bytea NOT NULL,
+  PRIMARY KEY ("skill_id", "path")
+);` },
   { describe: "attention channel grace", probe: { kind: "column", table: "user_notification_preferences", column: "channel_grace_seconds" }, sql: 'ALTER TABLE user_notification_preferences ADD COLUMN channel_grace_seconds integer' },
   { describe: "personal attention outbox", probe: { kind: "table", table: "pending_channel_deliveries" }, sql: `CREATE TABLE pending_channel_deliveries (
     id text PRIMARY KEY NOT NULL, user_id text NOT NULL, tier_id text NOT NULL, notification_id text,
@@ -1971,6 +1982,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "usage member activity summaries", probe: { kind: "column", table: "usage_member_activity_ready", column: "version" }, prepare: prepareMemberActivity, sql: MEMBER_ACTIVITY_PUBLISH_SQL },
   { describe: "usage_action_facts_window", probe: { kind: "index", index: "usage_action_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_facts_window ON usage_action_facts(org_id, created_at);` },
   { describe: "usage_action_hourly_window", probe: { kind: "index", index: "usage_action_hourly_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);` },
+  { describe: "skill companion usage filtering", probe: { kind: "column", table: "usage_skill_companion_ready", column: "version" }, prepare: prepareSkillCompanionUsage, sql: SKILL_COMPANION_USAGE_SQL },
   { describe: "usage_skill_facts_window", probe: { kind: "index", index: "usage_skill_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_window ON usage_skill_facts(created_at);` },
   { describe: "usage_skill_facts_session_window", probe: { kind: "index", index: "usage_skill_facts_session_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_session_window ON usage_skill_facts(session_id,created_at);` },
   { describe: "usage_skill_facts_invocation", probe: { kind: "index", index: "usage_skill_facts_invocation" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_invocation ON usage_skill_facts(invocation_id);` },
