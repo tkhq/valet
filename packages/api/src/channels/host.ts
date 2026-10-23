@@ -1693,7 +1693,8 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await session.threadByKey(threadKey);
+    const thread = await session.threadByKey(threadKey) ??
+      (channelType === "slack" ? await session.threadByKey(HOME_THREAD_KEY) : null);
     if (!thread) {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;

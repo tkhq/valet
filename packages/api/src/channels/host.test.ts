@@ -452,6 +452,16 @@ describe("ChannelHost.handleUpdate", () => {
       }
       expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
       expect(entry?.author).toMatchObject({ id: USER_ID, interactive: true, directChannel: true });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
+      const replies = (await engineStore.getEntries(session.id, home!.id)).filter(e => e.type === "message" && e.role === "assistant").length;
+      await slackHost.handleUpdate("slack", inbound({ kind: "edit", conversationKey: "slack:T1:D1:111.1", text: "what is on tomorrow?", previousText: "what is on today?", dispatchId: "home-dm-edit" }));
+      await vi.waitFor(async () => {
+        const entries = await engineStore.getEntries(session.id, home!.id);
+        expect(entries.some(e => e.type === "message" && e.signal?.signalType === "slack.message_changed" && e.content.includes("After: what is on tomorrow?"))).toBe(true);
+        expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
+      });
+      const after = await engineStore.getEntries(session.id, home!.id);
+      expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
     } finally {
       await slackHost.stop();
     }
