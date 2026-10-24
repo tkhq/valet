@@ -4,6 +4,7 @@
  * the `services/usage` library, which owns the SQL over the one `cost_entries`
  * definition (so the dashboard and Grafana cannot drift).
  */
+import { isOrgAdmin } from "../services/org.js";
 import { getExternalUsage } from "../services/external-usage.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -123,7 +124,7 @@ usageRouter.get("/items", async (c) => {
   const { db } = c.var.providers;
   const useCaseQ = c.req.query("useCase");
   if (!useCaseQ || !isUsageUseCase(useCaseQ)) {
-    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy." }, 400);
+    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy, tagging." }, 400);
   }
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
@@ -176,11 +177,13 @@ usageRouter.get("/external", async (c) => {
   const limit = Number(c.req.query("limit") ?? "20");
   const search = c.req.query("q") ?? "";
   const surface = c.req.query("surface");
+  const key = c.req.query("key");
+  if (key && key !== "__emerging" && key !== "__unlabeled" && !/^[a-z][a-z0-9_]{0,31}$/.test(key)) return c.json({ error: "Invalid intent key. Choose a registry key or clear the key filter." }, 400);
   if (surface !== undefined && surface !== "hosted" && surface !== "mcp" && surface !== "cli") {
     return c.json({ error: "Choose surface hosted, mcp, or cli. Remove surface to see all calls." }, 400);
   }
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isInteger(limit) || limit < 1 || limit > 100 || search.length > 500) {
     return c.json({ error: "Use offset 0 to 100000, limit 1 to 100, and search text of 500 characters or fewer." }, 400);
   }
-  return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface }));
+  return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface, key, canManage: await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id) }));
 });

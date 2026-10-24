@@ -519,3 +519,17 @@ describe("team proxy record visibility", () => {
     expect((await fetch(`${api.baseUrl}/api/proxy/requests/shared-team-1`, { headers })).status).toBe(404);
   });
 });
+
+it("excludes tagging accounting from every personal summary bucket and request log", async () => {
+  api = await bootTestApi();
+  await api.providers.db.insert(llmProxyRequests).values([
+    makeRow({ id: "normal" }), makeRow({ id: "tagging", providerKind: "tagging", costUsd: 99 }),
+  ]);
+  const summary = await (await fetch(`${api.baseUrl}/api/proxy/usage/summary`)).json() as ProxyUsageSummary;
+  expect(summary.totalRequests).toBe(1); expect(summary.totalCostUsd).toBeCloseTo(.001);
+  for (const buckets of [summary.byUser, summary.byModel, summary.byHarness, summary.byDay]) {
+    expect(buckets.reduce((sum, bucket) => sum + bucket.requests, 0)).toBe(1);
+  }
+  const list = await (await fetch(`${api.baseUrl}/api/proxy/requests`)).json() as ProxyRequestListResponse;
+  expect(list.requests.map(row => row.id)).toEqual(["normal"]);
+});

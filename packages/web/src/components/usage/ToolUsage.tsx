@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ExternalUsageResponse, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { useExternalUsage } from "~/api/usage";
 import { Badge, Button, Card, CardBody, CardHeader, CardTitle, FilterChips, Input, Time } from "~/components/primitives";
+import { IntentKeys } from "./IntentKeys";
 
 const SURFACES = [{ id: "all", label: "All surfaces" }, { id: "hosted", label: "Hosted" }, { id: "mcp", label: "MCP" }, { id: "cli", label: "CLI" }] as const;
 type Surface = (typeof SURFACES)[number]["id"];
@@ -31,6 +32,7 @@ function CallsChart({ daily }: { daily: ExternalUsageResponse["daily"] }) {
 }
 
 export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelection; scope: UsageScopeName; teamId?: string }) {
+  const [keyFilter, setKeyFilter] = useState("");
   const [surface, setSurface] = useState<Surface>("all");
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
@@ -41,7 +43,7 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
     const timer = setTimeout(() => { setSearch(input); setOffset(0); }, 250);
     return () => clearTimeout(timer);
   }, [input]);
-  const query = useExternalUsage(period, scope, teamId, search, offset, surface === "all" ? undefined : surface);
+  const query = useExternalUsage(period, scope, teamId, search, offset, surface === "all" ? undefined : surface, keyFilter || undefined);
   const data = query.data;
   const total = data?.daily.reduce((sum, day) => sum + day.calls, 0) ?? 0;
 
@@ -53,9 +55,11 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
       </div>
       <FilterChips options={SURFACES.map(s => ({ value: s.id, label: s.label }))} value={surface} onChange={value => { setSurface(value); setOffset(0); }} label="Tool surface" />
     </div>
+        <IntentKeys data={data?.classification ?? { keys: [], canManage: false, consolidationDue: false }} selected={keyFilter} onSelect={key => { setKeyFilter(key); setOffset(0); }} />
     {query.isPending ? <div role="status" className="rounded-lg border border-line p-8 text-sm text-muted">Loading tool usage…</div>
       : query.isError ? <div role="alert" className="rounded-lg border border-line p-5 text-sm text-danger-600">Tool usage could not load. <Button size="sm" variant="ghost" onClick={() => void query.refetch()}>Try again</Button></div>
       : data && <>
+
         <Card><CardHeader className="flex items-center justify-between gap-3"><CardTitle>Calls over time</CardTitle>
           <span className="text-sm tabular-nums text-muted">{total.toLocaleString()} {total === 1 ? "call" : "calls"}</span></CardHeader>
           <CardBody>{total === 0 ? <p className="py-8 text-center text-sm text-muted">No tool calls in this window.</p> : <>
@@ -89,8 +93,8 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
           {data.recent.length === 0 ? <CardBody><p className="text-sm text-muted">{search ? "No intents match your search." : "No recent intents in this window."}</p></CardBody> :
             <ul className="divide-y divide-line">{data.recent.map(row => <li key={row.id} className="px-5 py-4">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted">
-                <span className="break-all font-medium text-ink">{row.name}</span><Badge variant={row.outcome === "ok" ? "success" : row.outcome === "denied" ? "warning" : "danger"}>{row.outcome}</Badge>
-                <span>{LABELS[row.surface]}</span><Time ts={row.createdAt} className="sm:ml-auto" />
+                <span className="break-all font-medium text-ink">{row.name}</span><Badge variant={row.outcome === "ok" ? "success" : row.outcome === "denied" ? "warning" : row.outcome === "pending-approval" ? "neutral" : "danger"}>{row.outcome}</Badge>
+                <span>{LABELS[row.surface]}</span>{row.key && <button type="button" className="underline" onClick={() => { setKeyFilter(row.key ?? ""); setOffset(0); }}>{data.classification?.keys.find(key => key.key === row.key)?.label ?? row.key}</button>}<Time ts={row.createdAt} className="sm:ml-auto" />
               </div>
               <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{row.intent ?? (row.intentCleared ? "Intent cleared after 90 days." : row.surface === "cli" ? "CLI commands do not require intent." : "No valid intent was supplied.")}</p>
               <p className="mt-2 break-all text-xs text-muted">{row.userName ?? row.userId ?? row.teamName ?? "Automation"} · {row.clientName ?? "Hosted Valet"}{row.clientVersion ? ` ${row.clientVersion}` : ""}</p>

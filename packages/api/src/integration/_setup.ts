@@ -9,6 +9,7 @@
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import { taggingDrain } from "../tagging/worker.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -558,6 +559,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,

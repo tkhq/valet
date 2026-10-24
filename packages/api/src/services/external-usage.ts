@@ -1,4 +1,8 @@
 import { stripNul } from "@valet/engine";
+import { intentKey, intentKeyFilter, intentJoins, toolIntentUsage } from "../tagging/usage.js";
+import { taggingAvailable } from "../tagging/availability.js";
+import { readRegistry } from "../tagging/registry.js";
+import { enqueueTagging } from "../tagging/tagger.js";
 import { canAccessSessionResources } from "./session-access.js";
 import type { Providers } from "../providers/types.js";
 import { visibleThreadIds } from "./thread-access.js";
@@ -25,7 +29,7 @@ export type ExternalCall = typeof externalCalls.$inferInsert;
 export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise<void> {
   call = stripNul(call);
   await bestEffortTelemetry(async () => {
-    await db.insert(externalCalls).values(call).onConflictDoUpdate({
+    const rows = await db.insert(externalCalls).values(call).onConflictDoUpdate({
       target: externalCalls.id,
       // A CLI invocation can issue many requests. Keep one fact and its latest outcome.
       set: call.surface !== "cli" ? { outcome: call.outcome, errorCode: call.errorCode, durationMs: call.durationMs, createdAt: call.createdAt } : {
@@ -38,7 +42,8 @@ export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise
         durationMs: sql`greatest(0, greatest(${call.createdAt + call.durationMs}, ${externalCalls.createdAt} + ${externalCalls.durationMs}) - least(${call.createdAt}, ${externalCalls.createdAt}))::integer`,
       },
       setWhere: and(eq(externalCalls.orgId, call.orgId), sql`${externalCalls.userId} IS NOT DISTINCT FROM ${call.userId ?? null}`),
-    });
+    }).returning({ id: externalCalls.id });
+    if (rows.length && await taggingAvailable(db, call.orgId)) await enqueueTagging(db, call.orgId, "tool_intent", [{ type: "external_call", id: call.id }]);
   });
 }
 
@@ -80,27 +85,31 @@ export async function saveMcpClientInfo(db: AppDb, identity: { orgId: string; us
 }
 
 export async function getExternalUsage(db: AppDb, opts: {
-  viewer: { deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">; userId: string }; period: ResolvedUsagePeriod; scope: UsageScope; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
+  viewer: { deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">; userId: string }; period: ResolvedUsagePeriod; scope: UsageScope; key?: string; canManage?: boolean; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
 }): Promise<ExternalUsageResponse> {
   const { scope, period } = opts;
-  const where = and(eq(externalCalls.orgId, scope.orgId),
+  const baseWhere = and(eq(externalCalls.orgId, scope.orgId),
     opts.surface ? eq(externalCalls.surface, opts.surface) : undefined,
     sql`${externalCalls.createdAt} >= ${period.startMs} AND ${externalCalls.createdAt} < ${period.endMs}`,
     scope.scope === "me" ? eq(externalCalls.userId, scope.userId) : undefined,
     scope.scope === "team" ? and(eq(externalCalls.ownerType, "team"), eq(externalCalls.ownerId, scope.teamId)) : undefined);
+  const registry = await readRegistry(db, scope.orgId, "tool_intent");
+  const { join: intentLabelJoin, on: intentLabelOn } = intentJoins(registry, scope.orgId, opts.canManage ?? false);
+  const where = and(baseWhere, intentKeyFilter(opts.key));
+  const classification = await toolIntentUsage(db, scope.orgId, baseWhere, opts.canManage ?? false, registry);
   const detailsVisible = scope.scope !== "team" || scope.byMember;
   const [daily, tools, clients] = await Promise.all([
     db.select({ dayMs: sql<number>`floor(${externalCalls.createdAt}::numeric / 86400000) * 86400000`.mapWith(Number),
       surface: externalCalls.surface, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
-      .where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
+      .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
     db.select({ name: externalCalls.name, surface: externalCalls.surface,
       calls: sql<number>`count(*)`.mapWith(Number),
       errorRate: sql<number>`coalesce(count(*) filter (where ${externalCalls.outcome} = 'error')::float / nullif(count(*) filter (where ${externalCalls.outcome} in ('ok', 'error')), 0), 0)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number) }).from(externalCalls)
-      .where(where).groupBy(externalCalls.name, externalCalls.surface).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
+      .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.name, externalCalls.surface).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
     db.select({ surface: externalCalls.surface, name: sql<string>`coalesce(${externalCalls.clientName}, case when ${externalCalls.surface} = 'hosted' then 'Hosted Valet' else 'Unknown client' end)`,
       version: externalCalls.clientVersion, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
-      .where(where).groupBy(externalCalls.clientName, externalCalls.clientVersion, externalCalls.surface)
+      .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.clientName, externalCalls.clientVersion, externalCalls.surface)
       .orderBy(sql`count(*) desc`, externalCalls.clientName, externalCalls.clientVersion).limit(25),
   ]);
   const counts = new Map(daily.map(row => [`${row.dayMs}:${row.surface}`, row.calls]));
@@ -110,7 +119,7 @@ export async function getExternalUsage(db: AppDb, opts: {
       filledDaily.push({ dayMs, surface, calls: counts.get(`${dayMs}:${surface}`) ?? 0 });
     }
   }
-  if (!detailsVisible) return { daily: filledDaily, tools, clients, detailsVisible, recent: [], hasMore: false };
+  if (!detailsVisible) return { classification, daily: filledDaily, tools, clients, detailsVisible, recent: [], hasMore: false };
   // Workflow-step threads do not carry the run's originating audience. Fail closed on details.
   const feedWhere = and(where,
     sql`NOT (${externalCalls.ownerType} = 'team' AND (coalesce(${externalCalls.sessionId}, '') LIKE 'wf:%'
@@ -118,7 +127,7 @@ export async function getExternalUsage(db: AppDb, opts: {
       OR ${externalCalls.name} LIKE 'workflows %'))`,
     scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined);
   // Search first, then check a bounded candidate window. Hidden matches never set hasMore.
-  const candidates = await db.select({ call: externalCalls, userName: users.name, teamName: teams.name }).from(externalCalls)
+  const candidates = await db.select({ call: externalCalls, key: intentKey, userName: users.name, teamName: teams.name }).from(externalCalls).leftJoin(intentLabelJoin, intentLabelOn)
     .leftJoin(users, eq(users.id, externalCalls.userId))
     .leftJoin(teams, and(eq(externalCalls.ownerType, "team"), eq(teams.id, externalCalls.ownerId), eq(teams.orgId, scope.orgId)))
     .where(and(feedWhere, opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
@@ -150,8 +159,8 @@ export async function getExternalUsage(db: AppDb, opts: {
     shown.push(row);
     if (shown.length > opts.offset + opts.limit) break;
   }
-  return { daily: filledDaily, tools, clients, detailsVisible, hasMore: shown.length > opts.offset + opts.limit,
-    recent: shown.slice(opts.offset, opts.offset + opts.limit).map(({ call: r, userName, teamName }) => ({ userName, teamName,
+  return { classification, daily: filledDaily, tools, clients, detailsVisible, hasMore: shown.length > opts.offset + opts.limit,
+    recent: shown.slice(opts.offset, opts.offset + opts.limit).map(({ call: r, key, userName, teamName }) => ({ key, userName, teamName,
       intentCleared: r.intentClearedAt !== null,
       id: r.id, surface: r.surface, name: r.name, clientName: r.clientName, clientVersion: r.clientVersion,
       userId: r.userId, outcome: r.outcome, intent: r.intent, createdAt: r.createdAt })) };

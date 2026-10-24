@@ -70,3 +70,11 @@ export async function prepareUsageAnalytics(db: PgDb): Promise<void> {
     cursor = next;
   }
 }
+
+/** Republish cost and rollup use cases after adding internal tagging accounting. */
+export const taggingAccountingPublishSql = projectedCostViewSql
+  + "CREATE OR REPLACE VIEW usage_daily_entries AS"
+  + migration.split("CREATE OR REPLACE VIEW usage_daily_entries AS")[1]!.split("CREATE OR REPLACE VIEW usage_daily_ready")[0]
+  + "CREATE OR REPLACE VIEW usage_hourly_entries AS"
+  + migration.split("CREATE OR REPLACE VIEW usage_hourly_entries AS")[1]!.split("CREATE OR REPLACE VIEW usage_hourly_ready")[0]
+  + "CREATE OR REPLACE VIEW tagging_accounting_ready AS SELECT 1 AS version WHERE false;";

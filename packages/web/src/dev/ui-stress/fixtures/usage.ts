@@ -147,6 +147,7 @@ const proxyItems: UsageDrillItem[] = Array.from({ length: 6 }, (_, i) =>
   drill("proxy", { id: `usage-proxy-${i}`, label: i === 0 ? `key-${HEX_300}` : `API key ${i}`, isChild: false, parentId: null }, i + 1));
 
 export const stressUsageItems: Record<UsageUseCase, UsageDrillResponse> = {
+  tagging: { items: [] },
   workflow: { items: workflowItems },
   session: { items: sessionItems },
   orchestrator: { items: orchestratorItems },

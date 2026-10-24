@@ -1,4 +1,5 @@
 import { externalUsageRetention } from "../services/external-usage.js";
+import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeDeps } from "../home/service.js";
@@ -841,6 +842,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
