@@ -105,3 +105,69 @@ The classifier parser sanitizes strings before validating proposed keys, labels,
 Administrator edits use the same sanitizer before length checks.
 NUL and lone UTF-16 surrogates are removed; complete astral characters remain intact.
 This prevents invalid model text from rolling back a batch or invalid edit text from failing at the database boundary.
+
+## Session outcomes (PR3)
+
+`session_outcome` is a closed, single-label dimension.
+Its outcome keys are `completed`, `partial`, `failed`, `blocked_on_human`, `abandoned`, and `unclear`.
+The library also keeps its required `other` fallback for invalid classifier output.
+The card only shows that fallback when it has assignments.
+
+The subject is one session thread, including assistant and child-session threads.
+The renderer uses that thread's latest compaction summary and up to 12 recent nonempty user/assistant messages.
+SQL selects messages before limiting the tail, ordered by timestamp and sequence.
+A separate whole-thread user-message check determines eligibility, even when the user message is outside that tail.
+The existing transcript formatter flattens untrusted text.
+The final input stays under the library's 1,024-byte cap.
+Raw tool results and attachments are not included in the model prompt.
+Sessions with no user message, deleted sessions, and accounting sessions are excluded.
+A running or queued latest submission defers classification until another stop event.
+
+The existing event stream enqueues settled, idle, and human-blocked sessions.
+The generic queue debounces these jobs for ten minutes.
+The subject cache limits each thread to three successful re-tags per UTC day.
+Cap-blocked jobs keep their version and wait until the next UTC midnight, without consuming attempts.
+The input hash skips repeated unchanged states.
+A changed summary, tail, or execution state permits reclassification.
+There is no historical-session backfill.
+
+`GET /api/usage/session-outcomes` returns only outcome labels, definitions, and counts.
+It uses the existing period resolver and personal/team/org authorization.
+The card counts each thread's latest label when its classification timestamp falls in the selected period.
+It does not expose session IDs or transcript text.
+Local validation finished one session and displayed Completed: 1.
+The completion provider was deterministic, not a live model.
+
+Session outcome labels also retain null actors for synthetic team runtime principals.
+
+The UI stress gallery seeds scoped session outcomes without network requests.
+
+## Outcome review constraints
+
+Outcome subjects keep the external identity `session_id:thread_id` from the event envelope.
+Jobs and subject caches also store separate nullable `session_id` and `thread_id` source columns.
+The renderer and Usage joins use these columns, not concatenated identities.
+A deployed-schema repair resolves unambiguous existing subjects and jobs once; it skips ambiguous legacy identities.
+The renderer reads only that thread's compaction, recent turns, and latest queue item.
+Empty assistant messages do not add a line.
+Running or queued work does not receive a settled label; a human gate can receive a blocked label.
+Each relevant event postpones classification until ten quiet minutes have passed.
+An initial label permits at most three successful re-tags per UTC day.
+Unchanged text and rejected output do not consume that budget.
+Workflow-step sessions (`wf:`) are excluded.
+Child-session threads are included and identified in the card tooltip.
+The response retains the `sessions` count field, but each count now represents one thread.
+
+## Transcript branches
+
+For an edited thread, outcome rendering follows the active leaf's parent links.
+User eligibility, the compaction summary and recent textual messages all use that path.
+Abandoned branches remain stored but cannot affect classification. Returning to a branch selects its transcript again.
+Unbranched legacy threads retain their full linear history. SQL walks identities only, before loading bounded text.
+
+## Branch switches and in-flight work
+
+A `branch_switched` event enqueues the thread on the same ten-minute debounce as settled and idle events.
+An edit or a return therefore re-renders and re-tags the active branch.
+The renderer defers a thread while any of its submissions is collecting, queued, running, or terminalizing.
+A newer cancelled follow-up cannot make a thread with earlier running work look settled.

@@ -6653,3 +6653,8 @@ export interface ToolIntentUsage {
   emergingCalls?: number;
   keys: ToolIntentKeyUsage[]; consolidationDue: boolean; canManage: boolean;
 }
+
+/** Thread outcome counts, including child-session threads. `sessions` retains its existing wire name. */
+export interface SessionOutcomeUsage {
+  outcomes: { key: string; label: string; definition: string; sessions: number }[];
+}

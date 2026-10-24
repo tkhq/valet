@@ -4,6 +4,7 @@
  * the `services/usage` library, which owns the SQL over the one `cost_entries`
  * definition (so the dashboard and Grafana cannot drift).
  */
+import { sessionOutcomeUsage } from "../tagging/usage.js";
 import { isOrgAdmin } from "../services/org.js";
 import { getExternalUsage } from "../services/external-usage.js";
 import { Hono } from "hono";
@@ -186,4 +187,12 @@ usageRouter.get("/external", async (c) => {
     return c.json({ error: "Use offset 0 to 100000, limit 1 to 100, and search text of 500 characters or fewer." }, 400);
   }
   return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface, key, canManage: await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id) }));
+});
+
+usageRouter.get("/session-outcomes", async c => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await sessionOutcomeUsage(c.var.providers.db, scope, period));
 });

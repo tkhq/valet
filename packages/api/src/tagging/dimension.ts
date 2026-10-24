@@ -1,4 +1,8 @@
-export interface SubjectRef { type: string; id: string }
+export interface SubjectRef {
+  type: string; id: string;
+  /** Caller-owned source identity; opaque to the generic classifier. */
+  sessionId?: string; threadId?: string;
+}
 export interface TagSubject extends SubjectRef {
   text: string;
   userId: string | null;
@@ -17,6 +21,7 @@ export interface Dimension {
   rules?: (subject: TagSubject) => string | undefined;
   maxActiveKeys: number;
   subjectTypes: readonly string[];
+  maxRetagsPerDay?: number;
 }
 
 export function normalizeKey(value: string): string {

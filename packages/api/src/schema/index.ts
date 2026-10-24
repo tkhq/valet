@@ -3155,12 +3155,15 @@ export const tagLabels = pgTable("tag_labels", {
 
 // A successful multi classification with no labels still has an input hash.
 export const tagSubjects = pgTable("tag_subjects", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
   orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
   ownerType: text("owner_type"), ownerId: text("owner_id"),
+  retagDay: bigint("retag_day", { mode: "number" }).notNull().default(0), retagCount: integer("retag_count").notNull().default(0),
   userId: text("user_id"), inputHash: text("input_hash").notNull(), otherRetried: boolean("other_retried").notNull().default(false),
 }, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] })]);
 
 export const tagJobs = pgTable("tag_jobs", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
   orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
   version: integer("version").notNull().default(1), attempts: integer("attempts").notNull().default(0),
   force: boolean("force").notNull().default(false), nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),

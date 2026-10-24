@@ -4,13 +4,14 @@ import type { AppDb } from "../lib/drizzle.js";
 import { tagJobs } from "../schema/index.js";
 import { recordTaggingDeadLetter } from "../observability/tagging-metrics.js";
 import { configureTaggingAvailability } from "./availability.js";
+import { sessionOutcomeDimension, sessionOutcomeRenderer } from "./session-outcome.js";
 import { Tagger } from "./tagger.js";
 import { taggingModel } from "./model.js";
 import { toolIntentDimension, toolIntentRenderer } from "./tool-intent.js";
 
 export function createTagger(db: AppDb, credentials: CredentialStore, orgId: string): Tagger {
-  return new Tagger({ db, orgId, dimensions: [toolIntentDimension], classify: taggingModel(db, credentials, orgId),
-    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)]]) });
+  return new Tagger({ db, orgId, dimensions: [toolIntentDimension, sessionOutcomeDimension], classify: taggingModel(db, credentials, orgId),
+    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)], ["session_thread", sessionOutcomeRenderer(db, orgId)]]) });
 }
 
 /** Uses EventDispatcher's existing retry rail. No timer or session reader lives here. */

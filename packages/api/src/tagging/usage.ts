@@ -1,8 +1,10 @@
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { externalCalls, tagDimensionState } from "../schema/index.js";
-import type { ToolIntentUsage } from "../wire/types.js";
-import { resolveKey, type RegistryKey } from "./registry.js";
+import type { ToolIntentUsage, SessionOutcomeUsage } from "../wire/types.js";
+import type { UsageScope } from "../services/usage.js";
+import type { ResolvedUsagePeriod } from "../services/usage-period.js";
+import { readRegistry, resolveKey, type RegistryKey } from "./registry.js";
 
 /** Resolve the small organization registry once, not the label table recursively in every query. */
 export function intentJoins(keys: readonly RegistryKey[], orgId: string, canManage: boolean) {
@@ -42,4 +44,22 @@ export async function toolIntentUsage(db: AppDb, orgId: string, where: SQL | und
       key: key.key, label: key.label, definition: key.definition, status: key.status, origin: key.origin,
       calls: counts.find(row => row.key === key.key)?.calls ?? 0, uniqueUsers: counts.find(row => row.key === key.key)?.uniqueUsers ?? 0,
       errorRate: counts.find(row => row.key === key.key)?.errorRate ?? 0 })) };
+}
+
+/** Counts thread subjects, including child-session threads. No transcript leaves this endpoint. */
+export async function sessionOutcomeUsage(db: AppDb, scope: UsageScope, period: ResolvedUsagePeriod): Promise<SessionOutcomeUsage> {
+  const result = await db.execute(sql`SELECT l.key, count(*)::int AS sessions FROM tag_labels l
+    JOIN tag_subjects subject ON subject.org_id = l.org_id AND subject.dimension = l.dimension
+      AND subject.subject_type = l.subject_type AND subject.subject_id = l.subject_id
+    JOIN engine_threads t ON t.session_id = subject.session_id AND t.id = subject.thread_id
+    JOIN agent_sessions s ON s.id = t.session_id AND s.org_id = l.org_id
+    WHERE l.org_id = ${scope.orgId} AND l.dimension = 'session_outcome' AND l.subject_type = 'session_thread'
+      AND s.status <> 'deleted' AND s.id NOT LIKE 'wf:%'
+      AND l.classified_at >= ${period.startMs} AND l.classified_at < ${period.endMs}
+      ${scope.scope === "me" ? sql`AND s.user_id = ${scope.userId}` : sql``}
+      ${scope.scope === "team" ? sql`AND s.owner_type = 'team' AND s.owner_id = ${scope.teamId}` : sql``}
+    GROUP BY l.key`) as { rows: { key: string; sessions: unknown }[] };
+  const registry = await readRegistry(db, scope.orgId, "session_outcome");
+  return { outcomes: registry.filter(key => key.status !== "merged" && (key.key !== "other" || result.rows.some(row => row.key === "other")))
+    .map(key => ({ key: key.key, label: key.label, definition: key.definition, sessions: Number(result.rows.find(row => row.key === key.key)?.sessions ?? 0) })) };
 }

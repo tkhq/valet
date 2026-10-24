@@ -5,6 +5,7 @@
  */
 import { keepPreviousData, type UseQueryOptions } from "@tanstack/react-query";
 import type {
+  SessionOutcomeUsage,
   ExternalUsageResponse,
   UsageDrillResponse,
   UsagePeriodSelection,
@@ -18,6 +19,8 @@ import { api } from "~/api/client";
 import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkUsage = {
+  sessionOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "session-outcomes", period, scope, teamId] as const,
   external: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: string, key?: string) =>
     ["usage", "external", period, scope, teamId, search, offset, surface, key] as const,
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
@@ -95,4 +98,9 @@ export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScope
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });
+}
+
+export function useSessionOutcomeUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) {
+  return useCancellableQuery<SessionOutcomeUsage>({ queryKey: qkUsage.sessionOutcomes(period, scope, teamId),
+    queryFn: ({ signal }) => api.sessionOutcomeUsage(period, scope, teamId, signal), staleTime: 30_000 });
 }

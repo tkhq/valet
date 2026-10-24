@@ -433,17 +433,42 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "tag_labels_single", probe: { kind: "index", index: "tag_labels_single" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single'` },
   { describe: "tag_labels_aggregate", probe: { kind: "index", index: "tag_labels_aggregate" }, sql: `CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at)` },
   { describe: "tag_subjects", probe: { kind: "table", table: "tag_subjects" }, sql: `CREATE TABLE IF NOT EXISTS tag_subjects (
+ session_id text, thread_id text,
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
- input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 )` },
+  { describe: "tag_subjects.retag_count", probe: { kind: "column", table: "tag_subjects", column: "retag_count" },
+    sql: `DO $repair$ BEGIN ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_day bigint NOT NULL DEFAULT 0;
+      ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_count integer NOT NULL DEFAULT 0; END $repair$` },
   { describe: "tag_subjects.owner_type", probe: { kind: "column", table: "tag_subjects", column: "owner_type" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_type text` },
   { describe: "tag_subjects.owner_id", probe: { kind: "column", table: "tag_subjects", column: "owner_id" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_id text` },
   { describe: "tag_jobs", probe: { kind: "table", table: "tag_jobs" }, sql: `CREATE TABLE IF NOT EXISTS tag_jobs (
+ session_id text, thread_id text,
  org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
  version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 )` },
+  { describe: "tag_subjects.session_id", probe: { kind: "column", table: "tag_subjects", column: "session_id" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS session_id text` },
+  { describe: "tag_subjects.thread_id", probe: { kind: "column", table: "tag_subjects", column: "thread_id" }, sql: `DO $repair$ BEGIN
+    ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS thread_id text;
+    UPDATE tag_subjects target SET session_id = source.session_id, thread_id = source.thread_id FROM (
+      SELECT s.org_id, t.session_id || ':' || t.id AS ref, min(t.session_id) AS session_id, min(t.id) AS thread_id
+      FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
+      GROUP BY s.org_id, t.session_id || ':' || t.id HAVING count(*) = 1
+    ) source WHERE target.org_id = source.org_id AND target.subject_id = source.ref
+      AND target.dimension = 'session_outcome' AND target.subject_type = 'session_thread' AND target.session_id IS NULL;
+    END $repair$` },
+  { describe: "tag_jobs.session_id", probe: { kind: "column", table: "tag_jobs", column: "session_id" }, sql: `ALTER TABLE tag_jobs ADD COLUMN IF NOT EXISTS session_id text` },
+  { describe: "tag_jobs.thread_id", probe: { kind: "column", table: "tag_jobs", column: "thread_id" }, sql: `DO $repair$ BEGIN
+    ALTER TABLE tag_jobs ADD COLUMN IF NOT EXISTS thread_id text;
+    UPDATE tag_jobs target SET session_id = source.session_id, thread_id = source.thread_id FROM (
+      SELECT s.org_id, t.session_id || ':' || t.id AS ref, min(t.session_id) AS session_id, min(t.id) AS thread_id
+      FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
+      GROUP BY s.org_id, t.session_id || ':' || t.id HAVING count(*) = 1
+    ) source WHERE target.org_id = source.org_id AND target.subject_id = source.ref
+      AND target.dimension = 'session_outcome' AND target.subject_type = 'session_thread' AND target.session_id IS NULL;
+    END $repair$` },
   { describe: "tag_jobs_retry_due", probe: { kind: "index", index: "tag_jobs_retry_due" }, sql: `DO $repair$ BEGIN DROP INDEX IF EXISTS tag_jobs_due; CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5; END $repair$` },
   { describe: "tag_dimension_state", probe: { kind: "table", table: "tag_dimension_state" }, sql: `CREATE TABLE IF NOT EXISTS tag_dimension_state (
  org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
