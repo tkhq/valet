@@ -325,3 +325,47 @@ it("retains the legacy null-parent prefix when a branched path starts at a pre-D
   expect(rendered[0]?.text).toContain("Original legacy request.");
   expect(rendered[0]?.text).toContain("Revised answer delivered.");
 });
+
+it("re-tags the active branch after a return to an earlier failed branch", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb); const events = new InMemoryEventStream();
+  vi.spyOn(availability, "taggingAvailable").mockResolvedValue(true);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("user", "user", "Deliver the patch."),
+    { ...message("failed", "assistant", "The patch failed to build.", 2), parentId: "user" },
+    { ...message("done", "assistant", "The patch is delivered.", 3), parentId: "user" }]);
+  await fixture.pgdb.query("UPDATE engine_threads SET metadata = $1 WHERE id = 'thread'", [JSON.stringify({ [THREAD_BRANCHED_KEY]: true })]);
+  const render = sessionOutcomeRenderer(db, "org");
+  const classify = vi.fn<Classify>(async request => result(request.subjects[0]?.text.includes("failed") ? "failed" : "completed"));
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify, renderers: new Map([["session_thread", render]]) });
+  const ref = { type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" };
+  await tagger.enqueueTagging("session_outcome", [ref]); await tagger.drain("session_outcome");
+  expect((await tagger.labelsFor(ref.type, ref.id))[0]?.key).toBe("completed");
+  const stop = wireSessionOutcomeTagging(events, db);
+  try {
+    await fixture.pgdb.query("UPDATE engine_threads SET active_leaf_entry_id = 'failed' WHERE id = 'thread'");
+    await events.append({ sessionId: "session", threadId: "thread", timestamp: Date.now(), event: { type: "branch_switched", threadId: "thread", noteEntryId: "failed" } }, "branch:failed");
+    await vi.waitFor(async () => expect(await db.select().from(tagJobs)).toHaveLength(1));
+  } finally { stop(); }
+  await db.update(tagJobs).set({ nextAttemptAt: Date.now() });
+  await tagger.drain("session_outcome");
+  expect((await tagger.labelsFor(ref.type, ref.id))[0]?.key).toBe("failed");
+});
+
+it("skips a thread whose earlier submission still runs behind a newer cancelled follow-up", async () => {
+  const db = fixture.appDb; const store = new PgSessionStore(fixture.pgdb);
+  await db.insert(agentSessions).values({ id: "session", orgId: "org", userId: "alice", workspace: "test", createdAt: 1, updatedAt: 1 });
+  await store.saveThread("session", { id: "thread", sessionId: "session", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await store.appendEntries("session", "thread", [message("user", "user", "Deliver the patch."), message("assistant", "assistant", "Working on it.", 2)]);
+  await fixture.pgdb.query(`INSERT INTO engine_queue_items(id,session_id,thread_id,status,outcome,content,attempt_count,max_attempts,timeout_at,created_at,updated_at) VALUES
+    ('running','session','thread','running',NULL,'Deliver the patch.',1,3,0,1,1),
+    ('cancelled','session','thread','settled','aborted','Also add docs.',0,3,0,2,2)`);
+  const classify = vi.fn<Classify>(async () => result("abandoned"));
+  const render = sessionOutcomeRenderer(db, "org");
+  const tagger = new Tagger({ db, orgId: "org", dimensions: [sessionOutcomeDimension], classify, renderers: new Map([["session_thread", render]]) });
+  const ref = { type: "session_thread", id: "session:thread", sessionId: "session", threadId: "thread" };
+  expect(await render([ref])).toEqual([]);
+  await tagger.enqueueTagging("session_outcome", [ref]); await tagger.drain("session_outcome");
+  expect(classify).not.toHaveBeenCalled();
+  expect(await tagger.labelsFor(ref.type, ref.id)).toEqual([]);
+});

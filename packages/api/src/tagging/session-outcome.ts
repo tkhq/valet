@@ -83,7 +83,11 @@ export function sessionOutcomeRenderer(db: AppDb, orgId: string): SubjectRendere
       const summary = await db.execute(sql`${path} SELECT left(summary, 1024) AS summary FROM engine_entries WHERE session_id = ${session.id} AND thread_id = ${session.threadId} AND id IN (SELECT id FROM active_entries) AND entry_type = 'compaction' ORDER BY created_at DESC, seq DESC LIMIT 1`) as { rows: { summary: string | null }[] };
       const pending = await db.execute(sql`SELECT status, outcome FROM engine_queue_items WHERE session_id = ${session.id} AND thread_id = ${session.threadId} ORDER BY created_at DESC, id DESC LIMIT 1`) as { rows: { status: string; outcome: string | null }[] };
       const latest = pending.rows[0];
-      if (latest?.status === "running" || latest?.status === "queued") continue;
+      // A cancelled follow-up can be the newest row while earlier work still runs.
+      // Defer while any submission on the thread is in flight, not just the newest.
+      const active = await db.execute(sql`SELECT EXISTS (SELECT 1 FROM engine_queue_items WHERE session_id = ${session.id}
+        AND thread_id = ${session.threadId} AND status IN ('collecting', 'queued', 'running', 'terminalizing')) AS present`) as { rows: { present: boolean }[] };
+      if (active.rows[0]?.present) continue;
       const state = latest ? `${latest.status}${latest.outcome ? ` (${latest.outcome})` : ""}` : session.status;
       rendered.push({ type: "session_thread", id: `${session.id}:${session.threadId}`, sessionId: session.id, threadId: session.threadId, text: renderSessionOutcomeText(summary.rows[0]?.summary ?? undefined, entries, state),
         userId: session.userId.startsWith("team:") ? null : session.userId, ownerType: session.ownerType === "team" ? "team" as const : "user" as const, ownerId: session.ownerId || session.userId });
@@ -94,14 +98,17 @@ export function sessionOutcomeRenderer(db: AppDb, orgId: string): SubjectRendere
 
 /** Subscribe before boot restore, just like automatic titles and delivery settlement. */
 export function wireSessionOutcomeTagging(eventStream: EventStream, db: AppDb): () => void {
-  return eventStream.subscribe({ eventTypes: ["submission_settled", "status"] }, delivered => {
+  // A branch switch (edit or return) changes the active transcript without a new turn.
+  return eventStream.subscribe({ eventTypes: ["submission_settled", "status", "branch_switched"] }, delivered => {
     const event = delivered.event;
-    if (event.type !== "submission_settled" && !(event.type === "status" && (event.status === "idle" || event.status === "blocked_on_decision_gate"))) return;
+    if (event.type !== "submission_settled" && event.type !== "branch_switched" &&
+      !(event.type === "status" && (event.status === "idle" || event.status === "blocked_on_decision_gate"))) return;
+    const threadId = delivered.threadId ?? (event.type === "branch_switched" ? event.threadId : undefined);
     void (async () => {
-      if (delivered.sessionId.startsWith("wf:") || !delivered.threadId) return;
+      if (delivered.sessionId.startsWith("wf:") || !threadId) return;
       const [session] = await db.select({ orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, delivered.sessionId));
       if (session && await taggingAvailable(db, session.orgId)) await enqueueTagging(db, session.orgId, "session_outcome",
-        [{ type: "session_thread", id: `${delivered.sessionId}:${delivered.threadId}`, sessionId: delivered.sessionId, threadId: delivered.threadId }], false, 10 * 60_000);
+        [{ type: "session_thread", id: `${delivered.sessionId}:${threadId}`, sessionId: delivered.sessionId, threadId }], false, 10 * 60_000);
     })().catch(() => console.warn("Session outcome could not be queued. Check database availability."));
   });
 }

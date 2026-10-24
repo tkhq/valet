@@ -164,3 +164,10 @@ For an edited thread, outcome rendering follows the active leaf's parent links.
 User eligibility, the compaction summary and recent textual messages all use that path.
 Abandoned branches remain stored but cannot affect classification. Returning to a branch selects its transcript again.
 Unbranched legacy threads retain their full linear history. SQL walks identities only, before loading bounded text.
+
+## Branch switches and in-flight work
+
+A `branch_switched` event enqueues the thread on the same ten-minute debounce as settled and idle events.
+An edit or a return therefore re-renders and re-tags the active branch.
+The renderer defers a thread while any of its submissions is collecting, queued, running, or terminalizing.
+A newer cancelled follow-up cannot make a thread with earlier running work look settled.
