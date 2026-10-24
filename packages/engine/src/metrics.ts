@@ -63,6 +63,7 @@ interface Instruments {
   tokens: Counter;
   costUsd: Counter;
   settlements: Counter;
+  childResultsRecovered: Counter;
   queueWait: Histogram;
   toolDuration: Histogram;
   sandboxExecDuration: Histogram;
@@ -117,6 +118,9 @@ function inst(): Instruments {
     }),
     costUsd: meter.createCounter("valet.cost.usd", {
       description: "LLM spend in USD (priced models only — unpriced turns record nothing)",
+    }),
+    childResultsRecovered: meter.createCounter("valet.child.results_recovered", {
+      description: "Pending child settlements recovered at runtime after a missed observer event",
     }),
     settlements: meter.createCounter("valet.submissions.settled", {
       description: "Settled submissions, by outcome",
@@ -265,6 +269,10 @@ function inst(): Instruments {
   return instruments;
 }
 
+export function recordChildResultRecovered(): void {
+  inst().childResultsRecovered.add(1);
+}
+
 export function recordTurn(args: {
   model?: string;
   reason: string;
@@ -392,6 +400,11 @@ export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause | "sessio
  * for `lease.expired`. */
 export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
   inst().wakeupSignalsLost.add(1, { kind });
+}
+
+/** A child retention sweep stopped waiting for a wakeup or hold's terminal signal. */
+export function recordChildTerminalSignalAbandoned(kind: WakeupKind | "hold"): void {
+  inst().wakeupSignalsLost.add(1, { kind, reason: "child_terminal_grace" });
 }
 
 /** A best-effort kill that threw after the row's terminal CAS (fix wave 4

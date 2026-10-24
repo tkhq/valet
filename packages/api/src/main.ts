@@ -434,7 +434,7 @@ const server = startListening({
 // follows it.
 //
 // The chain has two halves around the `bootReady` flip:
-//   1. Traffic-protecting steps — session restore, child-watch re-arm, the
+//   1. Traffic-protecting steps — session restore, the
 //      config reconcile (fail-fast `process.exit(1)`: a bad config dies
 //      while still NotReady and never takes traffic), team-sync report.
 //   2. Best-effort service starts — channel host, webhook sync, workflow
@@ -458,13 +458,8 @@ async function runBootChain(): Promise<void> {
 
   if (closed) return;
 
-  // Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
-  // restart-mid-child-run survival mechanism. Alongside
-  // restoreUnsettledSessions above; a failure here must likewise never block
-  // boot.
-  await providers.childWatcher.rearm().catch((err) => {
-    console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
-  });
+  // Recovery scans only delivery-active rows. It must not delay WakeWatcher or readiness.
+  providers.childWatcher.startRecovery();
 
   if (closed) return;
 
@@ -736,7 +731,7 @@ async function close(): Promise<void> {
     console.error("installationSweep.stop failed:", err);
   }
   try {
-    providers.childWatcher.stopRetentionSweep();
+    await providers.childWatcher.stopRetentionSweep();
   } catch (err) {
     console.error("childWatcher.stopRetentionSweep failed:", err);
   }

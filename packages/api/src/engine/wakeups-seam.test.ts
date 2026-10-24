@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemorySessionStore } from "@valet/engine";
-import type { ExecJobHandle, JobPoll, Sandbox } from "@valet/engine";
+import type { ExecJobHandle, JobPoll, Sandbox, WakeupCreateInput } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamSession } from "./wakeups-seam.js";
 
 const LIMITS = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
@@ -41,6 +41,37 @@ function fakeSession(sandbox: Sandbox, sandboxId = "sb-1", live: Sandbox | null 
 
 describe("buildWakeupsSeam", () => {
   const NOW = 1_700_000_000_000;
+
+  it.each(["process", "watch", "timer", "hold", "event"] as const)("persists the creating turn for %s work before asynchronous side effects", async kind => {
+    const store = await storeWithSession();
+    await store.saveThread("session-1", { id: "thread-1", sessionId: "session-1", key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    await store.admitSubmission("session-1", "thread-1", { id: "creator", threadId: "thread-1", content: "work", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: NOW + 60_000, createdAt: NOW, updatedAt: NOW });
+    await store.claimSubmission({ sessionId: "session-1", threadId: "thread-1", itemId: "creator", attemptId: "attempt", ownerId: "test" });
+    const sandbox = fakeSandbox({ execJob: vi.fn().mockResolvedValue({ execId: "job" }) });
+    const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW,
+      checkArm: async () => {
+        // The arm check can outlive the creator's turn. Capture provenance before it awaits.
+        await store.reserveSettlement("session-1", "thread-1", "creator", { outcome: "failed", error: "done" }, { itemId: "creator", attemptId: "attempt" });
+        await store.finalizeSettlement("session-1", "thread-1", "creator", { itemId: "creator", attemptId: "attempt" });
+        return { ok: true, subjects: ["github:acme/repo#1"], self: [] };
+      },
+    }, "session-1", () => fakeSession(sandbox));
+    if (kind === "hold") {
+      const lease = await seam.hold({ hours: 1, reason: "work", threadId: "thread-1", sourceQueueItemId: "creator" });
+      expect((await store.getLease(lease.id))?.sourceQueueItemId).toBe("creator");
+    } else if (kind === "event") {
+      const result = await seam.armEvent!("thread-1", { subject: "https://github.com/acme/repo/pull/1", on: [{ key: "github.check_run.completed" }], once: true, reason: "CI", maxHours: 1 }, undefined, undefined, "creator");
+      if (!("wakeup" in result)) throw new Error(result.refused);
+      expect((await store.getWakeup(result.wakeup.id))?.sourceQueueItemId).toBe("creator");
+    } else {
+      const input: WakeupCreateInput = kind === "timer" ? { kind, prompt: "work", fireAt: NOW + 60_000 }
+        : kind === "process" ? { kind, command: "sleep 1", reason: "work", deadlineHours: 1 } : { kind, command: "logs", reason: "work", maxHours: 1 };
+      const result = await seam.create("thread-1", { ...input, sourceQueueItemId: "creator" });
+      expect((await store.getWakeup(result.wakeup.id))?.sourceQueueItemId).toBe("creator");
+      if (result.lease) expect((await store.getLease(result.lease.id))?.sourceQueueItemId).toBe("creator");
+    }
+  });
 
   it("creates a running process wakeup and an active lease with matching ids and a 48h deadline", async () => {
     const store = await storeWithSession();

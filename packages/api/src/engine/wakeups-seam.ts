@@ -1,3 +1,5 @@
+import type { AppDb } from "../lib/drizzle.js";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { recordWakeupEnded } from "@valet/engine";
 import type {
   ArmEventRequest,
@@ -44,6 +46,7 @@ export interface WakeupsSeamSession {
 }
 
 export interface WakeupsSeamDeps {
+  db?: AppDb;
   engineStore: SessionStore;
   limits: WakeupLimits;
   /** Restores a lease's sandbox for a best-effort kill or a log read when the session holds no ready handle. */
@@ -184,6 +187,7 @@ export function buildWakeupsSeam(
     reason: string,
     hours: number,
     origin: ChannelOrigin | undefined,
+    sourceQueueItemId: string | undefined,
   ): Promise<{ wakeup: Wakeup; lease: Lease }> {
     assertLeaseHours(hours);
     const sb = session()?.sandbox;
@@ -200,6 +204,7 @@ export function buildWakeupsSeam(
       sandboxId,
       ownerKind: kind,
       ownerId: wakeupId,
+      sourceQueueItemId,
       threadId,
       ...(origin !== undefined ? { origin } : {}),
       reason,
@@ -209,6 +214,7 @@ export function buildWakeupsSeam(
     const pending: Wakeup = {
       id: wakeupId,
       sessionId,
+      sourceQueueItemId,
       threadId,
       kind,
       status: "pending",
@@ -306,11 +312,13 @@ export function buildWakeupsSeam(
     prompt: string,
     fireAt: number,
     origin: ChannelOrigin | undefined,
+    sourceQueueItemId: string | undefined,
   ): Promise<{ wakeup: Wakeup }> {
     const nowMs = now();
     const wakeup: Wakeup = {
       id: newWakeupId(),
       sessionId,
+      sourceQueueItemId,
       threadId,
       kind: "timer",
       status: "pending",
@@ -344,6 +352,7 @@ export function buildWakeupsSeam(
     reason: string,
     maxHours: number,
     origin: ChannelOrigin | undefined,
+    sourceQueueItemId: string | undefined,
   ): Promise<{ wakeup: Wakeup }> {
     if (!(maxHours > 0) || maxHours > limits.timerMaxHours) {
       throw new Error(`[wait_for_event] Set max_hours (1 to ${limits.timerMaxHours}).`);
@@ -352,6 +361,7 @@ export function buildWakeupsSeam(
     const wakeup: Wakeup = {
       id: newWakeupId(),
       sessionId,
+      sourceQueueItemId,
       threadId,
       kind: "event",
       status: "running",
@@ -382,6 +392,7 @@ export function buildWakeupsSeam(
       req: ArmEventRequest,
       origin?: ChannelOrigin,
       credentials?: CredentialProvider,
+      sourceQueueItemId?: string,
     ): Promise<ArmEventResult> => {
       const checked = await checkArm(threadId, req, credentials);
       if (!checked.ok) return { refused: checked.text };
@@ -393,7 +404,7 @@ export function buildWakeupsSeam(
         ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
-        const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+        const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin, sourceQueueItemId);
         return { ...result, ...(checked.warning ? { warning: checked.warning } : {}) };
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
@@ -408,7 +419,7 @@ export function buildWakeupsSeam(
 
     async create(threadId: string, input: WakeupCreateInput) {
       if (input.kind === "timer") {
-        return createTimer(threadId, input.prompt, input.fireAt, input.origin);
+        return createTimer(threadId, input.prompt, input.fireAt, input.origin, input.sourceQueueItemId);
       }
       if (input.kind === "event") {
         // Only `armEvent` creates event waiters, so every one passes the
@@ -416,7 +427,7 @@ export function buildWakeupsSeam(
         throw new Error(EVENT_CREATE_REFUSAL);
       }
       const hours = input.kind === "process" ? input.deadlineHours : input.maxHours;
-      return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin);
+      return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin, input.sourceQueueItemId);
     },
 
     async hold(input: HoldInput): Promise<Lease> {
@@ -434,6 +445,7 @@ export function buildWakeupsSeam(
         sessionId,
         sandboxId,
         ownerKind: "hold",
+        sourceQueueItemId: input.sourceQueueItemId,
         ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
         ...(input.origin !== undefined ? { origin: input.origin } : {}),
         reason: input.reason,
@@ -468,17 +480,22 @@ export function buildWakeupsSeam(
       };
     },
 
-    async cancel(id: string) {
+    async cancel(id: string, opts?: { terminalSignalExpected: true }) {
       const nowMs = now();
       if (id.startsWith("wk_")) {
         const wakeup = await ownWakeup(id);
         if (!wakeup) return null;
+        if (wakeup.eventMatch?.childSessionId && deps.db) {
+          await cancelChildDelivery(deps.db, engineStore, wakeup.eventMatch.childSessionId, "The child-updates subscription was cancelled.", opts);
+          recordEnded(wakeup.kind, "cancelled");
+          return { kind: "wakeup" as const };
+        }
         // Read the lease before the release: the kill needs its sandbox id.
         const lease = await activeLease(wakeup.leaseId);
         // CAS first, with the lease release in the same statement (spec B5,
         // fix wave 2 M1). A lost CAS kills nothing, so a watcher that ended
         // the row first keeps its exit signal and its cause.
-        const patch = { cause: "cancelled" as const, endedAt: nowMs };
+        const patch = { cause: "cancelled" as const, endedAt: nowMs, terminalSignalExpected: opts?.terminalSignalExpected ?? false };
         const transitioned = wakeup.leaseId
           ? await engineStore.transitionWakeupAndReleaseLease(id, ["running", "pending"], "cancelled", patch, nowMs, "cancelled")
           : await engineStore.transitionWakeup(id, ["running", "pending"], "cancelled", patch, nowMs);
@@ -501,7 +518,7 @@ export function buildWakeupsSeam(
             text: `[wakeup_cancel] ${id} belongs to ${lease.ownerKind} ${owner}. Cancel ${owner} instead; that stops the ${lease.ownerKind} and releases this lease.`,
           };
         }
-        const released = await engineStore.releaseLease(id, "cancelled", nowMs);
+        const released = await engineStore.releaseLease(id, "cancelled", nowMs, opts);
         return released ? { kind: "lease" as const } : null;
       }
       return null;

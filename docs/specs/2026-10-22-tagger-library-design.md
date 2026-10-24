@@ -98,3 +98,10 @@ Desktop is visually checked at 1280 by 800.
 Mobile remains unverified because the installed browser cannot resize.
 
 Pending approval badges are neutral. CLI HTTP 403 records use `forbidden` unless the body declares `policy_denied`.
+
+## Postgres text safety
+
+The classifier parser sanitizes strings before validating proposed keys, labels, and definitions.
+Administrator edits use the same sanitizer before length checks.
+NUL and lone UTF-16 surrogates are removed; complete astral characters remain intact.
+This prevents invalid model text from rolling back a batch or invalid edit text from failing at the database boundary.

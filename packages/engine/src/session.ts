@@ -308,6 +308,123 @@ export class Session {
   /** Last known user timezone (TKAI-584). Stamped into each new thread. */
   private latestUserTimezone: string | undefined;
   private destroyed = false;
+  private reclaiming = false;
+  private retiring = false;
+  private claimsInFlight = new Map<string, number>();
+  private executionOwners = new Set<Session>([this]);
+  private reclaimRecovery: (() => Promise<void>) | undefined;
+  private reclaimRecoveryTail: Promise<void> = Promise.resolve();
+
+  /** Reserve claim ownership before any store await. Reclaim and claims cannot cross this synchronous boundary. */
+  async claimExecution<T>(claim: () => Promise<T>, threadId = ""): Promise<T | null> {
+    if (this.isExecutionFenced || this.destroyed || this.attachment.state === "released" || this.options.isExecutionCurrent?.() === false || this.threadOwnedElsewhere(threadId)) return null;
+    this.claimsInFlight.set(threadId, (this.claimsInFlight.get(threadId) ?? 0) + 1);
+    try { return await claim(); }
+    finally {
+      const remaining = (this.claimsInFlight.get(threadId) ?? 1) - 1;
+      if (remaining) this.claimsInFlight.set(threadId, remaining); else this.claimsInFlight.delete(threadId);
+      this.notifyExecutionIdle();
+    }
+  }
+
+  get hasActiveExecution(): boolean {
+    return [...this.executionOwners].some(owner => owner.hasOwnActiveExecution);
+  }
+
+  get hasDrainingExecution(): boolean {
+    return [...this.executionOwners].some(owner => owner.retiring && owner.hasOwnActiveExecution);
+  }
+
+  get hasOwnActiveExecution(): boolean {
+    return this.claimsInFlight.size > 0 || this.listThreads().some(thread => thread.hasActiveRun);
+  }
+
+  private threadOwnedElsewhere(threadId: string): boolean {
+    return [...this.executionOwners].some(owner => owner !== this && (owner.claimsInFlight.has(threadId)
+      || owner.listThreads().some(thread => thread.id === threadId && thread.hasActiveRun)));
+  }
+
+  /** Handoff shares the exact attachment and policy wrapper; active-thread reservations span every generation. */
+  sharedExecutionRuntime(): { attachment: SandboxAttachment; sandbox: Sandbox; policySandbox?: PolicySandbox } {
+    return { attachment: this.attachment, sandbox: this.sandbox, ...(this.policySandbox ? { policySandbox: this.policySandbox } : {}) };
+  }
+
+  isThreadExecutionFenced(threadId: string): boolean {
+    return this.isExecutionFenced || this.threadOwnedElsewhere(threadId);
+  }
+
+  get isReclaiming(): boolean { return this.reclaiming; }
+  get isExecutionFenced(): boolean { return this.reclaiming || this.retiring; }
+
+  /** Config invalidation fences new claims immediately but lets already-reserved execution finish. */
+  retireExecution(recover: () => Promise<void>): void {
+    this.retiring = true;
+    for (const thread of this.threads.values()) thread.handoffParkedGate();
+    this.completeReclaim(recover);
+  }
+
+  /** Shutdown includes every generation sharing this attachment, not just the newest cached owner. */
+  stopExecutionOwners(): void {
+    for (const owner of this.executionOwners) {
+      owner.retireExecution(async () => {});
+      owner.suspendTimers({ permanent: true });
+    }
+  }
+
+  /** Also called after normal, gate-replay, and interrupted-resume execution releases local ownership. */
+  notifyExecutionIdle(): void {
+    if (this.retiring) this.notifyReclaimAdmission();
+  }
+
+  async refreshExecutionThreads(): Promise<void> {
+    for (const data of await this.providers.store.listThreads(this.id)) {
+      if (!this.threads.has(data.id)) this.attachThread(new Thread(this, data, { restoreTranscript: true }));
+    }
+    await this.reconcile();
+    // Old references remain permanently fenced; completed generations need not retain their tools and transcripts.
+    for (const owner of this.executionOwners) {
+      if (owner !== this && owner.retiring && !owner.hasOwnActiveExecution) {
+        owner.suspendTimers({ permanent: true });
+        this.executionOwners.delete(owner);
+      }
+    }
+  }
+
+  /** Call under the host cleanup barrier. Fence claims first, then recheck durable and in-process ownership. */
+  async beginReclaim(): Promise<boolean> {
+    if (this.isExecutionFenced || this.hasActiveExecution) return false;
+    this.reclaiming = true;
+    try {
+      if ((await this.providers.store.listUnsettledSubmissions(this.id)).length > 0 || this.hasActiveExecution) {
+        this.cancelReclaim();
+        return false;
+      }
+      return true;
+    } catch (error) { this.cancelReclaim(); throw error; }
+  }
+
+  /** A refused reclaim leaves this attachment usable. Never clear the fence after a terminal release. */
+  cancelReclaim(): void {
+    if (this.attachment.state === "released") return;
+    this.reclaiming = false;
+    for (const thread of this.threads.values()) void thread.kick();
+  }
+
+  /** Keep old references fenced. The host schedules recovery after its cleanup barrier, never inside a claim. */
+  completeReclaim(recover: () => Promise<void>): void {
+    this.reclaimRecovery = recover;
+    this.notifyReclaimAdmission();
+  }
+
+  notifyReclaimAdmission(): void {
+    if (!this.reclaimRecovery) return;
+    const recover = this.reclaimRecovery;
+    this.reclaimRecoveryTail = this.reclaimRecoveryTail.then(recover).catch(error => {
+      console.error(`Session ${this.id}: reclaim recovery failed; resolve the session to retry:`, error);
+    });
+  }
+
+  private timersStopped = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight: Promise<void> | undefined;
@@ -390,7 +507,7 @@ export class Session {
    * the process alive, and are cleared in `destroy()`.
    */
   ensureTimers(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.timersStopped) return;
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
         // A transient store error inside the tick must not become an
@@ -443,13 +560,11 @@ export class Session {
    * `destroy()`'s store deletion or thread aborts — this instance's
    * transcript and store rows must survive.
    *
-   * The object must not be reused after this without a fresh claim: no
-   * caller should hold a reference across an eviction. If one somehow does,
-   * `ensureTimers` will restart the timers lazily on the next claim (it
-   * checks `this.destroyed`, which `suspendTimers` does not set), so this
-   * is not a poison-pill — just an idle instance.
+   * Permanent suspension is for retired owners: an already-reserved claim that installs after eviction
+   * must not restart timers. Default suspension remains resumable on the next claim.
    */
-  suspendTimers(): void {
+  suspendTimers(opts: { permanent?: boolean } = {}): void {
+    if (opts.permanent) this.timersStopped = true;
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -489,6 +604,7 @@ export class Session {
   }
 
   private async sweepThreads(): Promise<void> {
+    if (this.retiring) return;
     // Reclaim expired leases: any running/blocked item of this session whose
     // lease has lapsed is reconciled through the tree (Task 5 lease-expiry
     // reclaim). QueueItem carries no sessionId, so we scan this session's own
@@ -517,7 +633,7 @@ export class Session {
     }
     for (const threadId of new Set([...byThread.keys(), ...gatesByThread.keys()])) {
       const t = this.threads.get(threadId);
-      if (!t) continue;
+      if (!t || this.threadOwnedElsewhere(threadId)) continue;
       // Durable expiry backstop for pending decision gates whose in-process
       // timer was lost (e.g. across restart). Runs before the kick so an
       // expired gate terminalizes and unblocks the thread's queued work.
@@ -551,9 +667,14 @@ export class Session {
     sandbox: Sandbox,
     attachment: SandboxAttachment,
     policySandbox?: PolicySandbox,
+    predecessor?: Session,
   ): Promise<Session> {
     options.toolScope = intersectToolScopes(readToolScope(data.metadata?.[TOOL_SCOPE_KEY]), options.toolScope);
     const session = new Session(data.id, options, providers, sandbox, attachment, policySandbox);
+    if (predecessor) {
+      session.executionOwners = predecessor.executionOwners;
+      session.executionOwners.add(session);
+    }
     // The host's restore-time options usually don't re-supply `owner` (it's
     // not something callers round-trip through CreateSessionOptions on
     // every restart) — preserve the persisted value in that case rather
@@ -683,7 +804,7 @@ export class Session {
    */
   private async reconcileItem(item: QueueItem, opts?: { startup?: boolean }): Promise<void> {
     if (this.options.readOnlyReason) return;
-    if (item.status === "settled") return;
+    if (item.status === "settled" || this.threadOwnedElsewhere(item.threadId)) return;
     const thread = this.threads.get(item.threadId);
     if (!thread) return; // thread not hydrated — nothing to drive it with
 
@@ -925,10 +1046,7 @@ export class Session {
    * sandbox convergence.
    */
   hasOtherActiveRuns(excludeThreadId: string): boolean {
-    for (const t of this.threads.values()) {
-      if (t.id !== excludeThreadId && t.hasActiveRun) return true;
-    }
-    return false;
+    return [...this.executionOwners].some(owner => [...owner.threads.values()].some(thread => thread.id !== excludeThreadId && thread.hasActiveRun));
   }
 
   /**
@@ -1596,7 +1714,11 @@ export class Session {
       this.sweepTimer = null;
     }
     try {
-      await Promise.all([...this.threads.values()].map((t) => t.abort()));
+      for (const owner of this.executionOwners) {
+        owner.retiring = true;
+        owner.suspendTimers({ permanent: true });
+      }
+      await Promise.all([...this.executionOwners].flatMap(owner => [...owner.threads.values()].map(thread => thread.abort())));
       await this.attachment.destroy();
       await beforeStoreDelete?.();
       await this.providers.store.deleteSession(this.id);

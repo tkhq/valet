@@ -1,6 +1,6 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
-import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -29,7 +29,7 @@ import type {
   WriteFence,
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
-import { boundEventDigest } from "../../wakeups/digest.js";
+import { stripNul, boundEventDigest } from "../../wakeups/digest.js";
 import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -154,7 +154,7 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async saveDecisionGate(sessionId: string, _threadId: string, gate: DecisionGate): Promise<void> {
-    this.row(sessionId).gates.set(gate.id, { ...gate });
+    this.row(sessionId).gates.set(gate.id, { ...gate, ...(gate.agentReason !== undefined ? { agentReason: stripNul(gate.agentReason) } : {}) });
   }
 
   async saveDecisionGateRef(
@@ -208,6 +208,13 @@ export class InMemorySessionStore implements SessionStore {
     const r = this.rows.get(id);
     if (!r) return;
     r.data = { ...r.data, ...metadata, status, updatedAt: Date.now() };
+  }
+
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean> {
+    const row = this.rows.get(sessionId);
+    if (row?.data.sandboxId !== sandboxId) return false;
+    row.data = { ...row.data, sandboxId: undefined };
+    return true;
   }
 
   async getSession(id: string): Promise<SessionData | null> {
@@ -402,9 +409,10 @@ export class InMemorySessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
-    if (!w || !from.includes(w.status)) return null;
+    if (!w || !from.includes(w.status) || (condition?.eventBufferEmpty && (w.eventBuffer?.length ?? 0) > 0)) return null;
     const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
     this.wakeups.set(id, next);
     return copyWakeup(next);
@@ -431,7 +439,10 @@ export class InMemorySessionStore implements SessionStore {
       console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    // Child results leave ten slots for gates. The host retains overflow in its outbox.
+    const bufferLimit = w.eventMatch?.childSessionId && bounded.key === "child.settled"
+      ? EVENT_BUFFER_MAX_DIGESTS - 10 : EVENT_BUFFER_MAX_DIGESTS;
+    if (buffer.length >= bufferLimit) {
       recordEventWaiterBufferFull();
       return false;
     }
@@ -457,10 +468,40 @@ export class InMemorySessionStore implements SessionStore {
     this.leases.set(lease.id, { ...lease });
   }
 
-  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+  async claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean> {
+    const wakeup = this.wakeups.get(id);
+    if (wakeup?.sessionId === sessionId && wakeup.endedAt !== undefined && wakeup.terminalSignalExpected
+      && ["done", "expired", "lost", "cancelled"].includes(wakeup.status)
+      && Math.max(wakeup.terminalSignalStartedAt ?? 0, wakeup.endedAt) === admissionAt
+      && wakeup.terminalSignalLossReportedAt !== wakeup.endedAt) {
+      this.wakeups.set(id, { ...wakeup, terminalSignalLossReportedAt: wakeup.endedAt });
+      return true;
+    }
+    const lease = this.leases.get(id);
+    if (lease?.sessionId === sessionId && lease.ownerKind === "hold" && lease.releasedAt !== undefined && lease.terminalSignalExpected
+      && Math.max(lease.terminalSignalStartedAt ?? 0, lease.releasedAt) === admissionAt
+      && lease.terminalSignalLossReportedAt !== lease.releasedAt) {
+      this.leases.set(id, { ...lease, terminalSignalLossReportedAt: lease.releasedAt });
+      return true;
+    }
+    return false;
+  }
+
+  async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
+    const wakeup = this.wakeups.get(id);
+    if (wakeup?.sessionId === sessionId && wakeup.status === "cancelled" && wakeup.terminalSignalExpected && (wakeup.terminalSignalStartedAt === undefined || wakeup.terminalSignalStartedAt < (wakeup.endedAt ?? 0))) {
+      this.wakeups.set(id, { ...wakeup, terminalSignalStartedAt: startedAt });
+    }
+    const lease = this.leases.get(id);
+    if (lease?.sessionId === sessionId && lease.releasedAt !== undefined && lease.releaseCause === "cancelled" && lease.terminalSignalExpected && lease.terminalSignalStartedAt === undefined) {
+      this.leases.set(id, { ...lease, terminalSignalStartedAt: startedAt });
+    }
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
     const l = this.leases.get(id);
     if (!l || l.releasedAt !== undefined) return null;
-    const next: Lease = { ...l, releasedAt, releaseCause: cause };
+    const next: Lease = { ...l, releasedAt, releaseCause: cause, ...(opts?.terminalSignalExpected ? { terminalSignalExpected: true } : {}) };
     this.leases.set(id, next);
     return { ...next };
   }
@@ -477,6 +518,10 @@ export class InMemorySessionStore implements SessionStore {
     if (rows.leaseId !== undefined && this.leases.get(rows.leaseId)?.sessionId === sessionId) {
       this.leases.delete(rows.leaseId);
     }
+  }
+
+  async listLeases(sessionId: string): Promise<Lease[]> {
+    return [...this.leases.values()].filter(lease => lease.sessionId === sessionId).map(lease => ({ ...lease }));
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
@@ -653,6 +698,20 @@ export class InMemorySessionStore implements SessionStore {
       const scope = continuationToolScope(item.metadata, [...r.threads.values()]);
       item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
     }
+    if (item.attemptCount === 0) {
+      const thread = r.threads.get(claim.threadId);
+      const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+      if (signal) {
+        item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: thread?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
+      } else if (thread) {
+        item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+        thread.metadata = { ...thread.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+      }
+    }
+    if (r.data.purpose === "child" && ((typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal")
+      || (item.metadata?.parentDelegation !== null && typeof item.metadata?.parentDelegation === "object"))) {
+      item.childResultDelivery ??= "pending";
+    }
     // The execution clock starts when the item first runs, not at admission.
     if (item.attemptCount === 0) item.timeoutAt = now + SUBMISSION_TIMEOUT_MS;
     item.status = "running";
@@ -662,6 +721,11 @@ export class InMemorySessionStore implements SessionStore {
     item.attemptCount += 1;
     item.updatedAt = now;
     return { ...item };
+  }
+
+  async resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void> {
+    const item = this.rows.get(sessionId)?.queueItems.get(itemId);
+    if (item && (item.childResultDelivery === undefined || item.childResultDelivery === "pending")) item.childResultDelivery = outcome;
   }
 
   async replaceSubmissionAttempt(
@@ -752,6 +816,13 @@ export class InMemorySessionStore implements SessionStore {
     return [...r.queueItems.values()]
       .filter((i) => i.status === "settled" && i.updatedAt < cutoff)
       .map((i) => ({ ...i }));
+  }
+
+  async listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const row = this.rows.get(sessionId);
+    if (!row) return [];
+    return [...row.queueItems.values()].filter(item => item.childResultDelivery === "pending" && item.status === "settled"
+      && item.updatedAt < cutoff).sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id)).map(item => ({ ...item }));
   }
 
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {

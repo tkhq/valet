@@ -1,3 +1,4 @@
+import { stripNul } from "./wakeups/digest.js";
 import type {
   DecisionGate,
   DecisionGateRequest,
@@ -72,6 +73,9 @@ interface PendingGate {
   reject: (err: Error) => void;
 }
 
+/** An in-memory waiter relinquished a durable gate to a rebuilt config owner, without resolving it. */
+export class DecisionGateHandoffError extends Error {}
+
 export class GateManager {
   private pending = new Map<string, PendingGate>();
   private timers = new Map<string, NodeJS.Timeout>();
@@ -122,6 +126,15 @@ export class GateManager {
     this.cleanup(gateId);
     this.pending.delete(gateId);
     p.reject(new DecisionGateExpiredError(gateId, p.gate.ordinal));
+    return true;
+  }
+
+  handoff(gateId: string): boolean {
+    const pending = this.pending.get(gateId);
+    if (!pending) return false;
+    this.cleanup(gateId);
+    this.pending.delete(gateId);
+    pending.reject(new DecisionGateHandoffError("Durable gate handed to rebuilt session"));
     return true;
   }
 
@@ -370,7 +383,7 @@ export function fromRequest(
     type: req.type,
     title: req.title,
     body: req.body,
-    agentReason: req.agentReason,
+    agentReason: req.agentReason === undefined ? undefined : stripNul(req.agentReason),
     actions:
       req.actions ??
       (req.type === "approval"

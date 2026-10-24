@@ -37,6 +37,7 @@ import {
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
+  wireChildGateReports,
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
@@ -401,6 +402,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // the real ~/.valet/children.
   const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children"), scratchCaps };
   const childWatcher = new ChildWatcher(childrenDeps);
+  const stopChildReports = wireChildGateReports(eventStream, childWatcher);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
@@ -427,6 +429,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
   // Behavior is tested in engine/wake-watcher.test.ts.
   const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
     db,
     engineStore,
     engineHost,
@@ -656,6 +659,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       await server.close();
       await eventDispatcher.stop();
       await channelHost.stop();
+      stopChildReports();
+      await childWatcher.stopRetentionSweep();
       autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();

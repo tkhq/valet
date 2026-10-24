@@ -347,6 +347,9 @@ CREATE TABLE "assistant_executions" (
 CREATE UNIQUE INDEX "assistant_executions_conversation" ON "assistant_executions" ("assistant_id", "conversation_key");
 --> statement-breakpoint
 CREATE TABLE "child_watches" (
+ "delivery_active" boolean NOT NULL DEFAULT false,
+ "pending_cap_incident" text,
+	"events_started_at" bigint,
 	"child_session_id" text PRIMARY KEY NOT NULL,
 	"queue_item_id" text NOT NULL,
 	"parent_session_id" text NOT NULL,
@@ -363,11 +366,27 @@ CREATE TABLE "child_watches" (
 	"reply_route" text
 );
 --> statement-breakpoint
+CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
+--> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint
 CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE "session_config_invalidations" (
+  "session_id" text PRIMARY KEY NOT NULL,
+  "token" text NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "child_event_outbox" (
+  "id" text PRIMARY KEY NOT NULL,
+  "child_session_id" text NOT NULL,
+  "event" jsonb NOT NULL,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at");
 --> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,

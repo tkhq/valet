@@ -346,4 +346,3 @@ export function groupBranchNotes(items: readonly TranscriptItem[]): ListRow[] {
 function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
   return item?.kind === "message" ? item.message : undefined;
 }
-

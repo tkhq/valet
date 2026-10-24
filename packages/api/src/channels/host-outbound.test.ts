@@ -48,6 +48,7 @@ import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { parentDelegationMetadata } from "../orchestrator/children.js";
 import { CHILD_REPLY_MAX_ATTEMPTS, childReplyRetryDelayMs } from "./child-replies.js";
 
 const ORG_ID = "local-org";
@@ -2285,7 +2286,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
   });
 
-  it("posts a child's approval card in the channel thread that spawned it (TKAI-564)", async () => {
+  it.each([false, true])("posts a child's approval card in its spawning channel with settled=%s", async (settled) => {
     const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const childId = `child-origin-${randomUUID()}`;
     await testDb.appDb.insert(agentSessions).values({
@@ -2299,14 +2300,17 @@ describe("ChannelHost outbound delivery", () => {
     // What the spawner records when a channel message started the work.
     await testDb.appDb.insert(childWatches).values({
       childSessionId: childId, queueItemId: "qi-origin", parentSessionId: parent.id,
-      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled,
       originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }), createdAt: Date.now(),
     });
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-origin-action" })], { stopReason: "toolUse" }),
       fauxAssistantMessage("child finished"),
     ]);
-    await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+    await child.thread().submitPrompt({ text: "perform the child action" }, {
+      dispatchId: `child:${randomUUID()}`,
+      metadata: parentDelegationMetadata(parent.id, parent.thread().id, { channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }),
+    });
     await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1), { timeout: 5000 });
     const prompt = fakeTransport.gatePrompts[0]!;
     // The same conversation the parent's own channel thread posts to.

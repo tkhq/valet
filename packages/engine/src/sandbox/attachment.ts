@@ -179,6 +179,8 @@ export class SandboxAttachment {
   private pendingResumeEpoch: number | null = null;
   private _sandbox: Sandbox | null = null;
   private destroyed = false;
+  private destroying = false;
+  private destroyInFlight: Promise<boolean> | undefined;
   private inFlight: Promise<void> | null = null;
   private readonly waiters = new Set<Waiter>();
   private readonly listeners = new Set<StatusListener>();
@@ -250,6 +252,9 @@ export class SandboxAttachment {
     attachment._state = "ready";
     return attachment;
   }
+
+  /** A release status is provisional until the destroy caller receives its result. */
+  get isDestroying(): boolean { return this.destroying; }
 
   get state(): AttachmentState {
     return this._state;
@@ -773,7 +778,18 @@ export class SandboxAttachment {
    * The destroyed metric is recorded only on a real successful destroy,
    * so the created−destroyed leak alarm never counts a destroy that left
    * the sandbox standing. */
-  async destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
+  destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
+    if (this.destroyInFlight) return this.destroyInFlight;
+    this.destroying = true;
+    const operation = this.destroyOnce(reason).finally(() => {
+      this.destroying = false;
+      this.destroyInFlight = undefined;
+    });
+    this.destroyInFlight = operation;
+    return operation;
+  }
+
+  private async destroyOnce(reason: SandboxDestroyReason): Promise<boolean> {
     if (this.destroyed) return true;
     if (this._sandbox) await this.lifecycle?.beforeStop(this._sandbox, 'destroy', { suspended: this._state === 'suspended' });
     this.destroyed = true;

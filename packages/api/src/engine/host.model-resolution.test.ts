@@ -666,7 +666,7 @@ describe("EngineHost model resolution wiring", () => {
     const session = await engineHost.sessionFor("team-owned-restore", meta);
     expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     await db.update(teams).set({ defaultModel: "claude-opus-4-5" }).where(eq(teams.id, team.id));
 
     const restored = await engineHost.sessionFor("team-owned-restore", meta);
@@ -698,7 +698,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.modelSpec).toBe(spec);
     expect(session.options.model.id).toBe("m1"); // wire id
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
 
     await expect(
@@ -721,13 +721,13 @@ describe("EngineHost model resolution wiring", () => {
     if (!saved) throw new Error("Session was not persisted");
     await engineStore.saveSession({ ...saved, model: "openai/gpt-6-astra" });
     await api.providers.db.update(users).set({ defaultModel }).where(eq(users.id, "local-user"));
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
 
     const restored = await engineHost.sessionFor(session.id, meta);
     expect(restored.options.modelSpec).toBe("openai/gpt-6-astra");
     expect(restored.threadById(thread.id)?.key).toBe("web:retained");
     await restored.setModel("anthropic/claude-sonnet-4-5");
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-4-5");
   });
 
@@ -758,7 +758,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.modelSpec).toBe(spec);
     expect(session.options.model.id).toBe("m1"); // wire id
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     // Change the user default to prove restore prefers the persisted model.
     await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
@@ -1079,14 +1079,14 @@ describe("EngineHost model resolution wiring", () => {
       // Sessions from before the Valet default stored no level.
       const stored = (await engineStore.getSession("reasoning-legacy-null"))!;
       await engineStore.saveSession({ ...stored, reasoning: undefined });
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
 
       const restored = await engineHost.sessionFor("reasoning-legacy-null", meta);
       expect(restored.options.sampling?.reasoning).toBe("medium");
       expect((await engineStore.getSession("reasoning-legacy-null"))?.reasoning).toBe("medium");
 
       // The stored level now wins over a later org default, like any persisted level.
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       await setOrgReasoningSettings(db, "local-org", { default: "low" });
       const rebuilt = await engineHost.sessionFor("reasoning-legacy-null", meta);
       expect(rebuilt.options.sampling?.reasoning).toBe("medium");
@@ -1136,7 +1136,7 @@ describe("EngineHost model resolution wiring", () => {
       await session.setReasoning("high");
       expect(session.options.sampling?.reasoning).toBe("high");
 
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       // Change every cascade input that could otherwise win on rebuild —
       // if the host re-resolved the cascade instead of reading the
       // persisted value first, one of these would clobber "high".

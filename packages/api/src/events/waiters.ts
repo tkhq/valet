@@ -140,6 +140,8 @@ export async function evaluateWaiterCandidates(
   const evaluateOne = async (waiter: Wakeup): Promise<WaiterCandidate | null> => {
     const spec = waiter.eventMatch;
     if (!spec) return null;
+    if ((service === "valet") !== (spec.childSessionId !== undefined)) return null;
+    if (service === "valet" && event.refs.child_session_id !== spec.childSessionId) return null;
     // INV-E1: drop a candidate from another org before clause evaluation.
     const owner = await deps.sessionOrg(waiter.sessionId);
     if (!owner || owner.orgId !== orgId) return null;

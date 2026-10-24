@@ -1,3 +1,4 @@
+import { stripNul } from "@valet/engine";
 import { z } from "zod";
 import type { Dimension, TagSubject } from "./dimension.js";
 import type { RegistryKey } from "./registry.js";
@@ -38,7 +39,7 @@ export function parseClassification(text: string): ClassifierOutput {
     else if (char === "{") depth++;
     else if (char === "}" && --depth === 0) {
       const envelope = z.object({ subjects: z.array(z.unknown()).max(50), newKeys: z.array(z.unknown()).max(50).default([]) })
-        .parse(JSON.parse(text.slice(start, end + 1)));
+        .parse(stripNul(JSON.parse(text.slice(start, end + 1))));
       return { subjects: envelope.subjects.flatMap(row => {
         const parsed = prediction.safeParse(row); return parsed.success ? [parsed.data] : [];
       }), newKeys: envelope.newKeys.flatMap(row => {

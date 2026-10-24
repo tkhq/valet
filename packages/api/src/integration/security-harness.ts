@@ -276,7 +276,10 @@ export async function watchSettled(db: AppDb, childSessionId: string): Promise<b
 export async function settleChildByAbort(api: TestApi, childSessionId: string): Promise<void> {
   const { db, engineHost } = api.providers;
   await engineHost.liveSession(childSessionId)?.abort();
-  await waitFor(() => watchSettled(db, childSessionId), 20_000, `watch settled for ${childSessionId}`);
+  await waitFor(async () => {
+    await api.providers.wakeWatcher.sweep();
+    return watchSettled(db, childSessionId);
+  }, 20_000, `watch settled for ${childSessionId}`);
 }
 
 /** POST .../security/cells/:cellId/complete as the runner. */

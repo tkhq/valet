@@ -527,3 +527,11 @@ File tools retain their `sideEffect: files` checkpoint markers and remain intent
 Planning and skill-file tools use the same required intent contract as other non-exempt tools.
 Replay restores channel and reply-target data from the original durable queue item, alongside its author and metadata.
 Branch editing tests use intent-aware model fixtures so completed external actions remain visible in branch notes.
+
+### Postgres string boundaries
+
+External-call facts and truncated MCP client metadata use the shared JSON string sanitizer before storage.
+The sanitizer removes NUL and lone UTF-16 surrogates and keeps complete astral characters.
+Decision-gate stores apply the same rule to the new model-authored reason field.
+Invalid reason text must not block a durable gate or cause a usage fact to disappear.
+Configuration handoff preserves the stored reason when a parked approval moves to a rebuilt owner.

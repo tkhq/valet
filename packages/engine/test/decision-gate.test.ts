@@ -1657,3 +1657,9 @@ it.each(["ask_question", "ask_approval"] as const)("does not change %s prompts w
     await session.thread(receipt.threadId).awaitResult(receipt.queueItemId);
   } finally { session.suspendTimers(); faux.unregister(); }
 });
+
+it("sanitizes the model-authored reason before the durable gate is published", () => {
+  const gate = fromRequest({ type: "approval", title: "Approve?", resumeKey: "reason", agentReason: "Check\u0000 \ud800this\udfff 😀" },
+    { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "reason", ordinal: 0 });
+  expect(gate.agentReason).toBe("Check this 😀");
+});

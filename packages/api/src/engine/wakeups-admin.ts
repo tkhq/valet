@@ -4,6 +4,8 @@
 // background work (fix wave 2, group C): the listing the routes show, and
 // the human cancel of spec B6.
 
+import type { AppDb } from "../lib/drizzle.js";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import {
   recordWakeupSignalLost,
   SandboxEvictedError,
@@ -65,6 +67,14 @@ export async function listBackgroundWork(engineStore: SessionStore, sessionId: s
   return { wakeups, leases };
 }
 
+/** Stops delivery subscriptions without treating them as agent-owned work. */
+export async function endChildSubscriptions(store: Pick<SessionStore, "listWakeups" | "getWakeup" | "transitionWakeup">, sessionId: string, threadId: string | undefined, db: AppDb): Promise<void> {
+  for (const row of await store.listWakeups(sessionId, ["running", "done"])) {
+    if (row.eventMatch?.childSessionId === undefined || (threadId !== undefined && row.threadId !== threadId)) continue;
+    await cancelChildDelivery(db, store, row.eventMatch.childSessionId, "The parent thread was archived or its session moved.");
+  }
+}
+
 /** One piece of open background work, as a refusal names it and a cancel targets it. */
 export interface BlockingWork {
   /** `wk_` for a wakeup, `ls_` for a hold. A process or watch lease shows as its wakeup. */
@@ -104,7 +114,7 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
   const inThread = (threadId: string | undefined) => filter.threadId === undefined || threadId === filter.threadId;
   const picked = (id: string) => filter.ids === undefined || filter.ids.has(id);
   const wakeups: BlockingWork[] = work.wakeups
-    .filter((w) => inThread(w.threadId) && !(filter.leasedOnly && (w.kind === "timer" || w.kind === "event")) && picked(w.id))
+    .filter((w) => w.eventMatch?.childSessionId === undefined && inThread(w.threadId) && !(filter.leasedOnly && (w.kind === "timer" || w.kind === "event")) && picked(w.id))
     .map((w) => ({
       id: w.id,
       kind: w.kind,
@@ -341,6 +351,7 @@ async function deliverCancelSignal(
   target: { threadId: string | undefined; origin: Wakeup["origin"]; dispatchId: string; kind: WakeupKind | "hold" },
   build: (ownThread: boolean) => SignalContent,
   opts: HumanCancelOptions,
+  admission: { store: SessionStore; sessionId: string; id: string },
 ): Promise<void> {
   const { origin, dispatchId, kind } = target;
   const wanted = opts.deliverTo === "main" ? undefined : target.threadId;
@@ -351,14 +362,30 @@ async function deliverCancelSignal(
   const signal: SignalContent =
     ownThread && origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
   const base: PromptOptions = { dispatchId, queueMode: "followup" };
+  const readAdmissionAt = async () => {
+    const row = admission.id.startsWith("wk_") ? await admission.store.getWakeup(admission.id) : await admission.store.getLease(admission.id);
+    const endedAt = row ? ("status" in row ? row.endedAt : row.releasedAt) : undefined;
+    return endedAt === undefined ? undefined : Math.max(row?.terminalSignalStartedAt ?? 0, endedAt);
+  };
+  let admissionAt: number | undefined;
   try {
+    // Keep the loss claim tied to this cancellation, even if the subscription is re-enabled during delivery.
+    admissionAt = await readAdmissionAt();
+    await admission.store.startTerminalSignalAdmission(admission.sessionId, admission.id, (opts.now ?? Date.now)());
+    admissionAt = await readAdmissionAt();
     if (threadId !== undefined) {
       await session.prompt(signal, { threadId, ...base });
     } else {
       await session.prompt(signal, base);
     }
   } catch (err) {
-    (opts.signalLost ?? recordWakeupSignalLost)(kind);
+    try {
+      if (admissionAt !== undefined && await admission.store.claimTerminalSignalLoss(admission.sessionId, admission.id, admissionAt)) {
+        (opts.signalLost ?? recordWakeupSignalLost)(kind);
+      }
+    } catch (claimError) {
+      console.error(`wakeups: loss reporting for ${dispatchId} failed; retention can retry the loss claim:`, claimError);
+    }
     console.error(`wakeups: the human-cancel signal ${dispatchId} failed to submit; the work is already cancelled:`, err);
   }
 }
@@ -388,7 +415,7 @@ export async function cancelWorkAsHuman(
     if (lease.ownerKind !== "hold") {
       return lease.ownerId ? cancelWorkAsHuman(engineStore, session, sessionId, lease.ownerId, opts) : { kind: "not_found" };
     }
-    const outcome = await seam.cancel(id);
+    const outcome = await seam.cancel(id, opts.signal === "suppress" ? undefined : { terminalSignalExpected: true });
     if (outcome?.kind !== "lease") return { kind: "not_found" };
     const signal = holdReleasedSignal(lease, opts, now());
     const routed = await routeSignal(opts, (target) =>
@@ -397,6 +424,7 @@ export async function cancelWorkAsHuman(
         { threadId: lease.threadId, origin: lease.origin, dispatchId: `lease:${lease.id}:released`, kind: "hold" },
         () => signal,
         opts,
+        { store: engineStore, sessionId, id: lease.id },
       ),
     );
     return {
@@ -410,7 +438,7 @@ export async function cancelWorkAsHuman(
   if (!row || row.sessionId !== sessionId || (row.status !== "pending" && row.status !== "running")) {
     return { kind: "not_found" };
   }
-  const outcome = await seam.cancel(id);
+  const outcome = await seam.cancel(id, opts.signal === "suppress" ? undefined : { terminalSignalExpected: true });
   // A lost CAS means the WakeWatcher ended the row first. Its own signal stands.
   if (outcome?.kind !== "wakeup") return { kind: "not_found" };
   const at = now();
@@ -420,6 +448,7 @@ export async function cancelWorkAsHuman(
       { threadId: row.threadId, origin: row.origin, dispatchId: `wakeup:${row.id}:terminal`, kind: row.kind },
       (ownThread) => wakeupCancelledSignal(row, opts, at, ownThread),
       opts,
+      { store: engineStore, sessionId, id: row.id },
     ),
   );
   return { kind: "cancelled", work: { id, kind: row.kind, reason: row.reason, threadId: row.threadId }, ...routed };

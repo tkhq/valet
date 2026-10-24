@@ -32,7 +32,7 @@ import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, typ
 import { assistantExecutions, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
-import { selectWork } from "../engine/wakeups-admin.js";
+import { endChildSubscriptions, selectWork } from "../engine/wakeups-admin.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
@@ -316,7 +316,7 @@ export interface RunThreadArchiveDeps {
    * and for the state of the submission the node dispatched onto it. */
   engineStore: Pick<
     SessionStore,
-    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases"
+    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases" | "getWakeup" | "transitionWakeup"
   >;
   engineHost?: Pick<EngineHost, "liveSession" | "evictCache">;
 }
@@ -410,6 +410,7 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           );
           continue;
         }
+        await endChildSubscriptions(deps.engineStore, dispatch.sessionId, thread.id, deps.db);
         await deps.db
           .insert(sessionThreads)
           .values({

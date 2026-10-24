@@ -273,3 +273,21 @@ it("repairs owner columns on an existing subject table", async () => {
   await applyAppMigrations(fixture.pgdb);
   expect(await missingSchemaRepairs(fixture.pgdb)).toEqual([]);
 });
+
+it("stores classifier proposals with invalid Unicode without losing the batch", async () => {
+  const { tagger } = setup(toolIntentDimension, async request => choice(newKey.key, request.subjects.length,
+    [{ ...newKey, label: "Customer\u0000 support \ud800😀", definition: "Help\udfff customers." }]));
+  await tagger.tag("tool_intent", [subject("one"), subject("two", "Help a customer.", "bob")]);
+  expect((await tagger.registry.list("tool_intent")).find(key => key.key === newKey.key))
+    .toMatchObject({ label: "Customer support 😀", definition: "Help customers.", assignments: 2 });
+});
+
+it("sanitizes administrator key edits and rejects labels empty after sanitation", async () => {
+  const { tagger } = setup();
+  await tagger.initialize("tool_intent");
+  await tagger.registry.edit("tool_intent", "other", { label: "Other\u0000\ud800 😀", definition: "Unmatched\udfff purposes." });
+  expect((await tagger.registry.list("tool_intent")).find(key => key.key === "other"))
+    .toMatchObject({ label: "Other 😀", definition: "Unmatched purposes." });
+  await expect(tagger.registry.edit("tool_intent", "other", { label: "\u0000\ud800", definition: "Valid definition." }))
+    .rejects.toThrow("Use a label");
+});

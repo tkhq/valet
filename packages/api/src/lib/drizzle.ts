@@ -130,6 +130,11 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  // Earlier claims treated every parent-linked conversation as a task child.
+  // The partial index bounds this repeat-safe cleanup to pending results.
+  await db.query(`UPDATE engine_queue_items q SET child_result_delivery = NULL
+    WHERE q.child_result_delivery = 'pending'
+      AND NOT EXISTS (SELECT 1 FROM child_watches w WHERE w.child_session_id = q.session_id)`);
   await classifyLegacyRuntimes(db);
   await restoreSharedTeamMemory(db);
   await expandLegacySlackWildcards(db);
@@ -397,6 +402,8 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
+    sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
   { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
   { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
@@ -910,6 +917,40 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "workflow_versions.source_commit column",
     probe: { kind: "column", table: "workflow_versions", column: "source_commit" },
     sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
+  },
+  {
+    describe: "child_watches.delivery_active column",
+    probe: { kind: "column", table: "child_watches", column: "delivery_active" },
+    sql: `DO $$ BEGIN
+      ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "delivery_active" boolean NOT NULL DEFAULT false;
+      UPDATE "child_watches" c SET "delivery_active" = true WHERE EXISTS
+        (SELECT 1 FROM engine_wakeups w WHERE w.id = 'wk_child_events:' || c.child_session_id AND w.status = 'running');
+      END $$`,
+  },
+  {
+    describe: "child_watches.pending_cap_incident column",
+    probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',
+  },
+  {
+    describe: "child_watches_delivery index",
+    probe: { kind: "index", index: "child_watches_delivery" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false',
+  },
+  {
+    describe: "child_event_outbox table",
+    probe: { kind: "table", table: "child_event_outbox" },
+    sql: 'CREATE TABLE IF NOT EXISTS "child_event_outbox" ("id" text PRIMARY KEY NOT NULL, "child_session_id" text NOT NULL, "event" jsonb NOT NULL, "created_at" bigint NOT NULL)',
+  },
+  {
+    describe: "child_event_outbox_child index",
+    probe: { kind: "index", index: "child_event_outbox_child" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at")',
+  },
+  {
+    describe: "child_watches.events_started_at column",
+    probe: { kind: "column", table: "child_watches", column: "events_started_at" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "events_started_at" bigint',
   },
   {
     // The spawning submission's channel origin, inherited by child.settled
@@ -1915,6 +1956,56 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_buffer" text',
   },
   {
+    describe: "engine_queue_items.child_result_delivery column",
+    probe: { kind: "column", table: "engine_queue_items", column: "child_result_delivery" },
+    sql: 'ALTER TABLE "engine_queue_items" ADD COLUMN IF NOT EXISTS "child_result_delivery" text',
+  },
+  {
+    describe: "engine_queue_items_child_delivery index",
+    probe: { kind: "index", index: "engine_queue_items_child_delivery" },
+    sql: `CREATE INDEX IF NOT EXISTS "engine_queue_items_child_delivery" ON "engine_queue_items" ("session_id") WHERE "child_result_delivery" = 'pending'`,
+  },
+  {
+    describe: "engine_leases.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_leases", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
+    describe: "engine_wakeups.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_wakeups", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
+    describe: "engine_leases.terminal_signal_loss_reported_at column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_loss_reported_at" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_loss_reported_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_loss_reported_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_loss_reported_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_loss_reported_at" bigint',
+  },
+  {
+    describe: "engine_leases.terminal_signal_started_at column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_started_at" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_started_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_started_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_started_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_started_at" bigint',
+  },
+  {
+    describe: "engine_leases.terminal_signal_expected column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_expected" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_expected" boolean NOT NULL DEFAULT false',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_expected column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_expected" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_expected" boolean NOT NULL DEFAULT false',
+  },
+  {
     describe: "engine_wakeups.event_source_seen column",
     probe: { kind: "column", table: "engine_wakeups", column: "event_source_seen" },
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_source_seen" text',
@@ -1933,6 +2024,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "engine_wakeups_due index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_due" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    describe: "engine_wakeups_event_buffer_due index",
+    probe: { kind: "index", index: "engine_wakeups_event_buffer_due" },
+    sql: `CREATE INDEX IF NOT EXISTS "engine_wakeups_event_buffer_due" ON "engine_wakeups" ("created_at", "id") WHERE "kind" = 'event' AND "status" = 'running' AND COALESCE("event_buffer", '[]') <> '[]'`,
   },
   {
     // After the subjects column repair, which it indexes (spec 2026-10-15, Part C).

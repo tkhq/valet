@@ -4,7 +4,7 @@ import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
-import { assistantExecutions } from "../schema/index.js";
+import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
@@ -152,7 +152,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CHILD_TIMER_HOURS, codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
+import { codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -819,10 +819,45 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private sandboxCleanups = new Map<string, Promise<unknown>>();
+
+  /** Child reclaim takes delivery before this barrier and holds both through destroy and cleanup. Barrier owners never acquire delivery. */
+  async withSandboxCleanup<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.sandboxCleanups.get(sessionId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(work);
+    this.sandboxCleanups.set(sessionId, next);
+    try { return await next; }
+    finally { if (this.sandboxCleanups.get(sessionId) === next) this.sandboxCleanups.delete(sessionId); }
+  }
+
+  /** Resolve and admit on one cached session. The callback must not acquire the child delivery lock. */
+  async withSessionFor<T>(sessionId: string, meta: SessionMeta, work: (session: Session) => Promise<T>): Promise<T> {
+    while (true) {
+      const session = await this.sessionFor(sessionId, meta);
+      const used = await this.withSandboxCleanup(sessionId, async () => {
+        // A reclaim can start after resolution and finish before this admission gets the barrier.
+        if (this.liveSession(sessionId) !== session) return null;
+        return { value: await work(session) };
+      });
+      if (used) return used.value;
+    }
+  }
+
+  sessionBuildInFlight(sessionId: string): boolean { return this.inflight.has(sessionId); }
+
+  /** Released attachments are terminal. Eviction keeps durable submissions for the next session restore. */
+  private reusableCacheEntry(sessionId: string): CacheEntry | undefined {
+    const entry = this.cache.get(sessionId);
+    if (entry?.session.attachment.state !== "released" || entry.session.isReclaiming || entry.session.attachment.isDestroying || entry.session.hasActiveExecution) return entry;
+    this.evictCache(sessionId);
+    return undefined;
+  }
+
   private teardown = new Map<string, Promise<void>>();
   private lifecycleEpoch = new Map<string, number>();
 
   private assertSessionBuildAllowed(sessionId: string, epoch = this.lifecycleEpoch.get(sessionId) ?? 0): number {
+    if (this.shuttingDown) throw new Error("Engine host is shutting down.");
     if (this.teardown.has(sessionId) || epoch !== (this.lifecycleEpoch.get(sessionId) ?? 0)) {
       throw new Error("Session teardown interrupted this request. Start a new session and retry.");
     }
@@ -836,6 +871,9 @@ export class EngineHost {
    * row read and its `cache.set` evicts an empty slot, and the stale build
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
+  private configWrites = new Map<string, Promise<void>>();
+  private draining = new Map<string, Session>();
+  private shuttingDown = false;
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
   /** Repo keys whose dropped-scratch warning is active. */
@@ -1041,6 +1079,7 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     const lifecycleEpoch = this.assertSessionBuildAllowed(sessionId);
     // Assistant ids must always wake through `assistantSessionFor` so they
     // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
@@ -1062,7 +1101,7 @@ export class EngineHost {
       if (!assistant) throw new ArchivedAssistantError();
       return this.assistantSessionFor(assistant.id, { actorUserId: meta.userId, orgId: meta.orgId }, { sessionId });
     }
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -1077,6 +1116,8 @@ export class EngineHost {
     // lands in the same maps under the same key.
     if (this.opts.db) {
       const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      // The assistant lookup precedes the build's inflight registration.
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
       this.assertSessionBuildAllowed(sessionId, lifecycleEpoch);
       if (assistant) {
         return this.assistantSessionFor(
@@ -1087,7 +1128,7 @@ export class EngineHost {
       }
       // The awaited lookup opened a gap since the cache/inflight checks
       // above — re-check, or two concurrent cold wakes both start a build.
-      const cachedAfter = this.cache.get(sessionId);
+      const cachedAfter = this.reusableCacheEntry(sessionId);
       if (cachedAfter) return cachedAfter.session;
       const pendingAfter = this.inflight.get(sessionId);
       if (pendingAfter) return pendingAfter;
@@ -1101,6 +1142,7 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // Security runner wiring (Valet Security spec §Tools): a session whose
     // app row carries kind='security' gets the sec_* runner tools, the
     // engagement-runner skill, and the child read/send/status seams —
@@ -1328,8 +1370,10 @@ export class EngineHost {
     const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
+          predecessor: this.draining.get(sessionId),
           sessionId,
           options: {
+            isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
             userId: meta.userId,
             orgId: meta.orgId,
             owner: principal,
@@ -1341,7 +1385,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1368,6 +1412,7 @@ export class EngineHost {
         })
       : await engine.createSession({
           id: sessionId,
+          isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
           userId: meta.userId,
           orgId: meta.orgId,
           owner: principal,
@@ -1379,7 +1424,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1417,7 +1462,7 @@ export class EngineHost {
     }
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
     // durable events for submissions that settled outside the retention
@@ -2608,6 +2653,7 @@ export class EngineHost {
       wakeups: buildWakeupsSeam(
         {
           ...wakeupsSeamDeps(this.opts),
+          db: this.opts.db,
           scratchBytes: () => sessionScratchBytes(getSession),
           ...(checkArm ? { checkArm } : {}),
         },
@@ -2909,17 +2955,21 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) {
       const assistant = this.opts.db ? await loadAssistant(this.opts.db, assistantId) : undefined;
       const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
         .where(eq(agentSessions.id, sessionId)).limit(1) : [];
       if (!assistant || assistant.archivedAt !== null || app?.status === "deleted") {
-        this.evictCache(sessionId);
+        await this.invalidateSession(sessionId);
         throw new ArchivedAssistantError();
       }
-      return cached.session;
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
+      this.assertSessionBuildAllowed(sessionId);
+      const current = this.reusableCacheEntry(sessionId);
+      if (current) return current.session;
     }
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -3111,6 +3161,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && epoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: runtimeUserId,
       orgId: meta.orgId,
       workspace,
@@ -3200,20 +3251,14 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     const epochNow = this.buildEpoch.get(sessionId) ?? 0;
-    if (epochNow !== epoch && attempt < 2) {
-      // A config PATCH evicted the cache while this build was between its
-      // row read and here: the instance in hand was assembled from the
-      // pre-PATCH row. Suspend its timers (they would root it forever, see
-      // evictCache) and rebuild from the current row. CAPPED at two retries:
-      // each rebuild replays the session's durable history, so a caller
-      // PATCHing faster than one build must not livelock the wake. Past the
-      // cap the build in hand is served and cached, and the epoch check
-      // below drops it again if writes are still arriving — bounded
-      // staleness instead of unbounded rebuild.
+    if (epochNow !== epoch && attempt < 2 && !session.hasActiveExecution) {
+      // A generation change during this build invalidates all its claims. Retry an idle build immediately;
+      // an already-reserved execution must drain on this owner before cacheSession can hand it off.
+      session.retireExecution(async () => {});
       session.suspendTimers();
       return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
@@ -3227,20 +3272,9 @@ export class EngineHost {
     builtSession = session;
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
-
-    if (epochNow !== epoch) {
-      // Retry cap reached with the epoch still moving: serve this wake on
-      // the (at most one-PATCH-stale) build, but don't let it outlive the
-      // churn — dropping the cache entry makes the NEXT wake rebuild fresh.
-      console.warn(
-        `EngineHost: assistant ${assistantId} was patched ${attempt + 1}x during one build; ` +
-          `serving the last build uncached`,
-      );
-      this.evictCache(sessionId);
-    }
 
     return session;
   }
@@ -3288,15 +3322,15 @@ export class EngineHost {
     // A build can still be inserting its token. Settle it before revocation,
     // including failed builds that may have written only part of their state.
     await this.inflight.get(sessionId)?.catch(() => undefined);
-    const entry = this.cache.get(sessionId);
+    const session = this.liveSession(sessionId);
     // Existing browser state keeps its audit obligation after allocation is disabled.
-    if (entry && !entry.session.options.sandboxLifecycle) {
+    if (session && !session.options.sandboxLifecycle) {
       const rows = await this.opts.sandboxProvider.list?.() ?? [];
       for (const row of rows.filter((value) => value.sessionId === sessionId && value.browserEnabled)) {
         await this.stopBrowserBefore(row.id, 'destroy');
       }
     }
-    if (!entry) {
+    if (!session) {
       await this.destroyRetainedBrowserSandboxes(sessionId);
       // Cold session: nothing cached in this process, but every caller of
       // destroy() means "this session is being deleted", and the durable
@@ -3318,9 +3352,10 @@ export class EngineHost {
     try {
       // Replacement drops its attachment handle before it releases compute.
       // Final deletion also owns any browser state that remains in inventory.
-      await entry.session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
+      await session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
     } finally {
       this.cache.delete(sessionId);
+      this.draining.delete(sessionId);
       this.buildEpoch.delete(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
@@ -3345,35 +3380,82 @@ export class EngineHost {
     }
   }
 
-  /**
-   * Drop a session's in-process cache entry WITHOUT tearing down engine
-   * state — unlike `destroy()`, this never calls `session.destroy()` (which
-   * deletes the underlying engine session row via
-   * `SessionStore.deleteSession`). Used when a configuration change needs
-   * picking up on the next wake: the next `assistantSessionFor` call misses the cache
-   * and rebuilds `systemPrompt`/`systemContext` from current configuration,
-   * restoring the same durable session (same transcript) rather than
-   * creating a new one. Safe to call on an id that isn't cached — no-op.
-   *
-   * Calls `session.suspendTimers()` before dropping the cache entry: the
-   * evicted `Session` would otherwise be rooted forever by its two
-   * unref'd intervals (heartbeat 10s, sweep 5s — each interval closure
-   * captures `this`), permanently leaking the object and continuing to
-   * sweep/heartbeat against the store even though nothing references it
-   * through the cache anymore. `unref()` only keeps the *process* from
-   * staying alive on these timers; it does nothing to stop them from
-   * keeping this *object* alive or from continuing to fire. Suspending
-   * them first means the evicted instance is a normal orphan, collected
-   * once its last reference (this method's local `entry`) goes away.
-   */
-  evictCache(sessionId: string): void {
-    // Invalidate any in-flight build too: it read the row before this
-    // eviction's cause committed, and would otherwise re-populate the cache
-    // with the stale config (`buildAssistantSession` checks the epoch before
-    // its `cache.set`).
-    this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
-    this.cache.get(sessionId)?.session.suspendTimers();
+  /** Persist invalidation before acknowledging configuration-changing requests. The live fence is synchronous. */
+  async invalidateSession(sessionId: string): Promise<void> {
+    const token = randomUUID();
+    const previous = this.configWrites.get(sessionId);
+    const write = (async () => {
+      await previous;
+      await this.opts.db?.insert(sessionConfigInvalidations).values({ sessionId, token })
+        .onConflictDoUpdate({ target: sessionConfigInvalidations.sessionId, set: { token } });
+    })();
+    this.configWrites.set(sessionId, write);
+    this.evictCache(sessionId);
+    try { await write; }
+    finally { if (this.configWrites.get(sessionId) === write) this.configWrites.delete(sessionId); }
+  }
+
+  private async cacheSession(sessionId: string, entry: CacheEntry): Promise<void> {
+    const db = this.opts.db;
+    const [mark] = db ? await db.select().from(sessionConfigInvalidations).where(eq(sessionConfigInvalidations.sessionId, sessionId)).limit(1) : [];
+    this.cache.set(sessionId, entry);
+    if (this.shuttingDown) {
+      entry.session.retireExecution(async () => {});
+      this.dropCacheEntry(sessionId);
+    } else if (entry.session.options.isExecutionCurrent?.() === false) {
+      this.evictCache(sessionId);
+    } else if (mark && db) {
+      await db.delete(sessionConfigInvalidations).where(and(eq(sessionConfigInvalidations.sessionId, sessionId), eq(sessionConfigInvalidations.token, mark.token)));
+    }
+  }
+
+  private dropCacheEntry(sessionId: string): void {
+    this.cache.get(sessionId)?.session.suspendTimers({ permanent: true });
     this.cache.delete(sessionId);
+  }
+
+  /**
+   * Invalidate the cache without deleting durable engine state or destroying compute.
+   * Config eviction retires the owner and rebuilds immediately. Only its active threads wait for handoff.
+   * The identity-checked reclaim path can drop only an idle owner. Old references remain fenced after either handoff.
+   */
+  evictCache(sessionId: string, expected?: Session | null): void {
+    const entry = this.cache.get(sessionId);
+    // Identity-checked eviction is reclaim's terminal step, not config invalidation.
+    if (expected !== undefined && (this.inflight.has(sessionId) || (entry?.session ?? null) !== expected || entry?.session.hasActiveExecution)) return;
+    this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
+    if (!entry) return;
+    if (expected !== undefined) { this.dropCacheEntry(sessionId); return; }
+    const retired = entry.session;
+    if (retired.hasActiveExecution && retired.attachment.state !== "released") this.draining.set(sessionId, retired);
+    retired.retireExecution(async () => {
+      try {
+        await this.configWrites.get(sessionId);
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        await this.withSandboxCleanup(sessionId, async () => {
+          if (this.cache.get(sessionId)?.session === retired) this.cache.delete(sessionId);
+        });
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        const [row] = this.opts.db ? await this.opts.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1) : [];
+        if (row?.status === "deleted" || !(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length) return;
+        const data = await retired.toData();
+        const replacement = await this.sessionFor(sessionId, row && this.opts.db ? await loadSessionMeta(this.opts.db, row) : {
+          userId: data.userId, orgId: data.orgId, workspace: data.workspace, ownerType: data.owner.type,
+        });
+        if (replacement !== retired) await replacement.refreshExecutionThreads();
+        for (const thread of replacement.listThreads()) void thread.kick();
+      } catch (error) {
+        if (!(error instanceof ArchivedAssistantError)) throw error;
+      } finally {
+        if (!retired.hasOwnActiveExecution) {
+          retired.suspendTimers({ permanent: true });
+          if (this.draining.get(sessionId)?.hasDrainingExecution === false) this.draining.delete(sessionId);
+        }
+      }
+    });
+    // The replacement can claim other threads now. Old references stay fenced and recover late admissions.
+    this.cache.delete(sessionId);
+    if (!retired.hasOwnActiveExecution) retired.suspendTimers({ permanent: true });
   }
 
   /**
@@ -3384,10 +3466,20 @@ export class EngineHost {
    * (reconciliation on next boot) is the designed restart story, and it
    * needs those rows. Sandboxes are left as-is — the workspace survives,
    * the sandbox is disposable (Phase 3), and the next boot re-attaches or
-   * re-provisions.
+   * re-provisions. Shutdown is terminal: late builds cannot claim or repopulate this host.
+   * Explicit cache-reset fixtures can opt out of terminal shutdown, but their old owners stay fenced.
    */
-  evictAll(): void {
-    for (const id of [...this.cache.keys()]) this.evictCache(id);
+  evictAll(opts: { shutdown?: boolean } = {}): void {
+    this.shuttingDown = opts.shutdown ?? true;
+    for (const [id, entry] of this.cache) {
+      this.buildEpoch.set(id, (this.buildEpoch.get(id) ?? 0) + 1);
+      entry.session.stopExecutionOwners();
+      this.dropCacheEntry(id);
+    }
+    for (const session of this.draining.values()) {
+      session.stopExecutionOwners();
+    }
+    this.draining.clear();
     this.clearSweepInterval();
   }
 
@@ -3407,7 +3499,7 @@ export class EngineHost {
    * `evictAll()`. Kept for tests and true delete-everything flows.
    */
   async destroyAll(): Promise<void> {
-    const ids = [...this.cache.keys()];
+    const ids = [...new Set([...this.cache.keys(), ...this.draining.keys()])];
     await Promise.allSettled(ids.map((id) => this.destroy(id)));
     this.clearSweepInterval();
   }
@@ -3503,11 +3595,18 @@ export class EngineHost {
    * exists while the session is live.
    */
   sessionsWithActiveRuns(): string[] {
-    return [...this.cache].filter(([, entry]) => entry.session.listThreads().some(thread => thread.hasActiveRun)).map(([id]) => id);
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.hasActiveExecution).map(([id]) => id);
+  }
+
+  runningSandboxSessionIds(): string[] {
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.attachment.sandboxId !== undefined
+      && session.attachment.state !== "suspended" && session.attachment.state !== "released").map(([id]) => id);
   }
 
   liveSession(sessionId: string): Session | null {
-    return this.cache.get(sessionId)?.session ?? null;
+    return this.cache.get(sessionId)?.session ?? this.draining.get(sessionId) ?? null;
   }
 
   /**
@@ -4085,8 +4184,9 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(childSessionId)) await this.sandboxCleanups.get(childSessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(childSessionId);
-    const cached = this.cache.get(childSessionId);
+    const cached = this.reusableCacheEntry(childSessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(childSessionId);
     if (pending) return pending;
@@ -4127,6 +4227,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(childSessionId) ?? 0;
     // `opts.owner` is the child's own principal: the `task` tool reads the
     // parent session's principal and hands it to the spawner, which passes
     // it here and on to `createSession` below. A child of a team-owned
@@ -4276,6 +4377,7 @@ export class EngineHost {
       specProvider !== undefined,
     );
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(childSessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
@@ -4332,7 +4434,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4367,12 +4469,12 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions, predecessor: this.draining.get(childSessionId) })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     builtSession = session;
     provisionedExtras.bindSession(session);
-    this.cache.set(childSessionId, { engine, session });
+    await this.cacheSession(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
@@ -4402,8 +4504,9 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -4428,6 +4531,7 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
     // the scheduler and the event dispatcher copy from the definition row).
     // A run started from a team-owned workflow therefore reads the team's
@@ -4485,6 +4589,7 @@ export class EngineHost {
     // workflow run cannot wait for events (spec 2026-10-15, R9).
     let builtSession: Session | undefined;
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace,
@@ -4528,7 +4633,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}), childTimerHours: CHILD_TIMER_HOURS }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name
@@ -4552,12 +4657,12 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);
     builtSession = session;
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;

@@ -1,3 +1,4 @@
+import { stripNul } from "@valet/engine";
 import { intentKey, intentKeyFilter, intentJoins, toolIntentUsage } from "../tagging/usage.js";
 import { taggingAvailable } from "../tagging/availability.js";
 import { readRegistry } from "../tagging/registry.js";
@@ -26,6 +27,7 @@ export const ORG_RECENT_INCLUDES_PERSONAL = false;
 export type ExternalCall = typeof externalCalls.$inferInsert;
 
 export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise<void> {
+  call = stripNul(call);
   await bestEffortTelemetry(async () => {
     const rows = await db.insert(externalCalls).values(call).onConflictDoUpdate({
       target: externalCalls.id,
@@ -75,7 +77,7 @@ export async function externalWorkflowOwner(db: AppDb, orgId: string, admittedPa
 
 export async function saveMcpClientInfo(db: AppDb, identity: { orgId: string; userId: string; clientId: string }, info: { name: string; version: string }) {
   await bestEffortTelemetry(async () => {
-    const value = { name: info.name.slice(0, 200), version: info.version.slice(0, 100) };
+    const value = stripNul({ name: info.name.slice(0, 200), version: info.version.slice(0, 100) });
     await db.insert(mcpClientInfo).values({ ...identity, ...value }).onConflictDoUpdate({
       target: [mcpClientInfo.orgId, mcpClientInfo.userId, mcpClientInfo.clientId], set: value,
     });

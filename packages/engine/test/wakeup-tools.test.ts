@@ -183,11 +183,15 @@ describe("fix wave 2 tool changes", () => {
   it("passes the turn's origin to create and the thread and origin to hold (H3, M17)", async () => {
     const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
     const hold = vi.fn(async () => ({ ...baseLease, id: "ls_h" }));
-    const ctx = { ...makeCtx({ create, hold }), origin };
+    const ctx = { ...makeCtx({ create, hold }), origin, queueItemId: "creator" };
     await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx);
-    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin });
+    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin, sourceQueueItemId: "creator" });
     await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx);
-    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin });
+    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin, sourceQueueItemId: "creator" });
+    await startBackgroundProcess(ctx, "sleep 1", { deadlineHours: 1, reason: "work" });
+    expect(create.mock.calls.at(-1)?.[1]).toMatchObject({ kind: "process", sourceQueueItemId: "creator" });
+    await watchTool.execute({ command: "logs", reason: "work", max_hours: 1 }, ctx);
+    expect(create.mock.calls.at(-1)?.[1]).toMatchObject({ kind: "watch", sourceQueueItemId: "creator" });
   });
 
   it("returns the seam's hold refusal as text (M10)", async () => {
@@ -309,6 +313,18 @@ describe("per-session limit", () => {
     expect(r.text).toBe(
       "[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20 per thread, set by sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.",
     );
+  });
+
+  it("lists host-owned child subscriptions without charging the agent's quota", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 20 }, (_, i) => ({ ...baseWakeup, id: `wk_child_${i}`, kind: "event" as const,
+        eventMatch: { childSessionId: `child-${i}`, clauses: [{ key: "child.*" }], once: false, self: [] } })),
+      leases: [], otherThreads: 0,
+    }));
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_timer", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const ctx = makeCtx({ list, create });
+    expect((await wakeupListTool.execute({}, ctx)).text).toContain("wk_child_19");
+    expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toContain("scheduled wakeup wk_timer");
   });
 
   it("counts a process wakeup once, not again for its lease", async () => {

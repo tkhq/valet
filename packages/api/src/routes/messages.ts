@@ -72,7 +72,7 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { canReadWorkflowRun } from "../workflows/service.js";
-import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
@@ -916,6 +916,8 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       });
     }
   }
+
+  if (body.archived === true) await endChildSubscriptions(c.var.providers.engineStore, sessionId, thread.id, db);
 
   // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;
@@ -1870,14 +1872,18 @@ async function exportForkSeed(
   const plan = planForkSeed(path);
   if (plan.length === 0) return undefined;
   try {
-    const repos: ForkSeedRecord[] = [];
-    for (const [index, repo] of plan.entries()) {
-      const bundle = await exportSeedBundle(source.sandbox, source.options.workspace, repo);
-      const blobKey = `fork-seed/${forkThreadId}/${index}`;
-      await c.var.providers.blobs.put(blobKey, bundle, { contentType: "application/x-git-bundle" });
-      repos.push({ repo: repo.repo, snapshot: repo.snapshot, blobKey, ...(repo.branch ? { branch: repo.branch } : {}) });
-    }
-    return { repos };
+    // A fork reads live compute outside a model turn. Reserve ownership before the first sandbox await.
+    const seed = await source.claimExecution(async () => {
+      const repos: ForkSeedRecord[] = [];
+      for (const [index, repo] of plan.entries()) {
+        const bundle = await exportSeedBundle(source.sandbox, source.options.workspace, repo);
+        const blobKey = `fork-seed/${forkThreadId}/${index}`;
+        await c.var.providers.blobs.put(blobKey, bundle, { contentType: "application/x-git-bundle" });
+        repos.push({ repo: repo.repo, snapshot: repo.snapshot, blobKey, ...(repo.branch ? { branch: repo.branch } : {}) });
+      }
+      return { repos };
+    }, path[0]?.threadId);
+    return seed ?? { skipped: "the source configuration or sandbox is changing; retry the branch to copy its files" };
   } catch (err) {
     return { skipped: `the files could not be read from the original thread: ${err instanceof Error ? err.message : String(err)}` };
   }

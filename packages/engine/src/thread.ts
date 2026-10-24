@@ -3,7 +3,8 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { stripToolIntent, type ToolUsageFact, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope, mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -26,6 +27,7 @@ import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   DecisionGateExpiredError,
+  DecisionGateHandoffError,
   DecisionGateWithdrawnError,
   findStickyTerminalGate,
   fromRequest,
@@ -472,6 +474,8 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  private gateHandedOff = false;
+  private rearmedGate = false;
   /**
    * The most recent `status` event this instance emitted. In-memory only —
    * feeds `currentAgentStatus` so a client that connects mid-turn can seed
@@ -841,7 +845,8 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const requestedMode = opts.queueMode ?? this.mode;
+    // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
+    const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -858,7 +863,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect") {
+    if (effectiveMode === "collect" && !this.session.isThreadExecutionFenced(this.id)) {
       return this.submitCollect(content, opts);
     }
 
@@ -900,7 +905,7 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -1162,6 +1167,7 @@ export class Thread {
       item,
     );
     await this.emitQueueState();
+    this.session.notifyReclaimAdmission();
     if (wasAdmitted) {
       this.armCollectTimer(
         typeof admittedItem.metadata?.collectDeadline === "number"
@@ -1641,6 +1647,7 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
+    this.rearmedGate = false;
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -1836,12 +1843,27 @@ export class Thread {
     }
   }
 
+  /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
+  handoffParkedGate(): void {
+    if (!this.blockedGateId || !this.gates.isPending(this.blockedGateId)) return;
+    this.gateHandedOff = true;
+    this.agent.abort();
+    this.gates.handoff(this.blockedGateId);
+    if (this.rearmedGate) {
+      this.runningItem = null;
+      this.fence = undefined;
+      this.blockedGateId = undefined;
+      this.session.notifyExecutionIdle();
+    }
+  }
+
   /**
    * Re-arm the GateManager for a still-pending gate after restart, so a
    * future resolveDecision triggers replay.
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
+    this.rearmedGate = true;
     this.gates
       .register(gate, () => {
         // Terminalization is driven off the promise rejection below (which the
@@ -1853,6 +1875,7 @@ export class Thread {
         );
       })
       .catch((err) => {
+        if (err instanceof DecisionGateHandoffError) return;
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
         // state as the live path: persist the gate's terminal status, flip the
         // durable block back to running, clear the suspended checkpoint, and
@@ -1874,6 +1897,7 @@ export class Thread {
           err instanceof Error ? err.message : String(err),
         );
       });
+    if (this.session.isExecutionFenced) this.handoffParkedGate();
   }
 
   /**
@@ -2174,7 +2198,7 @@ export class Thread {
     }
 
     try {
-      const rawResolution = await this.gates.register(gate, async (gateId) => {
+      const waiting = this.gates.register(gate, async (gateId) => {
         await session.providers.store.updateDecisionGateEntry(
           session.id,
           this.id,
@@ -2186,6 +2210,8 @@ export class Thread {
           { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
         );
       });
+      if (this.session.isExecutionFenced) this.handoffParkedGate();
+      const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
       // call_tool's policy audit) needs this to distinguish a
@@ -2214,6 +2240,7 @@ export class Thread {
       );
       return { ...resolution, gateContext: gate.context ?? {} };
     } catch (err) {
+      if (err instanceof DecisionGateHandoffError) throw err;
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
       await persistTerminalGate(
@@ -2458,7 +2485,9 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, steerScope: "active" },
+      this.session.isThreadExecutionFenced(this.id)
+        ? { maxPending: this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD }
+        : { steer: true, steerScope: "active" },
     );
     // The stopped turn can take a while to wind down (a tool waiting on the
     // sandbox), and the person who sent the edit must not wait for it. The
@@ -2539,6 +2568,16 @@ export class Thread {
    * leaves, so the person can return again.
    */
   async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    const result = await this.session.claimExecution(() => this.returnToBranchInner(noteEntryId, actor, choices), this.id);
+    if (!result) throw new ValidationError("The session configuration or sandbox is changing. Reload the thread and try again.");
+    return result;
+  }
+
+  private async returnToBranchInner(
     noteEntryId: string,
     actor: { id: string },
     choices: { restoreFiles?: boolean } = {},
@@ -3581,11 +3620,13 @@ export class Thread {
       })
       .finally(() => {
         unregisterBackgroundDrive(itemId);
+        this.session.notifyExecutionIdle();
       });
     this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
   }
 
   async kick(): Promise<void> {
+    if (this.session.isExecutionFenced) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -3596,6 +3637,7 @@ export class Thread {
       })
       .finally(() => {
         this.kicking = false;
+        this.session.notifyExecutionIdle();
       });
     return this.kickTail;
   }
@@ -3604,7 +3646,7 @@ export class Thread {
     if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused) return;
+      if (this.paused || this.session.isExecutionFenced) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -3630,17 +3672,17 @@ export class Thread {
       }
 
       const attemptId = uid("att");
-      const claimed = await store.claimSubmission({
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: head.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      });
-      if (!claimed) return; // lost the race or head is not actually claimable
-
-      await store.insertAttemptMarker(claimed.id, attemptId);
-      this.runningItem = claimed;
+      const claimed = await this.session.claimExecution(async () => {
+        const item = await store.claimSubmission({
+          sessionId: this.session.id, threadId: this.id, itemId: head.id,
+          attemptId, ownerId: this.session.ownerId,
+        });
+        if (!item) return null;
+        await store.insertAttemptMarker(item.id, attemptId);
+        this.runningItem = item;
+        return item;
+      }, this.id);
+      if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
       // no repair path can leak one turn's escalation into the next.
@@ -3945,6 +3987,7 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    if (this.gateHandedOff) return;
     return this.inSubmissionContext(() =>
       withSpan(
         "submission.settle",
@@ -4256,22 +4299,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -4282,6 +4329,7 @@ export class Thread {
       // Gate vanished between the decision and here — nothing to re-arm.
       this.runningItem = null;
       this.fence = undefined;
+      this.session.notifyExecutionIdle();
       return;
     }
 
@@ -4297,6 +4345,7 @@ export class Thread {
         this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
         this.runningItem = null;
         this.fence = undefined;
+        this.session.notifyExecutionIdle();
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
@@ -4331,22 +4380,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -6543,8 +6596,10 @@ export class Thread {
 
   private async persistContinuationToolScope(): Promise<void> {
     const scope = this.toolScopeCeiling();
-    if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
-    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+    const source = this.runningItem?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY];
+    if (!scope && source === undefined && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {},
+      ...(source !== undefined ? { [CONTINUATION_SOURCE_ITEM_KEY]: source } : {}) }), "after-save");
   }
 
   /**

@@ -1,3 +1,4 @@
+import { stripNul } from "@valet/engine";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { tagDimensionState, tagKeys, tagLabels, tagSubjects } from "../schema/index.js";
@@ -74,7 +75,7 @@ export class TagRegistry {
   }
 
   async edit(dimension: string, key: string, change: { label: string; definition: string }): Promise<void> {
-    const label = change.label.trim(); const definition = change.definition.trim();
+    const label = stripNul(change.label).trim(); const definition = stripNul(change.definition).trim();
     if (!label || label.length > 60 || !definition || definition.length > 200) throw new RegistryConflict("Use a label of 1 to 60 characters and a definition of 1 to 200 characters.");
     const rows = await this.db.update(tagKeys).set({ label, definition, updatedAt: Date.now(), editedAt: Date.now() })
       .where(and(dimensionWhere(this.orgId, dimension), eq(tagKeys.key, key))).returning({ key: tagKeys.key });

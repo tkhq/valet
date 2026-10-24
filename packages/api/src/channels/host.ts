@@ -59,7 +59,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import type { AttentionChannelDeliverer, AttentionDeliveryRef, AttentionEvent } from "../orchestrator/attention.js";
-import { activeChildWatch } from "../orchestrator/children.js";
+import { childGateOrigin } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
@@ -1156,12 +1156,7 @@ export class ChannelHost {
    * through `conversationKeyFromThreadKey`. Without this hop every outbound
    * call for such a transport is handed a key it did not mint.
    */
-  /** The channel conversation that spawned an unsettled child session. */
-  /**
-   * The channel conversation a home-thread submission came from. Home holds
-   * the person's Slack DM and web messages in one thread, so the thread key
-   * cannot say where a turn started; the submission's origin can.
-   */
+  /** The channel conversation a Home submission came from, since Home combines web and channel messages. */
   private async homeOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
     const item = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     const content = item?.content;
@@ -1169,9 +1164,10 @@ export class ChannelHost {
     return origin ? this.channelThreadFor(origin.threadKey) : null;
   }
 
-  private async childOriginConversation(sessionId: string): Promise<{ channelType: string; conversationKey: string } | null> {
-    const watch = await activeChildWatch(this.deps.db, sessionId);
-    return watch?.origin ? this.channelThreadFor(watch.origin.threadKey) : null;
+  /** The channel audience of a child's gate, including later signal turns. */
+  private async childOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
+    const origin = await childGateOrigin(this.deps.db, this.deps.engineStore, sessionId, queueItemId);
+    return origin ? this.channelThreadFor(origin.threadKey) : null;
   }
 
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
@@ -1291,7 +1287,7 @@ export class ChannelHost {
     // answer it (TKAI-564). The callback still resolves the child's gate.
     const direct = this.channelThreadFor(thread.key)
       ?? (thread.key === HOME_THREAD_KEY ? await this.homeOriginConversation(sessionId, gate.queueItemId) : null);
-    const mapped = direct ?? await this.childOriginConversation(sessionId);
+    const mapped = direct ?? await this.childOriginConversation(sessionId, gate.queueItemId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;

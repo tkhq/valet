@@ -63,7 +63,7 @@ workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
   await clearIntegrationLimit(db, c.var.user.orgId, owner);
   const assistant = await findDefaultAssistant(db, c.var.user.orgId, owner);
   if (assistant) {
-    for (const id of await workspaceSessionIds(db, c.var.user.orgId, assistant.sessionId)) engineHost.evictCache(id);
+    for (const id of await workspaceSessionIds(db, c.var.user.orgId, assistant.sessionId)) await engineHost.invalidateSession(id);
   }
   return c.body(null, 204);
 });

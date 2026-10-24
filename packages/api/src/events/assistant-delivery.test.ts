@@ -139,7 +139,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     await testDb.appDb.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, owner.id));
     // A team runtime must not inherit the member who delivered the event.
     await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
 
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: owner, actorUserId: USER,

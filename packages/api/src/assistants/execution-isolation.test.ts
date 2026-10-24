@@ -7,7 +7,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, workflowDefinitions, workflowRuns, teamMembers, sessionThreads, users } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, assistantExecutions, legacyAssistantRuntimes, workflowDefinitions, workflowRuns, teamMembers, sessionThreads, users } from "../schema/index.js";
 import type { CreateSessionResponse, CreateThreadResponse, ForkThreadResponse } from "../wire/types.js";
 import { eq, sql } from "drizzle-orm";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "./service.js";
@@ -100,6 +100,27 @@ it("keeps team helper files and memory separate across members and cache rebuild
   expect(restoredBob.sessionId).toBe(bob.sessionId);
   expect(JSON.stringify(restoredAlice.session.options.systemContext)).toContain("Private acquisition");
   expect(JSON.stringify(restoredBob.session.options.systemContext)).not.toContain("Private acquisition");
+});
+
+it("does not mark a team conversation signal as pending child delivery", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Conversation signals", creatorUserId: "local-user" });
+  const opened = await ensureAssistantExecution(p, { type: "team", id: team.id },
+    { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+  await opened.session.pause();
+  const thread = await opened.session.ensureDefaultThread();
+  expect((await p.engineStore.getSession(opened.sessionId))?.parentSessionId).toBeTruthy();
+  expect(await p.db.select().from(childWatches).where(eq(childWatches.childSessionId, opened.sessionId))).toEqual([]);
+  const now = Date.now();
+  await p.engineStore.admitSubmission(opened.sessionId, thread.id, { id: "conversation-signal", threadId: thread.id,
+    content: { kind: "signal", signalType: "event.matched", body: "Slack reply" }, status: "queued",
+    attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+  const claimed = await p.engineStore.claimSubmission({ sessionId: opened.sessionId, threadId: thread.id,
+    itemId: "conversation-signal", attemptId: "att-conversation", ownerId: "test" });
+  expect(claimed?.status).toBe("running");
+  expect(claimed?.childResultDelivery).toBeUndefined();
+  expect((await p.db.execute(sql`SELECT id FROM engine_queue_items WHERE session_id = ${opened.sessionId} AND child_result_delivery = 'pending'`))).toMatchObject({ rows: [] });
 });
 
 it("settles durable legacy team submissions as aborted at read-only restoration", async () => {

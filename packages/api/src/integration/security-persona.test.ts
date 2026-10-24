@@ -92,6 +92,7 @@ afterEach(async () => {
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    await api?.providers.wakeWatcher.sweep();
     if (await predicate()) return;
     await new Promise((r) => setTimeout(r, 50));
   }
