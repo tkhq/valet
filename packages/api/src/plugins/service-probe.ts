@@ -1,13 +1,18 @@
 /**
  * The tool listing `/api/plugins` runs for each connected dynamic service,
- * read twice: for `toolCount`, and for the MCP health probe
+ * read three ways: as the service's actions (the cached tool schema), for
+ * `toolCount`, and for the MCP health probe
  * (docs/specs/2026-07-20-integration-oauth-design.md, "MCP health probe").
  *
- * Dynamic (`resolveActions`) plugins declare zero static actions, so the
- * connect UI can only learn their tool count by asking the server. The
- * same answer says whether the server accepts the connection: a 401, a 403,
- * or tools that need scopes the grant lacks. Those reach the Integrations
- * page as health fields before a run fails on them.
+ * Dynamic (`resolveActions`) plugins declare zero static actions, so no
+ * policy surface can name their tools from the manifest alone: the
+ * Policies combobox offered none of them, and the override bounds check
+ * refused every one as "not in the plugin catalog". This cache holds the
+ * listing the owner's own credential gets, so those surfaces read the same
+ * tools a session would call (`DynamicActionSource`, `plugins/action-id.ts`).
+ * The same answer says whether the server accepts the connection: a 401, a
+ * 403, or tools that need scopes the grant lacks. Those reach the
+ * Integrations page as health fields before a run fails on them.
  *
  * Guardrails, since this sits on a page-load path and each probe is a
  * live MCP network call:
@@ -25,10 +30,12 @@ import type {
   CredentialOwner,
   CredentialProvider,
   CredentialStore,
+  PluginAction,
   StoredCredential,
 } from "@valet/engine";
 import { credentialSecret } from "@valet/engine";
 import { isMcpActionPlugin, type McpProbeResult } from "@valet/sdk/mcp";
+import type { DynamicActionSource } from "./action-id.js";
 import type { PluginServiceSummary } from "../wire/types.js";
 
 const TTL_MS = 5 * 60_000;
@@ -39,7 +46,9 @@ export type ProbeHealth = Pick<NonNullable<PluginServiceSummary["health"]>, "rej
 
 /** What one listing said. Empty when the probe failed or timed out. */
 export interface ServiceProbe {
-  toolCount?: number;
+  /** The tools the server listed, as actions. Absent when the server
+   * refused the listing, or the probe failed or timed out. */
+  actions?: PluginAction[];
   health?: ProbeHealth;
 }
 
@@ -82,7 +91,7 @@ export class ServiceProbes {
     const credentials = this.credentialProvider(owner, service, stored);
     const listing = isMcpActionPlugin(actionPlugin)
       ? () => actionPlugin.probe({ credentials }).then(fromMcpProbe)
-      : () => resolveActions({ credentials }).then((actions): ServiceProbe => ({ toolCount: actions.length }));
+      : () => resolveActions({ credentials }).then((actions): ServiceProbe => ({ actions }));
     const attempt = this.run(key, fingerprint, listing)
       .then((probe) => {
         if (probe.health) console.warn(`integration probe: ${service} for ${owner.type} ${owner.id}: ${probeSummary(probe.health)}`);
@@ -114,6 +123,16 @@ export class ServiceProbes {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  /**
+   * The tools each dynamic service lists for `owner`, for a policy surface
+   * (`DynamicActionSource`). Cached by `get`, or listed live under the same
+   * limits. An empty answer means the listing is unknown: no credential, a
+   * refusal, a failure, or a timeout.
+   */
+  listedActionsFor(owner: CredentialOwner): DynamicActionSource {
+    return async (service, actionPlugin) => (await this.get(owner, service, actionPlugin)).actions ?? [];
   }
 
   private now(): number {
@@ -149,9 +168,9 @@ export class ServiceProbes {
 function fromMcpProbe(result: McpProbeResult): ServiceProbe {
   switch (result.kind) {
     case "listed":
-      if (result.missingScopes.length === 0) return { toolCount: result.toolCount };
+      if (result.missingScopes.length === 0) return { actions: result.actions };
       return {
-        toolCount: result.toolCount,
+        actions: result.actions,
         health: { missingScopes: result.missingScopes, blockedTools: result.blockedTools },
       };
     case "insufficient_scope":

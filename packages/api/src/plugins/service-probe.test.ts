@@ -1,16 +1,32 @@
 /**
  * `ServiceProbes` — the tool listing `/api/plugins` runs for each connected
- * MCP service, read for both the tool count and the connection's health
- * (MCP health probe, docs/specs/2026-07-20-integration-oauth-design.md).
- * The plugins are fakes with a scripted `probe`, so nothing here calls a
+ * MCP service, read for the tools themselves (the cached tool schema policy
+ * surfaces build on), the tool count, and the connection's health (MCP
+ * health probe, docs/specs/2026-07-20-integration-oauth-design.md). The
+ * plugins are fakes with a scripted `probe`, so nothing here calls a
  * network.
  */
 import { describe, expect, it } from "vitest";
-import { InMemoryCredentialStore, type ActionPlugin, type CredentialOwner } from "@valet/engine";
+import { Type } from "typebox";
+import { InMemoryCredentialStore, type ActionPlugin, type CredentialOwner, type PluginAction } from "@valet/engine";
 import type { McpActionPlugin, McpProbeResult } from "@valet/sdk/mcp";
 import { ServiceProbes } from "./service-probe.js";
 
 const owner: CredentialOwner = { type: "user", id: "u-1" };
+
+function tool(id: string): PluginAction {
+  return {
+    id,
+    name: id.slice(id.indexOf(".") + 1),
+    description: `${id} tool`,
+    riskLevel: "medium",
+    parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  };
+}
+
+/** The three tools every listing fixture below returns. */
+const TOOLS: PluginAction[] = [tool("mb.search"), tool("mb.browse_data"), tool("mb.execute_query")];
 
 async function storeWith(accessToken: string | null): Promise<InMemoryCredentialStore> {
   const store = new InMemoryCredentialStore();
@@ -35,24 +51,24 @@ function mcpPlugin(next: () => Promise<McpProbeResult>): McpActionPlugin & { cal
 
 const listed = (missingScopes: string[] = [], blockedTools = 0): McpProbeResult => ({
   kind: "listed",
-  toolCount: 3,
+  actions: TOOLS,
   missingScopes,
   blockedTools,
 });
 
 describe("ServiceProbes result", () => {
-  it("reports the tool count and no health fields for a clean listing", async () => {
+  it("reports the listed tools and no health fields for a clean listing", async () => {
     const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
-    expect(await probes.get(owner, "mb", mcpPlugin(async () => listed()))).toEqual({ toolCount: 3 });
+    expect(await probes.get(owner, "mb", mcpPlugin(async () => listed()))).toEqual({ actions: TOOLS });
   });
 
   it("names the missing scopes and the blocked tool count from a listing", async () => {
     const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
     const result = await probes.get(owner, "mb", mcpPlugin(async () => listed(["agent:content:read"], 2)));
-    expect(result).toEqual({ toolCount: 3, health: { missingScopes: ["agent:content:read"], blockedTools: 2 } });
+    expect(result).toEqual({ actions: TOOLS, health: { missingScopes: ["agent:content:read"], blockedTools: 2 } });
   });
 
-  it("reports a rejected connection with no tool count", async () => {
+  it("reports a rejected connection with no tools", async () => {
     const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
     expect(await probes.get(owner, "mb", mcpPlugin(async () => ({ kind: "rejected" })))).toEqual({
       health: { rejected: true },
@@ -69,10 +85,10 @@ describe("ServiceProbes result", () => {
     expect(result).toEqual({ health: { missingScopes: ["agent:content:read"] } });
   });
 
-  it("counts a plain dynamic plugin's resolved actions and reports no health", async () => {
+  it("lists a plain dynamic plugin's resolved actions and reports no health", async () => {
     const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
-    const plain: ActionPlugin = { service: "mb", actions: [], resolveActions: async () => [] };
-    expect(await probes.get(owner, "mb", plain)).toEqual({ toolCount: 0 });
+    const plain: ActionPlugin = { service: "mb", actions: [], resolveActions: async () => TOOLS.slice(0, 1) };
+    expect(await probes.get(owner, "mb", plain)).toEqual({ actions: TOOLS.slice(0, 1) });
   });
 
   it("probes nothing when the owner holds no credential for the service", async () => {
@@ -80,6 +96,47 @@ describe("ServiceProbes result", () => {
     const plugin = mcpPlugin(async () => ({ kind: "rejected" }));
     expect(await probes.get(owner, "mb", plugin)).toEqual({});
     expect(plugin.calls).toBe(0);
+  });
+});
+
+describe("ServiceProbes.listedActionsFor (the cached tool schema policy surfaces read)", () => {
+  it("answers the owner's listing, from the cache once `get` has run", async () => {
+    const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
+    const plugin = mcpPlugin(async () => listed());
+    await probes.get(owner, "mb", plugin);
+    expect(await probes.listedActionsFor(owner)("mb", plugin)).toEqual(TOOLS);
+    expect(plugin.calls).toBe(1);
+  });
+
+  it("lists live when nothing is cached", async () => {
+    const probes = new ServiceProbes({ credentials: await storeWith("t-1") });
+    const plugin = mcpPlugin(async () => listed());
+    expect(await probes.listedActionsFor(owner)("mb", plugin)).toEqual(TOOLS);
+    expect(plugin.calls).toBe(1);
+  });
+
+  it("answers [] for a refused connection, a failed probe, or a missing credential", async () => {
+    const refused = new ServiceProbes({ credentials: await storeWith("t-1") });
+    expect(await refused.listedActionsFor(owner)("mb", mcpPlugin(async () => ({ kind: "rejected" })))).toEqual([]);
+
+    const failed = new ServiceProbes({ credentials: await storeWith("t-1") });
+    const failing = mcpPlugin(async () => {
+      throw new Error("MCP mb tools/list failed: HTTP 502");
+    });
+    expect(await failed.listedActionsFor(owner)("mb", failing)).toEqual([]);
+
+    const disconnected = new ServiceProbes({ credentials: await storeWith(null) });
+    expect(await disconnected.listedActionsFor(owner)("mb", mcpPlugin(async () => listed()))).toEqual([]);
+  });
+
+  it("answers another owner's listing from that owner's credential, not the cache", async () => {
+    const store = await storeWith("t-1");
+    const other: CredentialOwner = { type: "user", id: "u-2" };
+    const probes = new ServiceProbes({ credentials: store });
+    const plugin = mcpPlugin(async () => listed());
+    await probes.get(owner, "mb", plugin);
+    expect(await probes.listedActionsFor(other)("mb", plugin)).toEqual([]);
+    expect(plugin.calls).toBe(1);
   });
 });
 

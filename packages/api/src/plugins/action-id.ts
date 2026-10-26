@@ -13,6 +13,16 @@ export function qualifiedActionId(service: string, action: PluginAction): string
   return action.id.includes(".") ? action.id : `${service}.${action.id}`;
 }
 
+/**
+ * The tools a dynamic (`resolveActions`) service listed for one owner: the
+ * cached tool schema `ServiceProbes` (`plugins/service-probe.ts`) holds. A
+ * policy surface reads it to offer, verify, and resolve an action the static
+ * catalog cannot name. Answers `[]` when nothing is cached and the listing
+ * fails or times out, so a caller treats an empty answer as "unknown", not
+ * as "the service has no tools".
+ */
+export type DynamicActionSource = (service: string, actionPlugin: ActionPlugin) => Promise<readonly PluginAction[]>;
+
 /** Where one canonical tool id resolves: the service and the plugin's own action id. */
 export interface ToolIndexEntry {
   service: string;
