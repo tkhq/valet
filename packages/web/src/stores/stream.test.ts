@@ -6,7 +6,7 @@
  * `queue.state` slice population, `submission.settled` message badges,
  * and gate replay idempotence.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import type { Message, WireEvent, WireQueueState } from "@valet/api/wire";
 import { queueBusy, type StreamMessage, useStreamStore } from "./stream";
 
@@ -1705,7 +1705,17 @@ describe("turn error visibility", () => {
 });
 
 describe("turnStartedAt", () => {
-  beforeEach(reset);
+  // Browser and API clocks agree unless a test says otherwise.
+  const NOW = 50_000;
+  function connect(apiNow: number) {
+    useStreamStore.getState().ingest(SESSION, { seq: 0, ts: apiNow, type: "init", session: { id: SESSION } } as WireEvent);
+  }
+  beforeEach(() => {
+    reset();
+    vi.useFakeTimers({ now: NOW });
+    connect(NOW);
+  });
+  afterEach(() => { vi.useRealTimers(); });
 
   function threadStatus(threadId = THREAD) {
     return useStreamStore.getState().bySession[SESSION].statusByThread[threadId];
@@ -1739,11 +1749,25 @@ describe("turnStartedAt", () => {
     expect(threadStatus().turnStartedAt).toBe(3000);
   });
 
+  it("keeps the turn start in browser time when the API clock runs ahead", () => {
+    const ahead = 120_000;
+    connect(NOW + ahead);
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", NOW + ahead), turnStartedAt: NOW + ahead - 60_000 } as WireEvent);
+    // One minute into the turn by the API, one minute by the browser.
+    expect(NOW - (threadStatus().turnStartedAt ?? 0)).toBe(60_000);
+    reset();
+    connect(NOW - ahead);
+    ingest(SESSION, statusEvent(THREAD, "queued", NOW - ahead));
+    expect(threadStatus().turnStartedAt).toBe(NOW);
+  });
+
   it("uses the turn start a connect frame names, before or after a replayed frame", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
     expect(threadStatus().turnStartedAt).toBe(4000);
     reset();
+    connect(NOW);
     ingest(SESSION, statusEvent(THREAD, "thinking", 9000));
     ingest(SESSION, { ...statusEvent(THREAD, "queued", 9100), turnStartedAt: 4000 } as WireEvent);
     expect(threadStatus().turnStartedAt).toBe(4000);
