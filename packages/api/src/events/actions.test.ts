@@ -92,6 +92,31 @@ describe("eventsActionPlugin", () => {
     expect((await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "team-rule")))[0]!.target).toMatchObject({ appearance: { displayName: "Team helper" } });
   });
 
+  it("lets the team's own unattended run read, but not change, its subscriptions and problems", async () => {
+    const now = Date.now();
+    await db.insert(teams).values([
+      { id: "presence-team", orgId: ORG, name: "Team", createdAt: now },
+      { id: "other-team", orgId: ORG, name: "Other", createdAt: now },
+    ]);
+    await db.insert(eventSubscriptions).values({ id: "team-rule", orgId: ORG, ownerType: "team", ownerId: "presence-team", name: "Team rule", eventKeys: [], filters: [], target: { kind: "assistant", assistant: "team", teamId: "presence-team" }, createdBy: "member", createdAt: now, updatedAt: now });
+    await db.insert(eventDropLog).values({ id: "filter", orgId: ORG, reason: "filter_excluded", eventKey: "slack.message", eventMetadata: { channel: "C1", text: "private", botId: "B1" }, detail: "filtered", createdAt: now });
+    const plugin = eventsActionPlugin(db);
+    const tool = (id: string) => plugin.actions.find(a => a.id === id)!;
+    // A scheduled run of a team workflow acts as the team's own principal id.
+    const scheduled = context("team:presence-team", { owner: { type: "team", id: "presence-team" }, sessionPurpose: "workflow" });
+
+    expect(await tool("events.list_subscriptions").execute({}, scheduled)).toMatchObject({ success: true, data: { subscriptions: [{ id: "team-rule" }] } });
+    const problems = await tool("events.list_problems").execute({}, scheduled);
+    expect(resultProblems(problems)).toEqual([expect.objectContaining({ id: "filter", payloadMetadata: { channel: "C1" } })]);
+    expect(await tool("events.list_problems").execute({ text: "private" }, scheduled)).toMatchObject({ success: false });
+    expect(await tool("events.set_subscription_presence").execute({ subscription_id: "team-rule", presence: { displayName: "Bot" } }, scheduled)).toMatchObject({ success: false });
+    expect(await tool("events.list_event_logs").execute({}, scheduled)).toMatchObject({ success: false });
+    // Another team's principal id is not this team's run.
+    expect(await tool("events.list_subscriptions").execute({}, context("team:other-team", { owner: { type: "team", id: "presence-team" } }))).toMatchObject({ success: false });
+    expect(await tool("events.list_problems").execute({}, context("team:other-team", { owner: { type: "team", id: "presence-team" } }))).toMatchObject({ success: false });
+    expect(await tool("events.list_problems").execute({}, context("team:presence-team"))).toMatchObject({ success: false });
+  });
+
   it("persists the proposal appearance and rejects invalid avatar URLs", async () => {
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const input = { proposal_key: "presence", name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper", avatarUrl: "https://example.com/a.webp" } };
