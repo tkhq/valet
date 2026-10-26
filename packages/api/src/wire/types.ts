@@ -1894,6 +1894,8 @@ export type WireEvent =
       type: "status";
       threadId: string;
       status: "idle" | "queued" | "thinking" | "tool_calling" | "streaming" | "blocked_on_decision_gate" | "error";
+      /** Set on the frame a mid-turn subscriber receives at connect. */
+      turnStartedAt?: number;
     }
   | {
       seq: number;

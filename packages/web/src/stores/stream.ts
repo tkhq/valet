@@ -533,8 +533,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "status": {
       const prev = slice.statusByThread[ev.threadId];
       const wasIdle = prev === undefined || prev.status === "idle";
+      // A frame seeded at connect names the turn's real start; otherwise
+      // the first non-idle frame starts the clock.
       const turnStartedAt =
-        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+        ev.status === "idle" ? undefined : ev.turnStartedAt ?? (wasIdle ? ev.ts : prev.turnStartedAt);
       // Duplicate frames are routine (the engine re-emits tool_calling per
       // tool; the handshake seed and durable replay overlap) — skip them so
       // the entry keeps its identity and subscribers do not re-render. An

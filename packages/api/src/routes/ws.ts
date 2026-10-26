@@ -288,7 +288,8 @@ export function registerWsRoutes(
               deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
               const agentStatus = thread.currentAgentStatus;
               if (agentStatus !== "idle") {
-                deliver(ws, { type: "status", threadId: thread.id, status: agentStatus });
+                const turnStartedAt = thread.currentTurnStartedAt;
+                deliver(ws, { type: "status", threadId: thread.id, status: agentStatus, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) });
               }
             }
 

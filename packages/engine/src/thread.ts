@@ -3581,6 +3581,11 @@ export class Thread {
     return this.lastEmittedStatus;
   }
 
+  /** When the running turn started, for a subscriber that connects mid-turn. */
+  get currentTurnStartedAt(): number | undefined {
+    return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
   /**
    * The claim loop. Drives the thread's durable queue: repeatedly claim the
    * thread's runnable head from the store, run the turn under a write fence,

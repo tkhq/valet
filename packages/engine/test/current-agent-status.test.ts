@@ -71,16 +71,21 @@ describe("Thread.currentAgentStatus", () => {
     const thread = await session.ensureDefaultThread();
 
     expect(thread.currentAgentStatus).toBe("idle");
+    expect(thread.currentTurnStartedAt).toBeUndefined();
 
+    const submittedAt = Date.now();
     const receipt = await thread.submitPrompt("run the blocking tool", {});
     await entered;
     // Mid-tool: the turn owns the execution context and must read as such.
     expect(thread.currentAgentStatus).toBe("tool_calling");
     expect(thread.hasActiveRun).toBe(true);
+    expect(thread.currentTurnStartedAt).toBeGreaterThanOrEqual(submittedAt);
+    expect(thread.currentTurnStartedAt).toBeLessThanOrEqual(Date.now());
 
     release();
     await waitForStatus(events, receipt.threadId, "idle");
     expect(thread.currentAgentStatus).toBe("idle");
+    expect(thread.currentTurnStartedAt).toBeUndefined();
 
     faux.unregister();
   });
