@@ -37,7 +37,7 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList, ThreadShell } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
-import { PinnedPlan } from "~/components/session/thread-plan";
+import { PinnedPlan, useCurrentStep } from "~/components/session/thread-plan";
 import { ProcessingStatus } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
@@ -278,6 +278,7 @@ export function SessionView({
       .filter((message) => message !== undefined);
   }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
+  const currentStep = useCurrentStep(effectiveThreadId);
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
@@ -488,7 +489,8 @@ export function SessionView({
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           {composerAccessory}
           <TypingLine viewers={viewers} />
-          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)} />
+          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
+            activity={currentStep} startedAt={threadStatus.turnStartedAt} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

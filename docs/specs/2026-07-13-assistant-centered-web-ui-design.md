@@ -221,3 +221,9 @@ A thread used to open after a chain of dependent requests (who you are, the work
 - Socket events refresh the thread lists and the context meter with `cancelRefetch: false`. A burst of events joins the refresh already on its way instead of restarting it.
 
 Measured with 115 ms of added latency on a 154-entry, 2.4 MB thread: a cold open went from 1.9 s to 1.5 s with the layout visible at once, a thread switch from 1.1 s to 0.6 s, and a switch after a 300 ms hover to 0.2 s.
+
+### Plan and working line (2026-10-26)
+
+The thread shows its `update_plan` plan the way Claude Code shows its to-do list. Every step is listed above the composer, with no header or collapsed state. A step shows a check when done, a spinner while running, and a dashed circle until it starts. The list shows while the plan has a step left and leaves once every step is done. A thread without a plan shows no card. The `update_plan` tool card uses the same rows.
+
+The working line under it shows the Valet mascot, the plan step in progress (or "Valet is thinking…" / "Valet is working…"), and the turn's elapsed time. Only the label is in the live region, so a screen reader does not hear the clock. The clock starts when this view first sees the turn running.
