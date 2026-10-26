@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import { Type } from "typebox";
+import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, workflowDefinitions, workflowRuns, runtimeGrants, actionPolicies, teamMembers, teams } from "../schema/index.js";
 import { resolveActionPolicy } from "../policies/service.js";
@@ -35,6 +37,37 @@ describe("team policies", () => {
     }
     for (const id of ["policy-b", "policy-other-org", "missing"]) expect((await fetch(`${app.baseUrl}/api/teams/${id}/policies`, { headers: member })).status).toBe(404);
     expect((await fetch(`${app.baseUrl}/api/teams/policy-other-org/policies`, { headers })).status).toBe(404);
+  });
+
+  it("verifies a team allow override on a dynamic (MCP) tool against the team's own listing, not the admin's", async () => {
+    const grafana: ActionPlugin = {
+      service: "grafana",
+      actions: [],
+      resolveActions: async () => [{
+        id: "grafana.query_sql", name: "query_sql", description: "Run SQL", riskLevel: "medium",
+        parameters: Type.Object({}), execute: async () => ({ success: true }),
+      }],
+    };
+    const plugin: ValetPlugin = {
+      name: "mcp-config:grafana", version: "0.0.0", actions: [grafana],
+      credentials: [{ service: "grafana", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    await api.providers.db.insert(teams).values({ id: "policy-a", orgId: "local-org", name: "A", createdAt: Date.now() });
+    const put = () => fetch(`${api!.baseUrl}/api/teams/policy-a/policy-overrides`, {
+      method: "PUT", headers, body: JSON.stringify({ actionId: "grafana.query_sql", mode: "allow" }),
+    });
+
+    // The admin's own connection does not stand in for the team's.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "grafana", { type: "api_key", apiKey: "mine" });
+    const refused = await put();
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain("not in the plugin catalog");
+
+    await api.providers.engineCredentials.save({ type: "team", id: "policy-a" }, "grafana", { type: "api_key", apiKey: "team-key" });
+    const written = await put();
+    expect(written.status).toBe(200);
+    expect(await written.json()).toMatchObject({ actionId: "grafana.query_sql", mode: "allow" });
   });
 
   it("isolates CRUD from other teams and org policy routes and reaps on deletion", async () => {

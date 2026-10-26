@@ -62,10 +62,10 @@ export interface McpActionPluginOptions {
 export interface McpActionPlugin extends ActionPlugin {
   /**
    * Lists the server's tools with the same credential `resolveActions`
-   * sends, and says what the answer means for the connection: a refusal,
-   * or the scopes the grant lacks for tools that declare them. Throws for a
-   * failure that says nothing about the credential (no credential, a
-   * transport error, a 5xx).
+   * sends, and says what the answer means for the connection: the tools
+   * themselves as actions, a refusal, or the scopes the grant lacks for
+   * tools that declare them. Throws for a failure that says nothing about
+   * the credential (no credential, a transport error, a 5xx).
    */
   probe(ctx: { credentials: CredentialProvider }): Promise<McpProbeResult>;
 }
@@ -153,7 +153,10 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
         if (refused) return refused;
         throw err;
       }
-      return { kind: 'listed', toolCount: tools.length, ...scopeGaps(tools, scopes) };
+      const actions = tools.map((tool) =>
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
+      );
+      return { kind: 'listed', actions, ...scopeGaps(tools, scopes) };
     },
   };
 }

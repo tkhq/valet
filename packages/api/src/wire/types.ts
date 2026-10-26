@@ -3557,8 +3557,10 @@ export interface PluginServiceSummary {
    * array is the honest report that this token unlocks nothing, and the UI
    * says so instead of inventing a list.
    *
-   * Always empty for a `dynamic` service: its actions do not exist until a
-   * credential is connected and the upstream server is asked.
+   * For a `dynamic` service, empty until a credential is connected: then
+   * the tools the upstream server listed for this owner, TTL-cached
+   * server-side, in the same shape as static actions, so the Policies
+   * combobox offers them. Empty again when the listing fails or times out.
    */
   actions: PluginActionSummary[];
 }

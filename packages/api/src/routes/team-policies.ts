@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
-import { canViewTeam, getTeamInOrg } from "../services/teams.js";
+import { canAdministerTeam, canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { validateOverrideBounds, upsertSimpleTeamPolicy, listTeamGrants, revokeTeamGrant, createPolicy, updatePolicy, revokePolicy, listPolicies, type UpdateOrgPolicyInput, isApprovalMode, isRiskLevel, validateTarget } from "../policies/admin.js";
 import { validateParamMatchers } from "../policies/matchers.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
@@ -98,7 +98,17 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
   const id = c.req.param("id");
   const grantId = c.req.param("grantId");
   if ((c.req.method === "DELETE") !== (grantId !== undefined)) return c.json(NOT_FOUND, 404);
-  return c.var.providers.db.transaction(async (tx) => {
+  const { db, actionPluginByService, serviceProbes } = c.var.providers;
+  // The team's own tool listings verify a dynamic (MCP) tool, the same
+  // account a team session calls it with. Read them BEFORE the transaction:
+  // PGlite serves one connection, so a credential read inside the lock
+  // below would wait on the open transaction itself. The lock stays the
+  // authority on who may write; this cheap check only decides whether the
+  // team's listing is read on the caller's behalf at all.
+  const dynamicActions = !grantId && (await getTeamInOrg(db, user.orgId, id)) && (await canAdministerTeam(db, id, user.id))
+    ? await serviceProbes.listedActionsSnapshot({ type: "team", id }, actionPluginByService.values())
+    : undefined;
+  return db.transaction(async (tx) => {
     // Shared authority lock protects against role revocation and team deletion.
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change policies or grants." }, 403);
     if (grantId) {
@@ -117,7 +127,7 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
       return c.json({ error: error instanceof Error ? error.message : "Send a valid override." }, 400);
     }
     if (!fields.mode) return c.json({ error: "Choose a mode." }, 400);
-    const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), c.var.providers.actionPluginByService);
+    const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), { actionPluginByService, dynamicActions });
     if (!bounds.ok) return c.json({ error: bounds.error }, 400);
     const row = await upsertSimpleTeamPolicy(tx, { orgId: user.orgId, type: "team", id }, { ...target, mode: fields.mode, managedBy: user.id, now: Date.now() });
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);
