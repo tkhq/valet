@@ -257,14 +257,16 @@ describe("optimistic thread actions", () => {
   type Patch = Awaited<ReturnType<typeof api.patchThread>>;
   function setup() {
     const archived: string[] = [];
-    const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => opts?.archived
+    // Offline: the reads that would correct the lists fail too.
+    const network = { offline: false };
+    const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => network.offline ? Promise.reject(new Error("Offline.")) : opts?.archived
       ? { threads: rows.filter(row => archived.includes(row.id)) }
       : { threads: rows.filter(row => !archived.includes(row.id)) });
     const saves: Array<{ resolve: (value: Patch) => void; reject: (error: Error) => void }> = [];
     vi.spyOn(api, "patchThread").mockImplementation(() => new Promise<Patch>((resolve, reject) => { saves.push({ resolve, reject }); }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
-    return { archived, list, saves, client, wrapper };
+    return { archived, list, saves, client, wrapper, network };
   }
 
   it("moves an archived row at once and moves it back when a running turn refuses it", async () => {
@@ -309,6 +311,46 @@ describe("optimistic thread actions", () => {
     await act(async () => { saves[1]!.resolve({ ...rows[1]!, archivedAt: 4 }); await second; });
     await waitFor(() => expect(list.mock.calls.length).toBeGreaterThan(reads));
     expect(result.current.sidebar.data?.threads).toEqual([]);
+    unmount(); client.clear();
+  });
+
+  it("ends in the server's state when an archive and a quick restore both fail", async () => {
+    const { useSidebarThreads, useArchivedThreads, useSetThreadArchived } = await import("./queries");
+    const { saves, client, wrapper, network } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), archivedList: useArchivedThreads(sessionId), archive: useSetThreadArchived(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    await waitFor(() => expect(result.current.archivedList.data).toBeDefined());
+    network.offline = true;
+    let archiving: Promise<unknown> | undefined;
+    let restoring: Promise<unknown> | undefined;
+    act(() => { archiving = result.current.archive.mutateAsync({ threadId: "a", archived: true }).catch(() => undefined); });
+    await waitFor(() => expect(result.current.archivedList.data?.threads.map(thread => thread.id)).toEqual(["a"]));
+    act(() => { restoring = result.current.archive.mutateAsync({ threadId: "a", archived: false }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    // The archive's failure arrives first, then the restore's.
+    await act(async () => { saves[0]!.reject(new Error("Offline. Reconnect and retry.")); await archiving; });
+    await act(async () => { saves[1]!.reject(new Error("Offline. Reconnect and retry.")); await restoring; });
+    // The server never archived it, and no read can say so (observers update on the next tick).
+    await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toContain("a"));
+    await waitFor(() => expect(result.current.archivedList.data?.threads ?? []).toEqual([]));
+    unmount(); client.clear();
+  });
+
+  it("keeps the server's title when two quick renames both fail out of order", async () => {
+    const { useSidebarThreads, useRenameThread } = await import("./queries");
+    const { saves, client, wrapper, network } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), rename: useRenameThread(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    network.offline = true;
+    let first: Promise<unknown> | undefined;
+    let second: Promise<unknown> | undefined;
+    act(() => { first = result.current.rename.mutateAsync({ threadId: "a", title: "One" }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(1));
+    act(() => { second = result.current.rename.mutateAsync({ threadId: "a", title: "Two" }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    await act(async () => { saves[0]!.reject(new Error("Offline.")); await first; });
+    await act(async () => { saves[1]!.reject(new Error("Offline.")); await second; });
+    await waitFor(() => expect(result.current.sidebar.data?.threads.find(thread => thread.id === "a")?.title).toBe("Alpha"));
     unmount(); client.clear();
   });
 
