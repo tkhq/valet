@@ -7929,6 +7929,14 @@ export function userContentBlocks(
  */
 export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
   if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  // Another agent's signal, such as a child's result, joins only a turn that
+  // runs another signal from the same owner. It never joins a person's own
+  // turn, where its text would act with that person's authority.
+  const stamp = readSignalStamp(item.metadata);
+  if (stamp) {
+    const runningStamp = readSignalStamp(running.metadata);
+    if (!runningStamp || runningStamp.senderOwner.type !== stamp.senderOwner.type || runningStamp.senderOwner.id !== stamp.senderOwner.id) return false;
+  }
   if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
   if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
   if (item.author?.externalSender || running.author?.externalSender) return false;

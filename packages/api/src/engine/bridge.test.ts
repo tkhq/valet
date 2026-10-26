@@ -560,6 +560,9 @@ describe("queuedItemToWire", () => {
     }))).toEqual({ id: "q-1", text: "see the image", midTurn: false, attachments: 1 });
     expect(queuedItemToWire(item({ content: { kind: "signal", signalType: "wakeup.timer", tagName: "wakeup", body: "Check it." } })))
       .toEqual({ id: "q-1", text: "Check it.", signal: { type: "wakeup" }, midTurn: false });
+    // The engine's default tag names no kind, so a child's result reads as its type.
+    expect(queuedItemToWire(item({ content: { kind: "signal", signalType: "child.settled", tagName: "signal", body: "Done." } })))
+      .toEqual({ id: "q-1", text: "Done.", signal: { type: "child.settled" }, midTurn: false });
     const long = queuedItemToWire(item({ content: "x".repeat(QUEUED_TEXT_MAX + 50) }));
     expect(long.text).toHaveLength(QUEUED_TEXT_MAX + 1);
   });

@@ -1050,16 +1050,20 @@ export function Composer({
           })}
           {queueState ? unresolvedQueuedIds.map((itemId) => {
             const item = queuedItemById.get(itemId);
+            // A child's result runs by itself: it joins a running result turn
+            // or runs after the current one. Send now would stop that turn.
+            const childResult = item?.signal?.type.startsWith("child.") === true;
             return (
               <QueuedRow
                 key={itemId}
                 cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
                 canceling={cancelQueued.isPending}
-                sendNow={guest || !item ? undefined : () => void promoteQueuedItem(itemId)}
+                sendNow={guest || !item || childResult ? undefined : () => void promoteQueuedItem(itemId)}
                 sending={promotingItemId === itemId}
                 sendDisabled={send.isPending}
               >
                 <QueuedItemText item={item} />
+                {childResult && <span className="shrink-0 text-muted">Runs next</span>}
               </QueuedRow>
             );
           }) : unresolvedQueuedCount > 0 && (

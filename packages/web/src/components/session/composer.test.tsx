@@ -262,6 +262,20 @@ describe("Composer queued-message stack", () => {
     expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
   });
 
+  it("shows a child's result as running next, with Cancel and no Send now", () => {
+    queueStateRef.current = {
+      ...queueState("followup"),
+      pendingIds: ["q-1"],
+      pending: [{ id: "q-1", text: "Found two defects.", signal: { type: "child.settled" }, midTurn: true }],
+    };
+    renderComposer("streaming", [], 1);
+
+    expect(screen.getByText("Task result")).toBeTruthy();
+    expect(screen.getByText("Runs next")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  });
+
   it("shows the server's corrective text when a cancel is refused", async () => {
     cancelQueuedMutateAsync.mockRejectedValueOnce(
       new ApiError(409, "POST /threads/thread-1/queue/q-1/cancel → 409", {
