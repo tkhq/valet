@@ -205,6 +205,18 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     faux.unregister();
   });
 
+  it("gives a child session no question tool, so its blocking questions go to its parent", async () => {
+    const { engine } = makeEngine();
+    const faux = registerFauxProvider({ provider: "svc-child-tools" });
+    const base = { userId: "u1", orgId: "o1", workspace: "/workspace", sandbox: {}, model: faux.getModel() };
+    const child = await engine.createSession({ ...base, id: "sess-child-tools", purpose: "child", parentSessionId: "p", parentThreadId: "t" });
+    const parent = await engine.createSession({ ...base, id: "sess-parent-tools" });
+    const names = (tools: { name: string }[]) => tools.map((tool) => tool.name);
+    expect(names(child.builtinTools)).not.toContain("ask_question");
+    expect(names(child.builtinTools)).toContain("ask_approval");
+    expect(names(parent.builtinTools)).toContain("ask_question");
+  });
+
   it("parentSessionId/parentThreadId persist via toData and survive a restore that doesn't re-supply them", async () => {
     const { engine, store, bus } = makeEngine();
     const faux = registerFauxProvider({ provider: "svc3b" });

@@ -142,6 +142,7 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
   const body: ThreadAddress = {
     id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null,
     ...(meta?.shareMode ? { share: meta.shareMode } : {}),
+    ...(meta?.approvalBypassBy ? { approvalBypass: true as const } : {}),
     ...(guest ? { guest: { mode: guest.mode, ownerName: await ownerName(c, sessionId) } } : {}),
   };
   return c.json(body);

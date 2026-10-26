@@ -448,6 +448,12 @@ export const sessionThreads = pgTable(
     // Who else in the org may open this personal thread by its link:
     // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
     shareMode: text("share_mode", { enum: ["view", "reply"] }),
+    // "Run without asking": the person who turned it on, and when. Null when
+    // it is off. Approvals that this person could stop for good themselves
+    // run without a card in this thread and the child agents it starts
+    // (`services/thread-approval-bypass.ts`).
+    approvalBypassBy: text("approval_bypass_by"),
+    approvalBypassAt: bigint("approval_bypass_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );

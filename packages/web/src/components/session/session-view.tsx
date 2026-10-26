@@ -57,6 +57,7 @@ import { Button, LoadingRow } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 import { flattenChildWork, useChildWork } from "~/api/child-work";
+import { ChildGateCards } from "./child-gate-cards";
 import { AgentsLine } from "./agents-line";
 import { ThreadReplyContext } from "./send-as-person";
 import { ChildTitlesContext } from "./work-group";
@@ -473,6 +474,7 @@ export function SessionView({
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
+          <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
           {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           {composerAccessory}

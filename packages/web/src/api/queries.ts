@@ -633,6 +633,29 @@ export function useRenameThread(sessionId: string) {
   });
 }
 
+/** PATCH /threads/:id with `approvalBypass`: turn "Run without asking" on or
+ * off. The header shows the change at once and restores it if the save fails. */
+export function useSetThreadApprovalBypass(sessionId: string) {
+  const qc = useQueryClient();
+  const mark = (threadId: string, on: boolean) => qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+    threadListFilters(sessionId),
+    (current) => mapThreadData(current, thread => {
+      if (thread.id !== threadId) return thread;
+      const { approvalBypass: _previous, ...rest } = thread;
+      return on ? { ...rest, approvalBypass: true as const } : rest;
+    }),
+  );
+  return useMutation<PatchThreadResponse, Error, { threadId: string; on: boolean }>({
+    mutationFn: ({ threadId, on }) => api.patchThread(threadId, { approvalBypass: on }),
+    onMutate: async ({ threadId, on }) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      mark(threadId, on);
+    },
+    onError: (_error, { threadId, on }) => mark(threadId, !on),
+    onSettled: () => qc.invalidateQueries(threadListFilters(sessionId)),
+  });
+}
+
 /** PATCH /threads/:id with a `share` — the owner shares a personal thread
  * with the organization, or stops sharing it. */
 export function useShareThread(sessionId: string) {

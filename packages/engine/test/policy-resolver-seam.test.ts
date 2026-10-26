@@ -234,6 +234,16 @@ describe("policyResolver seam: resolve()", () => {
     expect(typeof invocations[0].durationMs).toBe("number");
   });
 
+  it("marks only a call that ran because the thread runs without asking", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const run = (source: PolicyDecision["provenance"]["source"]) => callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "read" },
+      makeCtx({ policyResolver: makeResolver({ decision: { mode: "allow", provenance: { baseMode: "require_approval", source } } }).resolver }),
+    );
+    expect((await run("thread_bypass")).approval).toBe("automatic");
+    expect((await run("override")).approval).toBeUndefined();
+  });
+
   it("deny → refusal text + one denied record, execute never runs", async () => {
     let executed = false;
     const { resolver, invocations } = makeResolver({

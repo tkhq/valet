@@ -235,7 +235,9 @@ receipt time window. Metadata predicates run before the result limit, so a
 matching older record is not hidden by newer unrelated rows. It returns newest
 records first and caps one call at 100 records. Every organization member can
 read ordinary Problems records, but their results expose only the allowlisted
-channel, raw event type, and raw subtype metadata. An organization admin can
+channel, raw event type, and raw subtype metadata. A team's unattended run
+(a schedule, event, or webhook) acts as the team's principal id, `team:{id}`,
+and reads Problems with the same member view. An organization admin can
 use text and bot ID filters and read those fields only from a private
 user-owned turn with no channel origin. Team-owned and organization-owned
 sessions have shared transcripts. A channel-originated turn also has a shared

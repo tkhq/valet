@@ -45,6 +45,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import type { WorkflowStepGrant } from "../workflows/step-grants.js";
 import { canAdministerTeam, isTeamMember } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
+import { threadApprovalBypass } from "../services/thread-approval-bypass.js";
 import { listPolicies, upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
@@ -762,6 +763,24 @@ export function gatedAuditId(
 
 // ── Engine PolicyResolver ──────────────────────────────────────────
 
+/**
+ * Whether "Run without asking" covers this call. On a personal thread it
+ * covers only the turns of the person who turned it on, so a member who
+ * replies in a shared thread never borrows it. On a team thread it covers the
+ * team's members and the team's own unattended turns.
+ */
+async function threadBypassCovers(
+  db: AppDb,
+  input: { sessionId: string; threadId: string; userId?: string },
+  owner: { userId?: string; teamId?: string },
+): Promise<boolean> {
+  if (!input.userId) return false;
+  const bypass = await threadApprovalBypass(db, { sessionId: input.sessionId, threadId: input.threadId });
+  if (!bypass) return false;
+  if (!owner.teamId) return input.userId === bypass.enabledBy && owner.userId === bypass.enabledBy;
+  return input.userId === `team:${owner.teamId}` || await isTeamMember(db, owner.teamId, input.userId);
+}
+
 export interface PolicyResolverDeps {
   db: AppDb;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
@@ -902,6 +921,11 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // names. A member who is refused the allow still has a lasting choice.
       const anyoneMayAllow = ownerMayAllow && input.riskLevel !== "critical"
         && !(owner.teamId && teamRuleNamesAction(rows.policies.filter((rule) => rule.principalType === "team"), input, now));
+      // "Run without asking" approves exactly what the person could stop
+      // asking for themselves: the same rule as the buttons above.
+      if (anyoneMayAllow && await threadBypassCovers(deps.db, input, owner)) {
+        return { mode: "allow", provenance: { ...decision.provenance, source: "thread_bypass" } };
+      }
       return {
         ...decision,
         extraGateActions: [
