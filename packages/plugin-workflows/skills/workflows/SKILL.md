@@ -226,7 +226,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - `start_run` (manual): the `input` you passed → `{{trigger.data.<field>}}`.
 - Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
 - Webhook: the raw JSON POST body.
-- Schedule: `{ <input fields>, scheduleName, cron, input }`. Read the schedule's static input at `{{trigger.data.<field>}}`, as a manual run does. Reading `trigger.data.input.<field>` keeps that field nested only. A scheduled run applies no `dataSchema` defaults.
+- Schedule: `{ <input fields>, scheduleName, cron, input }`. Read the schedule's static input at `{{trigger.data.<field>}}`, as a manual run does. A field the schedule leaves out takes its `dataSchema` default. Reading `trigger.data.input.<field>` keeps that field nested only, with no default.
 
 **Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array` (`integer` is an accepted alias for `number` and adds no integer-only check, so a non-integer value like `7.5` is accepted):
 

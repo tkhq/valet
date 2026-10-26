@@ -9,9 +9,9 @@
  *
  * Three contract rules shape every definition here.
  *
- * 1. A scheduled run gets NO `dataSchema` defaults — the schedule puts its
- *    own payload in `trigger.data`, so a template that reads
- *    `trigger.data.<field>` on a cron run reads null. Every scheduled
+ * 1. A scheduled run fills `trigger.data.<field>` only from the schedule's
+ *    input or the field's `dataSchema` default, so a template that reads a
+ *    field neither one sets reads null on a cron run. Every scheduled
  *    template below therefore carries its parameters as literals, and only
  *    the manual batch template declares inputs.
  * 2. `trigger.timestamp` IS available on every run path, so a scheduled run

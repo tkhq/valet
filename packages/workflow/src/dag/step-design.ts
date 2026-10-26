@@ -17,6 +17,7 @@
 
 import { readToolScope } from '@valet/shared';
 import { collectExpressionPaths, collectExpressionValuePaths, collectTemplatePaths, parseTemplate } from './expression.js';
+import { resolveTriggerInput, triggerDataSchema } from './trigger-input.js';
 
 /** Words that tell an agent to get a person's approval or sign-off. */
 const APPROVAL_REQUEST =
@@ -154,15 +155,22 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
  * - nothing is copied when the definition reads `trigger.data` or
  *   `trigger.data.input` as one value;
  * - a field named `scheduleName`, `cron` or `input` stays nested only.
+ *
+ * A top-level field that the schedule leaves out takes its `dataSchema`
+ * default, as on a manual run (`resolveTriggerInput`). A missing required
+ * field or a wrong type is not an error here: the schedule already fires,
+ * and failing its runs for a field it never sent would stop runs that work
+ * today. `trigger.data.input` stays the schedule's input as sent.
  */
 export function scheduledTriggerData(
   definition: unknown,
   schedule: { scheduleName: string; cron: string; input: unknown },
 ): Record<string, unknown> {
   const use = triggerDataUse(definition);
-  const copied = use.whole || !isRecord(schedule.input)
-    ? {}
-    : Object.fromEntries(Object.entries(schedule.input).filter(([field]) => !SCHEDULE_DATA_KEYS.has(field) && !use.nested.has(field)));
+  const copies = (field: string) => !use.whole && !SCHEDULE_DATA_KEYS.has(field) && !use.nested.has(field);
+  const sent = isRecord(schedule.input) ? Object.entries(schedule.input).filter(([field]) => copies(field)) : [];
+  const defaults = Object.entries(triggerDataSchema(definition) ?? {}).filter(([field]) => copies(field));
+  const { input: copied } = resolveTriggerInput(Object.fromEntries(defaults), Object.fromEntries(sent));
   return { ...copied, scheduleName: schedule.scheduleName, cron: schedule.cron, input: schedule.input };
 }
 

@@ -162,6 +162,31 @@ describe('scheduledTriggerData', () => {
     expect(data).toEqual({ ok: 1, scheduleName: 'Nightly', cron: '0 8 * * *', input: { cron: 'mine', input: 'mine', scheduleName: 'mine', ok: 1 } });
   });
 
+  it('gives a field the schedule leaves out its dataSchema default, as a manual run does', () => {
+    const definition = {
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: {
+          lookback: { type: 'string', default: '7h' },
+          cluster: { type: 'string', default: '.+', required: true },
+          channel: { type: 'string', required: true },
+        } },
+        { id: 'scan', type: 'tool', params: { query: '{cluster=~"{{trigger.data.cluster}}"} since now-{{trigger.data.lookback}} to {{trigger.data.channel}}' } },
+      ],
+    };
+    const data = scheduledTriggerData(definition, schedule({ cluster: 'prod' }));
+    // The sent value wins over the default; a field with no default stays absent instead of failing the run.
+    expect(data).toEqual({ cluster: 'prod', lookback: '7h', scheduleName: 'Nightly', cron: '0 8 * * *', input: { cluster: 'prod' } });
+    expect(renderTemplate('since now-{{trigger.data.lookback}}', { trigger: { data } })).toBe('since now-7h');
+  });
+
+  it('adds no default for a field the definition reads under trigger.data.input, or when it reads the envelope whole', () => {
+    const schema = { dry_run: { type: 'boolean', default: true } };
+    const nestedRead = { nodes: [{ id: 'trigger', type: 'trigger', dataSchema: schema }, { id: 'live', type: 'if', conditions: [{ left: 'trigger.data.input.dry_run', operation: 'isFalse' }] }] };
+    expect(scheduledTriggerData(nestedRead, schedule({}))).toEqual(nested({}));
+    const whole = { nodes: [{ id: 'trigger', type: 'trigger', dataSchema: schema }, { id: 's', type: 'session', prompt: '{{trigger.data}}' }] };
+    expect(scheduledTriggerData(whole, schedule({}))).toEqual(nested({}));
+  });
+
   it('copies nothing for a missing or non-object input', () => {
     expect(scheduledTriggerData({ nodes: [] }, schedule(null))).toEqual({ scheduleName: 'Nightly', cron: '0 8 * * *', input: null });
   });

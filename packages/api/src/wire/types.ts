@@ -3156,9 +3156,9 @@ export interface ListWorkflowTemplatesResponse {
 export interface InstallWorkflowTemplateRequest {
   /**
    * Values for `WorkflowTemplateSummary.inputs`, written into the installed
-   * definition. A scheduled run applies no `dataSchema` defaults, so a
-   * parameter the schedule needs is baked in here rather than read from the
-   * trigger at run time.
+   * definition. A scheduled run fills a field only from the schedule's input
+   * or the field's `dataSchema` default, so a parameter the schedule needs is
+   * baked in here rather than read from the trigger at run time.
    */
   inputs?: Record<string, unknown>;
   /**
