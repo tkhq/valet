@@ -26,7 +26,7 @@ it("keeps team helper files and memory separate across members and cache rebuild
   expect(alice.sessionId).toBe(repeated.sessionId);
   const bob = await open("test-member");
   expect(bob.sessionId).not.toBe(alice.sessionId);
-  expect(alice.session.options.workspace).toBe(join(homedir(), ".valet", "assistants", alice.assistant.id, "executions", alice.sessionId));
+  expect(alice.session.options.workspace).toBe(join(homedir(), ".valet", "assistant-executions", alice.assistant.id, alice.sessionId));
   expect(bob.session.options.workspace).not.toBe(alice.session.options.workspace);
   await alice.session.sandbox.writeFile("/workspace/private.txt", "Private acquisition");
   await expect(bob.session.sandbox.readFile("/workspace/private.txt")).rejects.toThrow();
@@ -489,5 +489,19 @@ it("preserves a recorded disjoint personal execution directory on restore", asyn
   await p.db.execute(sql`UPDATE engine_sessions SET workspace = ${workspace} WHERE id = ${execution.sessionId}`);
   p.engineHost.evictCache(execution.sessionId);
   const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-disjoint", { isolated: true });
+  expect(restored.session.options.workspace).toBe(workspace);
+});
+
+it("keeps a team execution's recorded directory under the root on restore", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Recorded execution", creatorUserId: "local-user" });
+  const owner = { type: "team" as const, id: team.id };
+  const meta = { orgId: "local-org", actorUserId: "local-user" };
+  const execution = await ensureAssistantExecution(p, owner, meta, "web:recorded-team");
+  const workspace = join(homedir(), ".valet", "assistants", execution.assistant.id, "executions", execution.sessionId);
+  await p.db.execute(sql`UPDATE engine_sessions SET workspace = ${workspace} WHERE id = ${execution.sessionId}`);
+  p.engineHost.evictCache(execution.sessionId);
+  const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-team");
   expect(restored.session.options.workspace).toBe(workspace);
 });

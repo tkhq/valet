@@ -3046,12 +3046,16 @@ export class EngineHost {
     const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
     // Existing scripts can depend on absolute paths. Keep the recorded working
     // directory when adopting a legacy runtime, rather than allocating a new one.
-    let workspace = legacyRuntime && existing ? existing.workspace : execution
-      ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
-      : join(homedir(), ".valet", "assistants", assistantId);
-    if (execution && principal.type === "user") {
-      // The personal root mounts its whole directory. Keep fork files outside it.
+    let workspace = legacyRuntime && existing ? existing.workspace : join(homedir(), ".valet", "assistants", assistantId);
+    if (execution) {
+      // The root sandbox mounts its whole directory, so an execution inside it
+      // would expose a private conversation's files to the root. A live
+      // browser sandbox also owns that directory, and the server could not
+      // create the execution there. Older team executions keep their
+      // recorded directory under `executions/`.
       workspace = existing?.workspace ?? join(homedir(), ".valet", "assistant-executions", assistantId, execution.sessionId);
+    }
+    if (execution && principal.type === "user") {
       const root = await this.opts.engineStore.getSession(assistant.sessionId);
       const sourcePath = resolve(root?.workspace ?? join(homedir(), ".valet", "assistants", assistantId));
       const executionPath = resolve(workspace);
