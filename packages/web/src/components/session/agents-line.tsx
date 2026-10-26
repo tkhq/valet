@@ -30,7 +30,9 @@ export function AgentsLine({ children, threadId, onOpenChild }: {
   const running = listed.filter(child => child.status === "running");
   if (running.length === 0) return null;
   const open = (id: string) => onOpenChild ? onOpenChild(id) : void navigate({ to: "/sessions/$sessionId", params: { sessionId: id } });
-  return <div className="mx-auto w-full max-w-3xl px-5 sm:px-8">
+  // Pad the row, then center the column, as message rows do; padding inside
+  // the column would push the line right of the messages on wide screens.
+  return <div className="min-w-0 px-5 sm:px-8"><div className="mx-auto w-full min-w-0 max-w-3xl">
     <TraceLine icon={<Bot />} status="running" label="Show the agents"
       title={`${running.length === 1 ? "1 agent" : `${running.length} agents`} working · ${running[0]!.title}`}>
       <TraceList>
@@ -40,5 +42,5 @@ export function AgentsLine({ children, threadId, onOpenChild }: {
           label={`Open ${child.title}`} onSelect={() => open(child.sessionId)} />)}
       </TraceList>
     </TraceLine>
-  </div>;
+  </div></div>;
 }

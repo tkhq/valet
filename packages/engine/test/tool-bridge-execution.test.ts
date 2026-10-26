@@ -130,6 +130,21 @@ describe("tool bridge: terminal outcomes", () => {
     const result = await tool.execute("tc-pr", {}, new AbortController().signal, () => {});
     expect(result.details).toEqual({ outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/42" } });
   });
+
+  it("keeps an automatic approval in persisted result details", async () => {
+    const tool = toAgentTool(
+      defineTool({
+        name: "call_tool",
+        intent: "exempt",
+        description: "runs an action",
+        parameters: Type.Object({}),
+        execute: async () => ({ text: "sent", ok: true, approval: "automatic" as const }),
+      }),
+      buildCtx,
+    );
+    const result = await tool.execute("tc-auto", {}, new AbortController().signal, () => {});
+    expect(result.details).toEqual({ ok: true, approval: "automatic" });
+  });
 });
 
 describe("shared tool intent", () => {

@@ -178,7 +178,16 @@ export const SCRATCH_RULE =
  * absent means no, so the prompt never names a directory that may not
  * exist.
  */
-export function codingSystemPrompt(opts: { secretsCli: boolean; scratchEnabled?: boolean }): string {
+/**
+ * A child session's rule for a blocking question. A child has no question
+ * tool (`CHILD_EXCLUDED_TOOL_NAMES` in the engine): its parent agent answers
+ * from the brief and the thread, or asks the person, then continues it.
+ */
+export const CHILD_QUESTION_RULES = `## Questions
+
+You work for a parent agent. No person reads this conversation while you work, so do not ask a person anything. If a missing fact or a decision blocks you, end your turn with the question as your result. Say what you need, why it blocks you, and the choices you see, and say what you finished before you stopped. The parent answers from its brief or asks the person, then sends you the answer. Do not guess on a step that is hard to reverse. When a guess is safe, go ahead and say in one line what you assumed.`;
+
+export function codingSystemPrompt(opts: { secretsCli: boolean; scratchEnabled?: boolean; child?: boolean }): string {
   return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
 ${TOOL_USE_RULES}
@@ -197,7 +206,7 @@ ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
 
 ${BACKGROUND_WORK_RULES}${opts.scratchEnabled ? ` ${SCRATCH_RULE}` : ""}
 
-${CODING_PERSISTENCE_RULES}`;
+${CODING_PERSISTENCE_RULES}${opts.child ? `\n\n${CHILD_QUESTION_RULES}` : ""}`;
 }
 
 /** The prepped-sandbox prompt, for callers and tests that want the constant. */

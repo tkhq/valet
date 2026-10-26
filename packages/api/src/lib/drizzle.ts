@@ -745,6 +745,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
   },
   {
+    describe: "session_threads.approval_bypass_by column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_by" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_by" text',
+  },
+  {
+    describe: "session_threads.approval_bypass_at column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_at" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_at" bigint',
+  },
+  {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
     sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',

@@ -47,6 +47,19 @@ describe("PinnedPlan", () => {
     expect(items[2].querySelector(".font-medium")).not.toBeNull();
   });
 
+  it("marks an unfinished plan with the Valet mascot and a finished one with a check", () => {
+    renderPlan({ t1: PLAN, t2: { ...PLAN, items: PLAN.items.map(item => ({ ...item, status: "done" as const })) } }, "t1");
+    const toggle = screen.getByRole("button", { expanded: false });
+    expect(within(toggle).getByRole("img", { name: "Plan in progress" }).getAttribute("src")).toBe("/icons/valet-mascot.webp");
+    fireEvent.click(toggle);
+    expect(within(screen.getAllByRole("listitem")[2]!).getByRole("img", { name: "In progress" }).getAttribute("src")).toBe("/icons/valet-mascot.webp");
+  });
+
+  it("marks a finished plan with a green check", () => {
+    renderPlan({ t2: { ...PLAN, items: PLAN.items.map(item => ({ ...item, status: "done" as const })) } }, "t2");
+    expect(within(screen.getByRole("button", { expanded: false })).getByRole("img", { name: "Plan done" }).getAttribute("class")).toContain("text-success-600");
+  });
+
   it("says the plan is done when every item is done", () => {
     renderPlan({ t1: { ...PLAN, items: PLAN.items.map((item) => ({ ...item, status: "done" })) } });
     expect(screen.getByRole("button", { expanded: false }).textContent).toContain("Plan done · 5 of 5");

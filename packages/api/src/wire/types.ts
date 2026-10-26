@@ -1017,6 +1017,8 @@ export interface ThreadSummary {
   channel?: ThreadChannel;
   /** Set when the owner shares this personal thread with the organization. */
   share?: ThreadShareMode;
+  /** True while the thread runs without asking (`PatchThreadRequest.approvalBypass`). */
+  approvalBypass?: true;
 }
 
 /**
@@ -1035,6 +1037,8 @@ export interface ThreadAddress {
   archivedAt: number | null;
   /** The thread's share, when it has one. */
   share?: ThreadShareMode;
+  /** True while the thread runs without asking. */
+  approvalBypass?: true;
   /** Present when the caller opens the thread through its share, not as its
    * owner or a member of its workspace. */
   guest?: { mode: ThreadShareMode; ownerName: string };
@@ -1291,6 +1295,16 @@ export interface PatchThreadRequest {
   /** Share a personal thread with the organization, or "off" to stop. Only
    * the owner can change it. */
   share?: ThreadShareMode | "off";
+  /**
+   * "Run without asking": true turns it on, false turns it off. While it is
+   * on, an approval that the person could stop for good with "Always allow
+   * for me" (or "for this team") runs without a card in this thread and the
+   * child agents it starts. Critical actions, actions an admin rule names,
+   * another member's shared account, and actions that need the author's own
+   * consent still ask. The owner of a personal thread or a team admin turns
+   * it on, from a signed-in browser.
+   */
+  approvalBypass?: boolean;
 }
 
 /** `GET /api/threads/:id/tool-output`: one tool call's full result, in its stored shape. */

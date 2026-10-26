@@ -257,3 +257,25 @@ Hosted tools cannot obtain ungated access to an actor-scoped action.
 `GET /api/me/tool-permissions[?service=][&teamId=]` lists each static catalog action with the caller's effective mode. The Integrations detail panel shows this value per tool, in place of the risk-derived "Approval required" label, which ignored policy rows. `listToolPermissions` (`policies/admin.ts`) loads the rows once with `loadPolicyRows` and runs `resolvePolicyDecision` for each action. It uses `appliesIn: "session"`, no params, and no session, so a matcher-scoped rule and a live grant do not show. The `source` field maps provenance to `default`, `plugin`, `org`, `team`, `personal`, or `grant`. `overridden` is true only for an override on that exact action, which is the row a Reset deletes.
 
 `settable` applies the write rules. `orgBlocksAllow`, the pure core of the actionId bounds check, removes `allow`. An effective org or team deny leaves only `deny`, because rung 0 outranks every override. `lockedBy` names the rule that removed a mode. With `teamId`, the rows are the team's and `settable` is empty, because team runs load no personal override. The web writes through `PUT` and `DELETE /api/me/policy-overrides`. No table changed. Pinned by `me-policies.test.ts`, which also resolves an Off override through `buildPolicyResolver` to `deny`.
+
+### Run without asking (2026-10-26)
+
+A person can let one thread run without approval cards: the thread menu item "Run without asking". It is stored on `session_threads` as `approval_bypass_by` (the person who turned it on) and `approval_bypass_at`. `PATCH /api/threads/:id` with `approvalBypass` turns it on or off, and thread summaries carry `approvalBypass: true` while it is on. The header shows a "Runs without asking" badge.
+
+What it approves is the same set that the owner option above could stop for good. In `buildPolicyResolver.resolve`, after `anyoneMayAllow` is computed, a covered call resolves `allow` with provenance `thread_bypass` and opens no gate. So these still ask:
+
+- a critical action;
+- an action that an org rule bounds, or that a live team rule names (`teamRuleNamesAction`);
+- an action that would use another member's shared account (that path returns before this check);
+- an action with `approvalScope: "actor"`, which `call_tool` turns back into a one-shot gate;
+- any call from a sender with no Valet account.
+
+Coverage (`threadBypassCovers`):
+
+- On a personal thread, the setting covers only the turns of the person who turned it on, and only when that person owns the session. A member who replies in a shared thread does not borrow it.
+- On a team thread, it covers team members and the team's own unattended turns (`team:{id}`).
+- A child agent inherits it. `threadApprovalBypass` follows `child_watches` from the child session to the thread that started it, up to eight hops. Turning it off on the parent stops it for the children at once.
+
+Who may turn it on: the owner of a personal thread, or a team admin (`canAdministerTeam`) for a team thread, from a signed-in browser (`authVia` session or the local stub). A plain API key gets 403 from the route. Agent credentials (MCP, `valet login`) never reach it, because `refuseAgentAuthority` refuses every thread PATCH. Anyone who may change the thread may turn it off. The web asks for a confirm before turning it on.
+
+A covered call returns `approval: "automatic"` on its `ToolResult`. The tool bridge keeps it in the persisted part's `details`, and the work line shows "Approved automatically" on the step and a count on the group. Audit records carry the `thread_bypass` provenance. It writes no policy, override, or grant. `listToolPermissions` maps the source to `default`, since it is a thread setting and not a standing permission.

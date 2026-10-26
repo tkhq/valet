@@ -1,7 +1,7 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { uid } from "./ids.js";
-import { builtinTools, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
+import { builtinTools, CHILD_EXCLUDED_TOOL_NAMES, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
@@ -455,8 +455,12 @@ export class Session {
     // A session with no wakeup seam (a bare engine, a test) gets no wakeup
     // tools: each one would only refuse, and six tool schemas widen every
     // prompt. The api gives every session a seam (`host.ts`).
+    // A child never asks a person: nobody watches its conversation. It ends
+    // its turn with the question as its result, and its parent answers it
+    // or asks the person in the thread they watch.
     this.builtinTools = options.builtinTools
-      ?? (options.wakeups ? builtinTools : builtinTools.filter((tool) => !WAKEUP_TOOL_NAMES.has(tool.name)));
+      ?? builtinTools.filter((tool) => (options.wakeups || !WAKEUP_TOOL_NAMES.has(tool.name))
+        && !(options.purpose === "child" && CHILD_EXCLUDED_TOOL_NAMES.has(tool.name)));
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;

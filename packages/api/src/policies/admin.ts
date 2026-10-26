@@ -496,9 +496,11 @@ const SOURCE: Record<PolicyProvenanceSource, ToolPermissionSource> = {
   override: "personal",
   runtime_grant: "grant",
   workflow_grant: "grant",
-  // The two below come from the session resolver only, never from the pure core.
+  // The three below come from the session resolver only, never from the pure core.
   resolver_error: "default",
   shared_account: "team",
+  // A thread setting, not a standing permission: the action keeps its mode.
+  thread_bypass: "default",
 };
 
 /**

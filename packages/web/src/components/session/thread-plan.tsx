@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { planProgress, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
 import { useThreadPlan } from "~/api/thread-plan";
 import { Button, cardClass, StatusDot } from "~/components/primitives";
@@ -25,14 +25,21 @@ const ITEM: Record<ThreadPlanStatus, { tone: "neutral" | "info" | "outline"; lab
   pending: { tone: "outline", label: "Not started", text: "text-ink" },
 };
 
+/** The Valet mascot, the mark the working line uses for Valet at work. */
+function Mascot({ label, className }: { label: string; className?: string }) {
+  return <img src="/icons/valet-mascot.webp" alt={label} width={20} height={20} className={cn("shrink-0 object-contain", className)} />;
+}
+
 /** The plan's items in order: done items struck through, the current item in bold. */
 export function PlanChecklist({ items, id, className }: { items: ThreadPlanItem[]; id?: string; className?: string }) {
   return (
-    <ol id={id} className={cn("space-y-1 text-[13px] leading-5", className)}>
+    <ol id={id} className={cn("space-y-1.5 text-[13px] leading-5", className)}>
       {items.map((item, index) => (
         // Items hold no state, so an index key cannot hand state to the wrong item.
         <li key={index} className="flex min-w-0 items-start gap-2">
-          <StatusDot tone={ITEM[item.status].tone} label={ITEM[item.status].label} className="mt-1.5" />
+          {item.status === "in_progress"
+            ? <Mascot label={ITEM[item.status].label} className="mt-0.5 h-4 w-4" />
+            : <StatusDot tone={ITEM[item.status].tone} label={ITEM[item.status].label} className="mt-1.5" />}
           <span className={cn("min-w-0 flex-1 [overflow-wrap:anywhere]", ITEM[item.status].text)}>{item.text}</span>
         </li>
       ))}
@@ -64,8 +71,13 @@ export function PinnedPlan({ threadId }: { threadId?: string }) {
           aria-expanded={open}
           aria-controls={open ? listId : undefined}
           onClick={() => setOpenFor(open ? undefined : threadId)}
-          className={cn("w-full min-w-0 justify-start rounded-lg px-3 font-normal", open && "rounded-b-none")}
+          className={cn("h-auto w-full min-w-0 justify-start gap-3 rounded-lg px-4 py-2.5 font-normal", open && "rounded-b-none")}
         >
+          {/* The mascot while the plan has work left, a green check once it is done.
+              Done is green, not `moss`: a theme may make `moss` its brand color. */}
+          {finished
+            ? <Check role="img" aria-label="Plan done" className="h-5 w-5 shrink-0 text-success-600 dark:text-success-500" />
+            : <Mascot label="Plan in progress" className="h-5 w-5" />}
           <PlanProgress done={done} total={total} label={finished ? "Plan done" : "Plan"} className="text-muted" />
           {!finished && current !== undefined && <span className="min-w-0 flex-1 truncate text-left text-ink">{current}</span>}
           {open
@@ -73,7 +85,7 @@ export function PinnedPlan({ threadId }: { threadId?: string }) {
             : <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
         </Button>
         {/* A long plan scrolls inside the card, so the composer stays on screen. */}
-        {open && <PlanChecklist id={listId} items={plan.items} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-3 py-2" />}
+        {open && <PlanChecklist id={listId} items={plan.items} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-4 py-3" />}
       </div>
     </section>
   );

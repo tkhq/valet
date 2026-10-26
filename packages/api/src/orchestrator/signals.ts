@@ -255,13 +255,15 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
     return await thread.submitPrompt(args.content, {
       ...(args.toolScope !== undefined ? { metadata: { toolScope: readToolScope(args.toolScope) } } : {}),
       dispatchId: args.dispatchId,
-      // Internal signals always queue behind in-flight work. User-owned
-      // orchestrator threads run queueMode 'steer' (decision 17) — without
-      // this override, a child.settled signal admitted mid-turn would
-      // SUPERSEDE and abort the parent's own running turn (steer semantics),
-      // which is backwards for an observed event: signals are context for
-      // the next turn, never an interrupt.
-      queueMode: "followup",
+      // Internal signals never interrupt. User-owned orchestrator threads
+      // run queueMode 'steer' (decision 17) — without this override, a
+      // child.settled signal admitted mid-turn would SUPERSEDE and abort the
+      // parent's own running turn (steer semantics), which is backwards for
+      // an observed event. A child's result is `inject`: it joins a running
+      // turn that handles another result from the same owner at its next
+      // tool boundary (`canDeliverMidTurn`), so close results are read
+      // together. It never joins a person's own turn; there it waits.
+      queueMode: args.content.signalType.startsWith("child.") ? "inject" : "followup",
       internalSender: { sessionId: args.from.sessionId, owner: args.from.owner, hopCount: args.hopCount },
     });
   } catch (err) {
