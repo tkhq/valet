@@ -9,7 +9,7 @@ const hook = vi.hoisted(() => vi.fn());
 vi.mock("~/api/usage", () => ({ useExternalUsage: hook }));
 const data: ExternalUsageResponse = {
   daily: [{ dayMs: 1792627200000, surface: "mcp", calls: 4 }, { dayMs: 1792627200000, surface: "hosted", calls: 2 }],
-  tools: [{ name: "github.create_issue", surface: "mcp", calls: 4, errorRate: 0.25, uniqueUsers: 2 }],
+  tools: [{ name: "github.create_issue", surface: "mcp", calls: 4, errorRate: 0.25, uniqueUsers: 2, errors: [{ code: "missing_credential", calls: 1 }] }],
   clients: [{ surface: "mcp", name: "Claude Code", version: "2.0", calls: 4 }], detailsVisible: true, hasMore: true,
   recent: [{ id: "one", surface: "mcp", name: "github.create_issue", clientName: "Claude Code", clientVersion: "2.0", userId: "u", userName: "Conner", outcome: "ok", intent: "Create an issue to track the login bug.", createdAt: Date.now() }],
 };
@@ -22,6 +22,7 @@ describe("Tool usage", () => {
     expect(screen.getByRole("img", { name: "Daily tool calls by surface" })).toBeTruthy();
     expect(screen.getByText("6 calls")).toBeTruthy();
     expect(screen.getByText("25.0%")).toBeTruthy();
+    expect(screen.getByText("Not connected 1")).toBeTruthy();
     expect(screen.getByText("Create an issue to track the login bug.")).toBeTruthy();
     expect(screen.getByText("Conner · Claude Code 2.0")).toBeTruthy();
   });

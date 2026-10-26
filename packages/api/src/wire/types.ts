@@ -6661,7 +6661,8 @@ export interface AgentAccessResponse {
 export interface ExternalUsageResponse {
   classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
-  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  /** `errors`: the most common error codes among the tool's failed calls. */
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number; errors: { code: string; calls: number }[] }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
   detailsVisible: boolean;
   recent: {

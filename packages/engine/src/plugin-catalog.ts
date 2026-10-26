@@ -1494,7 +1494,10 @@ function makeCallTool(catalog: Catalog): ToolDef {
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
       const entry = catalog.byId.get(a.tool_id);
       const result = renderInvokeOutcome(outcome, a.tool_id);
-      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : "unknown" } };
+      // A tool from a connected MCP server is resolved at call time and is
+      // not in the static catalog; an id the model made up is not in either.
+      // Record the requested id for both, so usage names the failing tool.
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : a.tool_id.slice(0, 200) } };
     },
   };
 }
@@ -1877,7 +1880,9 @@ async function executeAction(
     // present, no cred) or "credential <service> not available (no store)"
     // (no store at all). Both mean the same thing to the user — surface a
     // missing-credential outcome so callers can name the corrective action.
-    if (/credential .* not (connected|available)/.test(message)) {
+    // An MCP server plugin says "<service>: no credential connected"
+    // (`@valet/sdk` resolveToken).
+    if (/credential .* not (connected|available)|^\S+: no credential connected$/.test(message)) {
       return { kind: "missing-credential", service: credentialService };
     }
     return { kind: "error", message };

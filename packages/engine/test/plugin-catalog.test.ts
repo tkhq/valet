@@ -1017,6 +1017,25 @@ describe("pluginCatalogTools: call_tool", () => {
     );
   });
 
+  it("names a connected MCP tool in usage and treats its missing account as a missing credential", async () => {
+    const meetings: PluginAction = {
+      id: "get_meetings", name: "Get meetings", description: "Read meeting notes", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => { throw new Error("granola: no credential connected"); },
+    };
+    const mcp: ActionPlugin = { service: "granola", actions: [], resolveActions: async () => [meetings] };
+    const [, callTool] = pluginCatalogTools({ plugins: [mcp] });
+    const result = await callTool.execute({ tool_id: "granola.get_meetings", params: {}, summary: "Read this week's meeting notes" }, makeCtx());
+    expect(result.text).toContain("Connect granola on the Integrations page");
+    expect(result.usageOutcome).toMatchObject({ name: "granola.get_meetings", outcome: "error", errorCode: "missing_credential" });
+  });
+
+  it("records the tool id an agent asked for when no such tool exists", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [makeMockPlugin().plugin] });
+    const result = await callTool.execute({ tool_id: "github.get_everything", params: {}, summary: "Read the repository" }, makeCtx());
+    expect(result.usageOutcome).toMatchObject({ name: "github.get_everything", outcome: "error", errorCode: "unknown" });
+  });
+
   it("dispatches by tool_id and returns rendered data with credentials available", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });
