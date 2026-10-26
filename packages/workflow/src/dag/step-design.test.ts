@@ -125,6 +125,14 @@ describe('listingAgentStepWarnings', () => {
     expect(warnings.get('inventory')).toContain('foreach step "qualify"');
   });
 
+  it('stays quiet for an agent step that reads item content to choose the list', () => {
+    const definition = { nodes: [
+      { id: 'inventory', type: 'session', toolScope: { actions: ['slack.list_channels', 'slack.read_history'] } },
+      { id: 'review', type: 'foreach', items: '{{nodes.inventory.result.output.items}}', body: { id: 'r', type: 'llm', prompt: '{{item.text}}' } },
+    ] };
+    expect(listingAgentStepWarnings(definition).size).toBe(0);
+  });
+
   it('stays quiet for a tool-step list, an agent step that can write, or one with no action scope', () => {
     const list = (step: Record<string, unknown>) => ({ nodes: [step, { id: 'each', type: 'foreach', items: '{{nodes.list.result.items}}', body: { id: 'b', type: 'llm', prompt: 'x' } }] });
     expect(listingAgentStepWarnings(list({ id: 'list', type: 'tool', service: 'github', action: 'search_issues' })).size).toBe(0);
@@ -138,6 +146,25 @@ describe('rewriteStepWarnings', () => {
     const warnings = rewriteStepWarnings(releaseReport);
     expect([...warnings.keys()]).toEqual(['verify_and_revise']);
     expect(warnings.get('verify_and_revise')).toContain('model step "assemble"');
+  });
+
+  it('flags a step named for an edit pass even when its prompt does not say so', () => {
+    const definition = { nodes: [
+      { id: 'compose', type: 'llm', prompt: 'Write the reply.' },
+      { id: 'tighten', type: 'llm', prompt: 'Make it read like live chat: {{nodes.compose.result.output.text}}' },
+      { id: 'send', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.tighten.result.output.text}}' } },
+    ] };
+    expect([...rewriteStepWarnings(definition).keys()]).toEqual(['tighten']);
+  });
+
+  it('stays quiet for a step that writes a message from data an agent gathered', () => {
+    // Gather with tools, then compose: two jobs, not a rewrite.
+    const definition = { nodes: [
+      { id: 'gather', type: 'orchestrator', prompt: 'Call tools to gather tomorrow\'s tasks and meetings.' },
+      { id: 'compose', type: 'llm', prompt: 'Write a Slack reminder from {{nodes.gather.result.response}}. Do not rewrite task titles.' },
+      { id: 'send', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.compose.result.output.text}}' } },
+    ] };
+    expect(rewriteStepWarnings(definition).size).toBe(0);
   });
 
   it('stays quiet when the checking step reads a tool result and feeds an if step', () => {

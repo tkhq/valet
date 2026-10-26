@@ -182,6 +182,10 @@ const MODEL_STEP_TYPES: ReadonlySet<string> = new Set(['session', 'orchestrator'
 
 /** An action that only reads, by the verb its name starts with. */
 const READ_ACTION = /^[\w-]+\.(?:search|list|get|read|inspect|fetch|query)_/;
+/** An action that enumerates items. An agent that also reads their content may be choosing which ones count. */
+const LIST_ACTION = /^[\w-]+\.(?:search|list|query)_/;
+/** Words that make a step an editing pass over a draft, in its prompt or its id. */
+const EDITS_DRAFT = /\b(?:tighten|revis(?:e|es|ing)|rewrit(?:e|es|ing)|re-write|polish|proofread|copy-?edit|check (?:the|this) draft)\b/gi;
 
 type Step = Record<string, unknown> & { id: string; type: string };
 
@@ -228,7 +232,7 @@ function sendsOrWrites(step: Step): boolean {
 
 /**
  * Agent steps whose output is the list a foreach runs over, when every
- * action in the step's scope only reads. A tool step with that action
+ * action in the step's scope only lists. A tool step with that action
  * returns the same list on each run with no model turns, and its list
  * cannot drop or repeat items. A heuristic: a suggestion, never a
  * validation error.
@@ -243,8 +247,8 @@ export function listingAgentStepWarnings(definition: unknown): Map<string, strin
       const step = steps.get(id);
       if (step === undefined || !AGENT_STEP_TYPES.has(step.type)) continue;
       const actions = readToolScope(step.toolScope)?.actions ?? [];
-      if (actions.length === 0 || !actions.every((action) => READ_ACTION.test(action))) continue;
-      warnings.set(id, `This agent step builds the list that foreach step "${foreach.id}" runs over, and it only reads (${actions.join(', ')}). ` +
+      if (actions.length === 0 || !actions.every((action) => LIST_ACTION.test(action))) continue;
+      warnings.set(id, `This agent step builds the list that foreach step "${foreach.id}" runs over, and it only lists (${actions.join(', ')}). ` +
         'Get the list from a tool step instead. A tool step returns the same items on each run with no model turns. ' +
         'If the list needs judgment, put an llm step after the tool step, or decide each item in the foreach.');
     }
@@ -255,8 +259,10 @@ export function listingAgentStepWarnings(definition: unknown): Map<string, strin
 /**
  * Model steps that rewrite another model step's output before a tool step
  * sends or writes it. The earlier step's output goes only to this step, so
- * it is a draft. A second model pass can change correct facts as easily as
- * it fixes wrong ones, and it adds a model call to each run. A heuristic: a
+ * it is a draft, and this step's id or prompt says it edits it (tighten,
+ * revise, polish). A step that writes a message from gathered data is not
+ * a rewrite. A second model pass can change correct facts as easily as it
+ * fixes wrong ones, and it adds a model call to each run. A heuristic: a
  * suggestion, never a validation error.
  */
 export function rewriteStepWarnings(definition: unknown): Map<string, string> {
@@ -265,7 +271,7 @@ export function rewriteStepWarnings(definition: unknown): Map<string, string> {
   const readers = (id: string) => [...steps.values()].filter((step) => step.id !== id && reads.get(step.id)?.has(id));
   const warnings = new Map<string, string>();
   for (const step of steps.values()) {
-    if (!MODEL_STEP_TYPES.has(step.type) || !readers(step.id).some(sendsOrWrites)) continue;
+    if (!MODEL_STEP_TYPES.has(step.type) || !editsDraft(step) || !readers(step.id).some(sendsOrWrites)) continue;
     for (const id of reads.get(step.id) ?? []) {
       const draft = steps.get(id);
       if (draft === undefined || !MODEL_STEP_TYPES.has(draft.type)) continue;
@@ -276,6 +282,16 @@ export function rewriteStepWarnings(definition: unknown): Map<string, string> {
     }
   }
   return warnings;
+}
+
+/** True when the step's id, or its prompt outside a negation, says it edits a draft. */
+function editsDraft(step: Step): boolean {
+  if (new RegExp(EDITS_DRAFT.source, 'i').test(step.id.replace(/[_-]+/g, ' '))) return true;
+  if (typeof step.prompt !== 'string') return false;
+  for (const match of step.prompt.matchAll(EDITS_DRAFT)) {
+    if (!NEGATED.test(step.prompt.slice(Math.max(0, match.index - 40), match.index))) return true;
+  }
+  return false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

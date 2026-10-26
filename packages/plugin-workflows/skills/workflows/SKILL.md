@@ -26,6 +26,7 @@ Split the job by what each part needs. A workflow that does everything in one ag
 - Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
 - Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`. If the draft changes a saved workflow, pass its `workflow_id`. Fix each warning it returns, or tell the person why it does not apply.
 - After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
+- On a saved workflow that the person did not ask you to restructure, mention a warning that an agent step builds a foreach list, or that a step rewrites a draft, in one sentence. Do not change the steps for it unless the person asks. A step change revokes the workflow's saved permissions, so the person must allow them again.
 
 ## Use the workflow tools, not raw API calls
 
