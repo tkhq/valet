@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import {
   MID_TURN_DELIVERY_KEY,
   VirtualSandboxProvider,
@@ -378,13 +378,18 @@ describe("ChannelHost.handleUpdate", () => {
     expect((await session.threadByKey("fake:99"))?.id).toBe(threads[0]?.id);
   });
 
-  it("publishes shared progress through a capable non-Slack transport", async () => {
+  it("publishes a planned turn's progress through a capable non-Slack transport", async () => {
+    // Only a turn with a plan gets a progress card.
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("update_plan", { items: [{ text: "Check the change", status: "in_progress" }] })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Checked."),
+    ]);
     const publish = vi.fn(async () => ({ messageId: "progress-1" }));
     Object.assign(keyedTransport, { publishProgress: publish });
     await linkIdentity(testDb.appDb, { provider: "keyed", externalId: "77", userId: USER_ID });
     await host.handleUpdate("keyed", inbound({ conversationKey: "keyed:R1:99", text: "Check the change" }));
     await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(
-      "keyed:R1:99", expect.objectContaining({ turnId: expect.any(String), revision: expect.any(String), tasks: expect.any(Array) }),
+      "keyed:R1:99", expect.objectContaining({ turnId: expect.any(String), revision: expect.any(String), planned: true, tasks: [expect.objectContaining({ title: "Check the change" })] }),
       expect.objectContaining({ idempotencyKey: expect.any(String), threadTs: "99" }),
     ), { timeout: 5000 });
   });
