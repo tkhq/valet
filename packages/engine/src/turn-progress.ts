@@ -104,7 +104,9 @@ export function projectTurnProgress(
     tasks.set(id, { id, title: gate.type === "approval" ? "Approval required" : "Response required", status: "waiting" });
   }
   const allTasks = [...tasks.values()];
-  const snapshot = { turnId: item.id, title: turnPlan?.title ?? "Task progress", status, updatedAt, tasks: visibleTasks(allTasks, planIds), omittedTasks: Math.max(0, allTasks.length - MAX_TASKS) };
+  const snapshot = { turnId: item.id, title: turnPlan?.title ?? "Task progress", status, updatedAt, tasks: visibleTasks(allTasks, planIds), omittedTasks: Math.max(0, allTasks.length - MAX_TASKS),
+    // The tasks are the turn's plan, not its tool calls and approvals.
+    ...(turnPlan ? { planned: true as const } : {}) };
   return { ...snapshot, revision: progressRevision(JSON.stringify({ ...snapshot, allTasks })) };
 }
 

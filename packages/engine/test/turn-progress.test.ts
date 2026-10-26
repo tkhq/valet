@@ -89,6 +89,7 @@ describe("turn progress", () => {
     ]);
     expect(progress?.tasks.filter((task) => task.status === "complete")).toHaveLength(1);
     expect(progress?.omittedTasks).toBe(0);
+    expect(progress?.planned).toBe(true);
     expect(JSON.stringify(progress)).not.toContain("secret");
   });
   it("marks only the current plan step as failed when the root fails", () => {
@@ -104,7 +105,10 @@ describe("turn progress", () => {
   });
   it("uses tool rows if the plan is empty or belongs to another turn", () => {
     for (const plan of [{ turnId: "turn", updatedAt: 3, items: [] }, { turnId: "other", updatedAt: 3, items: [{ id: "old", text: "Old", status: "pending" as const }] }]) {
-      expect(projectTurnProgress(item, [entry], [], plan)?.tasks).toEqual([{ id: "tool:call", title: "Run command", status: "error" }]);
+      const progress = projectTurnProgress(item, [entry], [], plan);
+      expect(progress?.tasks).toEqual([{ id: "tool:call", title: "Run command", status: "error" }]);
+      // Tool rows are not a plan: the web shows no checklist for them.
+      expect(progress?.planned).toBeUndefined();
     }
   });
   it("does not complete unfinished plan steps after settlement", () => {

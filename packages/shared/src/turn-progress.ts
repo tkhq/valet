@@ -17,4 +17,7 @@ export interface TurnProgress {
   updatedAt: number;
   tasks: ProgressTask[];
   omittedTasks: number;
+  /** Set when the tasks are the turn's plan (`update_plan`). Otherwise they
+   * are the turn's tool calls and approvals, which the activity line covers. */
+  planned?: true;
 }
