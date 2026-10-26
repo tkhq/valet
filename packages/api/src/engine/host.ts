@@ -4434,7 +4434,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,

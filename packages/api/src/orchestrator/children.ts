@@ -838,8 +838,8 @@ export class ChildWatcher {
         body:
           (privateGate ? `Child ${childSessionId} is paused on a private request. `
             : `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}". `) +
-          "The request was sent to the person who can answer it. The child resumes when it is answered. " +
-          "Do not answer it for them; mention it only if the person is waiting on this work.",
+          "Its card shows in this thread, labeled with the child's title, and in the person's inbox. The child resumes when it is answered. " +
+          "Tell the person if they are waiting on this work. Do not steer the child past it.",
         attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
         ...(origin !== undefined ? { origin: { ...origin, reply: "manual" } } : {}),
       },

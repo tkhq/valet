@@ -1,6 +1,10 @@
-import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import type { ChildWorkResponse } from "@valet/api/wire";
+import { useInfiniteQuery, useMutation, useQueries, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import type { ChildWorkResponse, ChildWorkSummary, DecisionGate } from "@valet/api/wire";
 import { api } from "./client";
+import { qk } from "./queries";
+
+/** How often a parent thread rereads its running children's open requests. */
+const CHILD_GATE_POLL_MS = 5_000;
 
 export const childWorkKey = (sessionId: string | undefined) => ["child-work", sessionId] as const;
 
@@ -31,4 +35,22 @@ export function useDismissChild(sessionId: string | undefined) {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: childWorkKey(sessionId) }),
   });
+}
+
+/**
+ * The open requests of a thread's running children, so the parent thread can
+ * show and answer them. Nobody watches a child's own conversation. The query
+ * key is the child's decisions key, so answering a card clears it at once.
+ */
+export function useChildGates(children: readonly ChildWorkSummary[], threadId: string | undefined): Array<{ child: ChildWorkSummary; gate: DecisionGate }> {
+  const running = threadId ? children.filter(child => child.status === "running" && child.parentThreadId === threadId) : [];
+  const results = useQueries({
+    queries: running.map(child => ({
+      queryKey: qk.decisions(child.sessionId),
+      queryFn: () => api.listDecisions(child.sessionId),
+      refetchInterval: CHILD_GATE_POLL_MS,
+    })),
+  });
+  return running.flatMap((child, index) =>
+    (results[index]?.data?.gates ?? []).filter(gate => gate.status === "pending").map(gate => ({ child, gate })));
 }

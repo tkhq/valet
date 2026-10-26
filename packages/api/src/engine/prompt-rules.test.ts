@@ -9,6 +9,7 @@ import {
   MODEL_SWITCH_CORE,
   SECRETS_RULES,
   TOOL_USE_RULES,
+  CHILD_QUESTION_RULES,
   codingSystemPrompt,
   SECRETS_RULES_NO_CLI,
   threadLinkContext,
@@ -123,6 +124,14 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(codingSystemPrompt({ secretsCli: true })).not.toContain("/scratch");
     expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: false })).not.toContain("/scratch");
     expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: true })).toContain("`/scratch` is wiped when the sandbox stops");
+  });
+
+  it("tells only a child session to return a blocking question to its parent", () => {
+    expect(codingSystemPrompt({ secretsCli: true })).not.toContain(CHILD_QUESTION_RULES);
+    const child = codingSystemPrompt({ secretsCli: true, child: true });
+    expect(child).toContain(CHILD_QUESTION_RULES);
+    expect(child).toContain("end your turn with the question as your result");
+    expect(child).toContain("do not ask a person anything");
   });
 
   // Fix wave 3 (UX prompts 1, 9, M6): end the turn after a start, cover

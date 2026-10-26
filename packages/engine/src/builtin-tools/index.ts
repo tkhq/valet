@@ -1085,6 +1085,9 @@ export const builtinTools: ToolDef[] = [
   childStatusTool,
 ];
 
+/** Built-in tools a child session does not get (`purpose: "child"`). */
+export const CHILD_EXCLUDED_TOOL_NAMES: ReadonlySet<string> = new Set([askQuestionTool.name]);
+
 /** The tools that need a session's wakeup seam (`CreateSessionOptions.wakeups`).
  * A session without the seam leaves them out (`session.ts`). */
 export const WAKEUP_TOOL_NAMES: ReadonlySet<string> = new Set(
