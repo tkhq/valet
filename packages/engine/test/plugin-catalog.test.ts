@@ -1036,6 +1036,24 @@ describe("pluginCatalogTools: call_tool", () => {
     expect(result.usageOutcome).toMatchObject({ name: "github.get_everything", outcome: "error", errorCode: "unknown" });
   });
 
+  it("runs a tool written with the service name list_tools reports, under its catalog id and scope", async () => {
+    const listEvents: PluginAction = {
+      id: "calendar.list_events", name: "List events", description: "List events", riskLevel: "low",
+      parameters: Type.Object({}), execute: async () => ({ success: true, data: { events: [] } }),
+    };
+    const calendar: ActionPlugin = { service: "google_calendar", actions: [listEvents] };
+    const [, callTool] = pluginCatalogTools({ plugins: [calendar] });
+    for (const written of ["google_calendar.list_events", "google-calendar.list_events", "google_calendar.calendar.list_events"]) {
+      const result = await callTool.execute({ tool_id: written, params: {}, summary: "Read today's calendar" }, makeCtx());
+      expect(result.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "ok" });
+    }
+    const outOfScope = await callTool.execute({ tool_id: "google_calendar.list_events", params: {}, summary: "Read today's calendar" },
+      makeCtx({ toolScope: { actions: ["github.get_issue"] } }));
+    expect(outOfScope.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "denied", errorCode: "policy_denied" });
+    const unknown = await callTool.execute({ tool_id: "outlook.list_events", params: {}, summary: "Read today's calendar" }, makeCtx());
+    expect(unknown.text).toContain('Did you mean "calendar.list_events"?');
+  });
+
   it("dispatches by tool_id and returns rendered data with credentials available", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });

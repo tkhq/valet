@@ -641,6 +641,7 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  actionId = canonicalActionId(catalog, actionId);
   if (!actionInScope(ctx.toolScope, actionId)) return { kind: "denied-policy", scope: "tool" };
   if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
     return { kind: "unknown", toolId: actionId };
@@ -1492,12 +1493,13 @@ function makeCallTool(catalog: Catalog): ToolDef {
         summary: string;
       };
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
-      const entry = catalog.byId.get(a.tool_id);
-      const result = renderInvokeOutcome(outcome, a.tool_id);
+      const toolId = canonicalActionId(catalog, a.tool_id);
+      const entry = catalog.byId.get(toolId);
+      const result = renderInvokeOutcome(outcome, toolId, similarActionIds(catalog, a.tool_id));
       // A tool from a connected MCP server is resolved at call time and is
       // not in the static catalog; an id the model made up is not in either.
       // Record the requested id for both, so usage names the failing tool.
-      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : a.tool_id.slice(0, 200) } };
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : toolId.slice(0, 200) } };
     },
   };
 }
@@ -1508,8 +1510,8 @@ function makeCallTool(catalog: Catalog): ToolDef {
  * denial, validation and credential wording cannot drift apart between the
  * two routes.
  */
-function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
-  const result = renderInvokeResult(outcome, toolId);
+function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
+  const result = renderInvokeResult(outcome, toolId, similar);
   const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
     : outcome.kind === "pending-approval" ? "pending-approval" : (outcome.kind.startsWith("denied") || outcome.kind === "expired-approval") ? "denied" : "error";
   return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind === "denied-policy" ? "policy_denied"
@@ -1517,13 +1519,13 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     : outcome.kind.replaceAll("-", "_") } };
 }
 
-function renderInvokeResult(outcome: InvokeActionResult, toolId: string): ToolResult {
+function renderInvokeResult(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
   switch (outcome.kind) {
     case "ok":
       return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
     case "unknown":
       return {
-        text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,
+        text: `unknown tool_id: "${toolId}".${similar.length ? ` Did you mean ${similar.map((id) => `"${id}"`).join(" or ")}?` : ""} Use list_tools to find available actions.`,
       };
     case "resolve-failed":
       return {
@@ -1946,6 +1948,37 @@ function approvalModeFor(entry: CatalogEntry): ApprovalMode {
 
 function qualifiedId(entry: CatalogEntry): string {
   return entry.action.id.includes(".") ? entry.action.id : `${entry.service}.${entry.action.id}`;
+}
+
+const serviceKey = (service: string) => service.toLowerCase().replaceAll("-", "_");
+
+/**
+ * The catalog id for a tool id written with the service name that
+ * `list_tools` reports. Some services name their tools under another
+ * prefix (`google_calendar` has `calendar.list_events`, `google_workspace`
+ * has `drive.search_files`, `slack-user` has `slack_user.set_status`), and
+ * agents write `google_calendar.list_events` or
+ * `google_workspace.drive.search_files`. Those name one tool, so they run
+ * as it, and every scope and policy check sees the catalog id. An id that
+ * fits no tool, or more than one, is returned unchanged.
+ */
+function canonicalActionId(catalog: Catalog, actionId: string): string {
+  if (catalog.byId.has(actionId)) return actionId;
+  const dot = actionId.indexOf(".");
+  if (dot <= 0) return actionId;
+  const service = serviceKey(actionId.slice(0, dot));
+  const rest = actionId.slice(dot + 1);
+  const entries = catalog.entries.filter((entry) => serviceKey(entry.service) === service);
+  const exact = entries.find((entry) => qualifiedId(entry) === rest);
+  if (exact) return qualifiedId(exact);
+  const named = entries.filter((entry) => qualifiedId(entry).endsWith(`.${rest}`));
+  return named.length === 1 ? qualifiedId(named[0]!) : actionId;
+}
+
+/** Catalog tools with the same action name as an unknown id, for the error's "Did you mean". */
+function similarActionIds(catalog: Catalog, actionId: string): string[] {
+  const name = actionId.slice(actionId.lastIndexOf(".") + 1);
+  return catalog.entries.map(qualifiedId).filter((id) => id.slice(id.lastIndexOf(".") + 1) === name).slice(0, 3);
 }
 
 /**
