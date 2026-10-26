@@ -1000,6 +1000,36 @@ describe("Composer beside the Ask Valet dock", () => {
     expect(sendMutateAsync.mock.calls[2]?.[0].clientMessageId).not.toBe(firstKey);
   });
 
+  it("mints a new key when the person swaps an image before the resend", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    const image = (id: string) => ({ id, name: `${id}.png`, mimeType: "image/png", bytes: 4, dataUrl: "data:image/png;base64,QQ==" });
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    act(() => useComposerDraftStore.getState().setImages(slot, [image("img-a")]));
+    fireEvent.change(page, { target: { value: "look at this" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("look at this"));
+    const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+
+    act(() => useComposerDraftStore.getState().setImages(slot, [image("img-b")]));
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).toEqual(expect.any(String));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).not.toBe(firstKey);
+  });
+
+  it("sends a slash command without a key and does not promise a single post", async () => {
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "/status full" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("/status full"));
+    expect(sendMutateAsync.mock.calls[0]?.[0]).not.toHaveProperty("clientMessageId");
+    expect(screen.getAllByText(/check the thread before you send it again/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/does not post it twice/)).toBeNull();
+    expect(useComposerDraftStore.getState().byKey[draftKey("orchestrator:user-1", "shared")]?.sendKey).toBeUndefined();
+  });
+
   it("returns focus to the composer used last when sends overlap", () => {
     const { page, dock, rerender } = renderPageAndDock({ status: "idle", dockSession: "orchestrator:dock" });
     act(() => page.focus());

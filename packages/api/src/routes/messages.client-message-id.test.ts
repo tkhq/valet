@@ -50,11 +50,7 @@ describe("POST /messages: clientMessageId", () => {
     const firstBody = (await first.json()) as SendPromptResponse;
     expect(firstBody.messageId).toBeTruthy();
 
-    // The resend checks the key before it spends attachment refs. An api
-    // restart empties the ref store, so a dead ref here must not fail it.
-    const resend = await send(api, sessionId, {
-      text: "deploy the fix", threadId, clientMessageId: "key-0000001", fileRefs: [{ ref: "gone-after-restart" }],
-    });
+    const resend = await send(api, sessionId, { text: "deploy the fix", threadId, clientMessageId: "key-0000001" });
     expect(resend.status).toBe(202);
     expect(((await resend.json()) as SendPromptResponse).messageId).toBe(firstBody.messageId);
 
@@ -63,6 +59,44 @@ describe("POST /messages: clientMessageId", () => {
 
     const queued = await api.providers.engineStore.listUnsettledSubmissions(sessionId);
     expect(queued.map((item) => item.dispatchId)).toEqual(["web:local-user:key-0000001", "web:local-user:key-0000002"]);
+  });
+
+  it("answers a resend with a file before it spends the file's ref", async () => {
+    api = await bootTestApi();
+    const { sessionId, threadId } = await pausedSession(api);
+    // The first try queued text and one uploaded file, then its answer was lost.
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const first = await engineSession.prompt(
+      { text: "read the log", attachments: [{ type: "file", path: "/workspace/uploads/log.txt", bytes: 3, sha256: "sha256:abc", mimeType: "text/plain", name: "log.txt" }] },
+      { threadId, dispatchId: "web:local-user:key-0000004" },
+    );
+
+    // An api restart empties the ref store, so a dead ref here must not fail the resend.
+    const resend = await send(api, sessionId, {
+      text: "read the log", threadId, clientMessageId: "key-0000004", fileRefs: [{ ref: "gone-after-restart" }],
+    });
+    expect(resend.status).toBe(202);
+    expect(((await resend.json()) as SendPromptResponse).messageId).toBe(first.queueItemId);
+  });
+
+  it("refuses a resend whose key first sent a different message", async () => {
+    api = await bootTestApi();
+    const { sessionId, threadId } = await pausedSession(api);
+    const image = (name: string) => ({ type: "image", url: `data:image/png;base64,${name}`, mimeType: "image/png", name });
+
+    const first = await send(api, sessionId, { text: "look at this", threadId, clientMessageId: "key-0000003", attachments: [image("QQ==")] });
+    expect(first.status).toBe(202);
+
+    // The person swapped the image before the resend.
+    const swapped = await send(api, sessionId, { text: "look at this", threadId, clientMessageId: "key-0000003", attachments: [image("Qg==")] });
+    expect(swapped.status).toBe(409);
+    expect(((await swapped.json()) as { error: string }).error).toMatch(/without clientMessageId, or with a new key/);
+
+    const retyped = await send(api, sessionId, { text: "look at that", threadId, clientMessageId: "key-0000003", attachments: [image("QQ==")] });
+    expect(retyped.status).toBe(409);
+
+    const queued = await api.providers.engineStore.listUnsettledSubmissions(sessionId);
+    expect(queued).toHaveLength(1);
   });
 
   it("refuses a malformed key and names the fix", async () => {

@@ -29,7 +29,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type PromptContent, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -323,6 +323,26 @@ function authorFromEntry(
 const REPLY_METADATA_KEY = "replyTo";
 /** `SendPromptRequest.clientMessageId`: a client-minted key, short enough to sit inside a dispatch id. */
 const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * Whether a keyed resend carries the message its key first admitted. The
+ * engine refuses a reused dispatch id with different content, but the route
+ * answers a resend before it reaches the engine. So the route makes the same
+ * check here: the text, each image, and the file count. Slash text is not
+ * compared, because an expansion queues different text. The resend's file
+ * refs cannot be compared without spending them.
+ */
+export function resendMatches(admitted: PromptContent, body: Pick<SendPromptRequest, "text" | "attachments" | "fileRefs">): boolean {
+  if (typeof admitted !== "string" && "kind" in admitted) return false;
+  const text = typeof admitted === "string" ? admitted : admitted.text ?? "";
+  const parts = typeof admitted === "string" ? [] : admitted.attachments ?? [];
+  const sentText = body.text ?? "";
+  if (!sentText.startsWith("/") && text !== sentText) return false;
+  const images = parts.flatMap((part) => (part.type === "image" ? [part.url] : []));
+  const sentImages = (body.attachments ?? []).map((att) => att.url);
+  if (images.length !== sentImages.length || images.some((url, i) => url !== sentImages[i])) return false;
+  return parts.length - images.length === (body.fileRefs?.length ?? 0);
+}
 const REPLY_EXCERPT_CHARS = 280;
 
 function replyReferenceFromMetadata(
@@ -1613,9 +1633,14 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // the first try's key. Answer with that admission before any single-use
     // attachment ref is spent, so the message is never posted twice. The
     // sender's id scopes the key, because a team thread has several senders.
-    const dispatchId = body.clientMessageId && !promoteItemId ? `web:${author.id}:${body.clientMessageId}` : undefined;
+    const dispatchId = body.clientMessageId && !promoteItemId && body.editEntryId === undefined
+      ? `web:${author.id}:${body.clientMessageId}`
+      : undefined;
     if (dispatchId) {
       const admitted = await c.var.providers.engineStore.getQueueItemByDispatchId(row.id, dispatchId);
+      if (admitted && !resendMatches(admitted.content, body)) {
+        return c.json({ error: "This message key already sent a different message. Send the message without clientMessageId, or with a new key." }, 409);
+      }
       if (admitted) {
         const replay: SendPromptResponse = { messageId: admitted.id, threadId: admitted.threadId, activityAt: admitted.createdAt };
         return c.json(replay, 202);

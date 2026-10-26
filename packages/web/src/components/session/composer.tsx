@@ -29,7 +29,7 @@ import {
   type StreamMessage,
 } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
+import { draftKey, reusableSendKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
@@ -695,12 +695,17 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
-    // One key per message, kept across a failed send (`ComposerDraft.sendKey`).
-    const attachmentCount = pendingImages.length + fileRefs.length;
-    const failed = useComposerDraftStore.getState().byKey[slot]?.sendKey;
-    const clientMessageId = failed && failed.text === t && failed.attachments === attachmentCount
-      ? failed.id
-      : crypto.randomUUID();
+    // One key per queued message, kept across a send with no answer
+    // (`ComposerDraft.sendKey`). An edit or a slash command the registry
+    // knows runs without a queue item, so it has no key.
+    const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
+    const canonical = typedName
+      ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
+      : undefined;
+    const attachmentIds = [...pendingImages.map((i) => i.id), ...pendingFiles.flatMap((f) => (f.attachmentRef ? [f.id] : []))];
+    const clientMessageId = editTarget || canonical
+      ? undefined
+      : reusableSendKey(useComposerDraftStore.getState().byKey[slot]?.sendKey, t, attachmentIds) ?? crypto.randomUUID();
     useComposerDraftStore.getState().clear(slot);
     announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
@@ -754,10 +759,6 @@ export function Composer({
       // failed send is not a "use". Matched case-insensitively (dispatch
       // is too) and recorded under the canonical name so the recency key
       // always lines up with the popup's names.
-      const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
-      const canonical = typedName
-        ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
-        : undefined;
       if (canonical) {
         setCommandRecency(recordCommandUse(canonical));
       }
@@ -796,13 +797,17 @@ export function Composer({
           )
         : pendingFiles;
       drafts.setFiles(slot, (prev) => [...restored, ...prev]);
-      drafts.setSendKey(slot, { id: clientMessageId, text: t, attachments: attachmentCount });
       // The failure must be visible — a console-only error reads as a dead
       // send button. With no answer from the api the message may have
-      // landed, and the kept key makes a resend safe.
-      drafts.setFileErrors(slot, [isServerUnavailable(err)
-        ? "Valet did not respond, so your message is back in the box. Send it again after Valet reconnects. Valet does not post it twice."
-        : `The message did not send. ${errorText(err, "Unknown error.")}`]);
+      // landed, and only a kept key makes a resend safe. An answer means
+      // nothing was queued, so the next send gets a new key.
+      const unanswered = isServerUnavailable(err);
+      if (unanswered && clientMessageId) drafts.setSendKey(slot, { id: clientMessageId, text: t, attachments: attachmentIds });
+      drafts.setFileErrors(slot, [!unanswered
+        ? `The message did not send. ${errorText(err, "Unknown error.")}`
+        : clientMessageId
+          ? "Valet did not respond, so your message is back in the box. Send it again after Valet reconnects. Valet does not post it twice."
+          : "Valet did not respond, so your message is back in the box. After Valet reconnects, check the thread before you send it again."]);
       if (editTarget) onEditResult?.(false);
       console.error("send failed:", err);
     } finally {

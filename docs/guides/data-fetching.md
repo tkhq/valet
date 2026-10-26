@@ -35,8 +35,11 @@ this. Do not add a second retry loop or a second "reconnecting" notice.
   shows an error for a restart. Render `isError` for real errors only.
 - **One banner** (`ReconnectingBanner`) reads `useApiConnection`. Panels do not.
 - **Mutations** never retry. They fail at once, and `errorText` names the
-  outage. A message send carries `clientMessageId`, so a resend after a lost
-  answer cannot post the message twice.
+  outage. A queued message send carries `clientMessageId`, so a resend after a
+  lost answer cannot post the message twice. The composer keeps the key, also
+  across a reload, only for the same text and the same attachments. The api
+  refuses a reused key with different content (409). Edits and slash commands
+  carry no key.
 - **A loop outside TanStack Query** (a socket, a frame feed) waits with
   `backoffDelay`, calls `reportServerUnavailable()` when no api answers, and
   starts again after `waitForOutageEnd()` or `reportServerReachable()`.

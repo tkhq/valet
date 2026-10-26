@@ -14,7 +14,8 @@
  *
  * The text also persists to localStorage, so a draft survives a reload and
  * shows in another window. Attachments stay in memory: they are uploads in
- * flight, not text that can be written back.
+ * flight, not text that can be written back. The send key of a failed send
+ * persists beside the text, so a resend after a reload keeps it.
  */
 import { create } from "zustand";
 import type { ComposerImage } from "~/components/session/composer-images";
@@ -35,11 +36,29 @@ export interface ComposerDraft {
    */
   recall?: number;
   /**
-   * The idempotency key of a send that failed (`SendPromptRequest.clientMessageId`).
-   * A resend with the same text and attachment count reuses it, so the api
+   * The idempotency key of a send that got no answer (`SendPromptRequest.clientMessageId`).
+   * A resend of the same text and the same attachments reuses it, so the api
    * does not post the message twice when the first try landed after all.
    */
-  sendKey?: { id: string; text: string; attachments: number };
+  sendKey?: SendKey;
+}
+
+/** `attachments` holds the local ids of the images and files the send carried. */
+export interface SendKey {
+  id: string;
+  text: string;
+  attachments: string[];
+}
+
+/**
+ * The kept key when `text` and `attachments` are exactly what that send
+ * carried, else undefined. A changed attachment is a different message,
+ * so it must not reuse the key.
+ */
+export function reusableSendKey(sendKey: SendKey | undefined, text: string, attachments: string[]): string | undefined {
+  if (!sendKey || sendKey.text !== text || sendKey.attachments.length !== attachments.length) return undefined;
+  const sent = [...sendKey.attachments].sort();
+  return [...attachments].sort().every((id, i) => id === sent[i]) ? sendKey.id : undefined;
 }
 
 /**
@@ -110,6 +129,22 @@ interface ComposerDraftStore {
  * absent or throw (private windows, blocked site data, a full quota). A draft
  * that cannot be saved still works for this tab. */
 const STORAGE_PREFIX = "valet:composer-draft:v2:";
+/** One JSON `SendKey` per draft, beside the draft's text entry. */
+const SEND_KEY_PREFIX = "valet:composer-send-key:v1:";
+
+function parseSendKey(raw: string | null): SendKey | undefined {
+  if (!raw) return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || !("id" in value) || !("text" in value) || !("attachments" in value)) return undefined;
+    const { id, text, attachments } = value;
+    if (typeof id !== "string" || typeof text !== "string" || !Array.isArray(attachments)) return undefined;
+    if (!attachments.every((a): a is string => typeof a === "string")) return undefined;
+    return { id, text, attachments };
+  } catch {
+    return undefined;
+  }
+}
 
 function storedDrafts(owner: string): Record<string, ComposerDraft> {
   const byKey: Record<string, ComposerDraft> = {};
@@ -117,7 +152,10 @@ function storedDrafts(owner: string): Record<string, ComposerDraft> {
     for (let i = 0; i < localStorage.length; i++) {
       const name = localStorage.key(i);
       const text = name?.startsWith(STORAGE_PREFIX + owner + "\u0000") ? localStorage.getItem(name) : null;
-      if (name && text) byKey[name.slice(STORAGE_PREFIX.length)] = { ...EMPTY_DRAFT, text };
+      if (!name || !text) continue;
+      const key = name.slice(STORAGE_PREFIX.length);
+      const sendKey = parseSendKey(localStorage.getItem(SEND_KEY_PREFIX + key));
+      byKey[key] = sendKey ? { ...EMPTY_DRAFT, text, sendKey } : { ...EMPTY_DRAFT, text };
     }
   } catch { /* nothing stored */ }
   return byKey;
@@ -129,6 +167,14 @@ function storeText(key: string, text: string): void {
     if (text) localStorage.setItem(STORAGE_PREFIX + key, text);
     else localStorage.removeItem(STORAGE_PREFIX + key);
   } catch { /* keep the in-memory draft */ }
+}
+
+function storeSendKey(key: string, sendKey: SendKey | undefined): void {
+  try {
+    if (!useComposerDraftStore.getState().owner) return;
+    if (sendKey) localStorage.setItem(SEND_KEY_PREFIX + key, JSON.stringify(sendKey));
+    else localStorage.removeItem(SEND_KEY_PREFIX + key);
+  } catch { /* keep the in-memory key */ }
 }
 
 export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
@@ -187,6 +233,8 @@ useComposerDraftStore.subscribe((state, prev) => {
   for (const key of new Set([...Object.keys(state.byKey), ...Object.keys(prev.byKey)])) {
     const text = state.byKey[key]?.text ?? "";
     if (text !== (prev.byKey[key]?.text ?? "")) storeText(key, text);
+    const sendKey = state.byKey[key]?.sendKey;
+    if (sendKey !== prev.byKey[key]?.sendKey) storeSendKey(key, sendKey);
   }
 });
 
