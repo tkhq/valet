@@ -25,7 +25,7 @@
  * accepts an action name, before the real draft. The check counts both
  * on their own.
  */
-import { approvalRequestWarning } from "@valet/api/eval-workflows";
+import { approvalRequestWarning, scheduledRunMisses } from "@valet/api/eval-workflows";
 import { toolResultText } from "../trajectory.js";
 import type { CheckResult, Trajectory, TrajectoryToolCall, WorkflowDefinitionCheck } from "../types.js";
 
@@ -371,11 +371,12 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
     }
   }
   if (check.schedule_input === true) {
-    const reads = triggerDataReads(definition);
-    const outside = reads.filter((path) => firstSegment(path) !== "input" && !SCHEDULE_METADATA.has(firstSegment(path)));
-    if (!reads.some((path) => firstSegment(path) === "input")) failures.push("no step reads the schedule input at trigger.data.input");
-    if (outside.length > 0) {
-      failures.push(`steps read trigger.data${[...new Set(outside)].join(", trigger.data")}; schedule input is at trigger.data.input`);
+    if (!triggerDataReads(definition).some((path) => !SCHEDULE_METADATA.has(firstSegment(path)))) {
+      failures.push("no step reads the schedule input from trigger.data");
+    }
+    const missed = [...new Set([...scheduledRunMisses(definition).values()].flat().map((miss) => miss.field))];
+    if (missed.length > 0) {
+      failures.push(`steps read trigger.data.${missed.join(", trigger.data.")}, which a scheduled run leaves empty`);
     }
   }
   if (check.run_date === true) {

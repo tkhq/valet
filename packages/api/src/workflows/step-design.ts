@@ -71,7 +71,7 @@ function scheduleInputWarning({ field, sites }: ScheduledRunMiss, schedules: rea
   return (
     // The text names template paths, which start with the word.
     // copy-lint: allow trigger
-    `A scheduled run puts the schedule's input under trigger.data.input, so trigger.data.${field} is empty when ${named} starts this workflow. ` +
+    `This workflow reads trigger.data.input.${field} in another place, so a scheduled run keeps ${field} under trigger.data.input only, and trigger.data.${field} is empty when ${named} starts this workflow. ` +
     `To read it on every kind of run, write ${forms.join(", and ")}. ` +
     `The || operator skips a schedule value of false, 0, or an empty string. To keep such a value, read trigger.data.input.${field} alone. Only a scheduled run sets it.`
   );

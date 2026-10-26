@@ -51,7 +51,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.resolve_approval` — approve/deny a gate (an approval node, or a tool node that policy holds), ONLY when the user asks. Valet shows the user a card, and the gate resolves as the person who confirms it. Call it once per gate.
 - `workflows.list_event_types` — event keys workflows can be triggered by
 - `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events. Event data arrives as `{{trigger.data.payload...}}`.
-- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives as `{{trigger.data.input...}}`) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
+- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives at `{{trigger.data.<field>}}`, the same path a manual run uses) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 
@@ -226,7 +226,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - `start_run` (manual): the `input` you passed → `{{trigger.data.<field>}}`.
 - Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
 - Webhook: the raw JSON POST body.
-- Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
+- Schedule: `{ <input fields>, scheduleName, cron, input }`. Read the schedule's static input at `{{trigger.data.<field>}}`, as a manual run does. A field the schedule leaves out takes its `dataSchema` default. Reading `trigger.data.input.<field>` keeps that field nested only, with no default.
 
 **Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array` (`integer` is an accepted alias for `number` and adds no integer-only check, so a non-integer value like `7.5` is accepted):
 

@@ -39,10 +39,11 @@ describe("stepDesignWarnings", () => {
 describe("stepDesignWarnings: what a run reads and runs as", () => {
   const steps = (...nodes: Record<string, unknown>[]) => ({ version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, ...nodes], edges: [] });
 
-  it("warns when a step reads a trigger field that a schedule sends under trigger.data.input", () => {
+  it("warns when a step reads a trigger field that the workflow also reads under trigger.data.input", () => {
     const definition = steps(
       { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
       { id: "each", type: "foreach", items: "{{trigger.data.input.rows}}", body: { type: "tool", service: "slack", action: "post_message", params: { channel: "{{trigger.data.channel}}" } } },
+      { id: "note", type: "session", mode: "start", prompt: "Scheduled push {{trigger.data.input.push}} to {{trigger.data.input.channel}}." },
     );
     const warnings = stepDesignWarnings(definition, [], { schedules: ["Nightly refresh"] });
     expect([...warnings.keys()].sort()).toEqual(["each", "refresh"]);
@@ -57,7 +58,7 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
       nodes: [
         { id: "trigger", type: "trigger" },
         { id: "gate", type: "if", conditions: [{ left: "trigger.data.dryRun", dataType: "boolean", operation: "false" }] },
-        { id: "publish", type: "session", mode: "start", prompt: "Publish the report." },
+        { id: "publish", type: "session", mode: "start", prompt: "Publish the report (scheduled dry run {{trigger.data.input.dryRun}}, limit {{trigger.data.input.limit}})." },
       ],
       edges: [{ from: "trigger", to: "gate" }, { from: "gate", to: "publish", when: "trigger.data.limit > 0" }],
     };
@@ -74,6 +75,8 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
   it("stays quiet with no schedule, a read that covers both paths, or a field the schedule sets itself", () => {
     const read = (prompt: string) => steps({ id: "refresh", type: "session", mode: "start", prompt });
     expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), []).size).toBe(0);
+    // A scheduled run copies its input to trigger.data.push, so a top-level read works.
+    expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), [], { schedules: ["Nightly"] }).size).toBe(0);
     expect(stepDesignWarnings(read("Push: {{trigger.data.input.push || trigger.data.push}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
     expect(stepDesignWarnings(read("{{trigger.data.scheduleName}} fired at {{trigger.data.cron}} with {{trigger.data.input}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
   });
