@@ -140,6 +140,7 @@ function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResul
     ...(result.usageOutcome ? { usageOutcome: result.usageOutcome } : {}),
     ...(result.ok === undefined ? {} : { ok: result.ok }),
     ...(result.outcome === undefined ? {} : { outcome: result.outcome }),
+    ...(result.approval === undefined ? {} : { approval: result.approval }),
   };
   return { content, details: Object.keys(details).length === 0 ? undefined : details };
 }

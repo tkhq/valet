@@ -90,6 +90,8 @@ import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
+import { setThreadApprovalBypass } from "../services/thread-approval-bypass.js";
+import { canAdministerTeam } from "../services/teams.js";
 import { isAssistantConversationOf } from "../services/thread-access.js";
 import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
 import { threadRecap } from "../services/thread-recap.js";
@@ -544,6 +546,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           archivedAt: sessionThreads.archivedAt,
           lastUserActivityAt: sessionThreads.lastUserActivityAt,
           shareMode: sessionThreads.shareMode,
+          approvalBypassBy: sessionThreads.approvalBypassBy,
         })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
@@ -558,6 +561,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
             archivedAt: r.archivedAt ?? undefined,
             lastUserActivityAt: r.lastUserActivityAt ?? undefined,
             share: r.shareMode ?? undefined,
+            approvalBypass: r.approvalBypassBy !== null,
           },
         ] as const,
     ),
@@ -586,7 +590,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
       const meta = metaById.get(t.id);
       const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, meta?.title,
         t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
-      return meta?.share ? { ...summary, share: meta.share } : summary;
+      return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}) };
     });
   let body: ListThreadsResponse;
   try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
@@ -756,10 +760,11 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     body.archived === undefined &&
     body.title === undefined &&
     body.reasoning === undefined &&
-    body.share === undefined
+    body.share === undefined &&
+    body.approvalBypass === undefined
   ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear), archived, title, reasoning, and/or share" },
+      { error: "nothing to patch: send model (null to clear), archived, title, reasoning, share, and/or approvalBypass" },
       400,
     );
   }
@@ -775,6 +780,28 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       return c.json({ error: "Only a personal thread can be shared. Everyone on the team can already open team threads." }, 400);
     }
     nextShare = body.share === "off" ? null : body.share;
+  }
+
+  // "Run without asking" (`services/thread-approval-bypass.ts`). Anyone who
+  // may open the thread may turn it off. Only a person who could stop each
+  // approval for good may turn it on, and only from a signed-in browser, so
+  // an agent that holds the person's API key cannot turn it on for itself.
+  if (body.approvalBypass !== undefined) {
+    if (typeof body.approvalBypass !== "boolean") {
+      return c.json({ error: "Set approvalBypass to true or false." }, 400);
+    }
+    if (body.approvalBypass) {
+      if (c.var.authVia !== "session" && c.var.authVia !== "stub") {
+        return c.json({ error: "Turn on Run without asking in Valet, signed in to your browser." }, 403);
+      }
+      if (session.ownerType === "team") {
+        if (!session.ownerId || !(await canAdministerTeam(db, session.ownerId, c.var.user.id))) {
+          return c.json({ error: "Only a team admin can turn on Run without asking for a team thread. Ask a team admin." }, 403);
+        }
+      } else if (session.ownerType !== "user" || (session.ownerId || session.userId) !== c.var.user.id) {
+        return c.json({ error: "Only the thread's owner can turn on Run without asking." }, 403);
+      }
+    }
   }
 
   // Validate the title before changing any thread settings.
@@ -948,6 +975,11 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     await setThreadShare(db, { id: thread.id, sessionId: session.id, createdAt: thread.toThreadData().createdAt }, nextShare);
   }
 
+  if (body.approvalBypass !== undefined) {
+    await setThreadApprovalBypass(db, { id: thread.id, sessionId: session.id, createdAt: thread.toThreadData().createdAt },
+      body.approvalBypass ? c.var.user.id : null);
+  }
+
   // Return the same title and archive state as a subsequent GET.
   const rows = await db
     .select({
@@ -955,6 +987,7 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       title: sessionThreads.title,
       lastUserActivityAt: sessionThreads.lastUserActivityAt,
       shareMode: sessionThreads.shareMode,
+      approvalBypassBy: sessionThreads.approvalBypassBy,
     })
     .from(sessionThreads)
     .where(eq(sessionThreads.id, thread.id))
@@ -976,6 +1009,7 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
   const response: PatchThreadResponse = {
     ...summary,
     ...(rows[0]?.shareMode ? { share: rows[0].shareMode } : {}),
+    ...(rows[0]?.approvalBypassBy ? { approvalBypass: true as const } : {}),
     ...(cancelledWork ? { cancelledWork } : {}),
   };
   return c.json(response);
