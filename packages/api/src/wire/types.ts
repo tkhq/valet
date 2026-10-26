@@ -2677,6 +2677,8 @@ export interface WorkflowRunConversation {
   threadId: string;
   title?: string;
   nodeId?: string;
+  /** The foreach entry a step's own thread ran, from 0. Absent for other threads. */
+  iteration?: number;
 }
 
 /**

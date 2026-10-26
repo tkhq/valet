@@ -27,6 +27,15 @@ export function ThreadForm({
           { value: "until_idle", label: "Until idle" },
         ]}
       />
+      <SelectField
+        label="Thread"
+        value={node.thread ?? "run"}
+        onChange={(value) => onChange({ thread: value === "run" ? undefined : value })}
+        options={[
+          { value: "run", label: "Run thread: after earlier steps, with their context" },
+          { value: "step", label: "Own thread: new conversation, runs in parallel" },
+        ]}
+      />
     </div>
   );
 }

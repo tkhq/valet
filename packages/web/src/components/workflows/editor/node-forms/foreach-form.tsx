@@ -76,7 +76,8 @@ function defaultForeachBody(type: ForeachBodyNode["type"], id: string): ForeachB
     case "set":
       return { id, type: "set", values: {} };
     case "orchestrator":
-      return { id, type: "orchestrator", prompt: "" };
+      // Each entry gets its own conversation, so entries run in parallel.
+      return { id, type: "orchestrator", prompt: "", thread: "step" };
     case "session":
       return { id, type: "session", mode: "start", prompt: "" };
     case "workflow":

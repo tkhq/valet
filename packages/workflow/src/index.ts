@@ -22,6 +22,7 @@ export type {
   LlmNode,
   NodeErrorPolicy,
   ThreadNode,
+  ThreadPlacement,
   ToolNode,
   ToolCredentialMode,
   WorkflowCallNode,

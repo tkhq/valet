@@ -96,6 +96,13 @@ export interface WorkflowPromptOrchestratorOptions {
   ownerHint: { ownerType: string; ownerId: string };
   /** The most model calls the submission may make (`MODEL_CALL_LIMIT_KEY`). */
   modelCallLimit?: number;
+  /**
+   * Set for a step with `thread: "step"`: the submission goes to that
+   * step's own thread, not the run's thread. The host derives the thread
+   * key from the run, `nodeId` and `iteration`, so a re-issued dispatch
+   * (crash recovery, or the repair turn) finds the same thread.
+   */
+  stepThread?: { nodeId: string; iteration: number };
 }
 
 export interface WorkflowPromptOrchestratorResult {

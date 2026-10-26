@@ -17,7 +17,8 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildWorkflowEngineDeps, mapPiAiUsage, unattendedRefusalError, workflowRunThreadKey } from "./engine-deps.js";
+import { buildWorkflowEngineDeps, mapPiAiUsage, unattendedRefusalError, workflowRunThreadKey, workflowStepThreadKey } from "./engine-deps.js";
+import { isWorkflowRunThread } from "./editor-thread-context.js";
 import { eq, sql } from "drizzle-orm";
 import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
@@ -825,6 +826,128 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
         ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
       }),
     ).rejects.toThrow(/no recorded owner/);
+  });
+});
+
+describe("buildWorkflowEngineDeps: promptOrchestrator step threads", () => {
+  const OWNER_HINT = { ownerType: "user", ownerId: LOCAL_USER.id };
+
+  it("gives each step and foreach entry its own thread in the run's session, and re-issues land on it", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const runId = "wfrun_step_threads";
+    await seedRun(api, runId, "wf_step_threads");
+    const step = (iteration: number) => ({ nodeId: "review", iteration });
+    const dispatch = (suffix: string, stepThread?: { nodeId: string; iteration: number }) =>
+      deps.promptOrchestrator(`review ${suffix}`, { dispatchId: `workflow:${runId}:${suffix}`, queueMode: "followup", ownerHint: OWNER_HINT,
+        ...(stepThread ? { stepThread } : {}) });
+
+    const summary = await dispatch("summary");
+    const first = await dispatch("review", step(0));
+    const second = await dispatch("review:1", step(1));
+
+    expect(new Set([summary.sessionId, first.sessionId, second.sessionId]).size).toBe(1);
+    expect(new Set([summary.threadId, first.threadId, second.threadId]).size).toBe(3);
+    const keyOf = async (threadId: string) => (await engineStore.getThread(first.sessionId, threadId))?.key;
+    expect(await keyOf(summary.threadId)).toBe(workflowRunThreadKey(runId));
+    expect(await keyOf(first.threadId)).toBe(workflowStepThreadKey(runId, "review", 0));
+    expect(await keyOf(second.threadId)).toBe(workflowStepThreadKey(runId, "review", 1));
+    expect(isWorkflowRunThread({ key: workflowStepThreadKey(runId, "review", 1) })).toBe(true);
+
+    // A crash before the receipt was saved re-issues the same dispatch.
+    expect(await dispatch("review:1", step(1))).toEqual(second);
+    // The repair turn goes to the thread whose reply it corrects.
+    const repair = await deps.promptOrchestrator("fix the json", { dispatchId: `workflow:${runId}:review:1:repair`, queueMode: "followup",
+      ownerHint: OWNER_HINT, stepThread: step(1), taskSourceQueueItemId: second.queueItemId });
+    expect(repair.threadId).toBe(second.threadId);
+    expect(repair.queueItemId).not.toBe(second.queueItemId);
+  });
+
+  it("puts a team run's step threads in the run's own execution", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "step-thread-team", creatorUserId: LOCAL_USER.id });
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({ id: "wf_step_team", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "team-step-threads", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now });
+    const runId = "wfrun_step_team";
+    await workflowStore.createRun(runId, { workflowId: "wf_step_team", definitionVersionId: "v1" }, { version: "dag/v1", nodes: [], edges: [] },
+      "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const hint = { ownerType: "team", ownerId: team.id };
+
+    const report = await deps.promptOrchestrator("report", { dispatchId: `workflow:${runId}:report`, queueMode: "followup", ownerHint: hint });
+    const entry = await deps.promptOrchestrator("entry", { dispatchId: `workflow:${runId}:each:2`, queueMode: "followup", ownerHint: hint,
+      stepThread: { nodeId: "each", iteration: 2 } });
+
+    const teamAssistant = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
+    expect(entry.sessionId).toBe(report.sessionId);
+    expect(entry.sessionId).not.toBe(teamAssistant.sessionId);
+    expect(entry.threadId).not.toBe(report.threadId);
+    expect((await engineStore.getThread(entry.sessionId, entry.threadId))?.key).toBe(workflowStepThreadKey(runId, "each", 2));
+  });
+
+  it.each([
+    ["own threads", 2, true],
+    ["the run thread", 1, false],
+  ] as const)("runs agent turns on %s, at most %i at once", async (_label, expected, ownThreads) => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    // An earlier faux registration in this file can remove the built-in
+    // transport, so restore whatever was there, if anything.
+    const original = piAi.getApiProvider("anthropic-messages");
+    const sourceId = "step-thread-parallel-test";
+    // Each entry's turn holds its reply until a second entry's turn is in
+    // flight, or until a short timeout. Serial turns never overlap.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const holding: Array<() => void> = [];
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>((_model, context) => {
+      const events = piAi.createAssistantMessageEventStream();
+      const last = context.messages.at(-1);
+      if (!JSON.stringify(last ?? "").includes("parallel-entry")) {
+        events.end(fauxAssistantMessage("ok"));
+        return events;
+      }
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const release = () => { inFlight -= 1; events.end(fauxAssistantMessage("entry done")); };
+      holding.push(release);
+      if (holding.length >= 2) {
+        for (const held of holding.splice(0)) held();
+      } else {
+        setTimeout(() => {
+          const index = holding.indexOf(release);
+          if (index >= 0) { holding.splice(index, 1); release(); }
+        }, 1_500);
+      }
+      return events;
+    });
+    piAi.registerApiProvider({ api: "anthropic-messages", stream, streamSimple: stream }, sourceId);
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      const runId = `wfrun_parallel_${ownThreads ? "steps" : "run"}`;
+      await seedRun(api, runId, `wf_parallel_${ownThreads ? "steps" : "run"}`);
+      const receipts = await Promise.all([0, 1].map((iteration) => deps.promptOrchestrator(`parallel-entry ${iteration}`, {
+        dispatchId: `workflow:${runId}:each${iteration > 0 ? `:${iteration}` : ""}`, queueMode: "followup", ownerHint: OWNER_HINT,
+        ...(ownThreads ? { stepThread: { nodeId: "each", iteration } } : {}),
+      })));
+      await vi.waitFor(async () => {
+        for (const receipt of receipts) {
+          expect((await engineStore.getQueueItem(receipt.sessionId, receipt.queueItemId))?.status).toBe("settled");
+        }
+      }, { timeout: 15_000, interval: 50 });
+      expect(maxInFlight).toBe(expected);
+      for (const receipt of receipts) {
+        expect((await deps.awaitResult(receipt.sessionId, receipt.threadId, receipt.queueItemId)).outcome).toBe("completed");
+      }
+    } finally {
+      piAi.unregisterApiProviders(sourceId);
+      if (original) piAi.registerApiProvider(original);
+    }
   });
 });
 
