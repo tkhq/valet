@@ -358,6 +358,17 @@ function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
   return item?.kind === "message" ? item.message : undefined;
 }
 
+/** The thread page's layout while the thread loads: a header line,
+ * transcript rows, and the composer, so the page does not jump when it fills.
+ * A panel draws its own header. */
+export function ThreadShell({ header = true }: { header?: boolean }) {
+  return <div role="status" aria-label="Opening the thread" className="flex min-h-0 flex-1 flex-col">
+    {header && <div className="h-12 shrink-0 border-b border-line px-4 py-3"><div className="h-4 w-48 rounded bg-ink-wash motion-safe:animate-pulse" /></div>}
+    <TranscriptPlaceholder />
+    <div className="mx-auto w-full max-w-[52rem] px-5 pb-4 sm:px-8"><div className="h-24 rounded-2xl border border-line" /></div>
+  </div>;
+}
+
 /** Rows in the shape of a transcript, while it loads. */
 export function TranscriptPlaceholder() {
   return <div role="status" aria-label="Loading messages" className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-5 py-6 sm:px-8">

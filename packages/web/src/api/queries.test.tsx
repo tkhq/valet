@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/r
 import type { ListMessagesResponse, ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useSendPrompt, useSetThreadModel } from "./queries";
+import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useSendPrompt, useSession, useSetThreadModel } from "./queries";
 
 const sessionId = "session-1";
 
@@ -266,6 +266,18 @@ describe("thread transcript", () => {
     await waitFor(() => expect(result.current.data?.messages[0]?.id).toBe("m1"));
     expect(list).toHaveBeenCalledTimes(1);
     expect(list).toHaveBeenCalledWith("", { limit: TRANSCRIPT_TAIL, threadId: "t1" });
+  });
+
+  it("lets the thread view share a session prefetch still in flight", async () => {
+    let finish: (value: Awaited<ReturnType<typeof api.getSession>>) => void = () => {};
+    const get = vi.spyOn(api, "getSession").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    prefetchSession(client, sessionId);
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useSession(sessionId), { wrapper });
+    act(() => finish({ id: sessionId } as Awaited<ReturnType<typeof api.getSession>>));
+    await waitFor(() => expect(result.current.data?.id).toBe(sessionId));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it("shows a finished prefetch at once, and keeps it while the full history loads", async () => {

@@ -35,7 +35,7 @@ import {
   type ComposerDropIntake,
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
-import { MessageList } from "~/components/session/message-list";
+import { MessageList, ThreadShell } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
 import { PinnedPlan } from "~/components/session/thread-plan";
 import { ProcessingStatus } from "./processing-status";
@@ -55,7 +55,7 @@ import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-sessio
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 import { flattenChildWork, useChildWork } from "~/api/child-work";
@@ -332,7 +332,7 @@ export function SessionView({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {panel && !hidePanelHeader && renderPanelHeader?.(null)}
-        <div className="flex flex-1 items-center justify-center"><LoadingRow label="Loading conversation…" /></div>
+        <ThreadShell header={!panel} />
       </div>
     );
   }

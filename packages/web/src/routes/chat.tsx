@@ -1,9 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { useCreateThread, usePrefetchTranscript, useThreads } from "~/api/queries";
+import { useCreateThread, usePrefetchSession, usePrefetchTranscript, useThreads } from "~/api/queries";
 import { useTeams } from "~/api/settings";
 import { Button } from "~/components/primitives";
-import { TranscriptPlaceholder } from "~/components/session/message-list";
+import { ThreadShell } from "~/components/session/message-list";
 import { useSidebarControls } from "~/components/layout/app-shell";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
@@ -46,6 +46,9 @@ function ChatPage() {
     void navigate({ search: (prev) => ({ ...prev, threads: undefined }), replace: true });
   }, [threadsParam, openDrawer, navigate]);
   const runtimeId = conversation.data?.sessionId;
+  // Most threads live in the workspace runtime: load its detail beside the
+  // thread list rather than after it.
+  usePrefetchSession(runtimeId);
   const createThread = useCreateThread(runtimeId ?? "");
   // The notice follows the open thread: a helper thread is private, a Slack thread follows its channel.
   const threads = useThreads(runtimeId ?? "", undefined, thread);
@@ -80,12 +83,3 @@ function ChatPage() {
   </>;
 }
 
-/** The thread page's layout while the workspace resolves: a header line,
- * transcript rows, and the composer, so the page does not jump when it fills. */
-function ThreadShell() {
-  return <div role="status" aria-label="Opening the thread" className="flex min-h-0 flex-1 flex-col">
-    <div className="h-12 shrink-0 border-b border-line px-4 py-3"><div className="h-4 w-48 rounded bg-ink-wash motion-safe:animate-pulse" /></div>
-    <TranscriptPlaceholder />
-    <div className="mx-auto w-full max-w-[52rem] px-5 pb-4 sm:px-8"><div className="h-24 rounded-2xl border border-line" /></div>
-  </div>;
-}

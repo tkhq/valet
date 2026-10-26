@@ -50,6 +50,7 @@ import type {
 } from "@valet/api/wire";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  prefetchSession,
   prefetchTranscript,
   useArchivedThreads,
   useCreateThread,
@@ -1006,7 +1007,7 @@ function ThreadNode({
   const mobile = useMobileLayout();
   const qc = useQueryClient();
   const prefetchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const prefetch = () => prefetchTranscript(qc, thread.id);
+  const prefetch = () => { prefetchTranscript(qc, thread.id); prefetchSession(qc, thread.sessionId); };
   useEffect(() => () => clearTimeout(prefetchTimer.current), []);
   const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
   const queueState = useQueueStateForThread(thread.sessionId, thread.id);
