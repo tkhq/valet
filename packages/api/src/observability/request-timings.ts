@@ -10,8 +10,12 @@
 export const REQUEST_TIMING_WINDOW_MS = 60 * 60_000;
 /** Newest samples kept per route, so one busy route cannot grow without bound. */
 const MAX_SAMPLES_PER_ROUTE = 2_000;
-/** Distinct routes kept; route patterns are bounded, raw unmatched paths are not. */
+/** Distinct routes kept. Past it, new routes share `OTHER_ROUTES`. */
 const MAX_ROUTES = 500;
+/** The row for requests that matched no route. */
+export const UNMATCHED_ROUTE = "(no matching route)";
+/** The row for routes past `MAX_ROUTES`, so no request goes uncounted. */
+const OTHER_ROUTES = "(other routes)";
 
 interface Sample { at: number; ms: number; status: number; orgId?: string }
 
@@ -19,11 +23,11 @@ const byRoute = new Map<string, Sample[]>();
 const startedAt = Date.now();
 
 export function recordRequestTiming(route: string, sample: Sample): void {
-  let samples = byRoute.get(route);
+  const key = byRoute.has(route) || byRoute.size < MAX_ROUTES ? route : OTHER_ROUTES;
+  let samples = byRoute.get(key);
   if (!samples) {
-    if (byRoute.size >= MAX_ROUTES) return;
     samples = [];
-    byRoute.set(route, samples);
+    byRoute.set(key, samples);
   }
   samples.push(sample);
   if (samples.length > MAX_SAMPLES_PER_ROUTE) samples.splice(0, samples.length - MAX_SAMPLES_PER_ROUTE);

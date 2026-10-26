@@ -11,7 +11,7 @@
 import type { MiddlewareHandler } from "hono";
 import { SpanStatusCode, metrics, trace, type Histogram } from "@opentelemetry/api";
 import type { AppEnv } from "../env.js";
-import { recordRequestTiming } from "./request-timings.js";
+import { recordRequestTiming, UNMATCHED_ROUTE } from "./request-timings.js";
 
 // /api/ready joins /api/health here for the same reason: the kubelet's
 // readinessProbe hits it every 5s for the pod's whole life.
@@ -60,7 +60,10 @@ export function traceRequests(): MiddlewareHandler<AppEnv> {
             route: c.req.routePath ?? c.req.path,
             status: c.res.status,
           });
-          recordRequestTiming(`${c.req.method} ${c.req.routePath ?? c.req.path}`,
+          // Only a matched route pattern names a row: a raw unmatched path is
+          // caller-chosen, and unique ones would fill the window.
+          const matched = c.req.routePath && c.req.routePath !== "*" && c.req.routePath !== "/*" ? c.req.routePath : undefined;
+          recordRequestTiming(`${c.req.method} ${matched ?? UNMATCHED_ROUTE}`,
             { at: startedAt, ms: durationMs, status: c.res.status, ...(user ? { orgId: user.orgId } : {}) });
         } catch (err) {
           span.setStatus({
