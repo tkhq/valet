@@ -2140,7 +2140,7 @@ export const workflowSchedules = pgTable(
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
-    /** Optional static payload delivered as `trigger.data.input`. */
+    /** Optional static input: copied to `trigger.data.<field>` and kept at `trigger.data.input` (`scheduledTriggerData`). */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
     /** Why the scheduler disabled this schedule: the pin text when its

@@ -16,7 +16,7 @@
  */
 
 import { readToolScope } from '@valet/shared';
-import { collectExpressionValuePaths, collectTemplatePaths, parseTemplate } from './expression.js';
+import { collectExpressionPaths, collectExpressionValuePaths, collectTemplatePaths, parseTemplate } from './expression.js';
 
 /** Words that tell an agent to get a person's approval or sign-off. */
 const APPROVAL_REQUEST =
@@ -79,11 +79,92 @@ export function pushesGitCommits(node: { type: string; prompt?: unknown }): bool
 }
 
 /**
- * The `trigger.data` keys a scheduled run sets itself. The API's scheduler
- * starts the run with `{ scheduleName, cron, input }` and puts the
- * schedule's own input under `input`.
+ * The `trigger.data` keys a scheduled run sets itself: `{ scheduleName,
+ * cron, input }`, with the schedule's own input under `input`. An input key
+ * with one of these names stays under `input` only.
  */
 const SCHEDULE_DATA_KEYS: ReadonlySet<string> = new Set(['scheduleName', 'cron', 'input']);
+
+/** How a definition reads `trigger.data`, for the schedule input copy. */
+interface TriggerDataUse {
+  /** The fields it reads under `trigger.data.input`. */
+  nested: Set<string>;
+  /** It reads `trigger.data` or `trigger.data.input` as one value, so a copy changes what it sees. */
+  whole: boolean;
+}
+
+function triggerDataUse(definition: unknown): TriggerDataUse {
+  const use: TriggerDataUse = { nested: new Set(), whole: false };
+  const record = (path: string[]) => {
+    if (path[0] !== 'trigger' || path[1] !== 'data') return;
+    if (path.length === 2) use.whole = true;
+    else if (path[2] === 'input') {
+      if (path[3] === undefined) use.whole = true;
+      else use.nested.add(path[3]);
+    }
+  };
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') {
+      if (value.includes('{{')) {
+        try {
+          collectTemplatePaths(value).forEach(record);
+        } catch {
+          // The validator reports a template that does not parse.
+        }
+      }
+    } else if (Array.isArray(value)) {
+      value.forEach(visit);
+    } else if (isRecord(value)) {
+      if (value.type === 'if' && Array.isArray(value.conditions)) {
+        for (const condition of value.conditions) if (isRecord(condition) && typeof condition.left === 'string') visitExpression(condition.left);
+      }
+      Object.values(value).forEach(visit);
+    }
+  };
+  const visitExpression = (source: string) => {
+    try {
+      collectExpressionPaths(source).forEach(record);
+    } catch {
+      // The validator reports an expression that does not parse.
+    }
+  };
+  if (isRecord(definition)) {
+    visit(definition.nodes);
+    if (Array.isArray(definition.edges)) {
+      for (const edge of definition.edges) {
+        if (isRecord(edge) && typeof edge.when === 'string' && !edge.when.includes('{{')) visitExpression(edge.when);
+      }
+      visit(definition.edges);
+    }
+  }
+  return use;
+}
+
+/**
+ * The `trigger.data` of a scheduled run. A manual run puts its input at
+ * `trigger.data.<field>`, and a scheduled run used to put it only under
+ * `trigger.data.input`, so a workflow written for manual runs read empty
+ * values on every scheduled run. The schedule's input now also goes at the
+ * top level, with three exceptions that keep a workflow written for the
+ * nested shape exactly as it was:
+ *
+ * - a field the definition reads under `trigger.data.input` stays nested
+ *   only, so a fallback such as `{{trigger.data.input.ref}}{{trigger.data.ref}}`
+ *   does not render the value twice;
+ * - nothing is copied when the definition reads `trigger.data` or
+ *   `trigger.data.input` as one value;
+ * - a field named `scheduleName`, `cron` or `input` stays nested only.
+ */
+export function scheduledTriggerData(
+  definition: unknown,
+  schedule: { scheduleName: string; cron: string; input: unknown },
+): Record<string, unknown> {
+  const use = triggerDataUse(definition);
+  const copied = use.whole || !isRecord(schedule.input)
+    ? {}
+    : Object.fromEntries(Object.entries(schedule.input).filter(([field]) => !SCHEDULE_DATA_KEYS.has(field) && !use.nested.has(field)));
+  return { ...copied, scheduleName: schedule.scheduleName, cron: schedule.cron, input: schedule.input };
+}
 
 /**
  * Where a step reads a trigger field: a `{{ }}` template, or an
@@ -103,14 +184,19 @@ type FieldReads = Map<string, Set<TriggerReadSite>>;
 
 /**
  * The `trigger.data.<field>` reads that are empty on a scheduled run, by
- * node id. A foreach body counts under the foreach's id, and an edge's
- * `when` counts under the edge's `from` node, where the branch is decided.
- * A field that the same template or expression also reads as
+ * node id. A scheduled run copies its input to the top level unless the
+ * definition reads that field under `trigger.data.input`, or reads the
+ * envelope whole ({@link scheduledTriggerData}). So a read misses only when
+ * the copy is skipped. A foreach body counts under the foreach's id, and an
+ * edge's `when` counts under the edge's `from` node, where the branch is
+ * decided. A field that the same template or expression also reads as
  * `trigger.data.input.<field>` works on both kinds of run, so it is left
  * out.
  */
 export function scheduledRunMisses(definition: unknown): Map<string, ScheduledRunMiss[]> {
   if (!isRecord(definition) || !Array.isArray(definition.nodes)) return new Map();
+  const use = triggerDataUse(definition);
+  const copySkipped = (field: string) => use.whole || use.nested.has(field);
   const reads = new Map<string, FieldReads>();
   for (const node of definition.nodes) {
     if (!isRecord(node) || typeof node.id !== 'string') continue;
@@ -129,7 +215,8 @@ export function scheduledRunMisses(definition: unknown): Map<string, ScheduledRu
   }
   const misses = new Map<string, ScheduledRunMiss[]>();
   for (const [nodeId, fields] of reads) {
-    if (fields.size > 0) misses.set(nodeId, [...fields].map(([field, sites]) => ({ field, sites: [...sites] })));
+    const missed = [...fields].filter(([field]) => copySkipped(field));
+    if (missed.length > 0) misses.set(nodeId, missed.map(([field, sites]) => ({ field, sites: [...sites] })));
   }
   return misses;
 }

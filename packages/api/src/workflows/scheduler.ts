@@ -17,7 +17,7 @@
  * Same lifecycle shape as `EventDispatcher`: constructed in providers,
  * `start()`/`stop()` from main.ts.
  */
-import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
+import { scheduledTriggerData, type RunHost, type RunParams, type WorkflowStore, type WorkflowTriggerPayload } from "@valet/workflow";
 import { scheduledRunId } from "@valet/shared";
 import { and, eq, lte, sql, type SQL } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
@@ -221,7 +221,7 @@ export class WorkflowScheduler {
         type: "schedule",
         triggerId: schedule.id,
         timestamp: new Date(slotMs).toISOString(),
-        data: { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} },
+        data: scheduledTriggerData(def.definition, { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} }),
         metadata: { scheduleId: schedule.id, timezone: schedule.timezone },
       };
       const params: RunParams = {
