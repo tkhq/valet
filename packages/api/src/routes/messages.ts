@@ -14,6 +14,7 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  */
 import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
+import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
@@ -526,7 +527,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  if (!session.id.startsWith("execution:") && !engineSession.options.readOnlyReason) await engineSession.ensureDefaultThread();
+  await ensureDefaultThreadWhereOwned(session.id, engineSession);
   const wantArchived = c.req.query("archived") === "1";
   const selectedThreadId = c.req.query("threadId");
   const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
@@ -1211,7 +1212,7 @@ export async function listMessages(c: Context<AppEnv>, sessionId: string, thread
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
-  await engineSession.ensureDefaultThread();
+  await ensureDefaultThreadWhereOwned(session.id, engineSession);
   const requested = threadId ?? (c.req.query("threadId") || undefined);
   const thread = await visibleThread(c, session, engineSession, requested);
   if (!thread) {
@@ -1325,7 +1326,7 @@ export async function submitSessionPrompt(
   // ever fires the attachment-side hooks).
   await engineHost.markSessionUsed(row.id);
 
-  await engineSession.ensureDefaultThread();
+  await ensureDefaultThreadWhereOwned(row.id, engineSession);
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
   const recordActivity = (activityAt: number) => recordUserActivity
