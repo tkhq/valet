@@ -479,8 +479,8 @@ describe("ChannelHost.handleUpdate", () => {
 
   it("keeps Slack DM questions, answers, and reply origins in separate native threads", async () => {
     faux.setResponses([
-      fauxAssistantMessage([{ type: "toolCall", id: "repo-question", name: "ask_question", arguments: { question: "Which repo?" } }], { stopReason: "toolUse" }),
-      fauxAssistantMessage([{ type: "toolCall", id: "city-question", name: "ask_question", arguments: { question: "Which city?" } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "repo-question", name: "ask_question", arguments: { question: "Which repo?", intent: "Ask the person a question before continuing." } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "city-question", name: "ask_question", arguments: { question: "Which city?", intent: "Ask the person a question before continuing." } }], { stopReason: "toolUse" }),
       fauxAssistantMessage("Weather reply"), fauxAssistantMessage("Repo reply"),
     ]);
     const { slackHost, slack } = await startSlackHost();
@@ -593,7 +593,7 @@ describe("ChannelHost.handleUpdate", () => {
       expect((await engineStore.getQueueItemByDispatchId(session.id, "before-restart"))?.threadId).toBe(home.id);
       const native = await session.createThread("slack:D1:111.1");
       await slackHost.stop();
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       ({ slackHost } = await startSlackHost());
       await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "after restart", dispatchId: "after-restart" }), true);
       await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
@@ -604,7 +604,7 @@ describe("ChannelHost.handleUpdate", () => {
 
   it("answers a pending Home question from the old Slack root while a new root stays separate", async () => {
     faux.setResponses([
-      fauxAssistantMessage([{ type: "toolCall", id: "legacy-question", name: "ask_question", arguments: { question: "Which repository?" } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "legacy-question", name: "ask_question", arguments: { question: "Which repository?", intent: "Ask the person a question before continuing." } }], { stopReason: "toolUse" }),
       fauxAssistantMessage("Separate answer"), fauxAssistantMessage("Legacy answer"),
     ]);
     const { slackHost, slack } = await startSlackHost();
@@ -649,8 +649,8 @@ describe("ChannelHost.handleUpdate", () => {
 
   it("interrupts only the Slack chat receiving a correction and keeps another chat's approval pending", async () => {
     faux.setResponses([
-      fauxAssistantMessage([{ type: "toolCall", id: "first-approval", name: "ask_approval", arguments: { title: "Approve the first task?" } }], { stopReason: "toolUse" }),
-      fauxAssistantMessage([{ type: "toolCall", id: "second-approval", name: "ask_approval", arguments: { title: "Approve the second task?" } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "first-approval", name: "ask_approval", arguments: { title: "Approve the first task?", intent: "Ask the person to approve before continuing." } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage([{ type: "toolCall", id: "second-approval", name: "ask_approval", arguments: { title: "Approve the second task?", intent: "Ask the person to approve before continuing." } }], { stopReason: "toolUse" }),
       ...Array.from({ length: 6 }, () => fauxAssistantMessage("Updated first task")),
     ]);
     const { slackHost } = await startSlackHost();
@@ -692,7 +692,7 @@ describe("ChannelHost.handleUpdate", () => {
       const native = await session.threadByKey("slack:D1:111.1");
       if (!native) throw new Error("Expected bound chat");
       await slackHost.stop();
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       await testDb.pgdb.query("DELETE FROM engine_threads WHERE session_id = $1 AND id = $2", [session.id, native.id]);
       ({ slackHost } = await startSlackHost());
       await expect(slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", dispatchId: "bound-missing", text: "Follow up" }), true)).rejects.toThrow("Start a new Slack thread");
