@@ -379,17 +379,17 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const [deleteError, setDeleteError] = useState<string>();
 
   const [projectError, setProjectError] = useState<string>();
-  async function createProject() {
+  function createProject() {
     const name = projectName.trim();
     if (!name) return;
     if (projects.value.projects.some((project) => project.id !== editingProjectId && project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
       setProjectError("A project with this name already exists. Choose another name.");
       return;
     }
-    const saved = await projects.update((current) => ({ ...current, grouped: true, collapsed: false,
+    // The folder shows at once; a failed save reports under Projects.
+    void projects.update((current) => ({ ...current, grouped: true, collapsed: false,
       projects: editingProjectId ? current.projects.map(project => project.id === editingProjectId ? { ...project, name } : project)
         : [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
-    if (!saved || currentSession.current !== sessionId) return;
     setProjectDialog(false);
     setProjectName("");
   }
@@ -626,16 +626,12 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const { attempt } = workGuard;
   const archiveThread = useCallback((threadId: string) => {
     setActionError(undefined);
-    // Archiving the thread you're looking at would strand the view on a
-    // thread absent from the list, so return to the default thread once the
-    // archive lands.
-    const leaveIfActive = () => {
-      if (threadId === activeThreadId) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-    };
+    // The row leaves at once, so the view leaves the thread at once too: it
+    // would otherwise show a thread that the list no longer has.
+    if (threadId === activeThreadId) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
     attempt(
       STOP_AND_ARCHIVE,
       (force) => setArchived.mutateAsync({ threadId, archived: true, ...(force ? { force: true } : {}) }),
-      leaveIfActive,
     ).catch((err: unknown) => setActionError(errorText(err, "Could not archive the thread. Try again.")));
   }, [activeThreadId, attempt, navigate, setArchived]);
 
@@ -840,7 +836,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           )}
           <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
             <DialogContent title={editingProjectId ? "Rename project" : "New project"} aria-describedby={undefined}>
-              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void createProject(); }}>
+              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
                 <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} disabled={projects.isSaving} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
                 {projectError && <p role="alert" className="text-xs text-danger-500">{projectError}</p>}
                 {projects.error && <p role="alert" className="text-xs text-danger-500">{projects.error} Retry saving the project.</p>}
@@ -931,7 +927,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
                   <button
                     type="button"
                     aria-label={`Unarchive ${t.title ?? t.id}`}
-                    onClick={() => void setArchived.mutateAsync({ threadId: t.id, archived: false })}
+                    onClick={() => setArchived.mutateAsync({ threadId: t.id, archived: false })
+                      .catch((err: unknown) => setActionError(errorText(err, "Could not restore the thread. Try again.")))}
                     className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
                   >
                     <ArchiveRestore className="h-3 w-3" aria-hidden />

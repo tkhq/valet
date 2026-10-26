@@ -405,8 +405,8 @@ describe("ThreadTree: background work blocks archive and replace (fix wave 3, H1
 
     const dialog = await screen.findByRole("dialog", { name: "Stop background work and archive?" });
     expect(within(dialog).getByText("full proof build")).toBeTruthy();
-    // Nothing left the list yet, so the view stays on the thread.
-    expect(navigate).not.toHaveBeenCalled();
+    // The view leaves the thread when the archive starts, not after the save.
+    expect(navigate).toHaveBeenCalledTimes(1);
     await user.click(within(dialog).getByRole("button", { name: "Stop background work and archive" }));
     expect(setArchivedMutateAsync).toHaveBeenLastCalledWith({ threadId: "thread-1", archived: true, force: true });
     expect(navigate).toHaveBeenCalledTimes(1);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CancelledError, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
-import { threadProjectsChanges, type ThreadProjectsOperation, type ThreadProjectsResponse } from "@valet/shared";
+import { applyThreadProjectsOperations, threadProjectsChanges, type ThreadProjectsOperation, type ThreadProjectsResponse } from "@valet/shared";
 import { api, ApiError } from "~/api/client";
 import { errorText } from "./error-text";
 import { safeLocalStorage } from "./safe-storage";
@@ -92,37 +92,45 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
       return current;
     },
   });
-  // Open and closed folders show at once. Their saves run in the background
-  // without a saving state, and each save sends the latest folds, so a quick
-  // series of clicks costs one request. When the saves settle, the server
-  // value shows again: the saved folds, or the old ones and an error.
-  const folds = useRef<{ key: string; section?: boolean; projects: Record<string, boolean>; saving: number }>({ key, projects: {}, saving: 0 });
-  if (folds.current.key !== key) folds.current = { key, projects: {}, saving: 0 };
-  const [, showFolds] = useState(0);
-  const withFolds = (base: ThreadProjects): ThreadProjects => {
-    const { section, projects } = folds.current;
-    return { ...base, collapsed: section ?? base.collapsed,
-      projects: base.projects.map(project => Object.hasOwn(projects, project.id) ? { ...project, collapsed: projects[project.id]! } : project) };
-  };
-  const base = query.data?.value ?? initial;
-  const value = folds.current.section === undefined && !Object.keys(folds.current.projects).length ? base : withFolds(base);
+  // Every change shows at once. The sidebar applies the change's operations
+  // to the last server value, as the server will, while the save runs in the
+  // background without a saving state. A save leaves the overlay in the same
+  // tick that stores the server's answer, so nothing flickers. A failed save
+  // drops its overlay: the sidebar shows the saved state and the error.
+  const pending = useRef<{ key: string; changes: ThreadProjectsOperation[][] }>({ key, changes: [] });
+  if (pending.current.key !== key) pending.current = { key, changes: [] };
+  const [, rerender] = useState(0);
+  // The cache, not the observer: the observer reports a new value a tick
+  // after the overlay that it replaces has gone.
+  const shown = () => pending.current.changes.reduce(applyLocally, client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? initial);
+  const value = shown();
 
-  /** Folds one project, or the whole Projects section without a project ID. */
-  function setCollapsed(collapsed: boolean, projectId?: string) {
-    const current = folds.current;
-    if (projectId === undefined) current.section = collapsed;
-    else current.projects = { ...current.projects, [projectId]: collapsed };
-    current.saving += 1;
-    showFolds(count => count + 1);
-    void enqueue(withFolds, false, true).finally(() => {
-      if (folds.current !== current || --current.saving > 0) return;
-      folds.current = { key, projects: {}, saving: 0 };
-      if (isCurrent()) showFolds(count => count + 1);
+  function optimistic(operations: ThreadProjectsOperation[]) {
+    const owner = pending.current;
+    owner.changes = [...owner.changes, operations];
+    rerender(count => count + 1);
+    return enqueue(operations, false, () => {
+      owner.changes = owner.changes.filter(change => change !== operations);
+      if (isCurrent()) rerender(count => count + 1);
     });
   }
 
-  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false, quiet = false) {
-    const counted = isCurrent() && !quiet;
+  function update(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) {
+    const current = shown();
+    const operations = typeof change === "function" ? threadProjectsChanges(current, change(current)) : change;
+    return operations.length ? optimistic(operations) : Promise.resolve(current);
+  }
+
+  /** Folds one project, or the whole Projects section without a project ID. */
+  function setCollapsed(collapsed: boolean, projectId?: string) {
+    void update(current => projectId === undefined ? { ...current, collapsed }
+      : { ...current, projects: current.projects.map(project => project.id === projectId ? { ...project, collapsed } : project) });
+  }
+
+  /** A change with `settled` is optimistic: it shows no saving state, and
+   * `settled` runs as soon as its save stores an answer or fails. */
+  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false, settled?: () => void) {
+    const counted = isCurrent() && !settled;
     if (counted) setWrite(previous => ({ key, pending: (previous.key === key ? previous.pending : 0) + 1 }));
     const task = queue.current.then(async () => {
       let operations: ThreadProjectsOperation[] = [];
@@ -152,6 +160,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
         if (conflict) await query.refetch();
         return undefined;
       } finally {
+        settled?.();
         if (counted && isCurrent()) setWrite(previous => previous.key === key ? { ...previous, pending: Math.max(0, previous.pending - 1) } : previous);
       }
     });
@@ -159,7 +168,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     return task;
   }
   return {
-    value, update: enqueue, setCollapsed,
+    value, update, setCollapsed,
     beginOperation: () => ({
       update: (change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) => enqueue(change, true),
       readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
@@ -179,11 +188,23 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     unsyncedLegacy: migration?.key === key ? stored(key) : null,
     error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : migration?.key === key ? migration.error : undefined,
     retry: () => {
-      if (failed.current?.key === key) return enqueue(failed.current.operations);
+      if (failed.current?.key === key) return optimistic(failed.current.operations);
       setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
       return query.refetch();
     },
   };
+}
+
+/** The server's own rules, so the overlay matches what the save stores. A
+ * change the server would refuse shows nothing; its save reports the error. */
+function applyLocally(value: ThreadProjects, operations: ThreadProjectsOperation[]): ThreadProjects {
+  // The overlay has no folder history, so it ignores a create's generation.
+  const local = operations.map(op => op.type === "create" ? { type: op.type, id: op.id, name: op.name, ...(op.collapsed === undefined ? {} : { collapsed: op.collapsed }) } : op);
+  try {
+    return applyThreadProjectsOperations({ value, retiredProjects: [], touchedAssignments: [], touchedPins: [], initialized: true }, local).value;
+  } catch {
+    return value;
+  }
 }
 
 /** Includes pinned, collapsed, filtered, and unloaded chats. */
