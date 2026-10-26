@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderTemplate } from './expression.js';
+import { evaluateExpression, parseExpression, renderTemplate } from './expression.js';
 import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, scheduledTriggerData } from './step-design.js';
 
 const session = (prompt: string) => ({ type: 'session', prompt });
@@ -155,6 +155,21 @@ describe('scheduledTriggerData', () => {
     expect(scheduledTriggerData(definition, schedule({ mode: 'sweep' }))).toEqual(nested({ mode: 'sweep' }));
     const inputWhole = { nodes: [{ id: 'sweep', type: 'session', prompt: '{{trigger.data.input}}' }] };
     expect(scheduledTriggerData(inputWhole, schedule({ mode: 'sweep' }))).toEqual(nested({ mode: 'sweep' }));
+  });
+
+  it('copies no field that a step probes with exists, so a manual-versus-scheduled branch keeps its answer', () => {
+    const probe = 'exists(trigger.data.dryRun)';
+    const definition = {
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { dryRun: { type: 'boolean', default: false } } },
+        { id: 'manual', type: 'if', conditions: [{ left: probe, operation: 'isTrue' }] },
+        { id: 'note', type: 'session', prompt: 'Manual: {{exists(trigger.data["dryRun"])}}' },
+      ],
+      edges: [{ from: 'manual', to: 'note', when: probe }],
+    };
+    const data = scheduledTriggerData(definition, schedule({ dryRun: true, other: 1 }));
+    expect(data).toEqual({ other: 1, scheduleName: 'Nightly', cron: '0 8 * * *', input: { dryRun: true, other: 1 } });
+    expect(evaluateExpression(parseExpression(probe), { trigger: { data } })).toBe(false);
   });
 
   it('keeps an input key named like a schedule key under input only', () => {

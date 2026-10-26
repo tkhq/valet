@@ -86,9 +86,16 @@ export function pushesGitCommits(node: { type: string; prompt?: unknown }): bool
  */
 const SCHEDULE_DATA_KEYS: ReadonlySet<string> = new Set(['scheduleName', 'cron', 'input']);
 
+/**
+ * `exists(trigger.data.<field>)`, or `exists(trigger.data)`. A workflow can
+ * use the probe to tell a manual run from a scheduled one, so a copy would
+ * change its branch.
+ */
+const EXISTS_PROBE = /\bexists\(\s*trigger\s*\.\s*data\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*['"]([^'"\]]+)['"]\s*\])?\s*\)/g;
+
 /** How a definition reads `trigger.data`, for the schedule input copy. */
 interface TriggerDataUse {
-  /** The fields it reads under `trigger.data.input`. */
+  /** The fields it reads under `trigger.data.input`, or probes with `exists(trigger.data.<field>)`. */
   nested: Set<string>;
   /** It reads `trigger.data` or `trigger.data.input` as one value, so a copy changes what it sees. */
   whole: boolean;
@@ -104,8 +111,16 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
       else use.nested.add(path[3]);
     }
   };
+  const probes = (source: string) => {
+    for (const match of source.matchAll(EXISTS_PROBE)) {
+      const field = match[1] ?? match[2];
+      if (field === undefined) use.whole = true;
+      else if (field !== 'input') use.nested.add(field);
+    }
+  };
   const visit = (value: unknown): void => {
     if (typeof value === 'string') {
+      probes(value);
       if (value.includes('{{')) {
         try {
           collectTemplatePaths(value).forEach(record);
@@ -123,6 +138,7 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
     }
   };
   const visitExpression = (source: string) => {
+    probes(source);
     try {
       collectExpressionPaths(source).forEach(record);
     } catch {
@@ -152,6 +168,9 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
  * - a field the definition reads under `trigger.data.input` stays nested
  *   only, so a fallback such as `{{trigger.data.input.ref}}{{trigger.data.ref}}`
  *   does not render the value twice;
+ * - a field the definition probes with `exists(trigger.data.<field>)`
+ *   stays nested only, so a probe that tells manual runs from scheduled
+ *   ones keeps its answer;
  * - nothing is copied when the definition reads `trigger.data` or
  *   `trigger.data.input` as one value;
  * - a field named `scheduleName`, `cron` or `input` stays nested only.
