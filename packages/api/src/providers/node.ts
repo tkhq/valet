@@ -47,6 +47,7 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
+import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -421,6 +422,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing received event diagnostics.",
     actions: [eventsActionPlugin(db, () => plugins)],
   };
+  const diagnosticsActions: ValetPlugin = {
+    name: "diagnostics-actions",
+    version: "0.1.0",
+    description: "Agent-facing tool failure and request latency diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }))],
+  };
 
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
@@ -450,7 +457,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions, avatarActions, settingsActions],
+        [workflowsActions, skillsActions, eventsActions, diagnosticsActions, avatarActions, settingsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),

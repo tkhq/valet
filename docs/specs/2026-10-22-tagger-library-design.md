@@ -87,6 +87,16 @@ Registry edits and merges require the existing organization-settings admin permi
 The merge editor uses the shared Select primitive.
 No examples or classifier input text are exposed by the registry API.
 
+## Tool names and failure diagnosis (2026-10-26)
+
+A hosted `call_tool` call records the tool it ran. A tool from a connected MCP server is resolved at call time and is not in the static catalog, so the call records the requested tool id. An id that names no tool also records the requested id, with error code `unknown`.
+Some services name their tools under another prefix (`google_calendar` has `calendar.*`, `google_workspace` has `drive.*`, `slack-user` has `slack_user.*`). `call_tool` runs an id written with the service name as the catalog tool, when it names exactly one tool. Scope and policy checks see the catalog id. An unknown id gets a "Did you mean" list of tools with the same action name.
+An MCP server's "no credential connected" error counts as `missing_credential`, so the agent is told which account to connect.
+The Top tools table shows each tool's three most common error codes.
+
+`diagnostics.list_tool_failures` gives an agent the same view. An organization admin in a private conversation reads organization counts; other callers read their own calls, and a team run reads its team's calls. Failure samples join a hosted usage row (`<session>:<call id>`) to its transcript tool call for the requested tool id and the result text. Samples come only from the caller's own personal conversations and team conversations the caller may see. A transcript that other people read gets no error text.
+`diagnostics.list_slow_requests` reads an in-process window of request durations by route pattern (`observability/request-timings.ts`), fed by the HTTP tracing middleware. It keeps up to one hour, clears on restart, and is for organization admins.
+
 ## Validation limits
 
 The targeted tests cover registry behavior, mocked classification, durable jobs, scope filters, and the UI.
