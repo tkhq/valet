@@ -22,6 +22,15 @@ describe("orchestratorPersona", () => {
     expect(flat(persona)).toContain("queue: true if the approval must remain actionable");
   });
 
+  it("answers a child's question itself and asks the person only when it cannot", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("A child cannot ask the person: when it is blocked, its result is a question.");
+    expect(persona).toContain("Answer it yourself from your brief, this thread, and memory, then send the answer with child_send");
+    expect(persona).toContain("Only when you cannot answer, ask the person with ask_question in this thread");
+    expect(persona).toContain("Its card shows in this thread, labeled with the child's title");
+    expect(persona).not.toContain("Do not answer it for them");
+  });
+
   // TKAI-484. The agent used to write a personal file, copy it to the team,
   // then delete the original, because mem_write had no way to name a team.
   it("tells the agent to write a team directly instead of copying into it", () => {
