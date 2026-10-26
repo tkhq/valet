@@ -89,6 +89,7 @@ import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { trimToolResults } from "../services/transcript-trim.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
 import { isAssistantConversationOf } from "../services/thread-access.js";
 import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
@@ -1194,9 +1195,11 @@ export async function listMessages(c: Context<AppEnv>, sessionId: string, thread
   const hasMore = entries.length > limit;
   const tail = hasMore ? entries.slice(1) : entries;
 
+  // Large tool results ship trimmed; a step loads its full output when it opens.
   const messages = tail
     .map((e) => entryToMessage(e, session.id, thread.id))
-    .filter((m): m is Message => m !== null);
+    .filter((m): m is Message => m !== null)
+    .map((m) => m.parts.length ? { ...m, parts: trimToolResults(m.parts, { entryId: m.id, threadId: thread.id }) } : m);
 
   const body: ListMessagesResponse = {
     messages,

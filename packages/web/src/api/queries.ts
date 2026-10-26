@@ -4,6 +4,7 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { useEffect } from "react";
 import { threadOriginBucket } from "~/lib/thread-origin";
 import { isAppAssistantThread } from "~/lib/thread-default";
 import {
@@ -203,14 +204,49 @@ export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<Li
   });
 }
 
+/** A thread opens with its newest entries; older ones load when the reader scrolls up. */
+export const TRANSCRIPT_TAIL = 50;
+export const TRANSCRIPT_FULL = 200;
+
+/** Keyed by thread alone, so a request can start before the thread's
+ * session is known: from the chat route's URL, or from a sidebar hover. */
+const qkTranscript = (threadId: string, limit: number) => ["thread-transcript", threadId, limit] as const;
+const transcriptQuery = (threadId: string, limit: number) => ({
+  queryKey: qkTranscript(threadId, limit),
+  queryFn: () => api.listMessages("", { limit, threadId }),
+});
+
+/** Starts loading a thread's newest page; a later `useMessages` shares the request or its answer. */
+export function prefetchTranscript(qc: QueryClient, threadId: string) {
+  void qc.prefetchQuery({ ...transcriptQuery(threadId, TRANSCRIPT_TAIL), staleTime: 15_000 });
+}
+
+/** Starts a thread's transcript as soon as its id is known, such as from the URL. */
+export function usePrefetchTranscript(threadId: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (threadId) prefetchTranscript(qc, threadId); }, [qc, threadId]);
+}
+
 export function useMessages(
   id: string,
   threadId?: string,
   opts?: Partial<UseQueryOptions<ListMessagesResponse>>,
+  limit: number = TRANSCRIPT_TAIL,
 ) {
+  const qc = useQueryClient();
+  // A workflow step's transcript has no thread route, so it has no early request.
+  const early = threadId && !id.startsWith("wf:") ? transcriptQuery(threadId, limit) : undefined;
   return useQuery<ListMessagesResponse>({
-    queryKey: qk.messages(id, threadId),
-    queryFn: () => api.listMessages(id, { limit: 200, threadId }),
+    queryKey: [...qk.messages(id, threadId), limit],
+    // Joins a prefetch still in flight; every later fetch reads the server.
+    queryFn: () => early ? qc.fetchQuery({ ...early, staleTime: 0 }) : api.listMessages(id, { limit, threadId }),
+    // A finished prefetch shows at once, with its own age.
+    initialData: early ? () => qc.getQueryData<ListMessagesResponse>(early.queryKey) : undefined,
+    initialDataUpdatedAt: early ? () => qc.getQueryState(early.queryKey)?.dataUpdatedAt : undefined,
+    // The newest page stays on screen while the full history loads. Another
+    // thread's data never stands in for this one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === id && previousQuery?.queryKey[3] === threadId ? previous : undefined,
     enabled: !!id,
     // Background refetches (window focus, network reconnect) would call
     // setThreadMessages and risk wiping in-flight optimistic / live state.

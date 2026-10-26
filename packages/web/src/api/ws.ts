@@ -272,7 +272,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         // A finished turn can add an unread reply or a pull request to any thread
         // in the session. The list query carries both, so refresh it.
         if (wire.type === "turn_end") {
-          void qc.invalidateQueries(threadListFilters(sessionId));
+          void qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
           for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
         }
         // The context meter's reading moves when a turn ends, a compaction
@@ -286,7 +286,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched" || wire.type === "branch_switched") {
           void qc.invalidateQueries({
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
-          });
+          }, { cancelRefetch: false });
         }
         if (wire.type === "thread.viewers") {
           useActiveViewersStore.getState().set(sessionId, wire.threadId, wire.viewers);

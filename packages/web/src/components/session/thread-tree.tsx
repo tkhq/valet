@@ -48,7 +48,9 @@ import type {
   ThreadSummary,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  prefetchTranscript,
   useArchivedThreads,
   useCreateThread,
   useRenameThread,
@@ -996,6 +998,10 @@ function ThreadNode({
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, isDefault);
   const mobile = useMobileLayout();
+  const qc = useQueryClient();
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const prefetch = () => prefetchTranscript(qc, thread.id);
+  useEffect(() => () => clearTimeout(prefetchTimer.current), []);
   const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
   const queueState = useQueueStateForThread(thread.sessionId, thread.id);
   const pullRequest = rowPullRequest(thread.pullRequests);
@@ -1122,6 +1128,11 @@ function ThreadNode({
                 active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
               )}
               draggable
+              // Start the transcript before the click lands, as a native app would.
+              onPointerEnter={() => { prefetchTimer.current = setTimeout(prefetch, 80); }}
+              onPointerLeave={() => clearTimeout(prefetchTimer.current)}
+              onPointerDown={prefetch}
+              onFocus={prefetch}
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData(THREAD_DRAG_TYPE, JSON.stringify({ sessionId: thread.sessionId, threadId: thread.id }));

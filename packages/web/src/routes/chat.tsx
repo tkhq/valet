@@ -1,8 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { useCreateThread, useThreads } from "~/api/queries";
+import { useCreateThread, usePrefetchTranscript, useThreads } from "~/api/queries";
 import { useTeams } from "~/api/settings";
-import { Button, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
+import { TranscriptPlaceholder } from "~/components/session/message-list";
 import { useSidebarControls } from "~/components/layout/app-shell";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
@@ -36,6 +37,9 @@ function ChatPage() {
   const team = teams.data?.teams.find(t => t.id === teamId);
   const navigate = useNavigate({ from: Route.fullPath });
   const openDrawer = sidebar?.present ? sidebar.openDrawer : undefined;
+  // The thread is in the URL: load its transcript beside the workspace and
+  // thread-list requests, not after them.
+  usePrefetchTranscript(thread);
   useEffect(() => {
     if (threadsParam !== "open" || !openDrawer) return;
     openDrawer();
@@ -54,7 +58,7 @@ function ChatPage() {
     Couldn’t open this workspace’s threads. {errorText(conversation.error)}
     <button className="ml-2 underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
-  if (!runtimeId || !sessionId || threads.isLoading) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening threads…" /></div>;
+  if (!runtimeId || !sessionId || threads.isLoading) return <ThreadShell />;
   if (threads.error) return <div role="alert" className="p-8 text-sm">
     Couldn’t load threads. {errorText(threads.error)}
     <Button variant="ghost" onClick={() => void threads.refetch()}>Retry</Button>
@@ -74,4 +78,14 @@ function ChatPage() {
     </div>
     {child && <ChildPanel childId={child} onClose={() => void navigate({ search: prev => ({ ...prev, child: undefined }) })} />}
   </>;
+}
+
+/** The thread page's layout while the workspace resolves: a header line,
+ * transcript rows, and the composer, so the page does not jump when it fills. */
+function ThreadShell() {
+  return <div role="status" aria-label="Opening the thread" className="flex min-h-0 flex-1 flex-col">
+    <div className="h-12 shrink-0 border-b border-line px-4 py-3"><div className="h-4 w-48 rounded bg-ink-wash motion-safe:animate-pulse" /></div>
+    <TranscriptPlaceholder />
+    <div className="mx-auto w-full max-w-[52rem] px-5 pb-4 sm:px-8"><div className="h-24 rounded-2xl border border-line" /></div>
+  </div>;
 }

@@ -209,3 +209,15 @@ This includes work submitted from Slack or restored after a reconnect.
 A polite live region announces state changes. The status dot respects reduced motion.
 Human typing stays on its own line and never represents agent work.
 The cue clears when the thread has no active or queued work.
+
+### Thread loading (2026-10-26)
+
+A thread used to open after a chain of dependent requests (who you are, the workspace, the thread list, the session). Then it downloaded the last 200 entries with every tool result whole: 2 to 5 MB for long threads. Nothing showed until both had finished. The server answers these requests in milliseconds, so the wait was the chain and the payload.
+
+- The transcript starts early. Its cache is keyed by thread alone (`prefetchTranscript`, `usePrefetchTranscript` in `api/queries.ts`). The `/chat` route starts it from `?thread=` beside the workspace requests. A sidebar row starts it on hover (after 80 ms), press, or focus. `useMessages` shares a request still in flight and shows a finished one at once.
+- The newest page comes first. A thread opens with `TRANSCRIPT_TAIL` (50) entries. When older entries exist, a control at the top of the list loads `TRANSCRIPT_FULL` (200), on its own when it scrolls into view or on click. The newest page stays on screen while the rest loads. The store's partial-tail merge keeps the order.
+- Large tool output ships trimmed. `GET /api/threads/:id/messages` sends any tool result over 16,384 characters as its first 6,000 and last 2,000 characters, with `resultTrimmed: { chars, entryId, threadId }` on the part (`services/transcript-trim.ts`). A step's card loads the full result when it renders: `GET /api/threads/:id/tool-output?entryId=&callId=` reads that one entry. The live socket and the stored entries are unchanged.
+- The page shows its layout at once. While the workspace resolves, `/chat` shows a header line, placeholder transcript rows, and the composer outline. While a transcript loads, the list shows placeholder rows instead of "No messages yet".
+- Socket events refresh the thread lists and the context meter with `cancelRefetch: false`. A burst of events joins the refresh already on its way instead of restarting it.
+
+Measured with 115 ms of added latency on a 154-entry, 2.4 MB thread: a cold open went from 1.9 s to 1.5 s with the layout visible at once, a thread switch from 1.1 s to 0.6 s, and a switch after a 300 ms hover to 0.2 s.
