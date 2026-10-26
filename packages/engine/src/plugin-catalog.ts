@@ -354,7 +354,7 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
  * (`ToolResult` text vs. a `command_result` markdown output).
  */
 export type InvokeActionResult =
-  | { kind: "ok"; result: PluginActionResult }
+  | { kind: "ok"; result: PluginActionResult; automatic?: true }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   /** `shared_account`: the action needs a teammate's shared account, and
@@ -959,7 +959,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  const executed = await executeAction(entry, actionId, args, summary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -968,6 +968,7 @@ export async function invokeAction(
       gateOrdinal,
     },
   });
+  return executed.kind === "ok" && decision.provenance.source === "thread_bypass" ? { ...executed, automatic: true } : executed;
 
 }
 
@@ -1516,7 +1517,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
 function renderInvokeResult(outcome: InvokeActionResult, toolId: string): ToolResult {
   switch (outcome.kind) {
     case "ok":
-      return actionResultToToolResult(outcome.result, toolId);
+      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
     case "unknown":
       return {
         text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,

@@ -13,11 +13,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { pgDbFromPglite } from "@valet/store-postgres";
 import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
 import { shareCredential, revokeShare } from "../services/credential-shares.js";
+import { setThreadApprovalBypass } from "../services/thread-approval-bypass.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { upsertOverride } from "./admin.js";
 import { qualifiedActionId } from "../plugins/action-id.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { assistants, agentSessions, actionInvocations, credentials as credentialRows, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
+import { assistants, agentSessions, childWatches, actionInvocations, credentials as credentialRows, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -55,6 +56,8 @@ async function reset(): Promise<void> {
   await pg.query("DELETE FROM action_policies");
   await pg.query("DELETE FROM action_policy_overrides");
   await pg.query("DELETE FROM action_invocations");
+  await pg.query("DELETE FROM session_threads");
+  await pg.query("DELETE FROM child_watches");
 }
 
 beforeAll(async () => {
@@ -740,6 +743,62 @@ describe("always allow for the session's owner", () => {
     await db.insert(actionPolicies).values({ id: "team-late", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
     await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
     expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+  });
+
+  describe("run without asking", () => {
+    const thread = (id: string, sessionId = SESSION) => ({ id, sessionId, createdAt: 1 });
+
+    it("approves what the owner could always allow, in their own turns only", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect(await resolver.resolve(input)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      // Another thread, and another person's turn in this one, still ask.
+      expect((await resolver.resolve({ ...input, threadId: "t2" })).mode).toBe("require_approval");
+      expect((await resolver.resolve({ ...input, userId: ADMIN })).mode).toBe("require_approval");
+      await setThreadApprovalBypass(db, thread("t1"), null);
+      expect((await resolver.resolve(input)).mode).toBe("require_approval");
+      // Nothing lasting was written: the setting is the thread's, not a policy.
+      expect(await db.select().from(actionPolicyOverrides)).toEqual([]);
+    });
+
+    it("still asks for a critical action", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect((await resolver.resolve({ ...input, riskLevel: "critical" })).mode).toBe("require_approval");
+    });
+
+    it("covers the child agents the thread starts, and stops for them when it is turned off", async () => {
+      await personalSession(SESSION);
+      await personalSession("sess_child");
+      await personalSession("sess_grandchild");
+      await db.insert(childWatches).values([
+        { childSessionId: "sess_child", queueItemId: "q1", parentSessionId: SESSION, parentThreadId: "t1", actorUserId: MEMBER, orgId: ORG, createdAt: 1 },
+        { childSessionId: "sess_grandchild", queueItemId: "q2", parentSessionId: "sess_child", parentThreadId: "ct", actorUserId: MEMBER, orgId: ORG, createdAt: 1 },
+      ]);
+      const grandchild = { ...input, sessionId: "sess_grandchild", threadId: "gt" };
+      expect((await resolver.resolve(grandchild)).mode).toBe("require_approval");
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect(await resolver.resolve(grandchild)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      await setThreadApprovalBypass(db, thread("t1"), null);
+      expect((await resolver.resolve(grandchild)).mode).toBe("require_approval");
+    });
+
+    it("covers team members and the team's own runs, but not an action a team rule names", async () => {
+      await teamSession();
+      await setThreadApprovalBypass(db, thread("t1"), TEAM_ADMIN);
+      const teamInput = { ...input, teamId: TEAM };
+      expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      expect((await resolver.resolve({ ...teamInput, userId: `team:${TEAM}` })).mode).toBe("allow");
+      expect((await resolver.resolve({ ...teamInput, userId: ADMIN })).mode).toBe("require_approval");
+      await db.insert(actionPolicies).values({ id: "team-ask-bypass", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+      expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    });
+
+    it("never covers a sender with no Valet account", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect((await resolver.resolve({ ...input, externalSender: true })).mode).toBe("require_approval");
+    });
   });
 
   it("leaves the team option out when a conditional team rule would still ask for this call", async () => {

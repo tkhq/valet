@@ -774,6 +774,9 @@ export interface ToolResult {
    * successful call from a completed-but-failed one read this value.
    */
   ok?: boolean;
+  /** "automatic" when the action needed approval and ran without a card
+   * because the thread runs without asking. The UI names it on the step. */
+  approval?: "automatic";
 }
 
 export type ToolAttachment =
@@ -1253,7 +1256,10 @@ export type PolicyProvenanceSource =
   | "risk_default"
   | "resolver_error"
   /** The action would use another member's shared account (`PolicyDecision.approver`). */
-  | "shared_account";
+  | "shared_account"
+  /** The thread runs without asking, and this approval was one its person
+   * could stop for good themselves, so no gate opened. */
+  | "thread_bypass";
 
 /**
  * The host's decision for one action invocation. `mode` drives `call_tool`:

@@ -27,6 +27,7 @@ import {
   useSetSessionProfile,
   useSetSessionReasoning,
   useSetThreadModel,
+  useSetThreadApprovalBypass,
   useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
@@ -38,6 +39,7 @@ import {
   Dialog,
   DialogContent,
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -260,6 +262,8 @@ export function SessionHeader({
   const [titleDraft, setTitleDraft] = useState("");
   const [moving, setMoving] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [confirmBypass, setConfirmBypass] = useState(false);
+  const bypass = useSetThreadApprovalBypass(session.id);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
   // one edit sends one PATCH.
@@ -401,6 +405,17 @@ export function SessionHeader({
   // Only the owner shares a personal thread. A team thread is already open
   // to its team.
   const canShare = activeThread !== undefined && owner.type === "user" && owner.id === me.data?.id;
+  // The server's rule: the owner of a personal thread, or a team admin.
+  // Anyone who sees it on may turn it off.
+  const canEnableBypass = activeThread !== undefined && (owner.type === "user" ? owner.id === me.data?.id : owner.type === "team" && canAdminister);
+  const bypassOn = activeThread?.approvalBypass === true;
+  function setBypass(on: boolean) {
+    if (!activeThread) return;
+    setActionError(null);
+    bypass.mutate({ threadId: activeThread.id, on }, {
+      onError: (err) => setActionError(extractActionError(err, on ? "Could not turn on Run without asking. Try again." : "Could not turn off Run without asking. Try again.")),
+    });
+  }
 
   // A subject thread names its place (spec Part G): the channel, repository,
   // or Linear issue it was opened for. The Slack case resolves the raw
@@ -531,6 +546,9 @@ export function SessionHeader({
           {!mobile && activeThread?.share && (
             <Badge variant="accent" className="max-w-full truncate" data-testid="thread-shared">Shared</Badge>
           )}
+          {bypassOn && (
+            <Badge variant="warning" className="max-w-full truncate" data-testid="thread-runs-without-asking">Runs without asking</Badge>
+          )}
           {/* Runtime workspace paths are internal; standalone paths describe the work. */}
           {!mobile && session.workspace && !isWorkspaceRuntime && (
             <span className="hidden sm:inline text-[10px] font-mono tracking-wide text-muted truncate">
@@ -644,6 +662,15 @@ export function SessionHeader({
               )}
               <DropdownMenuSeparator />
             </div>
+            {(bypassOn || canEnableBypass) && (
+              <>
+                <DropdownMenuCheckboxItem checked={bypassOn} disabled={bypass.isPending}
+                  onCheckedChange={(checked) => { if (checked) setConfirmBypass(true); else setBypass(false); }}>
+                  Run without asking
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
             {canAdminister && (
               <>
                 {/* Sleeps the sandbox until the next message. A menu item with a
@@ -705,6 +732,17 @@ export function SessionHeader({
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
       {guard.dialog}
+      <ConfirmDialog
+        open={confirmBypass}
+        onOpenChange={setConfirmBypass}
+        title="Run without asking?"
+        description="Valet stops asking for approval in this thread and the agents it starts, for the actions you could always allow yourself."
+        confirmLabel="Run without asking"
+        confirmVariant="primary"
+        onConfirm={() => { setConfirmBypass(false); setBypass(true); }}
+      >
+        <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from this menu at any time.</p>
+      </ConfirmDialog>
       {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
         <DialogContent ref={modelDialog} data-mobile-model-settings title="Model and thinking" description="Choose the model and thinking level for this thread."
           onOpenAutoFocus={(event) => {
