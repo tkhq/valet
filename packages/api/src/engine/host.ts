@@ -10,6 +10,7 @@ import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
 import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -402,6 +403,13 @@ export interface EngineHostOpts {
    * means the plugin-default rung falls through to the risk default.
    */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /**
+   * The cached tool listings of dynamic (MCP) services (`plugins/service-probe.ts`).
+   * The policy resolver reads them so an owner's "always allow" on an MCP
+   * tool passes the override bounds check (`PolicyResolverDeps.serviceProbes`).
+   * Absent: a dynamic tool is unverifiable and the gate hides that option.
+   */
+  serviceProbes?: ServiceProbes;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -2030,6 +2038,7 @@ export class EngineHost {
       this.policyResolverInstance = buildPolicyResolver({
         db: this.opts.db,
         actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+        ...(this.opts.serviceProbes ? { serviceProbes: this.opts.serviceProbes } : {}),
         credentials: this.opts.engineCredentials,
         ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
         ...(this.opts.plugins ? { plugins: this.opts.plugins } : {}),

@@ -477,7 +477,7 @@ describe("loadPolicyRows", () => {
     expect((await resolveActionPolicy(db, { ...input, params: { to: "other@example.com" }, appliesIn: "session" })).mode).toBe("require_approval");
     expect((await resolveActionPolicy(db, { ...input, actionId: "gmail.delete_email", appliesIn: "session" })).mode).toBe("require_approval");
     expect((await loadPolicyRows(db, { orgId: "other-org", userId: MEMBER })).overrides).toEqual([]);
-    expect(await upsertOverride(db, ORG, MEMBER, { service: "gmail", mode: "allow", now: 3 }, new Map())).toMatchObject({ ok: true });
+    expect(await upsertOverride(db, ORG, MEMBER, { service: "gmail", mode: "allow", now: 3 }, { actionPluginByService: new Map() })).toMatchObject({ ok: true });
     expect((await resolveActionPolicy(db, { ...input, appliesIn: "session" })).mode).toBe("allow");
   });
   it("loads org policies + session grants + user overrides for the scope", async () => {

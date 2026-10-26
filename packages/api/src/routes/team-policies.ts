@@ -117,7 +117,12 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
       return c.json({ error: error instanceof Error ? error.message : "Send a valid override." }, 400);
     }
     if (!fields.mode) return c.json({ error: "Choose a mode." }, 400);
-    const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), c.var.providers.actionPluginByService);
+    // The team's own listing verifies a dynamic tool, the same account a team session calls it with.
+    const catalog = {
+      actionPluginByService: c.var.providers.actionPluginByService,
+      dynamicActions: c.var.providers.serviceProbes.listedActionsFor({ type: "team", id }),
+    };
+    const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), catalog);
     if (!bounds.ok) return c.json({ error: bounds.error }, 400);
     const row = await upsertSimpleTeamPolicy(tx, { orgId: user.orgId, type: "team", id }, { ...target, mode: fields.mode, managedBy: user.id, now: Date.now() });
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);

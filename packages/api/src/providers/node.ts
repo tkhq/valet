@@ -477,6 +477,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // token; this layer mints a replacement before it expires.
   const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   const engineCredentials = new TeamCredentialStore(linearAppCredentials);
+  // One cache of dynamic (MCP) tool listings, shared by `/api/plugins`, the
+  // policy routes, and the engine host's policy resolver.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
@@ -524,6 +527,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     pluginLoadFailures,
     actionPluginByService,
+    serviceProbes,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -945,7 +949,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     configMcpServers: opts.instanceConfig?.mcpServers ?? [],
     actionPluginByService,
-    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
     scratchCaps,
   };
