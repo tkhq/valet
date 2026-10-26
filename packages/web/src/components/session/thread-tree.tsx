@@ -394,6 +394,9 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
     setProjectName("");
   }
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
+  // Read after a save answers, so a refused archive sees the current view.
+  const openThread = useRef(search.thread);
+  openThread.current = search.thread;
   const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
   const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
   // Seed pending gates from REST for ourselves — the tree must not depend
@@ -628,11 +631,17 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
     setActionError(undefined);
     // The row leaves at once, so the view leaves the thread at once too: it
     // would otherwise show a thread that the list no longer has.
-    if (threadId === activeThreadId) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+    const leftThread = threadId === activeThreadId;
+    if (leftThread) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
     attempt(
       STOP_AND_ARCHIVE,
       (force) => setArchived.mutateAsync({ threadId, archived: true, ...(force ? { force: true } : {}) }),
-    ).catch((err: unknown) => setActionError(errorText(err, "Could not archive the thread. Try again.")));
+    ).catch((err: unknown) => {
+      setActionError(errorText(err, "Could not archive the thread. Try again."));
+      // A refused archive, such as one with a turn running, puts the row
+      // back. Return to the thread unless the view moved on meanwhile.
+      if (leftThread && openThread.current === undefined) navigate({ search: (prev) => ({ ...prev, thread: threadId }) });
+    });
   }, [activeThreadId, attempt, navigate, setArchived]);
 
   const archiveActive = useCallback(() => {

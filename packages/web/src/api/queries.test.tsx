@@ -267,7 +267,7 @@ describe("optimistic thread actions", () => {
     return { archived, list, saves, client, wrapper };
   }
 
-  it("moves an archived row at once and moves it back when the server refuses", async () => {
+  it("moves an archived row at once and moves it back when a running turn refuses it", async () => {
     const { useSidebarThreads, useArchivedThreads, useSetThreadArchived } = await import("./queries");
     const { ApiError } = await import("./client");
     const { saves, client, wrapper } = setup();
@@ -280,7 +280,7 @@ describe("optimistic thread actions", () => {
     await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toEqual(["b"]));
     expect(result.current.archivedList.data?.threads.map(thread => thread.id)).toEqual(["a"]);
     expect(saves).toHaveLength(1);
-    await act(async () => { saves[0]!.reject(new ApiError(409, "PATCH → 409", { error: "Stop background work first." })); await done; });
+    await act(async () => { saves[0]!.reject(new ApiError(409, "PATCH → 409", { error: "A turn is running in this thread. Wait for it to finish, then archive." })); await done; });
     await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toContain("a"));
     expect(result.current.archivedList.data?.threads ?? []).toEqual([]);
     unmount(); client.clear();

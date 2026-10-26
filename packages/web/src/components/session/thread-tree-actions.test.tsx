@@ -412,6 +412,23 @@ describe("ThreadTree: background work blocks archive and replace (fix wave 3, H1
     expect(navigate).toHaveBeenCalledTimes(1);
   });
 
+  it("a running turn refuses the archive with its message, no stop confirm, and the view returns", async () => {
+    const busy = "A turn is running in this thread. Wait for it to finish, then archive.";
+    setArchivedMutateAsync.mockRejectedValueOnce(new ApiError(409, "PATCH → 409", { error: busy }));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
+
+    expect(await screen.findByText(busy)).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Stop background work and archive?" })).toBeNull();
+    // The view left the thread when the archive started and comes back after the refusal.
+    expect(navigate).toHaveBeenCalledTimes(2);
+    const back = navigate.mock.calls[1]?.[0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(back.search({})).toEqual({ thread: "thread-1" });
+  });
+
   it("the A hotkey path asks the same way", async () => {
     setArchivedMutateAsync.mockRejectedValueOnce(new ApiError(409, "PATCH → 409", conflict));
     const user = userEvent.setup();
