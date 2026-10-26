@@ -102,6 +102,17 @@ export function threadListFilters(sessionId: string) {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
+/** Starts loading a session's detail, which the thread view needs before it can show the thread. */
+export function prefetchSession(qc: QueryClient, id: string) {
+  void qc.prefetchQuery({ queryKey: qk.session(id), queryFn: () => api.getSession(id), staleTime: 15_000 });
+}
+
+/** Starts a session's detail as soon as its id is known. */
+export function usePrefetchSession(id: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (id) prefetchSession(qc, id); }, [qc, id]);
+}
+
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
     queryKey: qk.session(id),

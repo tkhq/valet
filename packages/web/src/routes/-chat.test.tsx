@@ -24,6 +24,7 @@ let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
   usePrefetchTranscript: () => undefined,
+  usePrefetchSession: () => undefined,
   useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: scopeKey === "user" ? "personal-session" : "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
