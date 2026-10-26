@@ -39,7 +39,9 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
   const [write, setWrite] = useState<{ key: string; pending: number; error?: string }>({ key, pending: 0 });
   const [migration, setMigration] = useState<{ key: string; error: string }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
-  const failed = useRef<{ key: string; operations: ThreadProjectsOperation[] } | undefined>(undefined);
+  // Every failed save waits here for Retry sync. Saves overlap, so a later
+  // success of another change must not drop an earlier failure.
+  const failed = useRef<{ key: string; batches: ThreadProjectsOperation[][] } | undefined>(undefined);
   const identity = useRef({ key, epoch: 0 });
   if (identity.current.key !== key) identity.current = { key, epoch: identity.current.epoch + 1 };
   const epoch = identity.current.epoch;
@@ -149,13 +151,25 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
         client.setQueryData(queryKey, current);
         void client.invalidateQueries({ queryKey, refetchType: "none" });
         remember(`${key}:cache-v1`, JSON.stringify(current.value));
-        if (isCurrent() && failed.current?.key === key) failed.current = undefined;
+        if (isCurrent() && failed.current?.key === key) {
+          failed.current.batches = failed.current.batches.filter(batch => batch !== change);
+          if (!failed.current.batches.length) {
+            failed.current = undefined;
+            setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
+          }
+        }
         return current.value;
       } catch (error) {
         if (!isCurrent()) return undefined;
         const conflict = error instanceof ApiError && error.status === 409;
-        if (conflict) failed.current = undefined;
-        else if (operations.length) failed.current = { key, operations: operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op) };
+        const waiting = failed.current?.key === key ? failed.current : undefined;
+        const retried = waiting?.batches.some(batch => batch === change) ?? false;
+        // A conflict means the server state moved on: refetch, do not replay.
+        if (conflict && waiting && retried) waiting.batches = waiting.batches.filter(batch => batch !== change);
+        else if (!conflict && !retried && operations.length) {
+          const batch = operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op);
+          failed.current = { key, batches: [...(waiting?.batches ?? []), batch] };
+        }
         setWrite(previous => previous.key === key ? { ...previous, error: errorText(error) } : previous);
         if (conflict) await query.refetch();
         return undefined;
@@ -188,7 +202,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     unsyncedLegacy: migration?.key === key ? stored(key) : null,
     error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : migration?.key === key ? migration.error : undefined,
     retry: () => {
-      if (failed.current?.key === key) return optimistic(failed.current.operations);
+      if (failed.current?.key === key) return Promise.all(failed.current.batches.map(optimistic)).then(values => values.at(-1));
       setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
       return query.refetch();
     },
