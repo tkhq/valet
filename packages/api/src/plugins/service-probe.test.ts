@@ -129,6 +129,23 @@ describe("ServiceProbes.listedActionsFor (the cached tool schema policy surfaces
     expect(await disconnected.listedActionsFor(owner)("mb", mcpPlugin(async () => listed()))).toEqual([]);
   });
 
+  it("snapshot: reads every dynamic plugin ahead, then answers from memory with no further probe or store read", async () => {
+    const store = await storeWith("t-1");
+    const probes = new ServiceProbes({ credentials: store });
+    const plugin = mcpPlugin(async () => listed());
+    const plain: ActionPlugin = { service: "other", actions: [tool("other.ping")] };
+    const source = await probes.listedActionsSnapshot(owner, [{ actionPlugin: plugin }, { actionPlugin: plain }]);
+    expect(plugin.calls).toBe(1);
+    // A store that now refuses every read proves the snapshot touches it no more.
+    store.get = async () => {
+      throw new Error("store read inside the snapshot");
+    };
+    expect(await source("mb", plugin)).toEqual(TOOLS);
+    expect(await source("other", plain)).toEqual([]);
+    expect(await source("unknown", plain)).toEqual([]);
+    expect(plugin.calls).toBe(1);
+  });
+
   it("answers another owner's listing from that owner's credential, not the cache", async () => {
     const store = await storeWith("t-1");
     const other: CredentialOwner = { type: "user", id: "u-2" };

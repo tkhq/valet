@@ -680,6 +680,27 @@ describe("always allow for the session's owner", () => {
     expect(await db.select().from(actionPolicies)).toEqual([]);
   });
 
+  it("offers and writes the owner's allow for a dynamic (MCP) tool from the call's own facts, with no listing", async () => {
+    // A dynamic service declares no static actions. The engine resolved the
+    // called tool live, so the gate verifies it from the call's service and
+    // risk level and never lists the server (the host wires no probes here).
+    const grafana = { service: "grafana", actions: [], resolveActions: async () => { throw new Error("must not list"); } };
+    const dynamicResolver = buildPolicyResolver({
+      db,
+      actionPluginByService: new Map([["grafana", { plugin: { name: "mcp-config:grafana", version: "0.0.0", actions: [grafana] }, actionPlugin: grafana }]]),
+      clock: () => 7000,
+    });
+    const call: PolicyResolveInput = { ...input, service: "grafana", actionId: "grafana.query_sql", riskLevel: "high", params: { sql: "select 1" } };
+    await personalSession(SESSION);
+    const first = await dynamicResolver.resolve(call);
+    expect(first.mode).toBe("require_approval");
+    expect(ownerOption(first)?.label).toBe("Always allow for me");
+    await dynamicResolver.onResolution?.(call, first, resolution(MEMBER));
+    expect(await db.select().from(actionPolicyOverrides)).toContainEqual(expect.objectContaining({ actionId: "grafana.query_sql", mode: "allow" }));
+    await personalSession("sess_next_run");
+    expect(await dynamicResolver.resolve({ ...call, sessionId: "sess_next_run" })).toMatchObject({ mode: "allow", provenance: { source: "override" } });
+  });
+
   it("refuses another member's choice in a personal session", async () => {
     await personalSession(SESSION);
     expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION }, ADMIN)).toBe("Only the owner of this conversation can always allow this. Approve it once instead.");

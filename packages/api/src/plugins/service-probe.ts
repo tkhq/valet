@@ -135,6 +135,28 @@ export class ServiceProbes {
     return async (service, actionPlugin) => (await this.get(owner, service, actionPlugin)).actions ?? [];
   }
 
+  /**
+   * `listedActionsFor(owner)`, read ahead for every dynamic plugin in
+   * `plugins` so the source then answers from memory. For a caller that
+   * checks bounds inside a database transaction: a credential read there
+   * would run on a second handle, and PGlite serves one connection, so that
+   * read would wait on the open transaction itself. Cached listings cost
+   * nothing; cold ones list live, concurrently, under the usual limits.
+   */
+  async listedActionsSnapshot(
+    owner: CredentialOwner,
+    plugins: Iterable<{ actionPlugin: ActionPlugin }>,
+  ): Promise<DynamicActionSource> {
+    const dynamic = [...plugins].filter(({ actionPlugin }) => actionPlugin.resolveActions !== undefined);
+    const listings = await Promise.all(
+      dynamic.map(async ({ actionPlugin }) =>
+        [actionPlugin.service, (await this.get(owner, actionPlugin.service, actionPlugin)).actions ?? []] as const,
+      ),
+    );
+    const byService = new Map<string, PluginAction[]>(listings);
+    return async (service) => byService.get(service) ?? [];
+  }
+
   private now(): number {
     return (this.deps.now ?? Date.now)();
   }

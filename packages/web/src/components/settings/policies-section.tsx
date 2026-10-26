@@ -90,7 +90,9 @@ const MODE_BADGE: Record<ApprovalModeWire, "success" | "accent" | "danger"> = {
 export function PoliciesSection({ teamId, canEdit = true, variant = "full" }: { teamId?: string; canEdit?: boolean; variant?: "full" | "advanced" }) {
   const title = teamId === undefined ? "Policies" : "Action rules";
   const policiesQ = usePolicies(teamId);
-  const pluginsQ = usePlugins();
+  // The team's catalog on a team page: a dynamic (MCP) service lists its
+  // tools from the team's own connection, which the team write checks.
+  const pluginsQ = usePlugins(teamId);
   const rows = policiesQ.data?.policies ?? [];
   const policies = variant === "advanced" ? rows.filter(p => p.appliesIn !== "any" || p.paramMatchers.length > 0 || p.expiresAt !== null) : rows;
   const plugins = pluginsQ.data?.plugins ?? [];
@@ -404,6 +406,7 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
                 value={service}
                 onChange={setService}
                 placeholder="Select or type a service…"
+                teamId={teamId}
               />
             </div>
           </div>
@@ -419,6 +422,7 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
                 value={actionId}
                 onChange={setActionId}
                 placeholder="Select or type an action id…"
+                teamId={teamId}
               />
             </div>
           </div>

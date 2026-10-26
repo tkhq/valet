@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
-import type { ActionPlugin, ApprovalMode, PluginAction, PolicyProvenanceSource, RiskLevel, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, ApprovalMode, PolicyProvenanceSource, RiskLevel, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   agentSessions, workflowRuns, workflowDefinitions,
@@ -24,7 +24,7 @@ import {
   type RuntimeGrantRow,
 } from "../schema/index.js";
 import type { ToolPermissionSource, ToolPermissionWire } from "../wire/types.js";
-import { qualifiedActionId, type DynamicActionSource } from "../plugins/action-id.js";
+import { qualifiedActionId, type DynamicActionSource, type ListedAction } from "../plugins/action-id.js";
 import { type ParamMatcher } from "./matchers.js";
 import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
 import { loadPolicyRows } from "./service.js";
@@ -258,14 +258,14 @@ interface CatalogAction {
   pluginDefault: ApprovalMode | undefined;
 }
 
-function catalogAction(actionPlugin: ActionPlugin, action: PluginAction): CatalogAction {
+function catalogAction(actionPlugin: ActionPlugin, action: ListedAction): CatalogAction {
   return { service: actionPlugin.service, riskLevel: action.riskLevel, pluginDefault: actionPlugin.defaultApprovalMode };
 }
 
 /** Match raw `a.id` OR its fqid — the canonical policy-facing id is the
  *  fully-qualified `service.action` form (spec T6 #3), but a plugin may
  *  declare bare action ids. */
-function namedAction(actionPlugin: ActionPlugin, actions: readonly PluginAction[], actionId: string): PluginAction | undefined {
+function namedAction(actionPlugin: ActionPlugin, actions: readonly ListedAction[], actionId: string): ListedAction | undefined {
   return actions.find((a) => a.id === actionId || qualifiedActionId(actionPlugin.service, a) === actionId);
 }
 
@@ -556,7 +556,7 @@ export async function listToolPermissions(
 ): Promise<ToolPermissionWire[]> {
   const rows = await loadPolicyRows(db, scope);
   const listed = await Promise.all(
-    actionPlugins.map(async (actionPlugin): Promise<readonly PluginAction[]> => {
+    actionPlugins.map(async (actionPlugin): Promise<readonly ListedAction[]> => {
       if (!actionPlugin.resolveActions || !dynamicActions) return actionPlugin.actions;
       const staticIds = new Set(actionPlugin.actions.map((action) => qualifiedActionId(actionPlugin.service, action)));
       const dynamic = await dynamicActions(actionPlugin.service, actionPlugin);

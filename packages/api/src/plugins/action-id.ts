@@ -9,9 +9,14 @@ import type { ActionPlugin, PluginAction } from "@valet/engine";
  * (`service.action`), mirroring the plugin-catalog's list_tools convention.
  * Both invocation paths resolve to this form, so one org policy / override /
  * grant targets both (spec Deviations T6 #3). */
-export function qualifiedActionId(service: string, action: PluginAction): string {
+export function qualifiedActionId(service: string, action: Pick<PluginAction, "id">): string {
   return action.id.includes(".") ? action.id : `${service}.${action.id}`;
 }
+
+/** What a policy surface reads off a listed tool: its identity and risk,
+ * never its `execute`. A `PluginAction` is one; so is a fact set the engine
+ * resolved for a live call. */
+export type ListedAction = Pick<PluginAction, "id" | "name" | "description" | "riskLevel">;
 
 /**
  * The tools a dynamic (`resolveActions`) service listed for one owner: the
@@ -21,7 +26,7 @@ export function qualifiedActionId(service: string, action: PluginAction): string
  * fails or times out, so a caller treats an empty answer as "unknown", not
  * as "the service has no tools".
  */
-export type DynamicActionSource = (service: string, actionPlugin: ActionPlugin) => Promise<readonly PluginAction[]>;
+export type DynamicActionSource = (service: string, actionPlugin: ActionPlugin) => Promise<readonly ListedAction[]>;
 
 /** Where one canonical tool id resolves: the service and the plugin's own action id. */
 export interface ToolIndexEntry {

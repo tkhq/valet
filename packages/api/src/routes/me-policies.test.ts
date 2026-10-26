@@ -462,6 +462,26 @@ describe("PUT /api/me/policy-overrides and GET /api/me/tool-permissions for a dy
     expect(tools[0]).toMatchObject({ service: "grafana", riskLevel: "medium", mode: "allow", source: "default" });
     expect(tools[0]?.settable).toEqual(["allow", "require_approval", "deny"]);
   });
+
+  it("proves a service override disjoint from an org rule on a dynamic tool only once the listing names it", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    const orgRes = await putOrgPolicy({ actionId: "grafana.query_sql", mode: "require_approval" });
+    expect(orgRes.status).toBe(201);
+    const putServiceAllow = () => fetch(`${api!.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ service: "slack", mode: "allow" }),
+    });
+
+    // Disconnected: the org rule's action is unknown, so it may belong to any service. Blocked.
+    const blocked = await putServiceAllow();
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { error: string }).error).toContain("conflicts with org policy");
+
+    // Connected: the listing proves the rule names a grafana tool, so slack is disjoint.
+    await connect();
+    expect((await putServiceAllow()).status).toBe(200);
+  });
 });
 
 // ── PUT /api/me/policy-overrides — matcher-blind bounds (finding C1) ─────
