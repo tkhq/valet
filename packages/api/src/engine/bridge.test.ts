@@ -171,6 +171,8 @@ describe("busEventToWire", () => {
   it("forwards status events directly (engine status ⊆ wire status)", () => {
     const out = busEventToWire(ev({ type: "status", threadId: "t1", status: "thinking" }));
     expect(out).toEqual([{ type: "status", threadId: "t1", status: "thinking" }]);
+    expect(busEventToWire(ev({ type: "status", threadId: "t1", status: "tool_calling", turnStartedAt: 4000 })))
+      .toEqual([{ type: "status", threadId: "t1", status: "tool_calling", turnStartedAt: 4000 }]);
   });
 
   it("forwards turn_end", () => {

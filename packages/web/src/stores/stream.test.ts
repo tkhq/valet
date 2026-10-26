@@ -1738,6 +1738,29 @@ describe("turnStartedAt", () => {
     ingest(SESSION, statusEvent(THREAD, "queued", 3000));
     expect(threadStatus().turnStartedAt).toBe(3000);
   });
+
+  it("uses the turn start a connect frame names, before or after a replayed frame", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    reset();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 9000));
+    ingest(SESSION, { ...statusEvent(THREAD, "queued", 9100), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+  });
+
+  it("keeps the submission start across a replayed idle and a step boundary", () => {
+    const { ingest } = useStreamStore.getState();
+    // Connect seed, then a replay that starts before the previous turn ended.
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, statusEvent(THREAD, "idle", 9001));
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9002), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    // One submission can go idle between model steps.
+    ingest(SESSION, { ...statusEvent(THREAD, "idle", 9500), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9600), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+  });
 });
 
 describe("per-thread status scoping", () => {
