@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses } from './step-design.js';
+import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses } from './step-design.js';
 
 const session = (prompt: string) => ({ type: 'session', prompt });
 
@@ -100,5 +100,97 @@ describe('scheduledRunMisses', () => {
       edges: [{ from: 'publish', to: 'skip', when: 'trigger.data.dry' }],
     };
     expect([...scheduledRunMisses(definition)]).toEqual([['publish', [{ field: 'dry', sites: ['template', 'expression'] }]]]);
+  });
+});
+
+/** The shape of a weekly release report whose output drifted: an agent lists the PRs, and a final agent rewrites the draft. */
+const releaseReport = {
+  nodes: [
+    { id: 'trigger', type: 'trigger' },
+    { id: 'inventory', type: 'session', prompt: 'List the PRs merged since {{trigger.timestamp}}.', toolScope: { tools: ['call_tool'], actions: ['github.search_issues'] } },
+    { id: 'qualify', type: 'foreach', items: '{{nodes.inventory.result.output.batches}}', itemAlias: 'batch',
+      body: { id: 'qualify_batch', type: 'session', prompt: 'Qualify {{batch.prs}}.', toolScope: { actions: ['github.inspect_pull_request'] } } },
+    { id: 'assemble', type: 'session', prompt: 'Assemble the report from {{nodes.qualify.result.items}}.' },
+    { id: 'verify_and_revise', type: 'session', prompt: 'Check the draft {{nodes.assemble.result.output}} against {{nodes.qualify.result.items}}.' },
+    { id: 'post', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.verify_and_revise.result.output.text}}' } },
+    { id: 'replies', type: 'foreach', items: '{{nodes.verify_and_revise.result.output.thread_replies}}', itemAlias: 'reply',
+      body: { id: 'reply', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{reply.text}}' } } },
+  ],
+};
+
+describe('listingAgentStepWarnings', () => {
+  it('flags a read-only agent step that builds a foreach list', () => {
+    const warnings = listingAgentStepWarnings(releaseReport);
+    expect([...warnings.keys()]).toEqual(['inventory']);
+    expect(warnings.get('inventory')).toContain('foreach step "qualify"');
+  });
+
+  it('stays quiet for an agent step that reads item content to choose the list', () => {
+    const definition = { nodes: [
+      { id: 'inventory', type: 'session', toolScope: { actions: ['slack.list_channels', 'slack.read_history'] } },
+      { id: 'review', type: 'foreach', items: '{{nodes.inventory.result.output.items}}', body: { id: 'r', type: 'llm', prompt: '{{item.text}}' } },
+    ] };
+    expect(listingAgentStepWarnings(definition).size).toBe(0);
+  });
+
+  it('stays quiet for a tool-step list, an agent step that can write, or one with no action scope', () => {
+    const list = (step: Record<string, unknown>) => ({ nodes: [step, { id: 'each', type: 'foreach', items: '{{nodes.list.result.items}}', body: { id: 'b', type: 'llm', prompt: 'x' } }] });
+    expect(listingAgentStepWarnings(list({ id: 'list', type: 'tool', service: 'github', action: 'search_issues' })).size).toBe(0);
+    expect(listingAgentStepWarnings(list({ id: 'list', type: 'session', toolScope: { actions: ['github.search_issues', 'github.create_issue'] } })).size).toBe(0);
+    expect(listingAgentStepWarnings(list({ id: 'list', type: 'session', prompt: 'Run the script.' })).size).toBe(0);
+  });
+});
+
+describe('rewriteStepWarnings', () => {
+  it('flags a model step that rewrites a draft before a tool step sends it', () => {
+    const warnings = rewriteStepWarnings(releaseReport);
+    expect([...warnings.keys()]).toEqual(['verify_and_revise']);
+    expect(warnings.get('verify_and_revise')).toContain('model step "assemble"');
+  });
+
+  it('flags a step named for an edit pass even when its prompt does not say so', () => {
+    const definition = { nodes: [
+      { id: 'compose', type: 'llm', prompt: 'Write the reply.' },
+      { id: 'tighten', type: 'llm', prompt: 'Make it read like live chat: {{nodes.compose.result.output.text}}' },
+      { id: 'send', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.tighten.result.output.text}}' } },
+    ] };
+    expect([...rewriteStepWarnings(definition).keys()]).toEqual(['tighten']);
+  });
+
+  it('stays quiet for a step that writes a message from data an agent gathered', () => {
+    // Gather with tools, then compose: two jobs, not a rewrite.
+    const definition = { nodes: [
+      { id: 'gather', type: 'orchestrator', prompt: 'Call tools to gather tomorrow\'s tasks and meetings.' },
+      { id: 'compose', type: 'llm', prompt: 'Write a Slack reminder from {{nodes.gather.result.response}}. Do not rewrite task titles.' },
+      { id: 'send', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.compose.result.output.text}}' } },
+    ] };
+    expect(rewriteStepWarnings(definition).size).toBe(0);
+  });
+
+  it('stays quiet when the checking step reads a tool result and feeds an if step', () => {
+    // A sales tracker: the model compares the sheet read-back with its own proposal.
+    const definition = {
+      nodes: [
+        { id: 'propose', type: 'llm', prompt: 'Propose values.' },
+        { id: 'write', type: 'tool', service: 'sheets', action: 'write_spreadsheet', params: { values: '{{nodes.propose.result.output.values}}' } },
+        { id: 'readback', type: 'tool', service: 'sheets', action: 'read_spreadsheet' },
+        { id: 'verify', type: 'llm', prompt: 'Compare {{nodes.readback.result}} with {{nodes.propose.result.output}}.' },
+        { id: 'ok', type: 'if', conditions: [{ left: 'nodes.verify.result.output.verified', op: 'eq', right: true }] },
+      ],
+    };
+    expect(rewriteStepWarnings(definition).size).toBe(0);
+  });
+
+  it('stays quiet for one model step that writes the post from foreach results', () => {
+    const definition = {
+      nodes: [
+        { id: 'list', type: 'tool', service: 'github', action: 'search_issues' },
+        { id: 'classify', type: 'foreach', items: '{{nodes.list.result.items}}', body: { id: 'c', type: 'llm', prompt: '{{item.title}}' } },
+        { id: 'compose', type: 'llm', prompt: 'Write the post from {{nodes.classify.result.items}}.' },
+        { id: 'post', type: 'tool', service: 'slack', action: 'send_message', params: { text: '{{nodes.compose.result.output.text}}' } },
+      ],
+    };
+    expect(rewriteStepWarnings(definition).size).toBe(0);
+    expect(listingAgentStepWarnings(definition).size).toBe(0);
   });
 });

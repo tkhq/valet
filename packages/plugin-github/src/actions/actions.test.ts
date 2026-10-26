@@ -9,13 +9,14 @@
 import process from "node:process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginAction } from "@valet/engine";
-import { githubPlugin } from "./actions.js";
+import { expandRelativeDates, githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
 import {
   startGithubFixture,
   type GithubFixture,
   type GithubFixtureCall,
   type GithubFixtureHandlers,
+  type GithubFixtureResponse,
 } from "../test-helpers/github-fixture.js";
 
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
@@ -496,10 +497,57 @@ describe("github.inspect_pull_request path scoping", () => {
   });
 });
 
+describe("github.inspect_pull_request merge facts", () => {
+  it("returns when and by whom the PR merged, and its labels", async () => {
+    useFixture({
+      getPull: (ref) => ({
+        body: {
+          number: Number(ref.pullNumber),
+          title: "fixture pull request",
+          state: "closed",
+          merged: true,
+          merged_at: "2026-10-20T12:00:00Z",
+          merged_by: { login: "release-lead" },
+          merge_commit_sha: "merge-sha",
+          closed_at: "2026-10-20T12:00:00Z",
+          labels: [{ name: "release" }],
+          user: { login: "fixture-user" },
+          html_url: "https://github.com/acme/widgets/pull/7",
+          head: { ref: "feature", sha: "head-sha" },
+          base: { ref: "main" },
+          additions: 1,
+          deletions: 0,
+          changed_files: 0,
+        },
+      }),
+      listPullFiles: pagedFiles([]),
+    });
+
+    const data = await inspectRaw({});
+
+    expect(data).toMatchObject({
+      merged_at: "2026-10-20T12:00:00Z",
+      merged_by: "release-lead",
+      merge_commit_sha: "merge-sha",
+      labels: ["release"],
+    });
+  });
+});
+
 describe("github.inspect_pull_request file pagination", () => {
   const MANY = Array.from({ length: 150 }, (_, i) =>
     fileEntry(i < 120 ? `source/rest/f${i}.go` : `docs/f${i}.md`),
   );
+
+  it("reads each file once when the limit ends inside a page", async () => {
+    const server = useFixture({ getPull: pullWith(150), listPullFiles: pagedFiles(MANY) });
+
+    const data = await inspect({ filesLimit: 150, pathPrefixes: ["docs/"] });
+
+    const fileCalls = server.calls.filter((c) => c.path.endsWith("/files"));
+    expect(fileCalls.map((c) => c.query.per_page)).toEqual(["100", "100"]);
+    expect(data.matched_file_count).toBe(30);
+  });
 
   it("pages past GitHub's 100-per-page ceiling so the count is not short", async () => {
     const server = useFixture({ getPull: pullWith(150), listPullFiles: pagedFiles(MANY) });
@@ -593,10 +641,15 @@ describe("github.search_issues", () => {
               state: "open",
               user: { login: "fixture-user" },
               html_url: "https://github.com/acme/widgets/pull/7",
-              pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/7" },
+              repository_url: "https://api.github.com/repos/acme/widgets",
+              pull_request: {
+                url: "https://api.github.com/repos/acme/widgets/pulls/7",
+                merged_at: "2026-08-09T00:00:00Z",
+              },
               labels: [{ name: "area/api" }],
               created_at: "2026-08-01T00:00:00Z",
               updated_at: "2026-08-10T00:00:00Z",
+              closed_at: "2026-08-09T00:00:00Z",
             },
           ],
         },
@@ -611,9 +664,73 @@ describe("github.search_issues", () => {
     expect(Array.isArray(items) ? items[0] : undefined).toMatchObject({
       number: 7,
       url: "https://github.com/acme/widgets/pull/7",
+      repo: "acme/widgets",
       created_at: "2026-08-01T00:00:00Z",
+      merged_at: "2026-08-09T00:00:00Z",
+      labels: ["area/api"],
       is_pr: true,
     });
+  });
+
+  it("sends relative dates as ISO dates and reports the query it sent", async () => {
+    const server = useFixture();
+
+    const result = await search({ q: "is:pr is:merged merged:>=@now-7d" });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const sent = server.calls[0]?.query.q ?? "";
+    expect(sent).toMatch(/^is:pr is:merged merged:>=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    expect(result.data).toMatchObject({ query: sent });
+  });
+
+  describe("paging past 100 results", () => {
+    const MATCHES = Array.from({ length: 250 }, (_, i) => ({
+      number: i + 1,
+      title: `pull request ${i + 1}`,
+      state: "closed",
+      user: { login: "fixture-user" },
+      html_url: `https://github.com/acme/widgets/pull/${i + 1}`,
+      repository_url: "https://api.github.com/repos/acme/widgets",
+      pull_request: { url: "", merged_at: "2026-08-09T00:00:00Z" },
+      labels: [],
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-10T00:00:00Z",
+      closed_at: "2026-08-09T00:00:00Z",
+    }));
+    /** Serves `MATCHES` as GitHub pages them: by `per_page` and `page`. */
+    function pagedSearch(query: Record<string, string>): GithubFixtureResponse {
+      const perPage = Number(query.per_page ?? "30");
+      const start = (Number(query.page ?? "1") - 1) * perPage;
+      return { body: { total_count: MATCHES.length, incomplete_results: false, items: MATCHES.slice(start, start + perPage) } };
+    }
+    function numbers(data: unknown): unknown[] {
+      const items = isRecord(data) ? data.items : undefined;
+      return Array.isArray(items) ? items.map((item) => (isRecord(item) ? item.number : undefined)) : [];
+    }
+
+    it("reads every page up to the limit, each result once", async () => {
+      const server = useFixture({ searchIssues: pagedSearch });
+
+      const result = await search({ limit: 250 });
+
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(server.calls.map((c) => [c.query.page, c.query.per_page])).toEqual([["1", "100"], ["2", "100"], ["3", "100"]]);
+      expect(numbers(result.data)).toEqual(MATCHES.map((m) => m.number));
+      expect(result.data).toMatchObject({ total_count: 250, truncated: false });
+    }, 20_000); // Octokit's search throttle holds pages about 2 s apart.
+
+    it("stops at a limit inside a page and says the list is truncated", async () => {
+      useFixture({ searchIssues: pagedSearch });
+
+      const result = await search({ limit: 150 });
+
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(numbers(result.data)).toEqual(MATCHES.slice(0, 150).map((m) => m.number));
+      expect(result.data).toMatchObject({ total_count: 250, truncated: true });
+    }, 20_000);
   });
 });
 
@@ -1283,5 +1400,19 @@ describe("github.update_pull_request", () => {
       "PATCH /repos/acme/widgets/issues/7",
     ]);
     expect(server.calls[0].body).toEqual({ assignees: [] });
+  });
+});
+
+describe("expandRelativeDates", () => {
+  const NOW = new Date("2026-10-26T15:04:05.678Z");
+
+  it("expands @now and @today with offsets back in time", () => {
+    expect(expandRelativeDates("merged:>=@now-7d", NOW)).toBe("merged:>=2026-10-19T15:04:05Z");
+    expect(expandRelativeDates("merged:@today-1w..@today", NOW)).toBe("merged:2026-10-19..2026-10-26");
+    expect(expandRelativeDates("updated:>@now-36h", NOW)).toBe("updated:>2026-10-25T03:04:05Z");
+  });
+
+  it("leaves other @ words alone", () => {
+    expect(expandRelativeDates("mentions:@nowhere author:@today-team is:pr", NOW)).toBe("mentions:@nowhere author:@today-team is:pr");
   });
 });

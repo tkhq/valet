@@ -408,6 +408,7 @@ describe("workflow case files", () => {
     expect(cases.map((c) => c.id).sort()).toEqual([
       "workflow-bot-alert-triage",
       "workflow-onboarding-linear",
+      "workflow-release-report",
       "workflow-sales-tracker",
       "workflow-scheduled-refresh",
     ]);

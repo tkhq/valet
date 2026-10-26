@@ -67,7 +67,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 
 ### Search
 - `github.search_code` — search code across repositories
-- `github.search_issues` — search issues and PRs
+- `github.search_issues` — search issues and PRs, up to 1000 results in one call. `@now-7d` and `@today-1w` in a date qualifier become ISO dates, so a workflow tool step can ask for the last 7 days.
 
 ### Releases & CI
 - `github.create_release` — create a release with tag
