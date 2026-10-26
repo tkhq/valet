@@ -8,7 +8,7 @@
  * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { screen, within, fireEvent, act } from "@testing-library/react";
+import { screen, within, fireEvent, act, waitFor } from "@testing-library/react";
 import { renderWithThreadProjects as render } from "~/test/thread-projects-client";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -782,6 +782,17 @@ describe("ThreadTree — thread rename", () => {
     renderTree();
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
     expect(screen.getByRole("menuitem", { name: /rename thread/i })).toBeTruthy();
+  });
+
+  it("keeps focus in the title field after Rename thread closes the menu", async () => {
+    const user = userEvent.setup();
+    renderTree();
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /rename thread/i }));
+    const input = await screen.findByRole("textbox", { name: /rename thread/i });
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    await user.keyboard("Renamed{Enter}");
+    expect(renameMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ title: "Renamed" }));
   });
 });
 

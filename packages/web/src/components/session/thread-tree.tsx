@@ -1039,6 +1039,10 @@ function ThreadNode({
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const savedRef = useRef(false);
+  // Rename from the row menu starts once the menu has closed. An open menu
+  // keeps focus inside itself and then returns it to its trigger, either of
+  // which would blur (and save) a title field opened from the item.
+  const renameFromMenuRef = useRef(false);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -1191,7 +1195,12 @@ function ThreadNode({
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown} onCloseAutoFocus={(event) => {
+            if (!renameFromMenuRef.current) return;
+            renameFromMenuRef.current = false;
+            event.preventDefault();
+            startEditing();
+          }}>
             {/* A phone row shows only this menu, so Pin lives here too. */}
             <DropdownMenuItem disabled={organizingDisabled} onSelect={onPin}>
               {pinned ? <PinOff className="h-4 w-4" aria-hidden /> : <Pin className="h-4 w-4" aria-hidden />}
@@ -1217,7 +1226,7 @@ function ThreadNode({
                 A
               </span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => startEditing()}>
+            <DropdownMenuItem onSelect={() => { renameFromMenuRef.current = true; }}>
               <Pencil className="h-4 w-4" aria-hidden />
               Rename thread
             </DropdownMenuItem>
