@@ -1,4 +1,4 @@
-import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
@@ -50,7 +50,15 @@ export function MessageList({
   newSince,
   emptyState,
   footer,
+  loading = false,
+  onShowEarlier,
+  loadingEarlier = false,
 }: {
+  /** The transcript has not arrived yet: placeholder rows, not the empty line. */
+  loading?: boolean;
+  /** Older messages exist; called once when the top of the list scrolls into view. */
+  onShowEarlier?: () => void;
+  loadingEarlier?: boolean;
   /** Shown after the last message, such as the agents this thread is running. */
   footer?: ReactNode;
   /** Shown in place of the default line when the thread has no messages. */
@@ -224,12 +232,15 @@ export function MessageList({
             {header}
           </div>
         )}
-        {visible.length === 0 ? (
+        {visible.length === 0 && loading ? (
+          <TranscriptPlaceholder />
+        ) : visible.length === 0 ? (
           emptyState ?? <div className="flex-1 grid place-items-center text-sm text-muted">
             No messages yet — try sending a prompt below.
           </div>
         ) : (
           <div ref={contentRef} className="shrink-0 space-y-2 py-4">
+            {onShowEarlier && <ShowEarlier onShow={onShowEarlier} loading={loadingEarlier} />}
             {transcript.items.map((item, i, items) => {
               const plan = transcript.plans[i]!;
               if (item.kind === "watch") {
@@ -345,4 +356,34 @@ export function groupBranchNotes(items: readonly TranscriptItem[]): ListRow[] {
  * ends a turn. */
 function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
   return item?.kind === "message" ? item.message : undefined;
+}
+
+/** Rows in the shape of a transcript, while it loads. */
+export function TranscriptPlaceholder() {
+  return <div role="status" aria-label="Loading messages" className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-5 py-6 sm:px-8">
+    {[0.55, 0.85, 0.7].map((width, index) => <div key={index} className="space-y-2">
+      <div className="h-3 w-24 rounded bg-ink-wash motion-safe:animate-pulse" />
+      <div className="h-3 rounded bg-ink-wash motion-safe:animate-pulse" style={{ width: `${width * 100}%` }} />
+      <div className="h-3 w-1/2 rounded bg-ink-wash motion-safe:animate-pulse" />
+    </div>)}
+  </div>;
+}
+
+/** Loads older messages when the reader reaches the top, with a button for the same. */
+function ShowEarlier({ onShow, loading }: { onShow: () => void; loading: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onShow();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onShow]);
+  return <div ref={ref} className="flex justify-center px-5 py-1 sm:px-8">
+    <button type="button" disabled={loading} onClick={onShow} className="text-xs text-muted hover:text-ink disabled:opacity-60">
+      {loading ? "Loading earlier messages…" : "Show earlier messages"}
+    </button>
+  </div>;
 }

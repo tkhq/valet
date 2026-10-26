@@ -2,10 +2,10 @@
 import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
-import type { ListThreadsResponse } from "@valet/api/wire";
+import type { ListMessagesResponse, ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { qk, useMarkThreadsRead, useSendPrompt, useSetThreadModel } from "./queries";
+import { prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useSendPrompt, useSetThreadModel } from "./queries";
 
 const sessionId = "session-1";
 
@@ -248,6 +248,40 @@ it("does not resurrect an archived thread from a pending activity read", async (
   await act(async () => { complete({ threads: [row] }); await pending; });
   expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toEqual(["recent"]);
   unmount(); client.clear(); vi.restoreAllMocks();
+});
+
+
+describe("thread transcript", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const page = (id: string): ListMessagesResponse => ({ messages: [{ id, sessionId, threadId: "t1", role: "user", content: id, parts: [], createdAt: 1 }], hasMore: true });
+
+  it("joins a prefetch still in flight instead of asking twice, newest page first", async () => {
+    let finish: (value: ListMessagesResponse) => void = () => {};
+    const list = vi.spyOn(api, "listMessages").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    prefetchTranscript(client, "t1");
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useMessages(sessionId, "t1"), { wrapper });
+    act(() => finish(page("m1")));
+    await waitFor(() => expect(result.current.data?.messages[0]?.id).toBe("m1"));
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith("", { limit: TRANSCRIPT_TAIL, threadId: "t1" });
+  });
+
+  it("shows a finished prefetch at once, and keeps it while the full history loads", async () => {
+    const list = vi.spyOn(api, "listMessages").mockResolvedValueOnce(page("newest")).mockImplementation(() => new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000 } } });
+    prefetchTranscript(client, "t1");
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result, rerender } = renderHook(({ limit }) => useMessages(sessionId, "t1", undefined, limit), { wrapper, initialProps: { limit: TRANSCRIPT_TAIL } });
+    expect(result.current.data?.messages[0]?.id).toBe("newest");
+    rerender({ limit: TRANSCRIPT_FULL });
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.data?.messages[0]?.id).toBe("newest");
+    expect(list).toHaveBeenLastCalledWith("", { limit: TRANSCRIPT_FULL, threadId: "t1" });
+  });
 });
 
 describe("optimistic thread actions", () => {

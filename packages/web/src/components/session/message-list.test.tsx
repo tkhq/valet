@@ -250,3 +250,18 @@ describe("isContinuation", () => {
     expect(isContinuation(msg({ role: "user", createdAt: at + 1 }), msg({ createdAt: at }))).toBe(false);
   });
 });
+
+describe("MessageList loading", () => {
+  it("shows placeholder rows, not the empty line, while the transcript loads", () => {
+    render(<MessageList messages={[]} loading />);
+    expect(screen.getByRole("status", { name: "Loading messages" })).toBeTruthy();
+    expect(screen.queryByText(/No messages yet/)).toBeNull();
+  });
+
+  it("offers earlier messages above the newest page", () => {
+    const onShowEarlier = vi.fn();
+    render(<MessageList messages={[msg()]} onShowEarlier={onShowEarlier} />);
+    fireEvent.click(screen.getByRole("button", { name: "Show earlier messages" }));
+    expect(onShowEarlier).toHaveBeenCalled();
+  });
+});

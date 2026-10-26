@@ -3,7 +3,7 @@ import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
-import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse } from "../wire/types.js";
+import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ToolOutputResponse } from "../wire/types.js";
 import { readStoredThreadPlan } from "../services/thread-plan.js";
 import { activeViewers } from "../services/active-viewers.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
@@ -149,6 +149,24 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
 }, "metadata", "read"));
 threadsRouter.patch("/:threadId", c => inThread(c, patchThread));
 threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages, "content", "read"));
+// The full result of one tool call that the transcript trimmed (`services/transcript-trim.ts`).
+threadsRouter.get("/:threadId/tool-output", c => inThread(c, async (c, sessionId, threadId) => {
+  const entryId = c.req.query("entryId");
+  const callId = c.req.query("callId");
+  if (!entryId || !callId) return c.json({ error: "Send entryId and callId." }, 400);
+  // One row by id, as `channels/host.ts` reads a single entry. `execute` types its result loosely.
+  const rows = (await c.var.providers.db.execute(sql`SELECT parts FROM engine_entries
+    WHERE id = ${entryId} AND session_id = ${sessionId} AND thread_id = ${threadId} LIMIT 1`)) as { rows: Array<{ parts: string | null }> };
+  const raw = rows.rows[0]?.parts;
+  let parts: unknown;
+  try { parts = raw ? JSON.parse(raw) : undefined; } catch { parts = undefined; }
+  const part = Array.isArray(parts)
+    ? parts.find((p: unknown) => typeof p === "object" && p !== null && (p as { type?: unknown }).type === "tool_call" && (p as { callId?: unknown }).callId === callId)
+    : undefined;
+  if (!part) return c.json({ error: "This output is no longer in the thread. Reload the thread." }, 404);
+  const body: ToolOutputResponse = { result: (part as { result?: unknown }).result };
+  return c.json(body);
+}, "content", "read"));
 threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt, "content", "reply"));
 threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity, "content", "read"));
 threadsRouter.get("/:threadId/context", c => inThread(c, getThreadContext));

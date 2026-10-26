@@ -3,11 +3,13 @@ import { QuickReplies } from "./quick-replies";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { ResolvedGateNotice, useResolvedGateNotice } from "./gate-outcome";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
   useForkThread,
+  TRANSCRIPT_FULL,
+  TRANSCRIPT_TAIL,
   useMessages,
   useSession,
   useThreads,
@@ -209,7 +211,11 @@ export function SessionView({
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
   // this never wipes live state mid-session.
-  const messagesQ = useMessages(sessionId, effectiveThreadId);
+  // The newest page first; the whole recent history once the reader scrolls up.
+  const [fullHistoryFor, setFullHistoryFor] = useState<string>();
+  const fullHistory = fullHistoryFor !== undefined && fullHistoryFor === effectiveThreadId;
+  const messagesQ = useMessages(sessionId, effectiveThreadId, undefined, fullHistory ? TRANSCRIPT_FULL : TRANSCRIPT_TAIL);
+  const showEarlier = useCallback(() => setFullHistoryFor(effectiveThreadId), [effectiveThreadId]);
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
@@ -422,6 +428,9 @@ export function SessionView({
               header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
               messages={stream.messages}
               threadId={effectiveThreadId}
+              loading={messagesQ.isPending}
+              onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
+              loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
               onOpenChild={onOpenChild}
               agentBusy={agentBusy}
               pendingIds={threadQueueState?.pendingIds}

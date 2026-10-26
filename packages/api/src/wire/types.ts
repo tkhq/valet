@@ -1307,6 +1307,11 @@ export interface PatchThreadRequest {
   approvalBypass?: boolean;
 }
 
+/** `GET /api/threads/:id/tool-output`: one tool call's full result, in its stored shape. */
+export interface ToolOutputResponse {
+  result: unknown;
+}
+
 export type PatchThreadResponse = ThreadSummary & {
   /** Ids of the background work a forced archive cancelled. Absent when it cancelled none. */
   cancelledWork?: string[];
@@ -1391,6 +1396,12 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
+      /**
+       * Set only in the REST transcript when `result` holds the start and the
+       * end of a large output. `chars` is the full length. Load the full
+       * result with `GET /api/threads/:id/tool-output?entryId=&callId=`.
+       */
+      resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
   | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
 

@@ -23,6 +23,7 @@ vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: teamMetadata ? { tea
 let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
+  usePrefetchTranscript: () => undefined,
   useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: scopeKey === "user" ? "personal-session" : "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
@@ -50,7 +51,8 @@ it("tells a helper thread's person that only they can see it", () => {
 });
 it("does not read a conversation before its session is ensured", () => {
   data = undefined; show(); expect(screen.queryByTestId("conversation")).toBeNull();
-  expect(screen.getByText("Opening threads…")).toBeTruthy();
+  // The thread layout shows while the workspace resolves.
+  expect(screen.getByRole("status", { name: "Opening the thread" })).toBeTruthy();
 });
 it("shows errors without silently substituting a personal conversation", () => {
   data = undefined; error = new Error("not found"); show();
