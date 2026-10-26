@@ -1933,7 +1933,11 @@ export type EngineEvent =
    * earlier version. `noteEntryId` is the branch note at the new leaf. */
   | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
-  | { type: "status"; threadId: string; status: EngineEventStatus }
+  /** `turnStartedAt` is when the running submission was claimed. A turn can
+   * end and go idle between model steps of one submission, and a replay
+   * delivers old frames at the replay time, so a client reads the start
+   * from here rather than from when a frame arrives. */
+  | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }

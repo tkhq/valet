@@ -399,6 +399,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "status",
           threadId: e.threadId,
           status: e.status,
+          ...(e.turnStartedAt !== undefined ? { turnStartedAt: e.turnStartedAt } : {}),
         },
       ];
 

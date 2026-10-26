@@ -2178,11 +2178,7 @@ export class Thread {
       }
       this.lastEmittedStatus = "blocked_on_decision_gate";
       await this.fencedEmit(
-        {
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        },
+        this.statusEvent("blocked_on_decision_gate"),
         { queueItemId: runningItemId },
       );
       await session.emit(
@@ -3584,6 +3580,11 @@ export class Thread {
   /** When the running turn started, for a subscriber that connects mid-turn. */
   get currentTurnStartedAt(): number | undefined {
     return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
+  private statusEvent(status: EngineEventStatus): EngineEvent {
+    const turnStartedAt = this.currentTurnStartedAt;
+    return { type: "status", threadId: this.id, status, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
   }
 
   /**
@@ -6883,7 +6884,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "thinking" },
+          this.statusEvent("thinking"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7121,7 +7122,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "tool_calling" },
+          this.statusEvent("tool_calling"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7320,7 +7321,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "idle";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "idle" },
+          this.statusEvent("idle"),
           { queueItemId: this.runningItem?.id },
         );
         break;

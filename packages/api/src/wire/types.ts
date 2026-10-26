@@ -1894,7 +1894,8 @@ export type WireEvent =
       type: "status";
       threadId: string;
       status: "idle" | "queued" | "thinking" | "tool_calling" | "streaming" | "blocked_on_decision_gate" | "error";
-      /** Set on the frame a mid-turn subscriber receives at connect. */
+      /** When the running submission was claimed. A replayed frame arrives
+       * with the replay time, so the start comes from here. */
       turnStartedAt?: number;
     }
   | {
