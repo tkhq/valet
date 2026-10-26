@@ -2382,6 +2382,9 @@ export interface SessionStore {
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
   listThreads(sessionId: string): Promise<ThreadData[]>;
+  /** The threads of every listed session, in one read. A workspace lists
+   * its history across one session per conversation. */
+  listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]>;
   getEntries(
     sessionId: string,
     threadId: string,

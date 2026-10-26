@@ -12,7 +12,7 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
-import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef } from "../services/thread-access.js";
+import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef, visibleThreadIds } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
 import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
@@ -500,25 +500,23 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
       .where(eq(assistantExecutions.sessionId, session.id)).limit(1);
     if (self) keys.set(session.id, self.key);
   }
-  const groups = [];
-  for (const row of [session, ...retained, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
-    if (!await spawnedFromVisibleThread(c, row)) continue;
-    const visible = threadsVisibleTo(c, row);
-    const stored = await engineStore.listThreads(row.id);
-    const threads = [];
-    for (const thread of stored) {
-      if (!await visible(thread)) continue;
-      // Root anchors carry authorization; keep old history when an anchor already held entries.
-      if (row.id === session.id && anchors.has(thread.id)) {
-        const entries = await db.select({ id: sql<string>`id` }).from(sql`engine_entries`)
-          .where(sql`session_id = ${row.id} AND thread_id = ${thread.id}`).limit(1);
-        if (!entries.length) continue;
-      }
-      threads.push({ ...thread, key: keys.get(row.id) ?? thread.key });
-    }
-    groups.push({ session: row, threads, defaults: await engineStore.getSession(row.id) });
-  }
-  return groups;
+  const rows = [session, ...retained, ...executions.filter(e => e.matchesArchive).map(e => e.session)];
+  // Each team conversation is its own session, so a workspace's history is
+  // one session per conversation. Read every thread, and decide who may see
+  // each one, in a fixed number of queries rather than several per session.
+  // `visibleThreadIds` gives each thread the answer `threadsVisibleTo` gives,
+  // including the audience of the thread that started a child session.
+  const stored = await engineStore.listThreadsForSessions(rows.map(row => row.id));
+  const shown = await visibleThreadIds(c.var.providers, { ownerType: session.ownerType }, viewerOf(c),
+    stored.map(thread => ({ sessionId: thread.sessionId, threadId: thread.id })));
+  // Root anchors carry authorization; keep old history when an anchor already held entries.
+  const rootAnchors = stored.filter(thread => thread.sessionId === session.id && anchors.has(thread.id)).map(thread => thread.id);
+  const anchorsWithHistory = new Set(rootAnchors.length === 0 ? [] : (await db.execute(sql`SELECT a.id FROM unnest(ARRAY[${sql.join(rootAnchors.map(id => sql`${id}`), sql`, `)}]::text[]) AS a(id)
+    WHERE EXISTS (SELECT 1 FROM engine_entries e WHERE e.session_id = ${session.id} AND e.thread_id = a.id)`) as { rows: Array<{ id: string }> }).rows.map(row => row.id));
+  return rows.map(row => ({ session: row, threads: stored
+    .filter(thread => thread.sessionId === row.id && shown.has(`${thread.sessionId}:${thread.id}`)
+      && !(row.id === session.id && anchors.has(thread.id) && !anchorsWithHistory.has(thread.id)))
+    .map(thread => ({ ...thread, key: keys.get(row.id) ?? thread.key })) }));
 }
 
 export async function listThreads(c: Context<AppEnv>, sessionId: string) {
@@ -531,10 +529,10 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const wantArchived = c.req.query("archived") === "1";
   const selectedThreadId = c.req.query("threadId");
   const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
-  // Parse stored tokens: a legacy "off" row has no pin and shows the session default.
-  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key)).map(t => ({ ...t,
-    model: t.model ?? group.defaults?.model,
-    reasoning: parseReasoningLevel(t.reasoning) ?? parseReasoningLevel(group.defaults?.reasoning) })));
+  // Parse stored tokens: a legacy "off" row has no pin and shows the session
+  // default, which is filled in for the returned page below.
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key))
+    .map(t => ({ ...t, reasoning: parseReasoningLevel(t.reasoning) })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
   // (titles populated by auto-title). One lookup by id set — small, since a
@@ -597,6 +595,14 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   let body: ListThreadsResponse;
   try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
   catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
+  // A thread without its own model or reasoning shows its session's defaults.
+  const unpinned = [...new Set(body.threads.filter(t => !t.model || !t.reasoning).map(t => t.sessionId))];
+  const defaults = new Map(await Promise.all(unpinned.map(async id => [id, await c.var.providers.engineStore.getSession(id)] as const)));
+  for (const summary of body.threads) {
+    const session = defaults.get(summary.sessionId);
+    summary.model ??= session?.model;
+    summary.reasoning ??= parseReasoningLevel(session?.reasoning) ?? null;
+  }
   for (const group of groups) {
     const groupSummaries = body.threads.filter(t => t.sessionId === group.session.id);
     if (!groupSummaries.length) continue;

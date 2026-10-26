@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -504,4 +504,23 @@ it("keeps a team execution's recorded directory under the root on restore", asyn
   p.engineHost.evictCache(execution.sessionId);
   const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-team");
   expect(restored.session.options.workspace).toBe(workspace);
+});
+
+it("lists a team's threads with one thread read for every conversation", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Many conversations", creatorUserId: "local-user" });
+  await addMember(p.db, { teamId: team.id, userId: "test-member", role: "member" });
+  const owner = { type: "team" as const, id: team.id };
+  for (const [index, user] of ["local-user", "test-member", "local-user", "test-member", "local-user"].entries()) {
+    const execution = await ensureAssistantExecution(p, owner, { orgId: "local-org", actorUserId: user }, `app-assistant:${user}:${index}`);
+    await execution.session.ensureDefaultThread();
+  }
+  const perSession = vi.spyOn(p.engineStore, "listThreads");
+  const batched = vi.spyOn(p.engineStore, "listThreadsForSessions");
+  const response = await fetch(`${api.baseUrl}/api/threads?workspace=${team.id}&limit=10`);
+  expect(response.status).toBe(200);
+  expect(batched).toHaveBeenCalledTimes(1);
+  expect(batched.mock.calls[0]?.[0]).toHaveLength(6);
+  expect(perSession).not.toHaveBeenCalled();
 });
