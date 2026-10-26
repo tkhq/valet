@@ -1,6 +1,8 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
 import { recordRequestTiming, requestTimingSummary, resetRequestTimings } from "./request-timings.js";
 
+// The window is process-wide: other suites in this worker record requests too.
+beforeEach(() => resetRequestTimings());
 afterEach(() => resetRequestTimings());
 
 it("keeps counting real routes after the route budget is spent", () => {
