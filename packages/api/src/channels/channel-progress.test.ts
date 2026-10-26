@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChannelProgressRejectedError, InMemoryEventStream } from "@valet/engine";
+import { ChannelProgressRejectedError, InMemoryEventStream, readTurnProgress } from "@valet/engine";
 import { PgSessionStore } from "@valet/store-postgres";
 import { channelProgressDeliveries as deliveries } from "../schema/index.js";
 import { applyAppMigrations, missingSchemaRepairs } from "../lib/drizzle.js";
@@ -18,7 +18,14 @@ async function setup() {
   const publish = vi.fn<NonNullable<ProgressTransport["publishProgress"]>>(async () => ({ messageId: "native-1" }));
   const transport: ProgressTransport = { publishProgress: publish, conversationKeyFromThreadKey: key => `fake:workspace:${key}`, threadKeyFromConversationKey: key => key };
   const events = new InMemoryEventStream();
-  const make = () => new ChannelProgressPublisher({ db: appDb, engineStore: store, eventStream: events,
+  // Only a plan gets a card. The delivery tests below give every turn one;
+  // `plans: false` reads progress as the engine projects it.
+  const plans = { fake: true };
+  const readProgress: typeof readTurnProgress = async (...args) => {
+    const progress = await readTurnProgress(...args);
+    return progress && plans.fake ? { ...progress, planned: true } : progress;
+  };
+  const make = () => new ChannelProgressPublisher({ db: appDb, engineStore: store, eventStream: events, readProgress,
     resolveOrgId: async () => "org", transportFor: type => type === "fake" ? transport : undefined, now: () => now });
   async function seed(id = "q", content: unknown = "hello", session = "s", channel: unknown = { channelType: "fake", channelId: "fake:workspace:room", threadId: "native-thread" }) {
     await pgdb.query(`INSERT INTO engine_queue_items
@@ -26,7 +33,7 @@ async function setup() {
       VALUES ($1, $2, 't', 'running', $3, $4, 0, 10, 99999999, 0, 0)`,
     [id, session, JSON.stringify(content), channel === null ? null : JSON.stringify(channel)]);
   }
-  return { pgdb, appDb, store, publish, transport, events, make, seed,
+  return { pgdb, appDb, store, publish, transport, events, make, seed, plans,
     advance: (ms = 120_000) => { now += ms; }, rows: () => appDb.select().from(deliveries) };
 }
 let f: Awaited<ReturnType<typeof setup>>;
@@ -75,6 +82,43 @@ describe("channel progress durable publisher", () => {
     f.advance();
     await f.make().poll();
     expect(f.publish).toHaveBeenCalledTimes(2);
+  });
+
+  it("posts no card for a turn without a plan, then posts once the turn writes one", async () => {
+    f.plans.fake = false;
+    await f.seed();
+    await f.make().poll();
+    expect(f.publish).not.toHaveBeenCalled();
+    expect((await f.rows())[0]).toMatchObject({ messageId: null, createStarted: false, completedAt: null });
+    const thread = await f.store.getThread("s", "t");
+    await f.store.saveThread("s", { ...thread!, metadata: { plan: { items: [{ text: "Check the logs", status: "in_progress" }], updatedAt: 5, turnId: "q" } } });
+    f.advance();
+    await f.make().poll();
+    expect(f.publish).toHaveBeenCalledTimes(1);
+    expect(f.publish.mock.calls[0][1]).toMatchObject({ planned: true, tasks: [expect.objectContaining({ title: "Check the logs" })] });
+  });
+
+  it("closes a plan-less turn's delivery without posting when the turn settles", async () => {
+    f.plans.fake = false;
+    await f.seed();
+    await f.make().poll();
+    await f.pgdb.query("UPDATE engine_queue_items SET status='settled', outcome='completed', updated_at=10 WHERE id='q'");
+    f.advance();
+    await f.make().poll();
+    expect(f.publish).not.toHaveBeenCalled();
+    expect((await f.rows())[0].completedAt).toBeTruthy();
+  });
+
+  it("keeps updating a card posted before its turn lost the plan flag", async () => {
+    await f.seed();
+    await f.make().poll();
+    expect(f.publish).toHaveBeenCalledTimes(1);
+    f.plans.fake = false;
+    await f.pgdb.query("UPDATE engine_queue_items SET status='settled', outcome='completed', updated_at=10 WHERE id='q'");
+    f.advance();
+    await f.make().poll();
+    expect(f.publish).toHaveBeenCalledTimes(2);
+    expect(f.publish.mock.calls[1][1].status).toBe("complete");
   });
 
   it("coalesces bursts and stale events against the current durable snapshot", async () => {

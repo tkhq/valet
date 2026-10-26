@@ -200,6 +200,13 @@ export class ChannelProgressPublisher {
       if (!progress) throw new Error("Progress unavailable");
       const transport = this.deps.transportFor(row.channelType);
       if (!transport?.publishProgress) throw new Error("Progress transport unavailable");
+      // Only a plan gets a card, as on the web. A turn without one shows
+      // the transport's working status. A card already posted keeps updating.
+      if (!progress.planned && !row.messageId && !row.createStarted) {
+        await this.deps.db.update(deliveries).set({ nextAttemptAt: this.now() + REFRESH_MS,
+          completedAt: terminal(progress) ? this.now() : null }).where(owned);
+        return;
+      }
       if (row.lastRevision === progress.revision) {
         await this.deps.db.update(deliveries).set({ nextAttemptAt: this.now() + REFRESH_MS,
           completedAt: terminal(progress) ? this.now() : null }).where(owned);
