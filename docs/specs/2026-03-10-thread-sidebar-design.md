@@ -188,6 +188,7 @@ A generation check rejects stale create operations after compaction. New operati
 A browser whose legacy import is closed retains its original data and can download it; normal server folder controls remain available.
 
 The sidebar shows loading and saving states. A failed read or write keeps the last available folders visible and offers **Retry sync**.
+Opening or closing a project folder, or the Projects section, shows at once. That save runs in the background with no saving state, and a quick series of clicks sends only the latest state. If the save fails, the folder returns to its saved state and the sidebar shows the error.
 Offline requests fail visibly instead of remaining paused. A migration stops if its viewer or runtime changes before it sends the import.
 
 Requests allow at most 2 MiB, 500 operations, 200 folders, 5000 assignments, and 5000 pins.

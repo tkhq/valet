@@ -804,7 +804,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
-            <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               {/* The one list-wide menu (sort, filter, mark all read) stays on a
                   phone: it is the only place those live. Per-row actions do not. */}
@@ -872,7 +872,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
             const members = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
             return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
               <div className="group flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
-              <button type="button" disabled={!projects.isReady || projects.isSaving} aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>

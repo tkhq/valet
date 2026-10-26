@@ -92,10 +92,37 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
       return current;
     },
   });
-  const value = query.data?.value ?? initial;
+  // Open and closed folders show at once. Their saves run in the background
+  // without a saving state, and each save sends the latest folds, so a quick
+  // series of clicks costs one request. When the saves settle, the server
+  // value shows again: the saved folds, or the old ones and an error.
+  const folds = useRef<{ key: string; section?: boolean; projects: Record<string, boolean>; saving: number }>({ key, projects: {}, saving: 0 });
+  if (folds.current.key !== key) folds.current = { key, projects: {}, saving: 0 };
+  const [, showFolds] = useState(0);
+  const withFolds = (base: ThreadProjects): ThreadProjects => {
+    const { section, projects } = folds.current;
+    return { ...base, collapsed: section ?? base.collapsed,
+      projects: base.projects.map(project => Object.hasOwn(projects, project.id) ? { ...project, collapsed: projects[project.id]! } : project) };
+  };
+  const base = query.data?.value ?? initial;
+  const value = folds.current.section === undefined && !Object.keys(folds.current.projects).length ? base : withFolds(base);
 
-  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false) {
-    const counted = isCurrent();
+  /** Folds one project, or the whole Projects section without a project ID. */
+  function setCollapsed(collapsed: boolean, projectId?: string) {
+    const current = folds.current;
+    if (projectId === undefined) current.section = collapsed;
+    else current.projects = { ...current.projects, [projectId]: collapsed };
+    current.saving += 1;
+    showFolds(count => count + 1);
+    void enqueue(withFolds, false, true).finally(() => {
+      if (folds.current !== current || --current.saving > 0) return;
+      folds.current = { key, projects: {}, saving: 0 };
+      if (isCurrent()) showFolds(count => count + 1);
+    });
+  }
+
+  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false, quiet = false) {
+    const counted = isCurrent() && !quiet;
     if (counted) setWrite(previous => ({ key, pending: (previous.key === key ? previous.pending : 0) + 1 }));
     const task = queue.current.then(async () => {
       let operations: ThreadProjectsOperation[] = [];
@@ -132,7 +159,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     return task;
   }
   return {
-    value, update: enqueue,
+    value, update: enqueue, setCollapsed,
     beginOperation: () => ({
       update: (change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) => enqueue(change, true),
       readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
