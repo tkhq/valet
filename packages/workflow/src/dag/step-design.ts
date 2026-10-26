@@ -16,7 +16,7 @@
  */
 
 import { readToolScope } from '@valet/shared';
-import { collectExpressionPaths, collectExpressionValuePaths, collectTemplatePaths, parseTemplate } from './expression.js';
+import { collectExpressionPaths, collectExpressionValuePaths, collectProbePaths, collectTemplatePaths, parseTemplate } from './expression.js';
 import { resolveTriggerInput, triggerDataSchema } from './trigger-input.js';
 
 /** Words that tell an agent to get a person's approval or sign-off. */
@@ -86,13 +86,6 @@ export function pushesGitCommits(node: { type: string; prompt?: unknown }): bool
  */
 const SCHEDULE_DATA_KEYS: ReadonlySet<string> = new Set(['scheduleName', 'cron', 'input']);
 
-/**
- * `exists(trigger.data.<field>)`, or `exists(trigger.data)`. A workflow can
- * use the probe to tell a manual run from a scheduled one, so a copy would
- * change its branch.
- */
-const EXISTS_PROBE = /\bexists\(\s*trigger\s*\.\s*data\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*['"]([^'"\]]+)['"]\s*\])?\s*\)/g;
-
 /** How a definition reads `trigger.data`, for the schedule input copy. */
 interface TriggerDataUse {
   /** The fields it reads under `trigger.data.input`, or probes with `exists(trigger.data.<field>)`. */
@@ -111,19 +104,19 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
       else use.nested.add(path[3]);
     }
   };
-  const probes = (source: string) => {
-    for (const match of source.matchAll(EXISTS_PROBE)) {
-      const field = match[1] ?? match[2];
-      if (field === undefined) use.whole = true;
-      else if (field !== 'input') use.nested.add(field);
-    }
+  // A workflow can use exists(trigger.data.<field>) to tell a manual run
+  // from a scheduled one, so a copy of a probed field would change its branch.
+  const probe = (path: string[]) => {
+    if (path[0] !== 'trigger' || path[1] !== 'data') return;
+    if (path.length === 2) use.whole = true;
+    else if (path[2] !== 'input') use.nested.add(path[2]);
   };
   const visit = (value: unknown): void => {
     if (typeof value === 'string') {
-      probes(value);
       if (value.includes('{{')) {
         try {
           collectTemplatePaths(value).forEach(record);
+          collectProbePaths(value, true).forEach(probe);
         } catch {
           // The validator reports a template that does not parse.
         }
@@ -138,9 +131,9 @@ function triggerDataUse(definition: unknown): TriggerDataUse {
     }
   };
   const visitExpression = (source: string) => {
-    probes(source);
     try {
       collectExpressionPaths(source).forEach(record);
+      collectProbePaths(source, false).forEach(probe);
     } catch {
       // The validator reports an expression that does not parse.
     }

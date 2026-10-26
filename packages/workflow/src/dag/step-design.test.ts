@@ -172,6 +172,17 @@ describe('scheduledTriggerData', () => {
     expect(evaluateExpression(parseExpression(probe), { trigger: { data } })).toBe(false);
   });
 
+  it('reads an exists probe in every path syntax the parser accepts', () => {
+    for (const probe of ['exists(trigger.data.dryRun)', 'exists(trigger.data["dryRun"])', 'exists(trigger.data[dryRun])', 'exists(trigger["data"].dryRun)']) {
+      const definition = { nodes: [{ id: 'manual', type: 'if', conditions: [{ left: probe, operation: 'isTrue' }] }] };
+      const data = scheduledTriggerData(definition, schedule({ dryRun: true }));
+      expect(data, probe).not.toHaveProperty('dryRun');
+      expect(evaluateExpression(parseExpression(probe), { trigger: { data } }), probe).toBe(false);
+    }
+    const whole = { nodes: [{ id: 's', type: 'session', prompt: '{{ exists(trigger.data) }}' }] };
+    expect(scheduledTriggerData(whole, schedule({ dryRun: true }))).toEqual(nested({ dryRun: true }));
+  });
+
   it('keeps an input key named like a schedule key under input only', () => {
     const data = scheduledTriggerData({ nodes: [] }, schedule({ cron: 'mine', input: 'mine', scheduleName: 'mine', ok: 1 }));
     expect(data).toEqual({ ok: 1, scheduleName: 'Nightly', cron: '0 8 * * *', input: { cron: 'mine', input: 'mine', scheduleName: 'mine', ok: 1 } });
