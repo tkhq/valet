@@ -97,6 +97,27 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
   });
 });
 
+describe("stepDesignWarnings: steps that make the output drift", () => {
+  it("reports an agent step that builds a foreach list and a model step that rewrites a draft", () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "inventory", type: "session", mode: "start", prompt: "List the merged PRs.", toolScope: { actions: ["github.search_issues"] } },
+        { id: "qualify", type: "foreach", items: "{{nodes.inventory.result.output.prs}}", body: { type: "llm", prompt: "{{item.title}}" } },
+        { id: "assemble", type: "llm", prompt: "Write the report from {{nodes.qualify.result.items}}." },
+        { id: "revise", type: "llm", prompt: "Verify and revise {{nodes.assemble.result.output}}." },
+        { id: "post", type: "tool", service: "slack", action: "send_message", params: { text: "{{nodes.revise.result.output.text}}" } },
+      ],
+      edges: [],
+    };
+    const warnings = stepDesignWarnings(definition, []);
+    expect([...warnings.keys()].sort()).toEqual(["inventory", "revise"]);
+    expect(warnings.get("inventory")?.join(" ")).toContain("tool step");
+    expect(warnings.get("revise")?.join(" ")).toContain('"assemble"');
+  });
+});
+
 describe("GET /api/workflows/step-check", () => {
   let api: TestApi | undefined;
   afterEach(async () => {

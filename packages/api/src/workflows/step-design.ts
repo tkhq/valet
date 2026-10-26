@@ -4,9 +4,11 @@
  * step must not ask, and an action that policy holds for approval runs from
  * a tool step or is allowed once in Review permissions. A scheduled run
  * reads its schedule's input under `trigger.data.input`. A team run commits
- * under the generic git identity, which deploy checks can block.
+ * under the generic git identity, which deploy checks can block. A list that
+ * an agent builds with read actions, and a model pass that rewrites a draft
+ * before it is sent, make each run's output drift.
  */
-import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses, type ScheduledRunMiss } from "@valet/workflow";
+import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, type ScheduledRunMiss } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { DEFAULT_USER_EMAIL, DEFAULT_USER_NAME } from "../engine/workspace-prep.js";
@@ -114,6 +116,8 @@ export function stepDesignWarnings(
     add(node.id, approvalRequestWarning({ type: step.type, prompt: step.prompt }));
     if (pushesGitCommits({ type: step.type, prompt: step.prompt })) add(node.id, gitIdentityWarning(context.ownerType));
   }
+  for (const [nodeId, warning] of listingAgentStepWarnings(definition)) add(nodeId, warning);
+  for (const [nodeId, warning] of rewriteStepWarnings(definition)) add(nodeId, warning);
   for (const row of permissions) {
     add(row.nodeId, heldActionWarning(row));
     add(row.nodeId, unknownRiskActionWarning(row));

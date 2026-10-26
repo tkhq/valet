@@ -8,9 +8,15 @@
  * The same prompt reading finds a step that pushes git commits, which the
  * API flags when the run commits under the generic Valet identity. A
  * template walk finds the trigger fields that a scheduled run leaves empty.
+ *
+ * A walk of the step references finds two designs that make a run drift:
+ * an agent step that builds a foreach's list with read actions only, and a
+ * model step that rewrites another model step's draft before a tool step
+ * sends it.
  */
 
-import { collectExpressionValuePaths, parseTemplate } from './expression.js';
+import { readToolScope } from '@valet/shared';
+import { collectExpressionValuePaths, collectTemplatePaths, parseTemplate } from './expression.js';
 
 /** Words that tell an agent to get a person's approval or sign-off. */
 const APPROVAL_REQUEST =
@@ -169,6 +175,107 @@ function addMisses(paths: string[][], fields: FieldReads, site: TriggerReadSite)
     if (!isData(path) || field === undefined || SCHEDULE_DATA_KEYS.has(field) || covered.has(field)) continue;
     fields.set(field, (fields.get(field) ?? new Set<TriggerReadSite>()).add(site));
   }
+}
+
+const AGENT_STEP_TYPES: ReadonlySet<string> = new Set(['session', 'orchestrator']);
+const MODEL_STEP_TYPES: ReadonlySet<string> = new Set(['session', 'orchestrator', 'llm']);
+
+/** An action that only reads, by the verb its name starts with. */
+const READ_ACTION = /^[\w-]+\.(?:search|list|get|read|inspect|fetch|query)_/;
+
+type Step = Record<string, unknown> & { id: string; type: string };
+
+/** The top-level steps of a definition, by id. */
+function stepsById(definition: unknown): Map<string, Step> {
+  const steps = new Map<string, Step>();
+  if (!isRecord(definition) || !Array.isArray(definition.nodes)) return steps;
+  for (const node of definition.nodes) {
+    if (isRecord(node) && typeof node.id === 'string' && typeof node.type === 'string') steps.set(node.id, { ...node, id: node.id, type: node.type });
+  }
+  return steps;
+}
+
+/** The step ids that templates in `value` read as `nodes.<id>`. A foreach body counts as its foreach. */
+function stepReads(value: unknown, out: Set<string> = new Set()): Set<string> {
+  if (typeof value === 'string') {
+    if (!value.includes('{{')) return out;
+    try {
+      for (const path of collectTemplatePaths(value)) if (path[0] === 'nodes' && path[1] !== undefined) out.add(path[1]);
+    } catch {
+      // The validator reports a template that does not parse.
+    }
+  } else if (Array.isArray(value)) {
+    for (const entry of value) stepReads(entry, out);
+  } else if (isRecord(value)) {
+    for (const entry of Object.values(value)) stepReads(entry, out);
+  }
+  return out;
+}
+
+/** The action id a tool step runs: `action` when it is qualified, else `service.action`. */
+function toolAction(step: Record<string, unknown>): string | undefined {
+  if (step.type !== 'tool' || typeof step.action !== 'string') return undefined;
+  if (step.action.includes('.')) return step.action;
+  return typeof step.service === 'string' ? `${step.service}.${step.action}` : undefined;
+}
+
+/** True when the step, or a foreach's body, runs a tool action that is not a read. */
+function sendsOrWrites(step: Step): boolean {
+  const target = step.type === 'foreach' && isRecord(step.body) ? step.body : step;
+  const action = toolAction(target);
+  return action !== undefined && !READ_ACTION.test(action);
+}
+
+/**
+ * Agent steps whose output is the list a foreach runs over, when every
+ * action in the step's scope only reads. A tool step with that action
+ * returns the same list on each run with no model turns, and its list
+ * cannot drop or repeat items. A heuristic: a suggestion, never a
+ * validation error.
+ */
+export function listingAgentStepWarnings(definition: unknown): Map<string, string> {
+  const steps = stepsById(definition);
+  const warnings = new Map<string, string>();
+  for (const foreach of steps.values()) {
+    // A foreach that sends or writes each item posts a step's output; its list is a result, not fetched data.
+    if (foreach.type !== 'foreach' || sendsOrWrites(foreach)) continue;
+    for (const id of stepReads(foreach.items)) {
+      const step = steps.get(id);
+      if (step === undefined || !AGENT_STEP_TYPES.has(step.type)) continue;
+      const actions = readToolScope(step.toolScope)?.actions ?? [];
+      if (actions.length === 0 || !actions.every((action) => READ_ACTION.test(action))) continue;
+      warnings.set(id, `This agent step builds the list that foreach step "${foreach.id}" runs over, and it only reads (${actions.join(', ')}). ` +
+        'Get the list from a tool step instead. A tool step returns the same items on each run with no model turns. ' +
+        'If the list needs judgment, put an llm step after the tool step, or decide each item in the foreach.');
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Model steps that rewrite another model step's output before a tool step
+ * sends or writes it. The earlier step's output goes only to this step, so
+ * it is a draft. A second model pass can change correct facts as easily as
+ * it fixes wrong ones, and it adds a model call to each run. A heuristic: a
+ * suggestion, never a validation error.
+ */
+export function rewriteStepWarnings(definition: unknown): Map<string, string> {
+  const steps = stepsById(definition);
+  const reads = new Map([...steps.values()].map((step) => [step.id, stepReads(step)]));
+  const readers = (id: string) => [...steps.values()].filter((step) => step.id !== id && reads.get(step.id)?.has(id));
+  const warnings = new Map<string, string>();
+  for (const step of steps.values()) {
+    if (!MODEL_STEP_TYPES.has(step.type) || !readers(step.id).some(sendsOrWrites)) continue;
+    for (const id of reads.get(step.id) ?? []) {
+      const draft = steps.get(id);
+      if (draft === undefined || !MODEL_STEP_TYPES.has(draft.type)) continue;
+      if (readers(id).some((reader) => reader.id !== step.id)) continue;
+      warnings.set(step.id, `This step rewrites the output of model step "${id}" before it is sent. ` +
+        'A second model pass can change correct facts as easily as it fixes wrong ones, and each run pays for both. ' +
+        `Write the result in one step: move this step's rules into "${id}" and its outputSchema. To check exact fields, use an if step.`);
+    }
+  }
+  return warnings;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
