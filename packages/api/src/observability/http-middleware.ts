@@ -11,6 +11,7 @@
 import type { MiddlewareHandler } from "hono";
 import { SpanStatusCode, metrics, trace, type Histogram } from "@opentelemetry/api";
 import type { AppEnv } from "../env.js";
+import { recordRequestTiming } from "./request-timings.js";
 
 // /api/ready joins /api/health here for the same reason: the kubelet's
 // readinessProbe hits it every 5s for the pod's whole life.
@@ -53,11 +54,14 @@ export function traceRequests(): MiddlewareHandler<AppEnv> {
           const routePath = c.req.routePath ?? "";
           const sessionId = routePath.includes("/sessions/:id") ? c.req.param("id") : undefined;
           if (sessionId !== undefined) span.setAttribute("valet.session.id", sessionId);
-          httpDuration?.record(Date.now() - startedAt, {
+          const durationMs = Date.now() - startedAt;
+          httpDuration?.record(durationMs, {
             method: c.req.method,
             route: c.req.routePath ?? c.req.path,
             status: c.res.status,
           });
+          recordRequestTiming(`${c.req.method} ${c.req.routePath ?? c.req.path}`,
+            { at: startedAt, ms: durationMs, status: c.res.status, ...(user ? { orgId: user.orgId } : {}) });
         } catch (err) {
           span.setStatus({
             code: SpanStatusCode.ERROR,
