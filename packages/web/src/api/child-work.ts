@@ -26,6 +26,7 @@ export function useChildWork(sessionId: string | undefined, opts?: { enabled?: b
   });
 }
 
+/** The row leaves at once; a failed dismiss puts the list back. */
 export function useDismissChild(sessionId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({
@@ -33,7 +34,18 @@ export function useDismissChild(sessionId: string | undefined) {
       if (!sessionId) throw new Error("Choose a parent session.");
       return api.dismissChild(sessionId, childSessionId);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: childWorkKey(sessionId) }),
+    onMutate: async (childSessionId: string) => {
+      await qc.cancelQueries({ queryKey: childWorkKey(sessionId) });
+      const previous = qc.getQueryData<InfiniteData<ChildWorkResponse>>(childWorkKey(sessionId));
+      if (previous) qc.setQueryData<InfiniteData<ChildWorkResponse>>(childWorkKey(sessionId), {
+        ...previous, pages: previous.pages.map(page => ({ ...page, children: page.children.filter(child => child.sessionId !== childSessionId) })),
+      });
+      return { previous };
+    },
+    onError: (_error, _childSessionId, context) => {
+      if (context?.previous) qc.setQueryData(childWorkKey(sessionId), context.previous);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: childWorkKey(sessionId) }),
   });
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CancelledError, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
-import { threadProjectsChanges, type ThreadProjectsOperation, type ThreadProjectsResponse } from "@valet/shared";
+import { applyThreadProjectsOperations, threadProjectsChanges, type ThreadProjectsOperation, type ThreadProjectsResponse } from "@valet/shared";
 import { api, ApiError } from "~/api/client";
 import { errorText } from "./error-text";
 import { safeLocalStorage } from "./safe-storage";
@@ -39,7 +39,9 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
   const [write, setWrite] = useState<{ key: string; pending: number; error?: string }>({ key, pending: 0 });
   const [migration, setMigration] = useState<{ key: string; error: string }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
-  const failed = useRef<{ key: string; operations: ThreadProjectsOperation[] } | undefined>(undefined);
+  // Every failed save waits here for Retry sync. Saves overlap, so a later
+  // success of another change must not drop an earlier failure.
+  const failed = useRef<{ key: string; batches: ThreadProjectsOperation[][] } | undefined>(undefined);
   const identity = useRef({ key, epoch: 0 });
   if (identity.current.key !== key) identity.current = { key, epoch: identity.current.epoch + 1 };
   const epoch = identity.current.epoch;
@@ -92,10 +94,45 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
       return current;
     },
   });
-  const value = query.data?.value ?? initial;
+  // Every change shows at once. The sidebar applies the change's operations
+  // to the last server value, as the server will, while the save runs in the
+  // background without a saving state. A save leaves the overlay in the same
+  // tick that stores the server's answer, so nothing flickers. A failed save
+  // drops its overlay: the sidebar shows the saved state and the error.
+  const pending = useRef<{ key: string; changes: ThreadProjectsOperation[][] }>({ key, changes: [] });
+  if (pending.current.key !== key) pending.current = { key, changes: [] };
+  const [, rerender] = useState(0);
+  // The cache, not the observer: the observer reports a new value a tick
+  // after the overlay that it replaces has gone.
+  const shown = () => pending.current.changes.reduce(applyLocally, client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? initial);
+  const value = shown();
 
-  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false) {
-    const counted = isCurrent();
+  function optimistic(operations: ThreadProjectsOperation[]) {
+    const owner = pending.current;
+    owner.changes = [...owner.changes, operations];
+    rerender(count => count + 1);
+    return enqueue(operations, false, () => {
+      owner.changes = owner.changes.filter(change => change !== operations);
+      if (isCurrent()) rerender(count => count + 1);
+    });
+  }
+
+  function update(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) {
+    const current = shown();
+    const operations = typeof change === "function" ? threadProjectsChanges(current, change(current)) : change;
+    return operations.length ? optimistic(operations) : Promise.resolve(current);
+  }
+
+  /** Folds one project, or the whole Projects section without a project ID. */
+  function setCollapsed(collapsed: boolean, projectId?: string) {
+    void update(current => projectId === undefined ? { ...current, collapsed }
+      : { ...current, projects: current.projects.map(project => project.id === projectId ? { ...project, collapsed } : project) });
+  }
+
+  /** A change with `settled` is optimistic: it shows no saving state, and
+   * `settled` runs as soon as its save stores an answer or fails. */
+  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false, settled?: () => void) {
+    const counted = isCurrent() && !settled;
     if (counted) setWrite(previous => ({ key, pending: (previous.key === key ? previous.pending : 0) + 1 }));
     const task = queue.current.then(async () => {
       let operations: ThreadProjectsOperation[] = [];
@@ -114,17 +151,30 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
         client.setQueryData(queryKey, current);
         void client.invalidateQueries({ queryKey, refetchType: "none" });
         remember(`${key}:cache-v1`, JSON.stringify(current.value));
-        if (isCurrent() && failed.current?.key === key) failed.current = undefined;
+        if (isCurrent() && failed.current?.key === key) {
+          failed.current.batches = failed.current.batches.filter(batch => batch !== change);
+          if (!failed.current.batches.length) {
+            failed.current = undefined;
+            setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
+          }
+        }
         return current.value;
       } catch (error) {
         if (!isCurrent()) return undefined;
         const conflict = error instanceof ApiError && error.status === 409;
-        if (conflict) failed.current = undefined;
-        else if (operations.length) failed.current = { key, operations: operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op) };
+        const waiting = failed.current?.key === key ? failed.current : undefined;
+        const retried = waiting?.batches.some(batch => batch === change) ?? false;
+        // A conflict means the server state moved on: refetch, do not replay.
+        if (conflict && waiting && retried) waiting.batches = waiting.batches.filter(batch => batch !== change);
+        else if (!conflict && !retried && operations.length) {
+          const batch = operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op);
+          failed.current = { key, batches: [...(waiting?.batches ?? []), batch] };
+        }
         setWrite(previous => previous.key === key ? { ...previous, error: errorText(error) } : previous);
         if (conflict) await query.refetch();
         return undefined;
       } finally {
+        settled?.();
         if (counted && isCurrent()) setWrite(previous => previous.key === key ? { ...previous, pending: Math.max(0, previous.pending - 1) } : previous);
       }
     });
@@ -132,7 +182,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     return task;
   }
   return {
-    value, update: enqueue,
+    value, update, setCollapsed,
     beginOperation: () => ({
       update: (change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) => enqueue(change, true),
       readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
@@ -152,11 +202,23 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     unsyncedLegacy: migration?.key === key ? stored(key) : null,
     error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : migration?.key === key ? migration.error : undefined,
     retry: () => {
-      if (failed.current?.key === key) return enqueue(failed.current.operations);
+      if (failed.current?.key === key) return Promise.all(failed.current.batches.map(optimistic)).then(values => values.at(-1));
       setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
       return query.refetch();
     },
   };
+}
+
+/** The server's own rules, so the overlay matches what the save stores. A
+ * change the server would refuse shows nothing; its save reports the error. */
+function applyLocally(value: ThreadProjects, operations: ThreadProjectsOperation[]): ThreadProjects {
+  // The overlay has no folder history, so it ignores a create's generation.
+  const local = operations.map(op => op.type === "create" ? { type: op.type, id: op.id, name: op.name, ...(op.collapsed === undefined ? {} : { collapsed: op.collapsed }) } : op);
+  try {
+    return applyThreadProjectsOperations({ value, retiredProjects: [], touchedAssignments: [], touchedPins: [], initialized: true }, local).value;
+  } catch {
+    return value;
+  }
 }
 
 /** Includes pinned, collapsed, filtered, and unloaded chats. */

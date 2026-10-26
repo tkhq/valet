@@ -315,7 +315,7 @@ it("renames a project through the server and keeps the original browser copy", a
   expect(localStorage.getItem(key)).toBe(original);
 });
 
-it("keeps the project name and existing folders visible when a server write fails", async () => {
+it("shows a new folder at once and keeps existing folders when the save fails", async () => {
   localStorage.setItem("valet:thread-projects:user-1:team-runtime", JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: false }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
   render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
   await waitFor(() => expect(screen.getByRole("button", { name: "New project" }).hasAttribute("disabled")).toBe(false));
@@ -323,9 +323,10 @@ it("keeps the project name and existing folders visible when a server write fail
   await userEvent.click(screen.getByRole("button", { name: "New project" }));
   await userEvent.type(screen.getByRole("textbox", { name: "Project name" }), "Pending folder");
   await userEvent.click(screen.getByRole("button", { name: "Create project" }));
+  // The dialog closes and the folder shows before the save answers.
+  expect(screen.queryByRole("textbox", { name: "Project name" })).toBeNull();
   await waitFor(() => expect(screen.getAllByRole("alert").some(alert => alert.textContent?.includes("Reconnect and retry"))).toBe(true));
-  expect(screen.getByRole("textbox", { name: "Project name" }).getAttribute("value")).toBe("Pending folder");
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("button", { name: "Pending folder" })).toBeNull();
   expect(screen.getByRole("button", { name: "ACME" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Retry sync" })).toBeTruthy();
 });

@@ -379,21 +379,24 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const [deleteError, setDeleteError] = useState<string>();
 
   const [projectError, setProjectError] = useState<string>();
-  async function createProject() {
+  function createProject() {
     const name = projectName.trim();
     if (!name) return;
     if (projects.value.projects.some((project) => project.id !== editingProjectId && project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
       setProjectError("A project with this name already exists. Choose another name.");
       return;
     }
-    const saved = await projects.update((current) => ({ ...current, grouped: true, collapsed: false,
+    // The folder shows at once; a failed save reports under Projects.
+    void projects.update((current) => ({ ...current, grouped: true, collapsed: false,
       projects: editingProjectId ? current.projects.map(project => project.id === editingProjectId ? { ...project, name } : project)
         : [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
-    if (!saved || currentSession.current !== sessionId) return;
     setProjectDialog(false);
     setProjectName("");
   }
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
+  // Read after a save answers, so a refused archive sees the current view.
+  const openThread = useRef(search.thread);
+  openThread.current = search.thread;
   const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
   const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
   // Seed pending gates from REST for ourselves — the tree must not depend
@@ -626,17 +629,19 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const { attempt } = workGuard;
   const archiveThread = useCallback((threadId: string) => {
     setActionError(undefined);
-    // Archiving the thread you're looking at would strand the view on a
-    // thread absent from the list, so return to the default thread once the
-    // archive lands.
-    const leaveIfActive = () => {
-      if (threadId === activeThreadId) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-    };
+    // The row leaves at once, so the view leaves the thread at once too: it
+    // would otherwise show a thread that the list no longer has.
+    const leftThread = threadId === activeThreadId;
+    if (leftThread) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
     attempt(
       STOP_AND_ARCHIVE,
       (force) => setArchived.mutateAsync({ threadId, archived: true, ...(force ? { force: true } : {}) }),
-      leaveIfActive,
-    ).catch((err: unknown) => setActionError(errorText(err, "Could not archive the thread. Try again.")));
+    ).catch((err: unknown) => {
+      setActionError(errorText(err, "Could not archive the thread. Try again."));
+      // A refused archive, such as one with a turn running, puts the row
+      // back. Return to the thread unless the view moved on meanwhile.
+      if (leftThread && openThread.current === undefined) navigate({ search: (prev) => ({ ...prev, thread: threadId }) });
+    });
   }, [activeThreadId, attempt, navigate, setArchived]);
 
   const archiveActive = useCallback(() => {
@@ -804,7 +809,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
-            <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               {/* The one list-wide menu (sort, filter, mark all read) stays on a
                   phone: it is the only place those live. Per-row actions do not. */}
@@ -840,7 +845,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           )}
           <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
             <DialogContent title={editingProjectId ? "Rename project" : "New project"} aria-describedby={undefined}>
-              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void createProject(); }}>
+              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
                 <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} disabled={projects.isSaving} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
                 {projectError && <p role="alert" className="text-xs text-danger-500">{projectError}</p>}
                 {projects.error && <p role="alert" className="text-xs text-danger-500">{projects.error} Retry saving the project.</p>}
@@ -872,7 +877,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
             const members = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
             return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
               <div className="group flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
-              <button type="button" disabled={!projects.isReady || projects.isSaving} aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
@@ -931,7 +936,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
                   <button
                     type="button"
                     aria-label={`Unarchive ${t.title ?? t.id}`}
-                    onClick={() => void setArchived.mutateAsync({ threadId: t.id, archived: false })}
+                    onClick={() => setArchived.mutateAsync({ threadId: t.id, archived: false })
+                      .catch((err: unknown) => setActionError(errorText(err, "Could not restore the thread. Try again.")))}
                     className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
                   >
                     <ArchiveRestore className="h-3 w-3" aria-hidden />
