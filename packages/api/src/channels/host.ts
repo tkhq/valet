@@ -1,5 +1,4 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
-import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
@@ -1156,14 +1155,6 @@ export class ChannelHost {
    * through `conversationKeyFromThreadKey`. Without this hop every outbound
    * call for such a transport is handed a key it did not mint.
    */
-  /** The channel conversation a Home submission came from, since Home combines web and channel messages. */
-  private async homeOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
-    const item = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
-    const content = item?.content;
-    const origin = content && typeof content === "object" && "kind" in content && content.kind === "signal" ? content.origin : undefined;
-    return origin ? this.channelThreadFor(origin.threadKey) : null;
-  }
-
   /** The channel audience of a child's gate, including later signal turns. */
   private async childOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
     const origin = await childGateOrigin(this.deps.db, this.deps.engineStore, sessionId, queueItemId);
@@ -1257,10 +1248,7 @@ export class ChannelHost {
     if (entry.channel === undefined) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
-    // A command typed in a Slack DM runs in home, whose key names no
-    // conversation; the entry's channel mark does.
-    const mapped = this.channelThreadFor(thread.key)
-      ?? (thread.key === HOME_THREAD_KEY && entry.channel?.channelId ? { channelType: entry.channel.channelType, conversationKey: entry.channel.channelId } : null);
+    const mapped = this.channelThreadFor(thread.key);
     if (!mapped) return;
 
     const dedupeKey = `${sessionId}:${entry.id}`;
@@ -1285,8 +1273,7 @@ export class ChannelHost {
     // A child's own thread is never a channel thread. Its card goes to the
     // conversation that spawned the work, so the person who asked there can
     // answer it (TKAI-564). The callback still resolves the child's gate.
-    const direct = this.channelThreadFor(thread.key)
-      ?? (thread.key === HOME_THREAD_KEY ? await this.homeOriginConversation(sessionId, gate.queueItemId) : null);
+    const direct = this.channelThreadFor(thread.key);
     const mapped = direct ?? await this.childOriginConversation(sessionId, gate.queueItemId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
@@ -1689,8 +1676,7 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await session.threadByKey(threadKey) ??
-      (channelType === "slack" ? await session.threadByKey(HOME_THREAD_KEY) : null);
+    const thread = await session.threadByKey(threadKey);
     if (!thread) {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;
@@ -1737,18 +1723,13 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    // A Slack DM with Valet is the person's home conversation, the same one
-    // the web app opens first. The reply still goes back to the DM thread:
-    // the origin below keeps the Slack thread key. A reply in a DM thread
-    // that already has its own Valet thread (one started before home
-    // existed) stays in that thread.
-    const ownThread = channelType === "slack" ? await session.threadByKey(threadKey) : null;
-    const thread = await this.deps.engineHost.ensureFreshThread(session, channelType === "slack" && !ownThread ? HOME_THREAD_KEY : threadKey, {
+    // Each channel conversation (a Slack DM thread) has its own Valet thread,
+    // so separate conversations never share one context.
+    const thread = await this.deps.engineHost.ensureFreshThread(session, threadKey, {
       userId,
       orgId,
       workspace: session.options.workspace,
     });
-    if (thread.key === HOME_THREAD_KEY) await thread.setMode("followup");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1803,7 +1784,6 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          queueMode: thread.key === HOME_THREAD_KEY ? "followup" : undefined,
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say

@@ -10,7 +10,6 @@ import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { agentSessions } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
-import { HOME_THREAD_KEY } from "../home/context.js";
 
 export interface OpenQuestionReply {
   session: Session;
@@ -50,10 +49,6 @@ export async function answerOpenQuestion(db: AppDb, reply: OpenQuestionReply): P
   let gate: ReturnType<Thread["pendingDecisionGates"]>[number] | undefined;
   for (const candidate of reply.thread.pendingDecisionGates()) {
     if (candidate.type !== "question" || candidate.actions.length !== 0 || gateApprover(candidate)) continue;
-    if (reply.thread.key === HOME_THREAD_KEY) {
-      const source = await reply.session.providers.store.getQueueItem(reply.session.id, candidate.queueItemId);
-      if (source?.channel?.channelType !== reply.channelType || source.channel.channelId !== reply.channelId) continue;
-    }
     gate = candidate;
     break;
   }

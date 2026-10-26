@@ -168,9 +168,10 @@ Search and default actions stay in the catalog view. Desktop keeps its existing 
 
 ### Home delivery and routine preferences
 
-Home queues new turns as follow-ups across web and direct messages. Task reports never supersede active work.
-A plain-text question reply from Slack must match the question submission's original conversation.
-DM edits record the correction in Home or their existing legacy thread without sending a reply.
+Home queues new turns as follow-ups. Task reports never supersede active work.
+Slack DMs are not Home. Each Slack DM thread has its own Valet thread, so separate DM conversations never share one context.
+A first version sent every new DM thread to Home, which merged unrelated DM threads into one conversation; that routing was removed.
+DM edits record the correction in the DM's own thread without sending a reply.
 The host marks a linked person's direct channel input separately from background signals.
 Only that verified input supplies an interactive actor; replay retains its original channel context.
 Workflow and child turns cannot inherit this authority.

@@ -419,7 +419,7 @@ describe("ChannelHost.handleUpdate", () => {
     ]);
   });
 
-  it("puts a Slack DM in the person's home thread and keeps the DM as the reply origin", async () => {
+  it("puts each new Slack DM thread in its own Valet thread, never in home", async () => {
     const slack: ChannelTransport = {
       channelType: "slack",
       verifyWebhook: () => null,
@@ -438,39 +438,44 @@ describe("ChannelHost.handleUpdate", () => {
     await slackHost.start();
     try {
       await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
-      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      await slackHost.handleUpdate("slack", inbound({ dispatchId: "dm-first", conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      await slackHost.handleUpdate("slack", inbound({ dispatchId: "dm-second", conversationKey: "slack:T1:D1:222.2", text: "draft the release note" }));
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-      const home = await session.threadByKey(HOME_THREAD_KEY);
-      expect(home).not.toBeNull();
-      expect((await engineStore.getThread(session.id, home!.id))?.queueMode).toBe("followup");
-      expect(await session.threadByKey("slack:D1:111.1")).toBeNull();
-      let entry: Extract<Awaited<ReturnType<typeof session.providers.store.getEntries>>[number], { type: "message" }> | undefined;
-      for (let i = 0; i < 50 && !entry; i++) {
-        const found = (await session.providers.store.getEntries(session.id, home!.id)).find((item) => item.type === "message" && item.role === "user");
-        entry = found?.type === "message" ? found : undefined;
-        if (!entry) await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      expect(entry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
-      expect(entry?.author).toMatchObject({ id: USER_ID, interactive: true, directChannel: true });
+      const first = await session.threadByKey("slack:D1:111.1");
+      const second = await session.threadByKey("slack:D1:222.2");
+      if (!first || !second) throw new Error("Expected one Valet thread per Slack DM thread");
+      expect(first.id).not.toBe(second.id);
+      expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
+      const userText = async (threadId: string) => {
+        let found: Extract<Awaited<ReturnType<typeof session.providers.store.getEntries>>[number], { type: "message" }> | undefined;
+        await vi.waitFor(async () => {
+          const entry = (await session.providers.store.getEntries(session.id, threadId)).find((item) => item.type === "message" && item.role === "user");
+          expect(entry?.type).toBe("message");
+          found = entry?.type === "message" ? entry : undefined;
+        });
+        return found;
+      };
+      const firstEntry = await userText(first.id);
+      expect(firstEntry?.content).toContain("what is on today?");
+      expect(firstEntry?.signal).toMatchObject({ signalType: "slack.message", origin: { channelType: "slack", threadKey: "slack:D1:111.1" } });
+      expect(firstEntry?.author).toMatchObject({ id: USER_ID, interactive: true, directChannel: true });
+      expect((await userText(second.id))?.content).toContain("draft the release note");
       await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
-      const replies = (await engineStore.getEntries(session.id, home!.id)).filter(e => e.type === "message" && e.role === "assistant").length;
-      await slackHost.handleUpdate("slack", inbound({ kind: "edit", conversationKey: "slack:T1:D1:111.1", text: "what is on tomorrow?", previousText: "what is on today?", dispatchId: "home-dm-edit" }));
+      await slackHost.handleUpdate("slack", inbound({ kind: "edit", conversationKey: "slack:T1:D1:111.1", text: "what is on tomorrow?", previousText: "what is on today?", dispatchId: "dm-first-edit" }));
       await vi.waitFor(async () => {
-        const entries = await engineStore.getEntries(session.id, home!.id);
+        const entries = await engineStore.getEntries(session.id, first.id);
         expect(entries.some(e => e.type === "message" && e.signal?.signalType === "slack.message_changed" && e.content.includes("After: what is on tomorrow?"))).toBe(true);
-        expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
       });
-      const after = await engineStore.getEntries(session.id, home!.id);
-      expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+      expect((await engineStore.getEntries(session.id, second.id)).some(e => e.type === "message" && e.signal?.signalType === "slack.message_changed")).toBe(false);
     } finally {
       await slackHost.stop();
     }
   });
 
-  it("keeps another Slack DM queued without answering or cancelling the first DM's question", async () => {
+  it("answers a DM thread's question only from that thread, never from another DM thread", async () => {
     faux.setResponses([
-      fauxAssistantMessage([{ type: "toolCall", id: "home-question", name: "ask_question", arguments: { question: "Which repo?", intent: "Ask which repository to use before starting the task." } }], { stopReason: "toolUse" }),
-      fauxAssistantMessage("First reply"), fauxAssistantMessage("Second reply"),
+      fauxAssistantMessage([{ type: "toolCall", id: "dm-question", name: "ask_question", arguments: { question: "Which repo?", intent: "Ask which repository to use before starting the task." } }], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Second reply"), fauxAssistantMessage("First reply"),
     ]);
     const slack: ChannelTransport = {
       channelType: "slack", verifyWebhook: () => null, parseUpdate: () => null,
@@ -488,23 +493,26 @@ describe("ChannelHost.handleUpdate", () => {
       await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:first", conversationKey: "slack:T1:D1:111.1", text: "Help with this repo" }));
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-      const home = await session.threadByKey(HOME_THREAD_KEY);
-      if (!home) throw new Error("Expected Home thread");
-      await vi.waitFor(() => expect(home.pendingDecisionGates()).toHaveLength(1), { timeout: 10_000 });
-      const gate = home.pendingDecisionGates()[0];
+      const first = await session.threadByKey("slack:D1:111.1");
+      if (!first) throw new Error("Expected the first DM thread");
+      await vi.waitFor(() => expect(first.pendingDecisionGates()).toHaveLength(1), { timeout: 10_000 });
+      const gate = first.pendingDecisionGates()[0];
       if (!gate) throw new Error("Expected question");
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:second", conversationKey: "slack:T1:D1:222.2", text: "What is the weather?" }));
-      expect(home.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
-      expect((await engineStore.getQueueItem(session.id, gate.queueItemId))?.status).toBe("blocked_on_decision_gate");
+      const second = await session.threadByKey("slack:D1:222.2");
+      if (!second) throw new Error("Expected the second DM thread");
+      expect(second.id).not.toBe(first.id);
+      expect(first.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
       const queued = await engineStore.getQueueItemByDispatchId(session.id, "slack:second");
-      expect(queued?.content).toMatchObject({ kind: "signal", body: "What is the weather?" });
+      if (!queued) throw new Error("Expected the second request");
+      await second.awaitResult(queued.id);
+      expect(first.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:answer", conversationKey: "slack:T1:D1:111.1", text: "org/repo" }));
-      expect(home.pendingDecisionGates()).toHaveLength(0);
-      await home.awaitResult(gate.queueItemId);
-      if (!queued) throw new Error("Expected queued second request");
-      await home.awaitResult(queued.id);
+      expect(first.pendingDecisionGates()).toHaveLength(0);
+      await first.awaitResult(gate.queueItemId);
       expect((await engineStore.getQueueItem(session.id, gate.queueItemId))?.outcome?.outcome).toBe("completed");
       expect((await engineStore.getQueueItem(session.id, queued.id))?.outcome?.outcome).toBe("completed");
+      expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
     } finally { await slackHost.stop(); }
   });
 
