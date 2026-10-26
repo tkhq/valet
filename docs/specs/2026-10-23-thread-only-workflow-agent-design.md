@@ -1,6 +1,7 @@
 # Remove Runtime from workflow authoring
 
 Status: proposed removal plan. This PR changes no application behavior or authorization.
+Revised on 2026-10-26: converted graphs keep parallel agent work through step threads. Slice 1 implements them in a separate PR and adds one optional node field.
 
 ## Existing baseline (informative)
 
@@ -33,9 +34,9 @@ MUST identifies a requirement. Prose without a requirement keyword is informativ
 | V4 | Run an unchanged saved Runtime definition after deployment | The run MUST use the existing Runtime executor and file paths. Schedules MUST remain armed. |
 | V5 | Restart during Runtime primary dispatch, parked wait, or schema repair | Recovery MUST reuse the original admission, receipt, session, and completed tool results. |
 | V6 | Preview explicit Runtime conversion with a model, title, script, and result reference | Preview MUST identify unsupported dependencies before the author saves. |
-| V7 | Run converted foreach steps with models and structured outputs | Each iteration MUST retain distinct receipts, outputs, budgets, and usage attribution. |
+| V7 | Run converted foreach steps with models and structured outputs | Each iteration MUST retain distinct receipts, outputs, budgets, and usage attribution. With `thread: "step"`, each iteration MUST have its own thread, and iteration turns MUST be able to run at the same time. |
 | V8 | Convert while an older version has active runs | Active runs MUST retain their snapshots. Preview MUST warn that old-version runs lose saved grants, or block conversion while they remain active. New runs MUST use the saved new version. |
-| V9 | Retry converted primary and repair submissions | Retry MUST return the original receipt without repeating external actions. |
+| V9 | Retry converted primary and repair submissions | Retry MUST return the original receipt without repeating external actions. The repair of a step MUST go to the thread of its primary submission. |
 
 Generated IDs and timestamps are outside exact-value comparison. Tests compare persisted identities before and after restart.
 
@@ -46,16 +47,16 @@ Covered features need regression checks during removal. They need no new Thread 
 
 | Capability | Runtime and Thread difference | Disposition and removal treatment |
 | --- | --- | --- |
-| Sandbox and shell | Runtime lazily provisions a headless sandbox per run/node/iteration. Thread already has shell and filesystem tools in its resolved execution. | **Covered** for shell capability. **Drop** automatic per-step sandbox allocation for converted graphs. |
+| Sandbox and shell | Runtime lazily provisions a headless sandbox per run/node/iteration. Thread already has shell and filesystem tools in its resolved execution. Step threads share the session of the run, so they share its sandbox and working directory. | **Covered** for shell capability. **Drop** automatic per-step sandbox allocation and per-step working directories. Preview warns that parallel entries must write to different paths. |
 | Working files and processes | Runtime uses `~/.valet/workflows/<run>/<node>/<iteration>`. Thread uses its existing execution directory. | **Close** conversion review for absolute paths, relative files, background processes, and cleanup assumptions. Retain old directories in place. |
-| Sandbox actions API | `/api/sandbox/actions/:toolId/invoke` admits active Runtime sessions. It rejects Thread sandboxes. | **Close** before converting script-dependent graphs. A separate API slice must identify the active step without widening sandbox-token authority. Explicit `tool` nodes remain an alternative. |
+| Sandbox actions API | `/api/sandbox/actions/:toolId/invoke` admits active Runtime sessions. It reads the step from the session ID of the sandbox (`sandbox-actions.ts:63`). It rejects Thread sandboxes. | **Close** before converting script-dependent graphs. Step threads share one session, so the session token cannot name the calling step. Admission must bind to the running turn. Explicit `tool` nodes remain an alternative. |
 | `model` | Runtime passes its optional model to primary and repair submissions. Thread has no node model field. | **Close** with a per-submission Thread model field, existing organization resolution, and repair parity. Never mutate the personal/team assistant default. |
 | `title` | Runtime accepts a templated session title. Thread has no node title field. | **Drop** dedicated session titles. Conversion uses the node ID as its step label and discloses the lost title and its template references. No new thread-title mutation. |
 | `mode` | Runtime supports only `start`. Thread has no mode field. | **Drop** during explicit conversion. No steer or attach replacement is needed. |
-| `wait` | Runtime `none` starts parallel work in its own session. Thread submissions run in series on the run's thread. Omission waits for settlement. | **Drop** independent agent work under `none`. Shared admission machinery does not provide parallelism. Preview warns that dispatch-only success means admission, not completed work. |
+| `wait` | Runtime `none` starts parallel work in its own session. A Thread step on the run thread runs in series. Omission waits for settlement. | **Covered** by `thread: "step"`: the step runs on its own thread, beside the steps after it. Preview warns that dispatch-only success means admission, not completed work. |
 | `wait.timeout` | New saves already reject timeout in `validate.ts`. Only legacy definitions carry it; the shared executor reads only `wait.mode`. | **Drop** this ineffective field. Preview flags its presence. No new timeout semantics. |
-| Per-step transcript isolation | Runtime has a deterministic session per step and iteration. Thread uses the existing run/origin conversation and serial queue. | **Drop** fresh per-step conversation guarantees for converted graphs. Preview warns about shared context, serialization, and cancellation scope. |
-| Foreach concurrency | Both node types are allowed as bodies. Runtime iterations have separate sessions. Thread uses the existing run/origin thread. | **Covered** for indexed results and dispatch identity. **Drop** independent agent-turn parallelism within one Thread queue. Keep non-agent concurrency unchanged. |
+| Per-step transcript isolation | Runtime has a deterministic session per step and iteration. A Thread step uses the run/origin conversation by default. | **Covered** by `thread: "step"`: a new conversation for each step and iteration, with its own queue, approval gates, and Stop. Conversion sets it on every converted node. |
+| Foreach concurrency | Both node types are allowed as bodies. Runtime iterations have separate sessions. A Thread body on the run thread runs its entries in series. | **Covered** by `thread: "step"`. `foreach` already dispatches up to `concurrency` bodies, and the engine claims one item for each thread. |
 | Cost and usage | Runtime writes under `wf:<run>:<node>[:<iteration>]`. Thread entries live under assistant sessions. | **Covered** by `valet_usage_step_session` and usage projections. Preserve dispatch IDs, repair attribution, model reporting, and iteration totals. |
 | Prompt, schema, repair | Both render templates and share submission machinery with one bounded schema-repair turn. | **Covered**. Keep `response` and `output` semantics. |
 | Result identity | Both return `sessionId`. Thread also returns `threadId`. Dispatch-only results include a receipt. | **Close** conversion review of session-ID templates, URLs, script arguments, and consumers. Never synthesize a Runtime ID for Thread. |
@@ -66,7 +67,7 @@ Covered features need regression checks during removal. They need no new Thread 
 | Owner, origin, reports, Slack sender | Thread refuses new team Slack-event dispatch with a separate conversation origin (`engine-deps.ts:558-561`); Runtime does not. Recorded legacy mappings retain their behavior. | **Drop** this Runtime route on conversion. Preview flags affected graphs. Other routes reuse #818 contracts; no personal/team scope selector or audience redesign. |
 | Authoring and model-update tools | Canvas, templates, generated reference, imports, aggregate helpers, and `update_model` still know Runtime. | **Close** all new-authoring surfaces together. Keep legacy readers and diagnostics. |
 | V1 import | `v1-convert.ts:757` and the pending-step flush near line 1100 emit `session` nodes for `import-v1-dialog.tsx`. | **Close** before the save gate: route V1 output through conversion preview, or provide a supported replacement. Otherwise V1 import cannot save. |
-| Sandbox lifecycle | `sandbox-reclaim.ts` destroys `wf:` sandboxes when runs settle. Originless Thread runs allocate per-run executions (`engine-deps.ts:606-608`); archive only evicts the cache and keeps files (`run-attention.ts:422-431`). | **Close**: assign reclaim ownership and retention rules before high-frequency scheduled graphs convert. Cache eviction is not sandbox destruction. |
+| Sandbox lifecycle | `sandbox-reclaim.ts` destroys `wf:` sandboxes when runs settle. Originless team runs allocate per-run executions (`engine-deps.ts`, `ensureAssistantExecution`). Originless personal runs use the personal root session (`assistants/service.ts:187`) and allocate none. Archive only evicts the cache and keeps files (`run-attention.ts`). | **Close** (slice 2): the run owns its team report execution and its sandbox. Cache eviction is not sandbox destruction. |
 | Historical diagnostics and reclamation | Runtime logs, costs, transcripts, and sandbox cleanup use `wf:` identities. | **Covered** through retained compatibility readers and cleanup. Authoring removal does not delete history or sandboxes. |
 
 Inventory sources:
@@ -77,6 +78,37 @@ Inventory sources:
 - Script admission: [sandbox actions](../../packages/api/src/routes/sandbox-actions.ts).
 - Usage projection: [application schema](../../packages/api/migrations/pg/0000_app.sql).
 - Authoring: [editor model](../../packages/web/src/components/workflows/editor-model.ts).
+
+## Step threads (normative)
+
+A Thread node takes an optional `thread` field: `run` (the default) or `step`.
+Slice 1 implements these rules.
+
+1. **ST-1, placement:** With `run` or no field, the step MUST queue on the run thread, as before this change.
+   With `step`, the step MUST run on its own thread. Each foreach entry is a separate step.
+2. **ST-2, location:** A step thread MUST be in the session that the run thread uses.
+   That is the origin target, the report execution of a team run, or the personal root session.
+   A step thread therefore keeps the owner of the run, memory scope, audience, grants, and working directory.
+3. **ST-3, key:** The step thread key MUST be the run thread key plus `:{nodeId}`. When the iteration is above 0, `:{iteration}` follows.
+   Examples: `signal:workflow:{runId}:{nodeId}` and `slack-events:{channel}:workflow:{runId}:{nodeId}:{iteration}`.
+   Every reader of run thread keys MUST also recognize step thread keys.
+   These readers are sidebar filtering, unattended-turn rules, run conversations, settle-time archive, and announcements.
+4. **ST-4, idempotency:** The key and the dispatch ID derive from the run, node, and iteration.
+   Dispatch dedup is per session (`store-postgres` `admitSubmission`), so a re-issued dispatch MUST return the original receipt on the same thread.
+   The repair submission MUST carry the same step identity as its primary submission.
+5. **ST-5, opt-in:** The executor MUST NOT move an existing node to a step thread.
+   A run snapshot fixes the placement of each node, and a retry starts a new run.
+   So the engine admits a step dispatch ID only on its step thread. It admits a run-thread dispatch ID only on the run thread.
+6. **ST-6, settlement:** When the run settles, the archive MUST treat a step thread like the run thread.
+   It archives a step thread only after its submissions settle and its background work ends.
+   Under the same holds, a team report execution leaves the cache when one of its run or step threads archives.
+7. **ST-7, authoring default:** A new Thread body of a `foreach` defaults to `step` in the editor. A new top-level Thread step defaults to `run`.
+   Conversion sets `step` on every converted Runtime node.
+
+Step threads drop the per-step working directory and sandbox that Runtime provided. Parallel entries share one directory.
+A separate execution per step would restore that isolation. It would also keep one sandbox and one retained directory per entry (isolation contract, line 34). The cost is the same class as the settled-run sandbox leak. This plan rejects it until a converted graph needs it.
+The thread fork route needs a request context, copies history, and uses a random key, so a retry would allocate a second execution.
+A child session has no persona or memory. It settles by signal, and a parent can have ten at most.
 
 ## Compatibility and invariants (normative)
 
@@ -104,34 +136,37 @@ Elapsed time alone cannot establish safe deletion.
 
 ## Implementation slices (informative)
 
-1. **Thread model parity:** Extend node types, `ALLOWED_KEYS.orchestrator`, validation, templating, dispatch, repair, `update_model`, editor, and generated reference.
+1. **Step threads (separate PR):** Add the `thread` field to node types, `ALLOWED_KEYS`, validation, the step reference, the editor, and the workflows skill.
+   Pass the step identity on primary and repair dispatches. Route step dispatches in `promptOrchestrator`.
+   Extend every run-key reader (ST-3) and the settle-time archive (ST-6).
+   Tests cover placement, repair identity, and distinct threads per entry.
+   They also cover re-issued dispatches, the repair thread, the team report execution, overlapping turns, archive, eviction, and key parsing.
+2. **Run execution reclaim:** The run owns its team report execution. The reclaimer destroys that sandbox at settlement, under the archive holds: unsettled submissions, pending gates, wakeups, and leases.
+   The isolation contract (line 33 and line 34) retains execution directories on purpose. This slice amends it for originless report executions only.
+   Personal root sessions and origin executions keep their sandboxes. Verify created and destroyed accounting.
+3. **Thread model parity:** Extend node types, `ALLOWED_KEYS.orchestrator`, validation, templating, dispatch, repair, `update_model`, editor, and generated reference.
    Extend `ui.defaultModel` propagation in `editor-model.ts:355` to Thread nodes.
-   Check invalid/disallowed models, omitted defaults, per-item isolation, repair, and concurrent runs. Do not rebuild personal/team assistant routing.
-2. **Script migration:** Specify and implement Thread sandbox-action step admission in a separate reviewed PR.
+   Check invalid and disallowed models, omitted defaults, per-entry isolation on step threads, repair, and concurrent runs. Do not rebuild personal/team assistant routing.
+4. **Script migration:** Specify and implement Thread sandbox-action admission in a separate reviewed PR.
+   Bind admission to the running turn, for example a token minted into the shell environment of that turn. A thread ID header is not sufficient: a parallel step with a wider `toolScope` could forge it.
    Test forged, stale, concurrent, settled, cross-owner, and widened-scope requests, plus valid calls and idempotent retries.
    Keep current Runtime admission. This removal spec grants no new authorization.
-3. **Conversion preview:** Show removed `mode`, templated `title` references, legacy timeout fields, file dependencies, changed isolation, and result-identity dependencies.
-   Warn about serialized foreach/`wait: none` work and refused team Slack-event/conversation-origin combinations.
+5. **Conversion preview:** Set `thread: "step"` on each converted node. Preserve node IDs, edges, prompts, schemas, scopes, budgets, and wait modes.
+   Show removed `mode`, templated `title` references, legacy timeout fields, file dependencies, the shared working directory, and result-identity dependencies.
+   Warn about refused team Slack-event/conversation-origin combinations.
    `step-grants.ts:85` requires `sameWorkflowSteps`: conversion removes saved-grant eligibility from active old-version runs despite retained snapshots.
-   Warn about this loss or block conversion until those runs settle (V8).
-   Preserve node IDs, edges, prompts, schemas, scopes, budgets, and supported wait modes. Require explicit confirmation.
-4. **Authoring gate:** Remove Runtime from creation menus, templates, examples, and generated guidance.
-   Add one save-only refusal across API create/update/copy/patch, aggregate helpers, file import, and repository sync.
-   Ship after model and script dependencies have a supported disposition. Keep legacy editing visible and explain conversion before graph saves.
-5. **V1 import:** Update `v1-convert.ts` and `import-v1-dialog.tsx` before enabling the save gate.
-   Preserve the import checklist and require review of lost parallelism, titles, files, and unsupported dependencies.
-6. **Repository sync:** Separate unchanged legacy mirrors from new definition writes before enabling the gate.
+   Block conversion while those runs are active, and offer to cancel them (V8). Require explicit confirmation.
+6. **V1 import and repository sync:** Update `v1-convert.ts` and `import-v1-dialog.tsx` to emit Thread steps with `thread: "step"`. Preserve the import checklist.
+   Separate unchanged legacy mirrors from new definition writes before enabling the gate.
    `ContentSyncService` skips body validation when the head/discovery stamp or manifest matches. Unchanged files are not re-checked on every poll.
    A changed manifest or forced resync revalidates all candidate bodies, including unchanged Runtime files, before comparing each mirror's `contentSha`.
    Today, `workflow-collector.ts:285-290` maps rejected files to `null` for call validation.
    `teamTriggerGate` (lines 824-849) can then disable a caller's trigger even though the rejected child retains its saved graph.
-   Proposed default: exempt unchanged saved Runtime mirrors by blob identity from the definition-write gate. Confirm the recheck policy before rollout.
-   If rollout requires revalidation, invalidate both sync comparisons once by gate version, not on every poll.
-   Persist rejection diagnostics by source/path/blob and gate version. Keep the warning visible without emitting it again on each poll.
-   Do not mark permanent validation failures as deferred readiness checks, which retry unchanged content.
-   Test unchanged polls, forced resync, unrelated file edits, rejected children, and caller triggers. The caller policy remains open.
-7. **Thread sandbox lifecycle:** Name one reclaim owner and define settlement, background-work, file-retention, and recovery rules.
-   Verify created/deleted accounting and retained-file access. Land this slice before converting high-frequency scheduled graphs.
+   Exempt unchanged saved Runtime mirrors by blob identity from the definition-write gate. A rejected child keeps its caller's trigger on.
+   Persist rejection diagnostics by source/path/blob and gate version. Do not mark permanent validation failures as deferred readiness checks.
+7. **Authoring gate:** Remove Runtime from creation menus, templates, examples, and generated guidance.
+   Add one save-only refusal across API create/update/copy/patch, aggregate helpers, file import, and repository sync.
+   Ship after slices 2 through 6. Keep legacy editing visible and explain conversion before graph saves.
 8. **Compatibility verification:** Exercise V1 through V9 with saved definitions, active versions, schedules, parked submissions, repairs, and retained files.
    Keep Runtime execution, diagnostics, usage attribution, and reclaim code until the separate retirement decision.
 
@@ -164,24 +199,26 @@ Any access-rule change belongs in a separate PR. Flip the current-behavior asser
 | Existing personal/team scope access model | #818 already shipped it | A second workflow access catalog |
 | Existing assistant targeting | Preserve shipped origins and legacy mappings | A new personal/team scope selector |
 | Save-only session deprecation with retained execution | Preserve definitions and active work | Automatic translation or immediate executor deletion |
+| Step threads in the session of the run | Separate threads give parallel turns with no extra sandbox | An execution, a fork, or a child session for each step (see Step threads) |
+| Opt-in `thread` field | A saved graph keeps its behavior, and an in-flight dispatch never moves threads | Moving every foreach or `wait: none` Thread step automatically |
 | Existing audience carriage contract | #818 shipped routing; the access test documents current behavior separately | Rebuilding Thread audience routing here |
 
 Open questions:
 
 1. Should a user-owned, channel-started run count as a shared context for admin-only event diagnostics?
-2. Is losing parallel agent work in `foreach` and `wait: none` acceptable, or should removal wait for per-step isolated Thread executions?
-3. Who owns sandbox reclaim for per-run Thread executions?
-4. Should conversion be blocked while the old version has active runs?
-5. Should unchanged mirrored Runtime files be re-checked on each sync, and should a rejected child keep its caller's trigger on?
+2. Resolved: converted graphs keep parallel agent work through step threads (ST-1 to ST-7). They lose per-step working directories.
+3. Proposed: the run owns its team report execution and its sandbox (slice 2). This needs an amendment to the isolation contract.
+4. Proposed: block conversion while old-version runs are active, with an offer to cancel them.
+5. Proposed: exempt unchanged mirrors by blob identity, and keep a caller's trigger on when a child is rejected.
 6. Is replacing templated Runtime titles with node IDs acceptable?
 
-Script-dependent conversion remains blocked until slice 2 or an explicit author rewrite to `tool` steps.
+Script-dependent conversion remains blocked until slice 4 or an explicit author rewrite to `tool` steps.
 This plan sets no deadline for deleting retained Runtime execution.
 
 ## Validation
 
 Run `CI=true pnpm install --frozen-lockfile`, `pnpm typecheck`, and `pnpm --filter @valet/workflow test`.
-Run `pnpm --filter @valet/api test workflows engine-deps events/actions step-grants event-log-privacy` without a `--` separator.
+Run `pnpm --filter @valet/api test workflows engine-deps events/actions step-grants event-log-privacy run-attention run-conversations` without a `--` separator.
 Confirm `event-log-privacy` passes. Temporarily invert its final receipt assertion, confirm failure only there, then revert and rerun.
 Run `python3 scripts/docs/ste_lint.py docs/specs/2026-10-23-thread-only-workflow-agent-design.md` for spec prose.
 `docs_lint.py` does not scan `docs/specs/`.
