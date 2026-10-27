@@ -42,6 +42,10 @@ export const OBSERVE_TTL_MS = 5 * 60_000;
 
 /** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
+/** First wait after a terminal startup failure; doubles per attempt. */
+export const STARTUP_BACKOFF_BASE_MS = 15_000;
+/** Longest wait between terminal-failure retries. */
+export const STARTUP_BACKOFF_CAP_MS = 120_000;
 
 /**
  * Missing applied resources and an empty opinion both mean no overrides.
@@ -199,6 +203,10 @@ export class SandboxAttachment {
   private pendingReadyEpoch: number | null = null;
   /** Why the most recent start attempt failed; cleared once a sandbox is ready. */
   private lastStartError: string | undefined;
+  /** Armed by a terminal startup failure (spec 8.1). `kickProvision` stays
+   * quiet until `at + window`; `ensureReady` inside the window rejects at
+   * once with `error` so callers get the cause instead of a timeout. */
+  private terminalFailure: { at: number; attempts: number; error: SandboxStartupError | SandboxPreparationError } | null = null;
 
   constructor(
     provider: SandboxProvider,
@@ -386,6 +394,7 @@ export class SandboxAttachment {
     if (oldSandbox) {
       await this.releaseExecution(oldSandbox, provider);
     }
+    this.terminalFailure = null;
     this.kickProvision();
     // Re-widen: the guard above narrowed `this.inFlight` to null and TS
     // keeps that narrowing across the kickProvision() call that re-set it
@@ -416,6 +425,16 @@ export class SandboxAttachment {
     }
     if (opts.signal?.aborted) {
       return Promise.reject(this.abortError(opts.signal));
+    }
+
+    const remainingMs = this.startupBackoffRemainingMs();
+    if (remainingMs > 0 && this.terminalFailure) {
+      const prior = this.terminalFailure.error;
+      const seconds = Math.ceil(remainingMs / 1000);
+      if (prior instanceof SandboxStartupError) {
+        return Promise.reject(new SandboxStartupError(prior.sandboxId, `${prior.reason} (retry in ${seconds}s)`, prior.kind));
+      }
+      return Promise.reject(prior);
     }
 
     this.kickProvision();
@@ -794,6 +813,7 @@ export class SandboxAttachment {
     if (this.destroyed) return true;
     if (this._sandbox) await this.lifecycle?.beforeStop(this._sandbox, 'destroy', { suspended: this._state === 'suspended' });
     this.destroyed = true;
+    this.terminalFailure = null;
 
     const sandbox = this._sandbox;
     this._sandbox = null;
@@ -845,10 +865,19 @@ export class SandboxAttachment {
     return new Error("aborted");
   }
 
+  /** Milliseconds left in the terminal-failure window, or 0 when none. */
+  private startupBackoffRemainingMs(): number {
+    const failure = this.terminalFailure;
+    if (!failure) return 0;
+    const window = Math.min(STARTUP_BACKOFF_CAP_MS, STARTUP_BACKOFF_BASE_MS * 2 ** (failure.attempts - 1));
+    return Math.max(0, failure.at + window - Date.now());
+  }
+
   private kickProvision(): void {
     if (this.destroyed || this.noProvider) return;
     if (this._state === "ready") return;
     if (this.inFlight) return;
+    if (this.startupBackoffRemainingMs() > 0) return;
     if (this.releaseInFlight) return;
     if (this.pendingRelease) {
       const { sandbox, provider } = this.pendingRelease;
@@ -1251,6 +1280,8 @@ export class SandboxAttachment {
       // a `SandboxPreparationError` (the host prep hook rejected) — waiters
       // get the real cause now instead of a generic timeout later.
       if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
+        const attempts = (this.terminalFailure?.attempts ?? 0) + 1;
+        this.terminalFailure = { at: Date.now(), attempts, error: err };
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);
@@ -1282,6 +1313,7 @@ export class SandboxAttachment {
 
   private publishReady(): void {
     this.lastStartError = undefined;
+    this.terminalFailure = null;
     this._state = "ready";
     this.emitStatus();
     this.flushWaiters();

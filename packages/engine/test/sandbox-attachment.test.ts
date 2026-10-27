@@ -657,3 +657,138 @@ it("preserves confirmed eviction and invalidates without replaying", async () =>
   expect(error.message).toContain("Increase");
   await attachment.destroy();
 });
+
+describe("terminal startup backoff", () => {
+  it("does not call create() again inside the window, and a caller inside it fails fast with the memoized cause", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d = provider.nextDeferred();
+      const first = attachment.ensureReady({ timeoutMs: 60_000 });
+      const cause = new SandboxStartupError("sess-1", "container crash-looping (CrashLoopBackOff): exit 127: tini not found", "crash_loop");
+      d.reject(cause);
+      await expect(first).rejects.toBe(cause);
+      expect(provider.createCalls).toBe(1);
+
+      // 1 second later: still inside the 15s window.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const started = Date.now();
+      const second = attachment.ensureReady({ timeoutMs: 60_000 });
+      await expect(second).rejects.toSatisfy((e: unknown) =>
+        e instanceof SandboxStartupError && e.kind === "crash_loop" && e.message.includes("tini not found") && /retry in \d+s/.test(e.message));
+      expect(Date.now() - started).toBeLessThan(50);
+      expect(provider.createCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries after the window and doubles the window on a second terminal failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d1 = provider.nextDeferred();
+      const p1 = attachment.ensureReady({ timeoutMs: 60_000 });
+      d1.reject(new SandboxStartupError("s", "boom", "pod_failed"));
+      await expect(p1).rejects.toBeInstanceOf(SandboxStartupError);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      const d2 = provider.nextDeferred();
+      const p2 = attachment.ensureReady({ timeoutMs: 60_000 });
+      expect(provider.createCalls).toBe(2);
+      d2.reject(new SandboxStartupError("s", "boom again", "pod_failed"));
+      await expect(p2).rejects.toBeInstanceOf(SandboxStartupError);
+
+      await vi.advanceTimersByTimeAsync(20_000); // 20s < 30s second window
+      await expect(attachment.ensureReady({ timeoutMs: 60_000 })).rejects.toBeInstanceOf(SandboxStartupError);
+      expect(provider.createCalls).toBe(2);
+
+      await vi.advanceTimersByTimeAsync(10_000); // now 30s
+      provider.nextDeferred().resolve(makeFakeSandbox("ok"));
+      await attachment.ensureReady({ timeoutMs: 60_000 });
+      expect(provider.createCalls).toBe(3);
+      expect(attachment.state).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps the window at 120 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      // 6 iterations: the 6th create follows the 5th failure, whose uncapped
+      // window would be 240s. It only runs if the window is capped at 120s.
+      for (let i = 0; i < 6; i++) {
+        const d = provider.nextDeferred();
+        const p = attachment.ensureReady({ timeoutMs: 60_000 });
+        d.reject(new SandboxStartupError("s", `fail ${i}`, "other"));
+        await expect(p).rejects.toBeInstanceOf(SandboxStartupError);
+        await vi.advanceTimersByTimeAsync(120_000);
+      }
+      expect(provider.createCalls).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replace() bypasses the window", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d = provider.nextDeferred();
+      const p = attachment.ensureReady({ timeoutMs: 60_000 });
+      d.reject(new SandboxStartupError("s", "boom", "other"));
+      await expect(p).rejects.toBeInstanceOf(SandboxStartupError);
+      provider.nextDeferred().resolve(makeFakeSandbox("replaced"));
+      await attachment.replace();
+      expect(provider.createCalls).toBe(2);
+      expect(attachment.state).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("destroy() inside the window rejects later callers as unavailable, not with the memoized startup cause", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d = provider.nextDeferred();
+      const p = attachment.ensureReady({ timeoutMs: 60_000 });
+      d.reject(new SandboxStartupError("s", "boom", "other"));
+      await expect(p).rejects.toBeInstanceOf(SandboxStartupError);
+      // Note: the destroy rollback (destroyed=false), the only path where a
+      // stale memo could block reuse, needs a pending release, which cannot
+      // coexist with an armed memo through public APIs, so the memo clear in
+      // destroyOnce is defensive and not observable here.
+      await attachment.destroy();
+      await expect(attachment.ensureReady({ timeoutMs: 1_000 })).rejects.toBeInstanceOf(SandboxUnavailableError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a non-terminal create failure does not arm the window", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d = provider.nextDeferred();
+      const p = attachment.ensureReady({ timeoutMs: 500 });
+      const settled = expect(p).rejects.toBeInstanceOf(WorkspaceProvisioningError);
+      d.reject(new Error("transient apiserver 503"));
+      await vi.advanceTimersByTimeAsync(500);
+      await settled;
+      provider.nextDeferred().resolve(makeFakeSandbox("ok"));
+      await attachment.ensureReady({ timeoutMs: 1_000 });
+      expect(provider.createCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
