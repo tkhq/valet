@@ -215,13 +215,16 @@ export default function UiStressGallery() {
                     <MessageList messages={stressThreadMessages} threadId={THREAD_ID} viewerId={stressMe.id} ratings={false} />
                   </div>
                   <PinnedPlan threadId={THREAD_ID} />
-                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={{ ...gate, expiresAt: Date.now() + 8 * 60_000 }} collapsible />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}
+              <Frame label="Expired approval">
+                <DecisionGateCard sessionId={stressThreadGates[0]!.sessionId} gate={{ ...stressThreadGates[0]!, id: "thread-gate-expired", expiresAt: 0 }} collapsible />
+              </Frame>
               {stressThreadGates.slice(2).map((gate) => (
                 <Frame key={gate.id} label={`Gate card: ${gate.type}${gate.approver ? " (shared account)" : ""}`}>
-                  <DecisionGateCard sessionId={gate.sessionId} gate={gate} />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={gate.type === "credential_request" ? { ...gate, expiresAt: Date.now() + 8 * 60_000 } : gate} collapsible={gate.type === "credential_request"} />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}
