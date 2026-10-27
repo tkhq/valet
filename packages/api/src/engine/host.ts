@@ -11,7 +11,7 @@ import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-
 import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -92,6 +92,8 @@ import {
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { recordImageFallback } from "../observability/image-fallback-metrics.js";
 import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
   applySandboxResourceOverrides,
@@ -136,6 +138,7 @@ import {
   sessionRepos,
   teams,
   users,
+  type ImageFallback,
   type SecurityCellRow,
 } from "../schema/index.js";
 import {
@@ -809,6 +812,13 @@ export async function verifyFileInSandbox(
  * same Session.
  */
 export class EngineHost {
+  /** Spec 7.1 callback target; attached after construction because the
+   * SourceService is built after the host (providers/node.ts). */
+  private imageFallbackHandler?: (event: ImageFallbackEvent) => Promise<void>;
+  setImageFallbackHandler(handler: (event: ImageFallbackEvent) => Promise<void>): void {
+    this.imageFallbackHandler = handler;
+  }
+
   private cache = new Map<string, CacheEntry>();
   /**
    * Single-flight gate for `sessionFor`. Two concurrent requests for the
@@ -1794,6 +1804,11 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        onIncompatible: async (info) => {
+          recordImageFallback("contract");
+          await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
+          await host.imageFallbackHandler?.({ ...info, sessionId });
+        },
       });
       // The repo's own command-to-credential declarations, resolved on the
       // same best-effort footing as the docker flag: read failures yield no
@@ -1810,6 +1825,7 @@ export class EngineHost {
       // Best-effort prebuild-id recording — same as the old eager path.
       if (snap.repoBake) {
         await host.recordPrebuildId(sessionId, snap.repoBake.bakeId);
+        await host.recordImageFallback(sessionId, null);
       }
 
       const spec = computeSpec(snap);
@@ -1871,6 +1887,23 @@ export class EngineHost {
         .where(eq(agentSessions.id, sessionId));
     } catch (err) {
       console.error(`EngineHost: recording bake_id for session ${sessionId} failed:`, err);
+    }
+  }
+
+  /** Best-effort write of `agent_sessions.image_fallback` (spec 7.1). A null
+   * clears it; the clear is conditioned on the column being set so a
+   * steady-state session costs no row write per reconcile. */
+  private async recordImageFallback(sessionId: string, fallback: ImageFallback | null): Promise<void> {
+    if (!this.opts.db) return;
+    try {
+      if (fallback) {
+        await this.opts.db.update(agentSessions).set({ imageFallback: fallback }).where(eq(agentSessions.id, sessionId));
+      } else {
+        await this.opts.db.update(agentSessions).set({ imageFallback: null })
+          .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.imageFallback)));
+      }
+    } catch (err) {
+      console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
     }
   }
 

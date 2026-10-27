@@ -20,6 +20,7 @@ import {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, imageSources, bakes, securityEngagements, securityCells, sessionRepos } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
+import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
 import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { contentsBody, startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -52,7 +53,7 @@ class RecordingSandbox implements Sandbox {
   async destroy(): Promise<void> {}
 }
 
-function makeIsolatedProvider(opts: { customImage?: boolean } = {}): SandboxProvider & {
+function makeIsolatedProvider(opts: { customImage?: boolean; backend?: string } = {}): SandboxProvider & {
   execs: string[];
   createCalls: SandboxCreateOpts[];
 } {
@@ -61,7 +62,7 @@ function makeIsolatedProvider(opts: { customImage?: boolean } = {}): SandboxProv
   let nextId = 1;
   const sandboxes = new Map<string, RecordingSandbox>();
   return {
-    backend: "recording-isolated",
+    backend: opts.backend ?? "recording-isolated",
     execs,
     createCalls,
     capabilities(): SandboxCapabilities {
@@ -413,6 +414,47 @@ describe("EngineHost buildSpecProvider", () => {
     expect(provider.execs.some((c) => c.includes("/usr/local/bin/sec-preflight"))).toBe(true);
     expect(provider.execs.some((c) => c.includes("command -v gitleaks"))).toBe(true);
     expect(provider.execs.some((c) => c.includes("command -v semgrep"))).toBe(true);
+  });
+
+  it("an incompatible repo bake records agent_sessions.image_fallback, calls the handler once, and clears on a compatible bake", async () => {
+    const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
+    api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
+    const events: ImageFallbackEvent[] = [];
+    api.providers.engineHost.setImageFallbackHandler(async (e) => { events.push(e); });
+
+    const now = Date.now();
+    await api.providers.db.insert(imageSources).values({
+      id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
+      setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
+      schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+    });
+    const bakeRow = (id: string, createdAt: number, contract: { contractVersion: number | null; contractSource: "label" | "missing" | "override" | null }) => ({
+      id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${id}`, status: "pushed" as const,
+      builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
+      startedAt: createdAt, finishedAt: createdAt, createdAt, ...contract,
+    });
+    await api.providers.db.insert(bakes).values(bakeRow("pb-bad", now, { contractVersion: 0, contractSource: "missing" }));
+
+    const sessionId = "fb-session";
+    await insertSession(api.providers.db, sessionId);
+    const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
+    const session = await api.providers.engineHost.sessionFor(sessionId, meta);
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    // Stock image, not the bad bake; fallback recorded; handler called once.
+    expect(provider.createCalls[0].image).toBe("stock:img");
+    const row = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+    expect(row.imageFallback).toMatchObject({ reason: "contract", sourceId: "fb-cfg1", bakeId: "pb-bad" });
+    expect(events).toEqual([expect.objectContaining({ sessionId, sourceId: "fb-cfg1", bakeId: "pb-bad", contract: 0, repoFullName: "acme/widgets" })]);
+
+    // A compatible bake lands. Re-evaluating the spec provider (the same
+    // closure a reconcile sweep runs) clears the fallback and picks the bake.
+    await api.providers.db.insert(bakes).values(bakeRow("pb-good", now + 1000, { contractVersion: 3, contractSource: "label" }));
+    const desired = await session.options.specProvider!();
+    expect(desired.image).toBe("valet-prebuild/acme-widgets:pb-good");
+    const cleared = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+    expect(cleared.imageFallback).toBeNull();
+    expect(events).toHaveLength(1);
   });
 
   it("repo session on isolated+customImage provider: newer pushed prebuild produces different image ref", async () => {

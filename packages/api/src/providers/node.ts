@@ -570,6 +570,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
   });
 
+  engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
+
   const childrenDeps = {
     sandboxBacked: sandboxProvider.capabilities().isolated === true,
     db,

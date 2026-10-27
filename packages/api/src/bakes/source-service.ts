@@ -71,6 +71,7 @@ import { resolveGithubApiUrl } from "../services/github-env.js";
 import { measureBakeSize } from "../prebuilds/bake-size.js";
 import { compatible, readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
+import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
@@ -2230,6 +2231,19 @@ export class SourceService {
       await this.maybeFireFirstBake(id, repo);
     } catch (err) {
       console.error(`ensureRepoSource(${orgId}, ${repo.fullName}) failed:`, err);
+    }
+  }
+
+  /** Spec 7.1: a session fell back from this source's image. Mark the source
+   * and request a bake through the same guards the first bake uses
+   * (`repoBakeDefers`, `hasActiveBake`), so one fallen-back session per
+   * reconcile sweep cannot start a bake each. Never throws. */
+  async handleImageFallback(event: ImageFallbackEvent): Promise<void> {
+    try {
+      await this.setSourceHealth(event.sourceId, "incompatible", "contract", `bake ${event.bakeId} contract ${event.contract ?? "missing"} < ${MIN_IMAGE_CONTRACT}; session ${event.sessionId} fell back`);
+      await this.maybeFireFirstBake(event.sourceId, { fullName: event.repoFullName });
+    } catch (err) {
+      console.error(`image fallback handling for ${event.sourceId} failed:`, err);
     }
   }
 
