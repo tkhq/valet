@@ -1163,6 +1163,10 @@ export class SourceService {
       startedAt: now,
       finishedAt: null,
       sizeBytes: null,
+      contractVersion: null,
+      contractSource: null,
+      parentBakeId: null,
+      baseImageRef: null,
       createdAt: now,
     };
     await this.db.insert(bakes).values(row);
@@ -1394,6 +1398,10 @@ export class SourceService {
       startedAt: now,
       finishedAt: null,
       sizeBytes: null,
+      contractVersion: null,
+      contractSource: null,
+      parentBakeId: null,
+      baseImageRef: null,
       createdAt: now,
     };
     await this.assertRepoBakeAllowed(source.orgId, gitToken.token);

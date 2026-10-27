@@ -1278,4 +1278,76 @@ describe("pg app schema + migrations", () => {
       expect(row[0]?.newThreadBehavior).toBe("keep_current");
     });
   });
+
+  describe("image pipeline health repairs", () => {
+    const TINI_EPOCH = 1789763460000;
+
+    async function oldShapedDb(): Promise<{ raw: PGlite; db: PgDb }> {
+      const raw = new PGlite();
+      const db = pgDbFromPglite(raw);
+      await applyAppMigrations(db);
+      // Drop the new columns so the repairs have something to do.
+      await raw.query(`ALTER TABLE bakes DROP COLUMN contract_version, DROP COLUMN contract_source, DROP COLUMN parent_bake_id, DROP COLUMN base_image_ref`);
+      await raw.query(`ALTER TABLE image_sources DROP COLUMN health, DROP COLUMN health_reason, DROP COLUMN health_detail, DROP COLUMN health_checked_at`);
+      await raw.query(`ALTER TABLE agent_sessions DROP COLUMN image_fallback`);
+      return { raw, db };
+    }
+
+    async function seedLineage(raw: PGlite): Promise<void> {
+      const src = (id: string, kind: string, parent: string | null) =>
+        raw.query(`INSERT INTO image_sources (id, org_id, kind, parent_id, name, created_at, updated_at) VALUES ($1, 'org', $2, $3, $1, 1, 1)`, [id, kind, parent]);
+      const bake = (id: string, source: string, createdAt: number, status = "pushed") =>
+        raw.query(`INSERT INTO bakes (id, source_id, identity_hash, image_ref, status, created_at) VALUES ($1, $2, '', $1, $3, $4)`, [id, source, status, createdAt]);
+      await src("ext", "external", null);
+      await src("base", "base", "ext");
+      await src("repo", "repo", "base");
+      await src("repo-ext", "repo", "ext");
+      await src("repo-orphan", "repo", "base");
+      await bake("base-old", "base", TINI_EPOCH - 1000);
+      await bake("base-new", "base", TINI_EPOCH + 1000);
+      await bake("base-failed-new", "base", TINI_EPOCH + 5000, "failed");
+      await bake("repo-before", "repo", TINI_EPOCH - 500);   // newest earlier base bake: base-old -> 0
+      await bake("repo-after", "repo", TINI_EPOCH + 2000);   // newest earlier base bake: base-new -> 3
+      await bake("repo-ext-1", "repo-ext", TINI_EPOCH + 9000); // external parent -> 0
+      await bake("repo-orphan-1", "repo-orphan", TINI_EPOCH - 9000); // no base bake at or before -> 0
+    }
+
+    it("adds the columns and backfills contracts by lineage on an old-shaped database", async () => {
+      const { raw, db } = await oldShapedDb();
+      await seedLineage(raw);
+      expect((await missingSchemaRepairs(db)).map((r) => r.describe)).toEqual(
+        expect.arrayContaining(["bakes contract and lineage columns", "image_sources health columns", "agent_sessions.image_fallback column"]),
+      );
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      const rows = await raw.query<{ id: string; contract_version: number | null; contract_source: string | null }>(
+        `SELECT id, contract_version, contract_source FROM bakes ORDER BY id`,
+      );
+      expect(Object.fromEntries(rows.rows.map((r) => [r.id, [r.contract_version, r.contract_source]]))).toEqual({
+        "base-old": [0, "missing"],
+        "base-new": [3, "missing"],
+        "base-failed-new": [3, "missing"],
+        "repo-before": [0, "missing"],
+        "repo-after": [3, "missing"],
+        "repo-ext-1": [0, "missing"],
+        "repo-orphan-1": [0, "missing"],
+      });
+      const health = await raw.query<{ health: string; health_reason: string }>(`SELECT health, health_reason FROM image_sources LIMIT 1`);
+      expect(health.rows[0]).toEqual({ health: "healthy", health_reason: "ok" });
+      await raw.close();
+    });
+
+    it("a fresh database has the same columns and nothing to repair", async () => {
+      const raw = new PGlite();
+      const db = pgDbFromPglite(raw);
+      await applyAppMigrations(db);
+      const pending = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(pending).not.toContain("bakes contract and lineage columns");
+      const cols = await raw.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'bakes' AND column_name IN ('contract_version','contract_source','parent_bake_id','base_image_ref')`,
+      );
+      expect(cols.rows.map((c) => c.column_name).sort()).toEqual(["base_image_ref", "contract_source", "contract_version", "parent_bake_id"]);
+      await raw.close();
+    });
+  });
 });

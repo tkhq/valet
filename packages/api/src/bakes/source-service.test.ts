@@ -567,6 +567,10 @@ describe("SourceService", () => {
         schedule: "nightly",
         enabled: true,
         lastBoundAt: null,
+        health: "healthy",
+        healthReason: "ok",
+        healthDetail: null,
+        healthCheckedAt: null,
         createdAt: NOW,
         updatedAt: NOW,
       });
@@ -598,6 +602,10 @@ describe("SourceService", () => {
         schedule: "nightly",
         enabled: true,
         lastBoundAt: null,
+        health: "healthy",
+        healthReason: "ok",
+        healthDetail: null,
+        healthCheckedAt: null,
         createdAt: NOW,
         updatedAt: NOW,
       };
