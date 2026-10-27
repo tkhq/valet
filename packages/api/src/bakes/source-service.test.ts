@@ -36,7 +36,7 @@ import {
 } from "./source-service.js";
 import { RegistryCapacityError } from "./registry-health.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
-import { lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
+import { currentSourceHealthSnapshot, lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -522,6 +522,32 @@ describe("SourceService", () => {
     });
   });
 
+  describe("source health gauges", () => {
+    const rowFor = (kind: string, health: string) => currentSourceHealthSnapshot().find((r) => r.sourceKind === kind && r.health === health);
+
+    it("counts boundUnhealthy only for sources that matter, after setSourceHealth", async () => {
+      const bound = await seedRepoSource(db, { lastBoundAt: NOW });
+      const dormant = await seedRepoSource(db, { lastBoundAt: NOW - 8 * 24 * 60 * 60 * 1000, name: "acme/old", repoFullName: "acme/old" });
+      const svc = makeService();
+      await svc.setSourceHealth(dormant, "failing", "bake_failed", "x");
+      expect(rowFor("repo", "failing")).toMatchObject({ count: 1, boundUnhealthy: 0 });
+      await svc.setSourceHealth(bound, "failing", "bake_failed", "x");
+      expect(rowFor("repo", "failing")).toMatchObject({ count: 2, boundUnhealthy: 1 });
+    });
+
+    it("counts a base unhealthy-bound when a bound repo sits beneath it, and refreshes on syncActiveBuilds", async () => {
+      const baseId = await seedBaseSource(db, []);
+      await seedRepoSource(db, { parentId: baseId, lastBoundAt: NOW });
+      const svc = makeService();
+      await svc.setSourceHealth(baseId, "failing", "bake_failed", "x");
+      expect(rowFor("base", "failing")).toMatchObject({ count: 1, boundUnhealthy: 1 });
+      await db.update(imageSources).set({ health: "healthy", healthReason: "ok" }).where(eq(imageSources.id, baseId));
+      await svc.syncActiveBuilds();
+      expect(rowFor("base", "failing")).toBeUndefined();
+      expect(rowFor("base", "healthy")).toMatchObject({ count: 1, boundUnhealthy: 0 });
+    });
+  });
+
   describe("health notifications", () => {
     const ADMIN_COUNT = 2;
     beforeEach(async () => {
@@ -646,6 +672,35 @@ describe("SourceService", () => {
       await svc2.setSourceHealth(src, "healthy", "ok", null);
       const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
       expect(rows.filter((r) => r.title.includes("cannot be rebuilt")).every((r) => r.readAt !== null)).toBe(true);
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a source that goes dormant mid-episode drops the episode on recovery, so a later same-reason failure notifies again", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      await db.update(imageSources).set({ lastBoundAt: NOW - 8 * 24 * 60 * 60 * 1000 }).where(eq(imageSources.id, src));
+      t = NOW + 20 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      expect(await db.select().from(notifications)).toHaveLength(ADMIN_COUNT);
+      await db.update(imageSources).set({ lastBoundAt: t }).where(eq(imageSources.id, src));
+      t = NOW + 30 * 60_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "y");
+      expect(await db.select().from(notifications)).toHaveLength(2 * ADMIN_COUNT);
+    });
+
+    it("a fallback that opens the episode counts toward recovery even when the episode is short", async () => {
+      builder = new K8sFakeImageBuilder();
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.handleImageFallback({ sessionId: "s", sourceId: src, bakeId: "none", contract: 0, repoFullName: "acme/widgets" });
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "incompatible", healthReason: "contract" });
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
     });
 
     it("a short episode whose fallback was since cleared still gets a recovery notification (in-process record)", async () => {

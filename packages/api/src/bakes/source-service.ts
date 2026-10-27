@@ -86,6 +86,8 @@ import {
   recordRegistryOperation,
   startBakeSpan,
   updatePrebuildQueueSnapshot,
+  updateSourceHealthSnapshot,
+  type SourceHealthSnapshot,
   type PrebuildDimensions,
 } from "../observability/prebuild-lifecycle.js";
 
@@ -1061,6 +1063,7 @@ export class SourceService {
         : { healthDetail: trimmed })
       .where(eq(imageSources.id, sourceId));
     if (transition) {
+      await this.refreshSourceHealthSnapshot().catch((err) => console.error("source health snapshot refresh failed:", err));
       await this.notifyHealthTransition(sourceId, { health: row.health, reason: row.reason, checkedAt: row.checkedAt }, { health, reason, detail: trimmed, at })
         .catch((err) => console.error(`health notification for ${sourceId} failed:`, err));
     }
@@ -1087,7 +1090,12 @@ export class SourceService {
   ): Promise<void> {
     if (!this.attention) return;
     const source = await this.loadSource(sourceId).catch(() => null);
-    if (!source || !(await this.sourceMatters(source))) return;
+    if (!source) return;
+    if (!(await this.sourceMatters(source))) {
+      // Dormant: no notifications, but a recovery still drops the episode.
+      if (next.health === "healthy") this.episodes.delete(sourceId);
+      return;
+    }
     const name = source.repoFullName ?? source.name;
     const href = `/settings/organization/sandbox-images?source=${sourceId}`;
     const owner = { type: "org" as const, id: source.orgId };
@@ -1760,6 +1768,34 @@ export class SourceService {
       group.latest[row.status] = (group.latest[row.status] ?? 0) + 1;
     }
     updatePrebuildQueueSnapshot([...groups.values()]);
+    await this.refreshSourceHealthSnapshot();
+  }
+
+  /** Gauges for source health. One query over all sources; the "bound" test
+   * is `sourceMatters` evaluated in memory (a repo bound within the window,
+   * a base with such a repo beneath it) so there is no per-source query. */
+  private async refreshSourceHealthSnapshot(): Promise<void> {
+    const rows = await this.db.select({
+      id: imageSources.id,
+      kind: imageSources.kind,
+      parentId: imageSources.parentId,
+      health: imageSources.health,
+      reason: imageSources.healthReason,
+      lastBoundAt: imageSources.lastBoundAt,
+    }).from(imageSources);
+    const since = this.now() - BOUND_WINDOW_MS;
+    const basesWithBoundRepo = new Set<string>();
+    for (const r of rows) if (r.kind === "repo" && r.parentId && (r.lastBoundAt ?? 0) >= since) basesWithBoundRepo.add(r.parentId);
+    const groups = new Map<string, SourceHealthSnapshot>();
+    for (const r of rows) {
+      const key = `${r.kind}|${r.health}|${r.reason}`;
+      const group = groups.get(key) ?? { sourceKind: r.kind, health: r.health, reason: r.reason, count: 0, boundUnhealthy: 0 };
+      group.count += 1;
+      const matters = r.kind === "repo" ? (r.lastBoundAt ?? 0) >= since : r.kind === "base" && basesWithBoundRepo.has(r.id);
+      if (matters && UNHEALTHY.has(r.health)) group.boundUnhealthy += 1;
+      groups.set(key, group);
+    }
+    updateSourceHealthSnapshot([...groups.values()]);
   }
 
   /** One poll pass: syncs every `queued`/`building` row from
