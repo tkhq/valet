@@ -657,23 +657,32 @@ class OwnershipConditionObjectsApi extends FakeObjectsApi {
   }
 }
 
-/** Liveness fake that reports a pod uid for the first `present` calls, then null. */
+/** Liveness fake that reports a pod uid for the first `present` calls made
+ * while `gate()` is true, then null. Calls made while the gate is closed
+ * report null and do not count down, so a test can start the countdown at a
+ * chosen moment (for example, when the CR is deleted). */
 class CountdownLivenessApi implements PodLivenessApi {
   calls = 0;
-  constructor(private present: number) {}
+  gatedCalls = 0;
+  constructor(private present: number, private gate: () => boolean = () => true) {}
   async getPodUid(): Promise<string | null> {
     this.calls++;
-    return this.calls <= this.present ? "pod-uid" : null;
+    if (!this.gate()) return null;
+    this.gatedCalls++;
+    return this.gatedCalls <= this.present ? "pod-uid" : null;
   }
 }
 
-/** PVC fake that reports the claim for the first `present` calls, then null. */
+/** PVC fake with the same gated countdown as CountdownLivenessApi. */
 class CountdownPvcApi implements SandboxPvcApi {
   calls = 0;
-  constructor(private present: number) {}
+  gatedCalls = 0;
+  constructor(private present: number, private gate: () => boolean = () => true) {}
   async readPvc(): Promise<WorkspacePvcRead | null> {
     this.calls++;
-    return this.calls <= this.present ? { requestedStorage: "10Gi", capacityStorage: "10Gi", annotations: {} } : null;
+    if (!this.gate()) return null;
+    this.gatedCalls++;
+    return this.gatedCalls <= this.present ? { requestedStorage: "10Gi", capacityStorage: "10Gi", annotations: {} } : null;
   }
   async patchPvcStorage(): Promise<void> {}
 }
@@ -682,6 +691,7 @@ class CountdownPvcApi implements SandboxPvcApi {
  * crash loop, so create() takes the failed-create path. */
 class CrashLoopObjectsApi extends FakeObjectsApi {
   deleteCalls = 0;
+  deleted = false;
   cr: SandboxCRRead | null = null;
   override async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
     this.cr = { ...params.body, metadata: { ...params.body.metadata, uid: "cr-fresh", resourceVersion: "1",
@@ -695,6 +705,7 @@ class CrashLoopObjectsApi extends FakeObjectsApi {
   }
   override async deleteNamespacedCustomObject(): Promise<unknown> {
     this.deleteCalls++;
+    this.deleted = true;
     this.cr = null;
     return {};
   }
@@ -2603,8 +2614,10 @@ describe("create() waits for its own cleanup and for orphans", () => {
     vi.useFakeTimers();
     try {
       const objectsApi = new CrashLoopObjectsApi();
-      const liveness = new CountdownLivenessApi(3);
-      const pvc = new CountdownPvcApi(5);
+      // Both fakes report "absent" until the CR is deleted, so the pre-create
+      // orphan wait passes at once and only the post-destroy wait counts down.
+      const liveness = new CountdownLivenessApi(3, () => objectsApi.deleted);
+      const pvc = new CountdownPvcApi(5, () => objectsApi.deleted);
       const provider = new KubernetesSandboxProvider(
         { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness, pvcApi: pvc,
           podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
@@ -2616,8 +2629,10 @@ describe("create() waits for its own cleanup and for orphans", () => {
       expect(err).toBeInstanceOf(SandboxStartupError);
       expect((err as SandboxStartupError).kind).toBe("crash_loop");
       expect(objectsApi.deleteCalls).toBe(1);
-      expect(liveness.calls).toBeGreaterThanOrEqual(4);
-      expect(pvc.calls).toBeGreaterThanOrEqual(6);
+      // The pod is gone on the 4th post-delete read, the PVC on the 6th; the
+      // loop reads both each pass, so create() returned only after 6 passes.
+      expect(liveness.gatedCalls).toBe(6);
+      expect(pvc.gatedCalls).toBe(6);
     } finally {
       vi.useRealTimers();
     }
@@ -2625,19 +2640,25 @@ describe("create() waits for its own cleanup and for orphans", () => {
 
   it("gives up waiting after RESOURCE_GONE_TIMEOUT_MS and still returns the startup error", async () => {
     vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const objectsApi = new CrashLoopObjectsApi();
+      const liveness = new CountdownLivenessApi(Number.MAX_SAFE_INTEGER, () => objectsApi.deleted);
       const provider = new KubernetesSandboxProvider(
-        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: new CountdownLivenessApi(Number.MAX_SAFE_INTEGER),
-          pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness,
+          pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER, () => objectsApi.deleted), podStatusApi: crashLoopPodStatusApi,
+          secretsApi: new FakeSecretsApi() },
         providerCfg,
       );
       const outcome = provider.create({ workspace: "/w", sessionId: "s-stuck" }).then(() => "resolved", (e: unknown) => e);
-      // The stuck fakes also hold the pre-create orphan wait for its full
-      // timeout, so the failed-create wait starts after that.
-      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_TIMEOUT_MS * 2 + 1_000);
+      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_TIMEOUT_MS + 1_000);
       expect(await outcome).toBeInstanceOf(SandboxStartupError);
+      // Only the post-destroy wait was stuck; it polled until the deadline.
+      expect(liveness.gatedCalls).toBeGreaterThan(10);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("still present after 30000ms");
     } finally {
+      warn.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -2646,7 +2667,7 @@ describe("create() waits for its own cleanup and for orphans", () => {
     vi.useFakeTimers();
     try {
       const objectsApi = new CrashLoopObjectsApi();
-      const liveness = new CountdownLivenessApi(2);
+      const liveness = new CountdownLivenessApi(2, () => objectsApi.deleted);
       const provider = new KubernetesSandboxProvider(
         { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness,
           podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
@@ -2655,7 +2676,7 @@ describe("create() waits for its own cleanup and for orphans", () => {
       const outcome = provider.create({ workspace: "/w", sessionId: "s-nopvc" }).then(() => "resolved", (e: unknown) => e);
       await vi.advanceTimersByTimeAsync(RESOURCE_GONE_POLL_MS * 4);
       expect(await outcome).toBeInstanceOf(SandboxStartupError);
-      expect(liveness.calls).toBeGreaterThanOrEqual(3);
+      expect(liveness.gatedCalls).toBe(3); // 2 present + 1 gone, all after the delete
     } finally {
       vi.useRealTimers();
     }
@@ -2699,14 +2720,25 @@ describe("create() waits for its own cleanup and for orphans", () => {
   });
 
   it("does not wait at all when the CR already exists (adopt path)", async () => {
-    const objectsApi = new ResourceAdoptingObjectsApi(buildSandboxManifest(providerCfg, "s-adopt", {}));
-    const liveness = new CountdownLivenessApi(Number.MAX_SAFE_INTEGER);
-    const provider = new KubernetesSandboxProvider(
-      { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness,
-        pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), secretsApi: new FakeSecretsApi() },
-      providerCfg,
-    );
-    await provider.create({ workspace: "/w", sessionId: "s-adopt" });
-    expect(objectsApi.calls[0]).toBe("get");
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new ResourceAdoptingObjectsApi(buildSandboxManifest(providerCfg, "s-adopt", {}));
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi,
+          livenessApi: new CountdownLivenessApi(Number.MAX_SAFE_INTEGER),
+          pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      const waitSpy = vi.spyOn(provider as unknown as { awaitSameNameResourcesGone: () => Promise<boolean> }, "awaitSameNameResourcesGone");
+      let settled = false;
+      const pending = provider.create({ workspace: "/w", sessionId: "s-adopt" }).then(() => { settled = true; });
+      // No timer advance: a wrongly-running wait would sleep RESOURCE_GONE_POLL_MS and stay pending.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      await pending;
+      expect(waitSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
