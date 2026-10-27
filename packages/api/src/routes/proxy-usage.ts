@@ -1,6 +1,9 @@
 /**
  * `/api/proxy/usage/summary`, `/api/proxy/requests`, `/api/proxy/requests/:id`
  *
+ * Also `DELETE /api/proxy/keys/:id`: personal key revoke for `valet proxy
+ * remove` (`docs/specs/2026-10-27-cli-proxy-setup-design.md`).
+ *
  * Read surface for the LLM recording gateway. Ownership gating:
  *   - the personal usage surface sees only rows owned by the current user.
  *   - team-owned rows are excluded from the personal usage surface.
@@ -11,9 +14,11 @@
  * `buildAuthMiddleware`) so `c.var.user` is always populated.
  */
 import { Hono } from "hono";
-import { and, desc, eq, gte, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { llmProxyRequests } from "../schema/index.js";
+import { apikey, llmProxyRequests } from "../schema/index.js";
+import { requireActingUser } from "../middleware/auth.js";
+import { isProxyScopedKeyMetadata, parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import { isOrgAdmin, getProxySettings, setProxySettings } from "../services/org.js";
 import type {
   ProxyDayBucket,
@@ -65,6 +70,33 @@ proxyUsageRouter.put("/settings", async (c) => {
     mode: parsed.mode as "centralized" | "passthrough" | undefined,
   });
   return c.json(body);
+});
+
+/** DELETE `/api/proxy/keys/:id` — revoke a proxy key the caller owns
+ * (`valet proxy remove`). The key is minted on the device sign-in flow
+ * (`routes/cli-device.ts`, purpose `proxy-key`). A CLI token may call this
+ * route (`AGENT_WRITES`), so it deletes only proxy-scoped keys: an agent
+ * cannot revoke the person's other keys. Any other key answers 404, so the
+ * route never confirms a key exists to a caller who cannot revoke it. */
+proxyUsageRouter.delete("/keys/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "Proxy keys are personal. Sign in as yourself, not with a team key." }, 403);
+  const db = c.var.providers.db;
+  const id = c.req.param("id");
+  const [row] = await db
+    .select({ referenceId: apikey.referenceId, teamId: apikey.teamId, metadata: apikey.metadata })
+    .from(apikey)
+    .where(eq(apikey.id, id))
+    .limit(1);
+  const metadata = parseApiKeyMetadata(row?.metadata);
+  const ownProxyKey = row
+    && row.referenceId === user.id
+    && row.teamId === null
+    && teamIdFromApiKeyMetadata(metadata) === undefined
+    && isProxyScopedKeyMetadata(metadata);
+  if (!ownProxyKey) return c.json({ error: "Proxy key not found. It may already be revoked." }, 404);
+  await db.delete(apikey).where(and(eq(apikey.id, id), eq(apikey.referenceId, user.id), isNull(apikey.teamId)));
+  return c.body(null, 204);
 });
 
 /** Parse the `?window=` query parameter into bounded milliseconds. */

@@ -26,7 +26,7 @@ vi.mock("~/api/client", () => ({
 
 const { CliDevicePage } = await import("./cli.device");
 
-const INFO: CliDeviceInfo = { account: "me@valet.test", device: "laptop", user_code: "BCDF-GHJK", access: ["Act as you in Valet"], limits: ["It cannot approve requests."] };
+const INFO: CliDeviceInfo = { account: "me@valet.test", device: "laptop", user_code: "BCDF-GHJK", purpose: "login", access: ["Act as you in Valet"], limits: ["It cannot approve requests."] };
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -58,6 +58,22 @@ describe("CLI device sign-in page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
     await waitFor(() => expect(decideCliDevice).toHaveBeenCalledWith("BCDF-GHJK", true));
     expect(await screen.findByText(/close this tab/)).toBeTruthy();
+  });
+
+  it("names the proxy key and its limits for a valet proxy setup request", async () => {
+    cliDevice.mockResolvedValue({
+      ...INFO, purpose: "proxy-key", key_name: "claude-code@laptop",
+      access: ["Send model calls through the Valet proxy"], limits: ["Disconnecting the CLI does not revoke it."],
+    });
+    decideCliDevice.mockResolvedValue({ ok: true });
+    renderPage();
+    enter("BCDF-GHJK");
+    expect(await screen.findByText("claude-code@laptop")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Create a Valet proxy key" })).toBeTruthy();
+    expect(screen.getByText("valet proxy setup")).toBeTruthy();
+    expect(screen.getByText("Disconnecting the CLI does not revoke it.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    expect(await screen.findByText(/receives the key/)).toBeTruthy();
   });
 
   it("says when no sign-in waits for the code, and lets the person try again", async () => {

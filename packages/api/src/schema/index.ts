@@ -2681,6 +2681,12 @@ export const cliDeviceRequests = pgTable("cli_device_requests", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
   lastPollAt: bigint("last_poll_at", { mode: "number" }),
+  /** `login` (`valet login`) or `proxy-key` (`valet proxy setup`). */
+  purpose: text("purpose").$type<"login" | "proxy-key">().notNull().default("login"),
+  /** The API key name a `proxy-key` request creates. */
+  keyName: text("key_name"),
+  /** The CLI's user on a `proxy-key` request. Only this user can approve it. */
+  requestedBy: text("requested_by").references(() => users.id, { onDelete: "cascade" }),
 }, (t) => [
   uniqueIndex("cli_device_requests_user_code").on(t.userCode),
   index("cli_device_requests_expires").on(t.expiresAt),

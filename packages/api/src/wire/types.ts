@@ -6664,9 +6664,27 @@ export interface CliDeviceInfo {
   /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
   device: string;
   user_code: string;
+  /** `login` for `valet login`; `proxy-key` for `valet proxy setup`. */
+  purpose: CliDevicePurpose;
+  /** The name of the key a `proxy-key` request creates. */
+  key_name?: string;
   access: string[];
   /** What the CLI cannot do. */
   limits: string[];
+}
+
+export type CliDevicePurpose = "login" | "proxy-key";
+
+/** `POST /api/cli/device/token` response for an approved `proxy-key`
+ * request. The secret `key` appears only in this response. */
+export interface CliProxyKeyResponse {
+  proxy_key: {
+    id: string;
+    key: string;
+    name: string;
+    /** Epoch ms. */
+    created_at: number;
+  };
 }
 
 /** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */
