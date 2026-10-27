@@ -155,6 +155,8 @@ export {
   assertSafeExecId,
   looksSignalKilled,
   podLivenessApiAdapter,
+  RESOURCE_GONE_POLL_MS,
+  RESOURCE_GONE_TIMEOUT_MS,
   sandboxSecretsApiAdapter,
   type KubernetesSandboxDeps,
   type KubernetesSandboxProviderDeps,

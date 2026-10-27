@@ -161,6 +161,11 @@ import {
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+/** Upper bound on waiting for a same-name pod and PVC to disappear, both
+ * after our own failed-create cleanup and before creating over an orphan
+ * left by an earlier delete (spec 8.2, 8.3). */
+export const RESOURCE_GONE_TIMEOUT_MS = 30_000;
+export const RESOURCE_GONE_POLL_MS = 500;
 
 function reportAdoptedWorkspacePvcError(args: {
   sandboxName: string;
@@ -1057,6 +1062,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
     const { cpu, memory, scratch } = opts.resources ?? {};
+    // Spec 8.3: a pod or PVC with our name whose Sandbox was deleted is
+    // being garbage-collected. Creating over it makes the controller reject
+    // the new CR ("is owned by Sandbox/... not by sandbox"). Only relevant
+    // when no CR exists; an existing CR is the adopt path and owns them.
+    // `previous` is this call's own GET of the CR above.
+    if (previous === null) {
+      await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
+    }
     let applyResult: Awaited<ReturnType<typeof applySandbox>>;
     try {
       applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
@@ -1258,7 +1271,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       });
     } catch (err) {
       const ownsPendingCreate = applied.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY] === neverReadyOwner;
-      if (err instanceof SandboxStartupError &&
+      if (err instanceof SandboxStartupError && err.kind !== "ownership" &&
         (!adopted || ownsPendingCreate)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
@@ -1276,6 +1289,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         await this.destroy(name).catch((cleanupErr) => {
           console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
         });
+        // Spec 8.2: do not hand control back while the pod and PVC we just
+        // orphaned are still terminating; the next create would race the
+        // controller's garbage collection.
+        await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
       }
       throw err;
     }
@@ -1284,6 +1301,28 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
+  }
+
+  /** Polls until no pod named `name` and no PVC named `workspace-<name>`
+   * exist, or `timeoutMs` passes. Returns true when both are gone. The pod
+   * check uses the liveness API; the PVC check is skipped when no pvcApi is
+   * wired. Never throws: a read error counts as "still present" and the
+   * deadline bounds the wait. */
+  private async awaitSameNameResourcesGone(name: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    const pvcName = workspacePvcName(name);
+    for (;;) {
+      const podPresent = await this.deps.livenessApi.getPodUid(this.cfg.namespace, name).then((uid) => uid !== null, () => true);
+      const pvcPresent = this.deps.pvcApi
+        ? await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName).then((pvc) => pvc !== null, () => true)
+        : false;
+      if (!podPresent && !pvcPresent) return true;
+      if (Date.now() >= deadline) {
+        console.warn(`k8s sandbox ${name}: pod or PVC still present after ${timeoutMs}ms; continuing`);
+        return false;
+      }
+      await sleep(RESOURCE_GONE_POLL_MS);
+    }
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine

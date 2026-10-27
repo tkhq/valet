@@ -10,7 +10,7 @@ import { newExecId } from "@valet/engine/wakeups-ids";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
-import { SANDBOX_CR_API_VERSION } from "../src/index.js";
+import { RESOURCE_GONE_POLL_MS, RESOURCE_GONE_TIMEOUT_MS, SANDBOX_CR_API_VERSION, type SandboxPvcApi, type WorkspacePvcRead } from "../src/index.js";
 import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName, SESSION_LABEL_KEY } from "../src/manifest.js";
 import { RUNTIME_STATE_ANNOTATION } from "../src/runtime-state.js";
 import { ROOT_TMPDIR_PREFIX, wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
@@ -657,6 +657,70 @@ class OwnershipConditionObjectsApi extends FakeObjectsApi {
   }
 }
 
+/** Liveness fake that reports a pod uid for the first `present` calls, then null. */
+class CountdownLivenessApi implements PodLivenessApi {
+  calls = 0;
+  constructor(private present: number) {}
+  async getPodUid(): Promise<string | null> {
+    this.calls++;
+    return this.calls <= this.present ? "pod-uid" : null;
+  }
+}
+
+/** PVC fake that reports the claim for the first `present` calls, then null. */
+class CountdownPvcApi implements SandboxPvcApi {
+  calls = 0;
+  constructor(private present: number) {}
+  async readPvc(): Promise<WorkspacePvcRead | null> {
+    this.calls++;
+    return this.calls <= this.present ? { requestedStorage: "10Gi", capacityStorage: "10Gi", annotations: {} } : null;
+  }
+  async patchPvcStorage(): Promise<void> {}
+}
+
+/** Objects API whose fresh CR never becomes ready: pod status reports a
+ * crash loop, so create() takes the failed-create path. */
+class CrashLoopObjectsApi extends FakeObjectsApi {
+  deleteCalls = 0;
+  cr: SandboxCRRead | null = null;
+  override async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
+    this.cr = { ...params.body, metadata: { ...params.body.metadata, uid: "cr-fresh", resourceVersion: "1",
+      annotations: { ...params.body.metadata.annotations, "agents.x-k8s.io/pod-name": "pod-fresh" } },
+      status: { conditions: [{ type: "Ready", status: "False", reason: "PodFailed" }] } };
+    return this.cr;
+  }
+  override async getNamespacedCustomObject(): Promise<unknown> {
+    if (!this.cr) throw new FakeApiError(404, "not found");
+    return this.cr;
+  }
+  override async deleteNamespacedCustomObject(): Promise<unknown> {
+    this.deleteCalls++;
+    this.cr = null;
+    return {};
+  }
+}
+
+/** The stock FakeObjectsApi answers every GET with a Ready CR, which would
+ * make the pre-create orphan check take the adopt path. This one is absent
+ * until create() is called, then Ready. */
+class AbsentUntilCreatedObjectsApi extends FakeObjectsApi {
+  private created: unknown = null;
+  override async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
+    this.created = await super.createNamespacedCustomObject(params);
+    return this.created;
+  }
+  override async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+    if (!this.created) throw new FakeApiError(404, "not found");
+    return super.getNamespacedCustomObject(params);
+  }
+}
+
+const crashLoopPodStatusApi: SandboxPodStatusApi = {
+  async getPodStatus() {
+    return { phase: "Running", containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }] };
+  },
+};
+
 /** Existing CR with live compute. Replacement updates the template, not the pod. */
 class ResourceAdoptingObjectsApi extends FakeObjectsApi {
   cr: SandboxCRRead;
@@ -1180,7 +1244,7 @@ describe("create() resource adoption and pod rollout", () => {
       expect(err).toBeInstanceOf(SandboxStartupError);
       expect((err as SandboxStartupError).kind).toBe("ownership");
       expect((err as SandboxStartupError).message).toContain("is owned by Sandbox/");
-      // Task 9 asserts deleteCalls === 0 once create() keeps the CR for kind "ownership".
+      expect(objectsApi.deleteCalls).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -2531,5 +2595,118 @@ describe("KubernetesSandboxProvider eviction protection", () => {
 
     expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: false });
     expect(pods.patches).toHaveLength(0);
+  });
+});
+
+describe("create() waits for its own cleanup and for orphans", () => {
+  it("after a failed create, waits until the pod and PVC are gone before returning the startup error", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new CrashLoopObjectsApi();
+      const liveness = new CountdownLivenessApi(3);
+      const pvc = new CountdownPvcApi(5);
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness, pvcApi: pvc,
+          podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      const outcome = provider.create({ workspace: "/w", sessionId: "s-cleanup" }).then(() => "resolved", (e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_POLL_MS * 8);
+      const err = await outcome;
+      expect(err).toBeInstanceOf(SandboxStartupError);
+      expect((err as SandboxStartupError).kind).toBe("crash_loop");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(liveness.calls).toBeGreaterThanOrEqual(4);
+      expect(pvc.calls).toBeGreaterThanOrEqual(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up waiting after RESOURCE_GONE_TIMEOUT_MS and still returns the startup error", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new CrashLoopObjectsApi();
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: new CountdownLivenessApi(Number.MAX_SAFE_INTEGER),
+          pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      const outcome = provider.create({ workspace: "/w", sessionId: "s-stuck" }).then(() => "resolved", (e: unknown) => e);
+      // The stuck fakes also hold the pre-create orphan wait for its full
+      // timeout, so the failed-create wait starts after that.
+      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_TIMEOUT_MS * 2 + 1_000);
+      expect(await outcome).toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits on the pod only when no pvcApi is configured", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new CrashLoopObjectsApi();
+      const liveness = new CountdownLivenessApi(2);
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness,
+          podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      const outcome = provider.create({ workspace: "/w", sessionId: "s-nopvc" }).then(() => "resolved", (e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_POLL_MS * 4);
+      expect(await outcome).toBeInstanceOf(SandboxStartupError);
+      expect(liveness.calls).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not delete the CR when the startup error kind is ownership", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new OwnershipConditionObjectsApi(); // from Task 7
+      const provider = makeProvider(new FakeSecretsApi(), objectsApi);
+      const outcome = provider.create({ workspace: "/w", sessionId: "s-own2" }).then(() => "resolved", (e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(61_000);
+      const err = await outcome;
+      expect((err as SandboxStartupError).kind).toBe("ownership");
+      expect(objectsApi.deleteCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("before creating a fresh CR, waits for an orphaned same-name pod or PVC to disappear", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new AbsentUntilCreatedObjectsApi(); // 404 on get until created; Ready=True afterwards
+      const liveness = new CountdownLivenessApi(2);
+      const pvc = new CountdownPvcApi(2);
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness, pvcApi: pvc, secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      const pending = provider.create({ workspace: "/w", sessionId: "s-orphan" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(objectsApi.createCalled).toBe(false); // still waiting on the orphan
+      await vi.advanceTimersByTimeAsync(RESOURCE_GONE_POLL_MS * 3);
+      await pending;
+      expect(objectsApi.createCalled).toBe(true);
+      expect(liveness.calls).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not wait at all when the CR already exists (adopt path)", async () => {
+    const objectsApi = new ResourceAdoptingObjectsApi(buildSandboxManifest(providerCfg, "s-adopt", {}));
+    const liveness = new CountdownLivenessApi(Number.MAX_SAFE_INTEGER);
+    const provider = new KubernetesSandboxProvider(
+      { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness,
+        pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), secretsApi: new FakeSecretsApi() },
+      providerCfg,
+    );
+    await provider.create({ workspace: "/w", sessionId: "s-adopt" });
+    expect(objectsApi.calls[0]).toBe("get");
   });
 });
