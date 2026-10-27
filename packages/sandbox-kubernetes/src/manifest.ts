@@ -60,6 +60,24 @@ export const SCRATCH_PLACEHOLDER_COMMAND = [
   `set -eu\n${scratchStartScript()}exec tail -f /dev/null`,
 ];
 
+/**
+ * Image runtime contract (image-pipeline-health design, section 5). Names the
+ * set of things this pod spec assumes exist inside a sandbox image. Value 3
+ * is the image built from docker/Dockerfile.sandbox-k8s today: /usr/bin/tini,
+ * /start-headless.sh, /start-full.sh, /usr/local/bin/valet-browser-client,
+ * and HOME_LAYOUT_VERSION 2. The Dockerfile stamps the same number as
+ * `LABEL io.valet.sandbox.contract`.
+ *
+ * Maintainer rule: a change that makes this module or the start scripts
+ * depend on something new in the image bumps SANDBOX_IMAGE_CONTRACT and the
+ * Dockerfile label together. If old images cannot run the new pod spec at
+ * all, it also bumps MIN_IMAGE_CONTRACT, which invalidates every bake below
+ * it at once (sessions fall back until the cascade finishes).
+ */
+export const SANDBOX_IMAGE_CONTRACT = 3;
+/** The lowest contract the current pod spec can run. */
+export const MIN_IMAGE_CONTRACT = 3;
+
 export const SCRATCH_INIT_NAME = "valet-scratch-init";
 
 /** The scratch forms the api accepts (`validateScratchRequest`): whole
