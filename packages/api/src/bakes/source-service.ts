@@ -1050,6 +1050,34 @@ export class SourceService {
     return ["stale", "ok", null];
   }
 
+  /**
+   * The one decision for "does the current bake need a contract rebake".
+   * Only an identity-matching (and, for repos, sha-matching) incompatible
+   * bake qualifies. `reread`: contract columns are null (label read failed),
+   * so re-read before rebuilding. `stuck`: it is already a contract rebake and
+   * still incompatible, so another rebake would loop. `rebake`: build again on
+   * a fresh `-c<contract>` tag. Schedulers and builders share this so the
+   * decision cannot drift.
+   */
+  private contractRebakeFor(current: BakeRow | null, identity: string, sha?: string | null): "rebake" | "reread" | "stuck" | null {
+    if (!current || current.identityHash !== identity) return null;
+    if (sha !== undefined && current.commitSha !== sha) return null;
+    if (compatible(current)) return null;
+    if (current.contractSource === null) return "reread";
+    if (current.imageRef.endsWith(`-c${MIN_IMAGE_CONTRACT}`)) return "stuck";
+    return "rebake";
+  }
+
+  /** Scheduler pre-step: a pushed bake with null contract columns gets its
+   * label re-read and stamped, then is reloaded. Returns the (possibly
+   * updated) bake and the read error if the read failed again. */
+  private async rereadContract(current: BakeRow | null, source: ImageSourceRow): Promise<{ current: BakeRow | null; error: string | null }> {
+    if (!current || current.contractSource !== null) return { current, error: null };
+    const read = await this.stampContract(current, source).catch((err): ContractRead => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    const reloaded = (await this.db.select().from(bakes).where(eq(bakes.id, current.id)))[0] ?? current;
+    return { current: reloaded, error: read.ok ? null : read.error };
+  }
+
   /** Newest bake of any status for a source, or null. */
   private async newestBake(sourceId: string): Promise<BakeRow | null> {
     const rows = await this.db.select().from(bakes).where(eq(bakes.sourceId, sourceId)).orderBy(desc(bakes.createdAt)).limit(1);
@@ -1227,8 +1255,9 @@ export class SourceService {
     // Plan refinement 1: a contract rebake keeps the identity (same inputs)
     // but must land on a fresh tag, or nodes with IfNotPresent keep serving
     // the cached old layer.
+    const contractRebake = opts.contractRebake ?? this.contractRebakeFor(await this.currentBake(source.id), identity) === "rebake";
     const taggedRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
-    const imageRef = opts.contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
+    const imageRef = contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
 
     const now = this.now();
     const row: BakeRow = {
@@ -1400,6 +1429,13 @@ export class SourceService {
     return parentBase.status === "defer";
   }
 
+  /** Like `repoBakeDefers` but for any source with a base parent (a base
+   * whose parent is another base must not FROM an incompatible/stale layer). */
+  private async parentBaseDefers(source: ImageSourceRow): Promise<boolean> {
+    if (source.kind !== "base" && source.kind !== "repo") return false;
+    return (await this.resolveParentBase(source)).status === "defer";
+  }
+
   private async anonymousImageBakesAllowed(orgId: string): Promise<boolean> {
     const [org] = await this.db.select({ allowed: orgs.allowAnonymousImageBakes })
       .from(orgs).where(eq(orgs.id, orgId)).limit(1);
@@ -1458,6 +1494,7 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
+    const contractRebake = opts.contractRebake ?? this.contractRebakeFor(await this.currentBake(source.id), identity, head.sha) === "rebake";
     const taggedRef = imageRefFor(
       builder.backend,
       source.id,
@@ -1467,7 +1504,7 @@ export class SourceService {
       identity,
       this.env.VALET_PREBUILD_REGISTRY,
     );
-    const imageRef = opts.contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
+    const imageRef = contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
     const now = this.now();
     const row: BakeRow = {
       id: newBakeId(this.newId),
@@ -1867,14 +1904,24 @@ export class SourceService {
     const children = await this.db
       .select()
       .from(imageSources)
-      .where(and(eq(imageSources.parentId, sourceId), eq(imageSources.kind, "repo")));
+      .where(and(eq(imageSources.parentId, sourceId), inArray(imageSources.kind, ["repo", "base"])));
 
     for (const child of children) {
       try {
         if (this.schedulingBlocked(child)) continue;
         // Defer if the just-pushed base bake is still not consistent (e.g. the
         // base already has a newer pending rebake).
-        if (await this.repoBakeDefers(child)) continue;
+        if (await this.parentBaseDefers(child)) continue;
+
+        if (child.kind === "base") {
+          const baseIdent = this.baseIdentity(child, await this.parentIdentity(child));
+          const baseCurrent = await this.currentBake(child.id);
+          if (baseCurrent && baseCurrent.identityHash === baseIdent && compatible(baseCurrent)) continue;
+          if (await this.hasActiveBake(child.id)) continue;
+          console.log(`prebuild cascade: kick ${child.name}: parent base bake pushed`);
+          await this.startBake(child.id, "cascade");
+          continue;
+        }
 
         await this.repoBakeToken(child);
         const owner = ownerOf(child.repoFullName ?? "");
@@ -1955,13 +2002,27 @@ export class SourceService {
 
   private async maybeScheduleBase(source: ImageSourceRow): Promise<void> {
     if (this.schedulingBlocked(source)) return;
+    // A base parented at another base waits for that parent's consistent,
+    // compatible bake; the cascade starts it when the parent pushes.
+    if (await this.parentBaseDefers(source)) {
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
+      console.log(`prebuild scheduler: defer ${source.name}: waiting for parent base bake`);
+      return;
+    }
     const parentIdent = await this.parentIdentity(source);
     const identity = this.baseIdentity(source, parentIdent);
-    const current = await this.currentBake(source.id);
+    const reread = await this.rereadContract(await this.currentBake(source.id), source);
+    const current = reread.current;
     if (current && current.identityHash === identity && compatible(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
       await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
+      return;
+    }
+    const kind = this.contractRebakeFor(current, identity);
+    if (kind === "reread") {
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
     // Skip when a base bake is already in flight — a prior scheduler tick may
@@ -1972,12 +2033,16 @@ export class SourceService {
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    const contractRebake = Boolean(current && current.identityHash === identity && !compatible(current));
-    recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : current ? "parent_changed" : "miss");
+    if (kind === "stuck") {
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
+      return;
+    }
+    recordPrebuildDecision(this.dimensions(source), kind === "rebake" ? "contract_changed" : current ? "parent_changed" : "miss");
     // Health is written only after startBake resolves: a throw goes to the
     // pass's catch (failing/<reason>) without flapping through pending first.
     const newest = await this.newestBake(source.id);
-    await this.startBake(source.id, "scheduler", { contractRebake });
+    await this.startBake(source.id, "scheduler");
     await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
   }
 
@@ -2020,11 +2085,18 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const current = await this.currentBake(source.id);
+    const reread = await this.rereadContract(await this.currentBake(source.id), source);
+    const current = reread.current;
     if (current && current.commitSha === head.sha && current.identityHash === identity && compatible(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
       await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
+      return;
+    }
+    const kind = this.contractRebakeFor(current, identity, head.sha);
+    if (kind === "reread") {
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
     // Skip when a bake is already in flight — a cascade (or a prior scheduler
@@ -2035,14 +2107,18 @@ export class SourceService {
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    const contractRebake = Boolean(current && current.commitSha === head.sha && current.identityHash === identity && !compatible(current));
-    recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
+    if (kind === "stuck") {
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
+      return;
+    }
+    recordPrebuildDecision(this.dimensions(source), kind === "rebake" ? "contract_changed" : !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
     const newest = await this.newestBake(source.id);
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
     try {
-      await this.startBake(source.id, "scheduler", { contractRebake });
+      await this.startBake(source.id, "scheduler");
       await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
     } catch (err) {
       // A newly declared/changed `baseSetup` surfaces here on the first pass:

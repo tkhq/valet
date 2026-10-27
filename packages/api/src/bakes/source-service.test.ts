@@ -984,6 +984,81 @@ describe("SourceService", () => {
       await svc.runSchedulerPass();
       expect(builder.specs).toHaveLength(0);
     });
+
+    describe("fix round", () => {
+      async function pushLast(svc: SourceService): Promise<void> {
+        builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
+        await svc.syncActiveBuilds();
+      }
+
+      it("cascade starts an incompatible identity-matching child on a -c3 tag after its base pushes a -c3 rebake", async () => {
+        const baseId = await seedBaseSource(db, []);
+        const svc = makeService();
+        const baseIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, baseId)))[0], null);
+        await seedBake(db, baseId, { id: "base-old", identityHash: baseIdentity, imageRef: "valet-prebuild/base:x", contractVersion: 0, contractSource: "missing" });
+        const repoId = await seedRepoSource(db, { parentId: baseId });
+        const repoRow = (await db.select().from(imageSources).where(eq(imageSources.id, repoId)))[0];
+        const childIdentity = svc.identityHash(repoRow, baseIdentity, RESOLVED_NPM_RECIPE);
+        await seedBake(db, repoId, { id: "repo-old", commitSha: currentSha, identityHash: childIdentity, imageRef: "valet-prebuild/acme-widgets:old", contractVersion: 0, contractSource: "missing" });
+        await svc.runSchedulerPass();
+        expect(builder.specs.map((s) => s.kind)).toEqual(["base"]);
+        expect(builder.specs[0].imageRef).toMatch(/-c3$/);
+        await pushLast(svc);
+        const repoSpecs = builder.specs.filter((s) => s.kind !== "base");
+        expect(repoSpecs).toHaveLength(1);
+        expect(repoSpecs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      });
+
+      it("a pushed bake with null contract columns and a failing reader stays contract_unknown with no bake, then becomes a hit once the read succeeds", async () => {
+        const src = await seedRepoSource(db);
+        const probe = makeService();
+        const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        const identity = probe.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+        await seedBake(db, src, { commitSha: currentSha, identityHash: identity });
+        const failing = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+        await failing.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const mid = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(mid.health).toBe("stale");
+        expect(mid.healthReason).toBe("contract_unknown");
+        expect(mid.healthDetail).toContain("registry 503");
+        const ok = makeService({ contractReader: async () => ({ ok: true, version: 3 }) });
+        await ok.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(after.health).toBe("healthy");
+      });
+
+      it("a -c3 bake that is still incompatible is not rebaked again", async () => {
+        const src = await seedRepoSource(db);
+        const svc = makeService();
+        const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+        await seedBake(db, src, { commitSha: currentSha, identityHash: identity, imageRef: `valet-prebuild/acme-widgets:head-c${MIN_IMAGE_CONTRACT}`, contractVersion: null, contractSource: "missing" });
+        await svc.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(after.health).toBe("incompatible");
+        expect(after.healthReason).toBe("contract");
+      });
+
+      it("a nested base defers behind an incompatible parent base, then the cascade bakes it FROM the new parent ref", async () => {
+        const defaultId = await seedBaseSource(db, []);
+        const svc = makeService();
+        const defaultIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, defaultId)))[0], null);
+        await seedBake(db, defaultId, { id: "def-old", identityHash: defaultIdentity, imageRef: "valet-prebuild/base:def", contractVersion: 0, contractSource: "missing" });
+        const synthId = await seedBaseSource(db, ["apt-get install -y jq"], { parentId: defaultId, name: "synthetic base", profile: "headless" });
+        await svc.runSchedulerPass();
+        expect(builder.specs.map((s) => s.configId)).toEqual([defaultId]);
+        const synth = (await db.select().from(imageSources).where(eq(imageSources.id, synthId)))[0];
+        expect(synth.healthReason).toBe("waiting_for_base");
+        await pushLast(svc);
+        expect(builder.specs).toHaveLength(2);
+        expect(builder.specs[1].configId).toBe(synthId);
+        expect(builder.specs[0].imageRef).toMatch(/-c3$/);
+        expect(builder.specs[1].baseImage).toBe(builder.specs[0].imageRef);
+      });
+    });
   });
 
   describe("runSchedulerPass parent-first defer (derivation invariant)", () => {
