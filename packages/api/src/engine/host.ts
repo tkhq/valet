@@ -92,7 +92,7 @@ import {
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { repoBakeCompatibility, type ImageFallbackEvent } from "../prebuilds/resolve.js";
 import { recordImageFallback } from "../observability/image-fallback-metrics.js";
 import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
@@ -550,6 +550,16 @@ export function codingPromptOptions(
  * request left the session without `/scratch`. Empty when nothing dropped. */
 export function scratchWarningPrompt(warning: string | undefined): string {
   return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
+}
+
+/** Spec 7.2. Appended to the system prompt at build time when the eager
+ * compatibility check says the repo image is incompatible, so it repeats on
+ * every turn of that build; a note that disappears mid-task is worse than
+ * one that repeats. */
+export function imageFallbackPrompt(repoFullName: string | undefined): string {
+  return repoFullName
+    ? `\n\n## Startup warning\n\nPrebuilt dependencies for \`${repoFullName}\` are unavailable right now because the repo image is being rebuilt. The workspace is checked out; install what you need.`
+    : "";
 }
 
 export interface SessionMeta {
@@ -1243,6 +1253,7 @@ export class EngineHost {
     // SandboxCreateOpts (caps/mounts/exec identity), never which image is
     // resolved.
     const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const dockerFlag = meta.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
@@ -1395,7 +1406,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1434,7 +1445,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1469,6 +1480,13 @@ export class EngineHost {
     // triggered the build. The system prompt carries it for the model.
     if (repoFlags.scratchWarning) {
       await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
+    }
+    if (fallbackRepo) {
+      await this.noteSessionWarning(
+        session,
+        `Running on the stock image: the \`${fallbackRepo}\` image failed its compatibility check and is being rebuilt. Prebuilt dependencies are unavailable until then.`,
+        meta.warningThreadKey ?? "web:default",
+      );
     }
 
     extras.bindSession(session);
@@ -2358,6 +2376,14 @@ export class EngineHost {
       console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
       return [];
     }
+  }
+
+  /** The primary repo's full name when its newest pushed bake would fail the
+   * contract gate (one DB read), else undefined. Never throws. */
+  private async repoImageFallbackRepo(meta: SessionMeta): Promise<string | undefined> {
+    if (!meta.repos?.length) return undefined;
+    const check = await repoBakeCompatibility(this.opts.db, meta, this.opts.sandboxProvider);
+    return check && !check.compatible ? check.info.repoFullName : undefined;
   }
 
   /**
@@ -4393,6 +4419,7 @@ export class EngineHost {
     // claim while REST sessions honored the declaration. Best-effort: any
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     if (repoFlags.outcome === "error") {
       opts.startupWarnings?.push(
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
@@ -4473,7 +4500,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4618,6 +4645,7 @@ export class EngineHost {
       ownerId: opts.owner.id,
     };
     const meta: SessionMeta = this.opts.db ? await loadSessionMeta(this.opts.db, metaSource) : metaSource;
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
@@ -4672,7 +4700,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name

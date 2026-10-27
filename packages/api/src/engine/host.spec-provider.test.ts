@@ -457,6 +457,58 @@ describe("EngineHost buildSpecProvider", () => {
     expect(events).toHaveLength(1);
   });
 
+  describe("startup warning", () => {
+    async function seed(bakeIds: Array<{ id: string; contractVersion: number; contractSource: "label" | "missing" }>) {
+      const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
+      api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
+      const now = Date.now();
+      await api.providers.db.insert(imageSources).values({
+        id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
+        setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
+        schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      for (const [i, b] of bakeIds.entries()) {
+        await api.providers.db.insert(bakes).values({
+          id: b.id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${b.id}`, status: "pushed" as const,
+          builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
+          startedAt: now + i, finishedAt: now + i, createdAt: now + i, contractVersion: b.contractVersion, contractSource: b.contractSource,
+        });
+      }
+      const sessionId = "fb-warn-session";
+      await insertSession(api.providers.db, sessionId);
+      const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
+      return { sessionId, meta, host: api.providers.engineHost };
+    }
+    const noteCount = async (sessionId: string, threadId: string) =>
+      ((await api!.providers.engineStore.getThreadSnapshot(sessionId, threadId))?.entries ?? [])
+        .filter((e) => e.type === "message" && e.role === "system" && String(e.content).includes("failed its compatibility check")).length;
+
+    it("a session that falls back gets the startup warning in its system prompt and one thread note", async () => {
+      const { sessionId, meta, host } = await seed([{ id: "pb-bad", contractVersion: 0, contractSource: "missing" }]);
+      const session = await host.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      const prompt = session.options.systemPrompt ?? "";
+      expect(prompt).toContain("## Startup warning");
+      expect(prompt).toContain("Prebuilt dependencies for `acme/widgets` are unavailable right now because the repo image is being rebuilt.");
+      const thread = await session.createThread("web:default");
+      expect(await noteCount(sessionId, thread.id)).toBe(1);
+      // A rebuild of the same session does not add a second note.
+      await host.invalidateSession(sessionId);
+      const again = await host.sessionFor(sessionId, meta);
+      await again.attachment.ensureReady({ timeoutMs: 5_000 });
+      expect(again).not.toBe(session);
+      expect(again.options.systemPrompt ?? "").toContain("## Startup warning");
+      expect(await noteCount(sessionId, thread.id)).toBe(1);
+    });
+
+    it("a session whose repo bake is compatible has no startup warning", async () => {
+      const { sessionId, meta, host } = await seed([{ id: "pb-good", contractVersion: 3, contractSource: "label" }]);
+      const session = await host.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      expect(session.options.systemPrompt ?? "").not.toContain("## Startup warning");
+    });
+  });
+
   it("repo session on isolated+customImage provider: newer pushed prebuild produces different image ref", async () => {
     const provider = makeIsolatedProvider({ customImage: true });
     api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
@@ -609,5 +661,15 @@ describe("EngineHost buildSpecProvider", () => {
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
     expect(session.attachment.state).toBe("ready");
     expect(provider.execs).toHaveLength(0);
+  });
+});
+
+describe("imageFallbackPrompt", () => {
+  it("renders the spec 7.2 paragraph and nothing when there is no fallback", async () => {
+    const { imageFallbackPrompt } = await import("./host.js");
+    expect(imageFallbackPrompt(undefined)).toBe("");
+    expect(imageFallbackPrompt("acme/widgets")).toBe(
+      "\n\n## Startup warning\n\nPrebuilt dependencies for `acme/widgets` are unavailable right now because the repo image is being rebuilt. The workspace is checked out; install what you need.",
+    );
   });
 });
