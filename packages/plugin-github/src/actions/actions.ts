@@ -13,7 +13,7 @@ import {
   type PluginActionContext,
   type PluginActionResult,
 } from "@valet/engine";
-import { Octokit } from "octokit";
+import type { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
 import {
   collectDirectoryEntries,
@@ -21,7 +21,7 @@ import {
   wrongPathKindError,
   MAX_DIRECTORY_ENTRIES,
 } from "./repo-directory.js";
-import { resolveGithubApiUrl } from "./api.js";
+import { githubOctokit, rateLimitError, resolveGithubApiUrl } from "./api.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+  return githubOctokit(token);
 }
 
 /**
@@ -55,7 +55,7 @@ async function getInstallationOctokit(ctx: PluginActionContext): Promise<Octokit
   const cred = await ctx.credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE);
   const token = cred?.accessToken;
   if (!token) return null;
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+  return githubOctokit(token);
 }
 
 const PERMISSION_HINTS: Record<string, string> = {
@@ -94,6 +94,8 @@ function handleOctokitError(
   actionId: string,
   operation: string,
 ): PluginActionResult {
+  const limited = rateLimitError(err, operation);
+  if (limited) return { success: false, error: limited };
   const e = err as { status?: number; message?: string };
   const status = e.status ?? "unknown";
   const ghMessage = e.message || "";

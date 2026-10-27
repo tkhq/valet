@@ -110,6 +110,7 @@ On a live deployment: create a real GitHub App via the manifest flow from admin 
   2. **Idempotent.** The read comes first, and the write occurs only on a difference. A boot that changes nothing sends no write.
   3. **It never clears.** With no public URL, it does nothing and logs at debug level. A deployment can set the hook URL deliberately, and an empty URL stops delivery for everyone.
   4. **Fail-soft.** It runs at boot and inside the setup callback, so a GitHub outage, a revoked key, or a 4xx is logged and swallowed. The boot call is not awaited: two GitHub round trips must not delay the listening port.
+- **(2026-10-27) A `github.*` action fails at once when the rate limit is used up.** Octokit's default handlers slept until the quota reset, up to an hour. That sleep ignores the action's abort signal, so a turn waiting there could not be stopped or steered. Every Octokit in `plugin-github` now comes from `githubOctokit` (`actions/api.ts`). It retries once only when the wait is `MAX_RATE_LIMIT_WAIT_SECONDS` (10) or less. A longer wait fails, and `rateLimitError` names the reset time in UTC. It also replaces the 403 permission hint, which named the wrong cause for a rate limit.
 - **RESOLVED (TKAI-498): the sandbox bearer no longer has a 24-hour lifetime.** Git credential helpers and `valet-gh` keep their original credential across API restarts. Teardown still revokes it.
 
 ## Personal installations restore the legacy behavior (2026-10-11)

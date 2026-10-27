@@ -773,6 +773,31 @@ describe("github.read_repo_file", () => {
     expect(result.error).toContain("read access to that repository");
   });
 
+  it("fails at once with the reset time when the rate limit is used up", async () => {
+    // Octokit's default handler sleeps until the quota resets, up to an
+    // hour, and the sleep ignores the action signal. A turn stuck there
+    // could not be stopped.
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    const server = useFixture({
+      readFile: () => ({
+        status: 403,
+        body: { message: "API rate limit exceeded for installation." },
+        headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) },
+      }),
+    });
+
+    const started = Date.now();
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("rate limit for this account is used up");
+    expect(result.error).toContain(`resets at ${new Date(reset * 1000).toISOString().slice(11, 16)} UTC`);
+    expect(result.error).not.toContain("permission");
+  });
+
   it("reads a PDF through the shared extractor", async () => {
     const bytes = Buffer.from("%PDF-1.4 fixture");
     useFixture({
