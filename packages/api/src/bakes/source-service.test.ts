@@ -36,7 +36,7 @@ import {
 } from "./source-service.js";
 import { RegistryCapacityError } from "./registry-health.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
-import { currentSourceHealthSnapshot, lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
+import { currentSourceHealthSnapshot, lastSchedulerPassAt, recordSchedulerPass } from "../observability/prebuild-lifecycle.js";
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -546,6 +546,16 @@ describe("SourceService", () => {
       expect(rowFor("base", "failing")).toBeUndefined();
       expect(rowFor("base", "healthy")).toMatchObject({ count: 1, boundUnhealthy: 0 });
     });
+
+    it("a disabled source never counts as bound-unhealthy; schedule off still does", async () => {
+      const disabled = await seedRepoSource(db, { lastBoundAt: NOW, enabled: false });
+      const off = await seedRepoSource(db, { lastBoundAt: NOW, schedule: "off", name: "acme/off", repoFullName: "acme/off" });
+      const svc = makeService();
+      await svc.setSourceHealth(disabled, "failing", "bake_failed", "x");
+      expect(rowFor("repo", "failing")).toMatchObject({ count: 1, boundUnhealthy: 0 });
+      await svc.setSourceHealth(off, "failing", "bake_failed", "x");
+      expect(rowFor("repo", "failing")).toMatchObject({ count: 2, boundUnhealthy: 1 });
+    });
   });
 
   describe("health notifications", () => {
@@ -716,6 +726,218 @@ describe("SourceService", () => {
       const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
       expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
     });
+
+    const DAY = 24 * 60 * 60 * 1000;
+    const platformRows = () => db.select().from(notifications).where(eq(notifications.kind, "platform"));
+
+    it("a scheduler-pass failure is provisional: one transient pass posts nothing and its recovery closes silently", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      repoMissing = true;
+      await svc.runSchedulerPass();
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "failing", healthReason: "repo_unreachable" });
+      expect(await platformRows()).toHaveLength(0);
+      // GitHub recovers before the next pass; even a long span stays silent
+      // because the episode was never notified.
+      repoMissing = false;
+      t = NOW + 20 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null, { origin: "scheduler" });
+      expect(await platformRows()).toHaveLength(0);
+    });
+
+    it("a scheduler-pass failure still stored at the next pass notifies once, keyed by when it was entered", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      repoMissing = true;
+      await svc.runSchedulerPass();
+      expect(await platformRows()).toHaveLength(0);
+      t = NOW + 10 * 60_000;
+      await svc.runSchedulerPass();
+      let rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.id.startsWith(`n-platform-image-source:${src}:repo_unreachable:${NOW}-`))).toBe(true);
+      expect(rows[0]).toMatchObject({ urgency: "high", title: "Image for `acme/widgets` cannot be rebuilt" });
+      t = NOW + 20 * 60_000;
+      await svc.runSchedulerPass(); // still failing: nothing new
+      expect(await platformRows()).toHaveLength(ADMIN_COUNT);
+      t = NOW + 30 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      rows = await platformRows();
+      expect(rows.filter((r) => r.title.includes("cannot be rebuilt")).every((r) => r.readAt !== null)).toBe(true);
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a provisional state that moved on before the next pass is dropped, not notified", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "resolve_failed", "GitHub 502", { origin: "scheduler" });
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "stale", "ok", null, { origin: "scheduler" });
+      t = NOW + 10 * 60_000;
+      await svc.runSchedulerPass(); // the fixture serves a stale-able repo; the pending failing is gone
+      expect((await platformRows()).filter((r) => r.title.includes("cannot be rebuilt"))).toHaveLength(0);
+    });
+
+    it("A→B→A posts each reason once per episode; returning to a notified reason marks nothing read", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "failing", "resolve_failed", "GitHub 502");
+      t = NOW + 120_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      t = NOW + 180_000;
+      await svc.setSourceHealth(src, "failing", "resolve_failed", "GitHub 502");
+      const rows = await platformRows();
+      expect(rows).toHaveLength(2 * ADMIN_COUNT);
+      expect(rows.filter((r) => r.id.includes(":bake_failed:")).every((r) => r.readAt !== null)).toBe(true);
+      expect(rows.filter((r) => r.id.includes(":resolve_failed:")).every((r) => r.readAt === null)).toBe(true);
+    });
+
+    it("a scheduler flip to a new reason inside a notified episode waits for the next pass; a flip back posts nothing", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x"); // bake origin: immediate
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "failing", "resolve_failed", "GitHub 502", { origin: "scheduler" });
+      t = NOW + 120_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x", { origin: "scheduler" });
+      const rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.readAt === null)).toBe(true);
+    });
+
+    it("an unbound unbaked repo and a base with no bound repos stay silent through two scheduler passes; a bound unbaked repo notifies on the second", async () => {
+      const unbound = await seedRepoSource(db, { lastBoundAt: NOW - 8 * DAY, name: "acme/old", repoFullName: "acme/old" });
+      const lonelyBase = await seedBaseSource(db, ["echo base"]);
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.runSchedulerPass();
+      t = NOW + 10 * 60_000;
+      await svc.runSchedulerPass();
+      const health = await db.select().from(imageSources);
+      expect(health.find((r) => r.id === unbound)).toMatchObject({ health: "unbaked" });
+      expect(health.find((r) => r.id === lonelyBase)).toMatchObject({ health: "unbaked" });
+      expect(await platformRows()).toHaveLength(0);
+
+      const bound = await seedRepoSource(db, { lastBoundAt: NOW, name: "acme/widgets", repoFullName: "acme/widgets" });
+      t = NOW + 20 * 60_000;
+      await svc.runSchedulerPass();
+      expect(await platformRows()).toHaveLength(0);
+      t = NOW + 30 * 60_000;
+      await svc.runSchedulerPass();
+      const rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.id.includes(`image-source:${bound}:ok:`))).toBe(true);
+      expect(rows[0]).toMatchObject({ urgency: "normal", title: "Image for `acme/widgets` has not been built yet" });
+    });
+
+    it("a throwing routeAttention leaves the health write and its return value intact", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      const broken = { select: () => { throw new Error("attention db down"); } } as unknown as AppDb;
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const svc = makeService({ attention: { db: broken } });
+        await expect(svc.setSourceHealth(src, "failing", "bake_failed", "x")).resolves.toBe(true);
+        expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "failing", healthReason: "bake_failed", healthCheckedAt: NOW });
+        expect(err).toHaveBeenCalledWith(expect.stringContaining(`health notification for ${src} failed`), expect.anything());
+      } finally {
+        err.mockRestore();
+      }
+    });
+
+    it("a disabled source does not notify; a schedule-off source still does", async () => {
+      const disabled = await seedRepoSource(db, { lastBoundAt: NOW, enabled: false });
+      const off = await seedRepoSource(db, { lastBoundAt: NOW, schedule: "off", name: "acme/off", repoFullName: "acme/off" });
+      const svc = makeService({ attention: { db } });
+      await svc.setSourceHealth(disabled, "failing", "bake_failed", "x");
+      expect(await platformRows()).toHaveLength(0);
+      await svc.setSourceHealth(off, "failing", "bake_failed", "x");
+      expect((await platformRows()).every((r) => r.id.includes(`image-source:${off}:`))).toBe(true);
+      expect(await platformRows()).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a fallback on a scheduler-diagnosed, still-provisional incompatible state notifies immediately, once", async () => {
+      builder = new K8sFakeImageBuilder();
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "incompatible", "contract", "bake bad contract 0 < 3", { origin: "scheduler" });
+      expect(await platformRows()).toHaveLength(0);
+      t = NOW + 1000;
+      await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" });
+      await fallbackSettled(svc);
+      let rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.id.startsWith(`n-platform-image-source:${src}:contract:${NOW}-`))).toBe(true);
+      // A later pass-end confirmation adds nothing.
+      const internals = svc as unknown as { passSeq: number; confirmPendingEpisodes(): Promise<void> };
+      internals.passSeq += 1;
+      await internals.confirmPendingEpisodes();
+      rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.readAt === null)).toBe(true);
+    });
+
+    it("pass-end confirmation drops a pending reason that a bake write changed while it was checking", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "resolve_failed", "GitHub 502", { origin: "scheduler" });
+      expect(await platformRows()).toHaveLength(0);
+      const real = svc.sourceMatters.bind(svc);
+      let armed = true;
+      vi.spyOn(svc, "sourceMatters").mockImplementation(async (source) => {
+        if (armed) {
+          armed = false;
+          t = NOW + 60_000;
+          await svc.setSourceHealth(src, "failing", "bake_failed", "npm ci exploded"); // bake origin: posts B now
+        }
+        return real(source);
+      });
+      const internals = svc as unknown as { passSeq: number; confirmPendingEpisodes(): Promise<void> };
+      internals.passSeq += 1;
+      await internals.confirmPendingEpisodes();
+      const rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.id.startsWith(`n-platform-image-source:${src}:bake_failed:${NOW + 60_000}-`))).toBe(true);
+      expect(rows.every((r) => r.readAt === null)).toBe(true);
+    });
+
+    it("start() catches up on sources already unhealthy at boot, once across restarts", async () => {
+      const bound = await seedRepoSource(db, { lastBoundAt: NOW, health: "incompatible", healthReason: "contract", healthDetail: "bake pb_x contract 0 < 3", healthCheckedAt: NOW - DAY });
+      await seedRepoSource(db, { lastBoundAt: NOW - 8 * DAY, name: "acme/old", repoFullName: "acme/old", health: "failing", healthReason: "bake_failed", healthCheckedAt: NOW - DAY });
+      await seedRepoSource(db, { lastBoundAt: NOW, name: "acme/stale", repoFullName: "acme/stale", health: "stale", healthReason: "ok", healthCheckedAt: NOW - DAY });
+      const first = makeService({ attention: { db } });
+      try {
+        await first.start();
+        await first.startupCatchUp;
+      } finally {
+        first.stop();
+      }
+      let rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.id.startsWith(`n-platform-image-source:${bound}:contract:${NOW - DAY}-`))).toBe(true);
+      expect(rows[0]).toMatchObject({ urgency: "high", title: "Image for `acme/widgets` is unusable; sessions are using the stock image" });
+      // One admin read theirs; a restart posts nothing, read or unread.
+      await db.update(notifications).set({ readAt: NOW }).where(eq(notifications.id, rows[0].id));
+      const second = makeService({ attention: { db } });
+      try {
+        await second.start();
+        await second.startupCatchUp;
+      } finally {
+        second.stop();
+      }
+      rows = await platformRows();
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.filter((r) => r.readAt !== null)).toHaveLength(1);
+    });
   });
 
   describe("source health", () => {
@@ -852,7 +1074,10 @@ describe("SourceService", () => {
       expect(healthReasonForError(new GitHubApiError(500, "/repos/acme/widgets"))).toBe("resolve_failed");
       expect(healthReasonForError(new AnonymousImageBakesDisabledError())).toBe("credentials");
       expect(healthReasonForError(new RegistryCapacityError("full"))).toBe("registry_full");
-      expect(healthReasonForError(new Error("boom"))).toBe("bake_failed");
+      // Not a GitHub or registry error (a network TypeError, say): it happened
+      // while resolving, so it must not read as "the setup commands failed".
+      expect(healthReasonForError(new Error("boom"))).toBe("resolve_failed");
+      expect(healthReasonForError(new TypeError("fetch failed"))).toBe("resolve_failed");
     });
 
     it("start() records a pass time when it arms the scheduler, before any pass", async () => {
@@ -860,6 +1085,17 @@ describe("SourceService", () => {
       try {
         await svc.start();
         expect(lastSchedulerPassAt()).toBe(NOW + 7);
+      } finally {
+        svc.stop();
+      }
+    });
+
+    it("start() records no pass time without a builder (no pass will ever run)", async () => {
+      recordSchedulerPass(NOW - 1);
+      const svc = makeService({ builder: null, now: () => NOW + 7 });
+      try {
+        await svc.start();
+        expect(lastSchedulerPassAt()).toBe(NOW - 1);
       } finally {
         svc.stop();
       }

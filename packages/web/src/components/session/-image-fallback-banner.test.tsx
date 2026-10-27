@@ -17,7 +17,7 @@ describe("ImageFallbackBanner", () => {
   });
   it("explains the fallback with the guidance line and links admins to the source", () => {
     render(<ImageFallbackBanner image={fallback} isOrgAdmin />);
-    expect(screen.getByRole("status").textContent).toContain("Running on the stock image. The `acme/widgets` image failed its compatibility check and is being rebuilt.");
+    expect(screen.getByRole("status").textContent).toContain("Running on the stock image. The acme/widgets image failed its compatibility check and is being rebuilt.");
     expect(screen.getByRole("status").textContent).toContain("The image was built before a runtime change. A rebuild is already queued.");
     expect(screen.getByRole("link", { name: "Manage images" }).getAttribute("href")).toBe("/settings/organization/sandbox-images?source=src1");
   });

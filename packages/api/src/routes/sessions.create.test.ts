@@ -134,7 +134,9 @@ describe("GET /api/sessions/:id: sandboxImage", () => {
     let detail = await getSession();
     expect(detail.sandboxImage).toEqual({ source: "repo", repoFullName: "acme/widgets", builtAt: 5000, fallback: null });
 
-    await db.update(agentSessions).set({ bakeId: null, imageFallback: { reason: "contract", sourceId: "src", bakeId: "pb_bad", at: 1 } }).where(eq(agentSessions.id, sessionId));
+    // The host keeps bake_id on a fallback (it records only image_fallback),
+    // so the session still points at an existing repo bake: fallback wins.
+    await db.update(agentSessions).set({ bakeId: "pb_img", imageFallback: { reason: "contract", sourceId: "src", bakeId: "pb_bad", at: 1 } }).where(eq(agentSessions.id, sessionId));
     detail = await getSession();
     expect(detail.sandboxImage).toEqual({ source: "stock", repoFullName: "acme/widgets", builtAt: null, fallback: { reason: "contract", sourceId: "src", bakeId: "pb_bad", at: 1 } });
 

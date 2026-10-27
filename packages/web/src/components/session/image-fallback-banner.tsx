@@ -10,7 +10,7 @@ export function ImageFallbackBanner({ image, isOrgAdmin }: { image: SessionSandb
   const repo = image.repoFullName ?? "repository";
   return (
     <Callout tone="warning" role="status" className="mx-4 my-2">
-      <p>Running on the stock image. The `{repo}` image failed its compatibility check and is being rebuilt.</p>
+      <p>Running on the stock image. The <code>{repo}</code> image failed its compatibility check and is being rebuilt.</p>
       <p className="mt-1 text-muted">{sourceHealthGuidance(fallback.reason)}</p>
       {isOrgAdmin && (
         <Link className="mt-1 inline-block underline" to="/settings/organization/sandbox-images" search={{ source: fallback.sourceId }}>

@@ -126,14 +126,18 @@ function parseRepoBindings(body: CreateSessionRequest): { repos: RepoBinding[] }
   return { repos };
 }
 
-/** Spec 7.4. A missing bake row (pruned by retention) reads as stock. */
+/** Spec 7.4. A missing bake row (pruned by retention) reads as stock. A set
+ * `image_fallback` wins over `bake_id`: the host never clears `bake_id` on a
+ * fallback, and clears `image_fallback` in the same reconcile that records a
+ * resolved repo bake, so a set fallback always means "not on the repo image". */
 async function sessionSandboxImage(db: AppDb, row: typeof agentSessions.$inferSelect, repoFullName: string | null): Promise<SessionSandboxImage> {
   const fallback = row.imageFallback ?? null;
+  if (fallback) return { source: "stock", repoFullName, builtAt: null, fallback };
   if (row.bakeId) {
     const [bake] = await db.select({ finishedAt: bakes.finishedAt, createdAt: bakes.createdAt }).from(bakes).where(eq(bakes.id, row.bakeId)).limit(1);
     if (bake) return { source: "repo", repoFullName, builtAt: bake.finishedAt ?? bake.createdAt, fallback: null };
   }
-  return { source: "stock", repoFullName, builtAt: null, fallback };
+  return { source: "stock", repoFullName, builtAt: null, fallback: null };
 }
 
 async function getSessionRepos(db: AppDb, sessionId: string): Promise<RepoBinding[]> {

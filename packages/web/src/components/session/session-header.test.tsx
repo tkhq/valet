@@ -304,11 +304,22 @@ describe("SandboxChip — suspended state", () => {
   });
   it("SandboxChip labels the image in its tooltip", async () => {
     render(<TooltipProvider><SandboxChip sandbox={{ state: "ready", epoch: 1 }} image={{ source: "repo", repoFullName: "acme/widgets", builtAt: Date.now() - 2 * 3600_000, fallback: null }} /></TooltipProvider>);
-    expect(screen.getByLabelText(/workspace ready.*Image: `acme\/widgets`, built 2h ago/)).toBeTruthy();
+    expect(screen.getByLabelText(/workspace ready.*Image: acme\/widgets, built 2h ago/)).toBeTruthy();
+  });
+  it("header shows the image label for repo and stock sessions, and none without sandboxImage", () => {
+    const ready = { state: "ready", epoch: 1 };
+    const { unmount } = renderHeader(ready, undefined, { ...baseSession(), sandboxImage: { source: "repo", repoFullName: "acme/widgets", builtAt: Date.now() - 2 * 3600_000, fallback: null } });
+    expect(screen.getByText("repo image, built 2h ago")).toBeTruthy();
+    unmount();
+    const stock = renderHeader(ready, undefined, { ...baseSession(), sandboxImage: { source: "stock", repoFullName: null, builtAt: null, fallback: null } });
+    expect(screen.getByText("stock image")).toBeTruthy();
+    stock.unmount();
+    renderHeader(ready, undefined, baseSession());
+    expect(screen.queryByText(/image/)).toBeNull();
   });
   it("SandboxChip says stock with the unavailable repo", () => {
     render(<TooltipProvider><SandboxChip sandbox={{ state: "ready", epoch: 1 }} image={{ source: "stock", repoFullName: "acme/widgets", builtAt: null, fallback: { reason: "contract", sourceId: "s", bakeId: "b", at: 1 } }} /></TooltipProvider>);
-    expect(screen.getByLabelText(/Image: stock \(`acme\/widgets` unavailable\)/)).toBeTruthy();
+    expect(screen.getByLabelText(/Image: stock \(acme\/widgets unavailable\)/)).toBeTruthy();
   });
 });
 

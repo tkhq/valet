@@ -592,6 +592,7 @@ export function SessionHeader({
           </Tooltip>
         )}
         <div className="hidden md:contents">
+          <SandboxChip sandbox={sandbox} image={session.sandboxImage} />
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
           <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>
             <Button
@@ -824,16 +825,22 @@ export function SandboxChip({ sandbox, image }: { sandbox?: { state: string; epo
   };
   const entry = map[sandbox.state];
   if (!entry) return null;
+  const imageText = image
+    ? image.source === "repo" && image.repoFullName
+      ? `repo image${image.builtAt ? `, built ${relativeTime(image.builtAt)}` : ""}`
+      : "stock image"
+    : null;
   const imageLabel = image
     ? image.source === "repo" && image.repoFullName
-      ? `Image: \`${image.repoFullName}\`${image.builtAt ? `, built ${relativeTime(image.builtAt)}` : ""}`
-      : image.repoFullName ? `Image: stock (\`${image.repoFullName}\` unavailable)` : "Image: stock"
+      ? `Image: ${image.repoFullName}${image.builtAt ? `, built ${relativeTime(image.builtAt)}` : ""}`
+      : image.repoFullName ? `Image: stock (${image.repoFullName} unavailable)` : "Image: stock"
     : null;
   const label = imageLabel ? `${entry.label}. ${imageLabel}` : entry.label;
   return (
     <Tooltip content={label}>
       <span className="inline-flex items-center gap-1.5 px-1" aria-label={label}>
         <span className={cn("h-1.5 w-1.5 rounded-full", entry.dot)} />
+        {imageText && <span className="text-xs text-muted">{imageText}</span>}
       </span>
     </Tooltip>
   );
