@@ -778,6 +778,7 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
   const fm = asRecord(row.frontmatter);
   const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
   const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
+  const metadata = stringMap(fm.metadata);
   return {
     name: row.name,
     description: row.description,
@@ -789,7 +790,20 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
     origin: row.origin,
     ...(invocation ? { invocation } : {}),
     ...(argHint ? { argHint } : {}),
+    // The spec's `metadata` map. A playbook marks itself here (`kind: playbook`).
+    ...(metadata ? { metadata } : {}),
   };
+}
+
+/** `value` as a map of text to text, or undefined when it is not one. */
+function stringMap(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") return undefined;
+    out[key] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** `frontmatter` is a jsonb column, so drizzle types it as `unknown`. */

@@ -52,6 +52,13 @@ export {
   type SkillSpecOptions,
   type SkillSpecViolation,
   type SkillSpecSeverity,
+  isPlaybook,
+  PLAYBOOK_KIND,
+  playbookPlanItems,
+  playbookSeedNote,
+  readPlaybookSteps,
+  type PlaybookSeedResult,
+  type PlaybookSteps,
 } from "./roles-skills/index.js";
 export {
   deriveQueueState,

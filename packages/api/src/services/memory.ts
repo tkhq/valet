@@ -48,6 +48,7 @@ const DIRECTORY_DEFAULT_TYPE: Record<string, string> = {
   workflows: "workflow",
   journal: "journal-entry",
   people: "person",
+  principles: "principle",
 };
 
 function defaultTypeForPath(path: string): string {
