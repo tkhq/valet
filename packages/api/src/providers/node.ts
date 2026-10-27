@@ -2,6 +2,7 @@ import { externalUsageRetention } from "../services/external-usage.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { buildHomeTools } from "../home/tools.js";
+import { buildThreadLinkTools } from "../home/thread-link-tools.js";
 import type { HomeDeps } from "../home/service.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
@@ -558,6 +559,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     },
     homeTools: () => buildHomeTools(() => {
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
+      return homeDepsRef;
+    }),
+    threadLinkTools: () => buildThreadLinkTools(() => {
+      if (!homeDepsRef) throw new Error("thread link tools invoked before provider wiring completed");
       return homeDepsRef;
     }),
   });

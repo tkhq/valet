@@ -42,6 +42,7 @@ export function MessageList({
   onReply,
   onEdit,
   onBranch,
+  onBranchPrivately,
   onReturnToBranch,
   onOpenThread,
   editingId,
@@ -93,6 +94,8 @@ export function MessageList({
   onEdit?: (message: StreamMessage) => void;
   /** Branches a message into a new thread. */
   onBranch?: (message: StreamMessage) => void;
+  /** Branches a message into the viewer's private threads (team threads only). */
+  onBranchPrivately?: (message: StreamMessage) => void;
   /** Goes back to the version a branch note left. */
   onReturnToBranch?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
   /** Opens another thread, for a fork note's source thread. */
@@ -272,6 +275,7 @@ export function MessageList({
                   onReply={onReply}
                   onEdit={onEdit && editable.has(m.id) ? onEdit : undefined}
                   onBranch={onBranch && branchable(m) ? onBranch : undefined}
+                  onBranchPrivately={onBranch && branchable(m) ? onBranchPrivately : undefined}
                   dimmed={dimFrom >= 0 && visible.indexOf(m) >= dimFrom}
                   ratings={ratings}
                 />

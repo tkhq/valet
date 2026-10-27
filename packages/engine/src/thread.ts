@@ -6694,6 +6694,11 @@ export class Thread {
     return added;
   }
 
+  /** Set `metadata[key]` to a JSON value and persist it, such as the thread a fork came from. */
+  async setMetadataValue(key: string, value: unknown): Promise<void> {
+    await this.patchThreadMetadata((current) => ({ ...current, [key]: value }), "before-save");
+  }
+
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
   async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
     const plan: ThreadPlan = { items, updatedAt: Date.now() };

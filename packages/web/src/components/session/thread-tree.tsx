@@ -11,6 +11,9 @@ import {
   Archive,
   ArchiveRestore,
   ArrowDownUp,
+  ArrowRightLeft,
+  Lock,
+  Users,
   Bot,
   Filter,
   Hash,
@@ -59,6 +62,7 @@ import {
   useRenameThread,
   useReplaceSandbox,
   useMarkThreadsRead,
+  useMoveThread,
   useSetThreadArchived,
   useSessionWakeups,
   useSidebarThreads,
@@ -82,7 +86,7 @@ const STOP_AND_REPLACE: GuardedAction = {
   confirmLabel: "Stop background work and replace",
 };
 import { downloadTextFile } from "~/lib/download";
-import { useMe } from "~/api/settings";
+import { useMe, useTeams } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { THREAD_TITLE_CLASS, ThreadStateMark, threadNeedsYou, threadRowState } from "./thread-state-mark";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -297,6 +301,9 @@ export function matchingWorkflows(workflows: WorkflowDefinitionSummary[], query:
 export function matchingArtifacts(artifacts: ArtifactListItem[], query: string): ArtifactListItem[] {
   return artifacts.filter((artifact) => !artifact.revoked && `${artifact.title} ${artifact.path}`.toLowerCase().includes(query));
 }
+
+/** A workspace a thread can move to. */
+type MoveTarget = { to: "private" | { teamId: string }; label: string };
 
 type SearchItem =
   | { key: string; kind: "thread"; thread: ThreadSummary }
@@ -655,6 +662,30 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
     });
   }, [activeThreadId, attempt, navigate, setArchived]);
 
+  // Move (docs/specs/2026-10-22-thread-edit-fork-design.md): a
+  // team thread goes to the person's private threads; a private thread goes
+  // to one of their teams. The copy opens; the source is archived here.
+  const teams = useTeams();
+  const teamWorkspace = workspace !== undefined && workspace !== "user" ? workspace : undefined;
+  const moveTargets: MoveTarget[] = teamWorkspace
+    ? [{ to: "private", label: "My private threads" }]
+    : (teams.data?.teams ?? []).filter((team) => team.callerRole !== null).map((team) => ({ to: { teamId: team.id }, label: team.name }));
+  const moveThreadM = useMoveThread();
+  const [pendingMove, setPendingMove] = useState<{ threadId: string; target: MoveTarget }>();
+  const [moveError, setMoveError] = useState<string>();
+  async function confirmMove() {
+    if (!pendingMove) return;
+    setMoveError(undefined);
+    const { threadId, target } = pendingMove;
+    try {
+      const result = await moveThreadM.mutateAsync({ threadId, to: target.to, ...(target.to === "private" ? {} : { confirm: true as const }) });
+      setPendingMove(undefined);
+      navigate({ search: (prev) => ({ ...prev, thread: result.thread.id, workspace: result.workspace, child: undefined }) });
+    } catch (err) {
+      setMoveError(errorText(err, "Could not move the thread. Try again."));
+    }
+  }
+
   const archiveActive = useCallback(() => {
     if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
     archiveThread(activeThreadId);
@@ -733,6 +764,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               organizingDisabled={!projects.isReady || projects.isSaving}
               onDragEnd={() => setDropTarget(undefined)}
               onArchive={archiveThread}
+              moveTargets={t.key?.startsWith("web:") ? moveTargets : []}
+              onMoveWorkspace={(target) => { setMoveError(undefined); setPendingMove({ threadId: t.id, target }); }}
               onReplaceSandbox={replaceSessionSandbox}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
               onRename={(threadId, title) =>
@@ -866,6 +899,14 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               </form>
             </DialogContent>
           </Dialog>
+
+          <ConfirmDialog open={!!pendingMove} onOpenChange={open => { if (!open && !moveThreadM.isPending) { setPendingMove(undefined); setMoveError(undefined); } }}
+            title={pendingMove?.target.to === "private" ? "Move to your private threads?" : `Move to ${pendingMove?.target.label ?? "the team"}?`}
+            description={pendingMove?.target.to === "private"
+              ? "Your teammates will no longer see this thread. It is archived here with a note that it moved, and continues in your private threads with its files."
+              : `Everyone on ${pendingMove?.target.label ?? "the team"} will see this thread's messages and files, and it runs with the team's accounts. It is archived here.`}
+            confirmLabel="Move thread" pendingLabel="Moving…" pending={moveThreadM.isPending} confirmVariant="primary"
+            error={moveError ? <span role="alert">{moveError}</span> : undefined} onConfirm={() => void confirmMove()} />
 
           <ConfirmDialog open={!!deleteProject} onOpenChange={open => { if (!open && !deletingRef.current) { setDeleteProject(undefined); setDeleteError(undefined); } }}
             title={`Delete project “${deleteProject?.name ?? ""}”?`}
@@ -1014,6 +1055,8 @@ function ThreadNode({
   childSessions,
   activeChildId,
   onArchive,
+  moveTargets,
+  onMoveWorkspace,
   onReplaceSandbox,
   onDismissChild,
   onRename,
@@ -1049,6 +1092,9 @@ function ThreadNode({
   childSessions: ChildWorkSummary[];
   activeChildId?: string;
   onArchive: (threadId: string) => void;
+  /** Workspaces this thread can move to; empty when it cannot move. */
+  moveTargets: MoveTarget[];
+  onMoveWorkspace: (target: MoveTarget) => void;
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
   /** Send `null` to clear the stored title. */
@@ -1266,6 +1312,14 @@ function ThreadNode({
                 {projects.map((project) => <DropdownMenuItem key={project.id} onSelect={() => onMove(project.id)}><Check className={cn("h-4 w-4", projectId !== project.id && "invisible")} />{project.name}</DropdownMenuItem>)}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
+            {moveTargets.length > 0 && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger><ArrowRightLeft className="h-4 w-4" />Move to workspace</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {moveTargets.map((target) => <DropdownMenuItem key={target.label} onSelect={() => onMoveWorkspace(target)}>{target.to === "private" ? <Lock className="h-4 w-4" aria-hidden /> : <Users className="h-4 w-4" aria-hidden />}{target.label}</DropdownMenuItem>)}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
             <DropdownMenuItem
               onSelect={() => onArchive(thread.id)}
               className="justify-between gap-3"
