@@ -1271,6 +1271,10 @@ Background drives are still owned: each kicked drive is registered in an in-proc
 
 **Steer supersession is transactional.** A `steer` admission durably, in one step: admits the steer item, stamps `supersededByItemId` on the running item *and every queued item admitted before it* on that thread, and withdraws their pending gates (reason `steer`). The steer item is thereby the oldest non-superseded unsettled item and claims under the normal FIFO rule — steer never bypasses head-claim, it *redefines the head*. Superseded items settle `superseded` through the normal settlement path.
 
+Amended 2026-10-27: the steer emits `submission_settled` only for a queued item it settled. The running item emits it when its turn ends. An earlier emit told clients the turn was over while it still ran.
+
+**A stopped turn does not wait on its tool for ever.** Stop, steer and thread abort call `agent.abort()` and then wait for the agent loop to go idle. The loop waits for the running tool. Each tool call goes through `toAgentTool` (`tool-bridge.ts`), which gives the tool `TOOL_STOP_GRACE_MS` (5 s, session option `toolStopGraceMs`) after the abort. If the tool has not returned by then, the call fails, the turn settles, and the queue continues. The call keeps running detached. Each timeout increments `valet.tool.stop_timeouts` and logs the tool name, because that tool ignores its signal and needs a fix. Found 2026-10-27: a `github.*` call slept through a GitHub rate-limit reset and held a thread for over 30 minutes. Stop and steer could not end it.
+
 #### Effect fencing
 
 Leases arbitrate who may *claim*; fencing arbitrates whose *writes land*. Every store write performed inside a claimed turn, every EventStream append, and every sandbox operation carries the writing attempt's identity, and the receiving side MUST reject writes from superseded attempts:

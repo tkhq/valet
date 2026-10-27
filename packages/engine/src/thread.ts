@@ -1126,9 +1126,12 @@ export class Thread {
     for (const g of this.pendingDecisionGates()) {
       this.withdrawDecision(g.id, "steer");
     }
+    // A claimed item (the running turn) is not settled here. It settles, and
+    // emits, when its turn ends. Emitting now told clients a turn had ended
+    // while it was still running.
     for (const id of supersededItemIds) {
-      await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
-      await this.emitSettled(id, { outcome: "superseded" });
+      const settled = await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+      if (settled) await this.emitSettled(id, { outcome: "superseded" });
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
@@ -6596,6 +6599,7 @@ export class Thread {
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
+        this.session.options.toolStopGraceMs,
       ),
     );
   }

@@ -2910,6 +2910,9 @@ export interface CreateSessionOptions {
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
+  /** How long a tool may keep running after its turn is stopped, in ms
+   * (default `TOOL_STOP_GRACE_MS`). See `toAgentTool`. */
+  toolStopGraceMs?: number;
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
