@@ -132,6 +132,13 @@ vi.mock("~/api/workspace-runtime", () => ({
 
 }));
 
+// The person's home conversation, which the web sidebar pins above the list.
+let homeConversation: { sessionId: string; threadId: string } | undefined;
+vi.mock("~/api/home", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/home")>(),
+  useHomeConversation: () => ({ data: homeConversation, isError: false, error: null, refetch: vi.fn() }),
+}));
+
 // Applies the component's real selectors against a minimal store shape:
 // `pendingGates` drives the response-required bell, `queueByThread` the children
 // live-update hook, and the absent `setPendingGates` is never called
@@ -225,6 +232,68 @@ beforeEach(() => {
   artifacts = [];
   listReads.length = 0;
   mobile = false;
+  homeConversation = undefined;
+});
+
+describe("ThreadTree — Home row", () => {
+  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastAgentActivityAt: Date.now() + 1 });
+
+  it("pins Home above the list in the person's own workspace and keeps it out of Recents", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    const section = screen.getByRole("region", { name: "Home" });
+    // The router Link mock renders a bare anchor, so query it by tag.
+    const link = section.querySelector("a");
+    expect(link?.textContent).toContain("Home");
+    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(within(section).getByLabelText("Unread")).toBeTruthy();
+    // One Home, above everything else in the list.
+    expect(screen.getAllByText("Home")).toHaveLength(1);
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).queryByText("Home")).toBeNull();
+    expect(section.compareDocumentPosition(recents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps existing Slack conversations visible alongside saved Home history", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
+    renderTree();
+    const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
+    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
+    expect(within(recents).queryByText("Home")).toBeNull();
+  });
+
+  it("shows no Home row on a phone, where Home is the first screen", () => {
+    mobile = true;
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+    expect(screen.queryByText("Home")).toBeNull();
+  });
+
+  it("shows no Home row in another workspace's sidebar", () => {
+    homeConversation = { sessionId: "orchestrator:someone-else", threadId: "home-9" };
+    threads = [thread()];
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+  });
+
+  it("finds Home in search when its content matches", async () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    searchMatches = [home()];
+    renderTree();
+    fireEvent.click(screen.getByRole("button", { name: "Search threads" }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "deploy" } });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+    fireEvent.click(screen.getByRole("option", { name: "Home" }));
+    const navigateOptions = navigate.mock.calls.at(-1)?.[0];
+    expect(navigateOptions.search({})).toMatchObject({ thread: "home-1" });
+  });
 });
 
 describe("ThreadTree progressive loading", () => {

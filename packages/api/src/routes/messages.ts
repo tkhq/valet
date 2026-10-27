@@ -1,3 +1,4 @@
+import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
@@ -588,7 +589,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
     .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => {
       const meta = metaById.get(t.id);
-      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, meta?.title,
+      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, t.key === HOME_THREAD_KEY ? HOME_THREAD_TITLE : meta?.title,
         t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
       return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}) };
     });
@@ -775,6 +776,14 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       { error: "nothing to patch: send model (null to clear), archived, title, reasoning, share, and/or approvalBypass" },
       400,
     );
+  }
+
+  // Home is a place: one name, never archived, never shared. Model and
+  // reasoning still change, and clearing a share or an archive is allowed.
+  if (thread.key === HOME_THREAD_KEY) {
+    if (body.title !== undefined) return c.json({ error: "Home keeps its name. Rename another thread instead." }, 400);
+    if (body.archived === true) return c.json({ error: "Home cannot be archived. Archive another thread instead." }, 400);
+    if (body.share !== undefined && body.share !== "off") return c.json({ error: "Home is private to you and cannot be shared. Share another thread instead." }, 400);
   }
 
   // Only the owner shares a personal thread. A team thread is already open to
