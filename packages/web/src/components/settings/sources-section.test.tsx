@@ -57,6 +57,10 @@ function makeSource(overrides: Partial<SourceSummary> = {}): SourceSummary {
     lastBoundAt: Date.now(),
     createdAt: 1000,
     updatedAt: 1000,
+    health: "healthy",
+    healthReason: "ok",
+    healthDetail: null,
+    healthCheckedAt: 1000,
     ...overrides,
   };
 }
@@ -75,6 +79,9 @@ function makeBake(overrides: Partial<BakeSummary> = {}): BakeSummary {
     startedAt: 1000,
     finishedAt: 2000,
     createdAt: 1000,
+    contractVersion: 3,
+    contractSource: "label",
+    parentBakeId: null,
     ...overrides,
   };
 }
@@ -93,6 +100,59 @@ describe("SourcesSection", () => {
   it("puts the bake queue before the base image settings", () => {
     render(<SourcesSection />);
     expect(screen.getAllByRole("heading")[0].textContent).toContain("Bake queue");
+  });
+
+  it("renders the health phrase and guidance per source", () => {
+    sourcesData = { builderAvailable: true, sources: [
+      makeSource({ id: "s-ok", repoFullName: "acme/ok", latestBake: { status: "pushed", createdAt: Date.now() - 2 * 3600_000 } }),
+      makeSource({ id: "s-fail", repoFullName: "acme/fail", health: "failing", healthReason: "repo_unreachable", healthDetail: "GitHub API /repos/acme/fail responded 404" }),
+      makeSource({ id: "s-old", repoFullName: "acme/old", health: "incompatible", healthReason: "contract" }),
+      makeSource({ id: "s-new", repoFullName: "acme/new", health: "unbaked", latestBake: null }),
+      makeSource({ id: "s-stale", repoFullName: "acme/stale", health: "stale" }),
+    ] };
+    render(<SourcesSection />);
+    expect(screen.getByText("Healthy, built 2h ago")).toBeTruthy();
+    expect(screen.getByText("Failing: The Valet GitHub app lost access. Reinstall it on this repository.")).toBeTruthy();
+    expect(screen.getByText("Unusable: image predates the current runtime")).toBeTruthy();
+    expect(screen.getByText("Not built yet")).toBeTruthy();
+    expect(screen.getByText("Rebuilding")).toBeTruthy();
+  });
+
+  it("status sort orders failing, incompatible, unbaked, stale, healthy, disabled", async () => {
+    sourcesData = { builderAvailable: true, sources: [
+      makeSource({ id: "a", repoFullName: "a/healthy" }),
+      makeSource({ id: "b", repoFullName: "b/disabled", enabled: false }),
+      makeSource({ id: "c", repoFullName: "c/stale", health: "stale" }),
+      makeSource({ id: "d", repoFullName: "d/unbaked", health: "unbaked" }),
+      makeSource({ id: "e", repoFullName: "e/incompatible", health: "incompatible", healthReason: "contract" }),
+      makeSource({ id: "f", repoFullName: "f/failing", health: "failing", healthReason: "bake_failed" }),
+    ] };
+    render(<SourcesSection />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sort: Name/ }));
+    await user.click(screen.getByRole("menuitem", { name: "Build status" }));
+    const names = screen.getAllByText(/^[a-f]\//).map((n) => n.textContent);
+    expect(names).toEqual(["f/failing", "e/incompatible", "d/unbaked", "c/stale", "a/healthy", "b/disabled"]);
+  });
+
+  it("expanded row shows contract, parent bake, since, and detail", async () => {
+    sourcesData = { builderAvailable: true, sources: [makeSource({ id: "s1", health: "failing", healthReason: "bake_failed", healthDetail: "npm ci exploded", healthCheckedAt: Date.now() - 3600_000 })] };
+    bakesData = { bakes: [makeBake({ contractVersion: 3, contractSource: "label", parentBakeId: "base-1", commitSha: "abcdef1234567" })] };
+    render(<SourcesSection />);
+    await userEvent.click(screen.getByRole("button", { name: "Details for acme/widgets" }));
+    expect(screen.getByText(/Contract 3 \(label\)/)).toBeTruthy();
+    expect(screen.getByText(/Parent bake base-1/)).toBeTruthy();
+    expect(screen.getByText(/Failing since 1h ago/)).toBeTruthy();
+    expect(screen.getByText("npm ci exploded")).toBeTruthy();
+  });
+
+  it("expands the row named by initiallyExpandedId and ignores an unknown id (Review Focus 3)", () => {
+    sourcesData = { builderAvailable: true, sources: [makeSource({ id: "s1" })] };
+    const { unmount } = render(<SourcesSection initiallyExpandedId="s1" />);
+    expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("true");
+    unmount();
+    render(<SourcesSection initiallyExpandedId="nope" />);
+    expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("false");
   });
 
   // ── Loading / error ──────────────────────────────────────────────────────
@@ -224,7 +284,7 @@ describe("SourcesSection", () => {
     render(<SourcesSection />);
 
     expect(screen.getByText("acme/widgets")).toBeTruthy();
-    expect(screen.getByText("Status unavailable")).toBeTruthy();
+    expect(screen.getByText("Healthy")).toBeTruthy();
     expect(screen.getByLabelText("Enable bakes for acme/widgets")).toBeTruthy();
   });
 
@@ -346,23 +406,25 @@ describe("SourcesSection", () => {
     expect(names()).toEqual(["Details for acme/widgets", "Details for acme/api"]);
   });
 
-  it("updates collapsed status after a refresh and sorts active builds first", async () => {
-    sourcesData = { sources: [makeSource({ latestBake: { status: "pushed", createdAt: 1 } }), makeSource({ id: "other", repoFullName: "acme/zebra", latestBake: { status: "building", createdAt: 2 } })], builderAvailable: true };
+  it("updates collapsed status after a refresh and sorts failing builds first", async () => {
+    sourcesData = { sources: [makeSource({ latestBake: { status: "pushed", createdAt: 1 } }), makeSource({ id: "other", repoFullName: "acme/zebra", health: "failing", healthReason: "bake_failed", latestBake: { status: "failed", createdAt: 2 } })], builderAvailable: true };
     const { rerender } = render(<SourcesSection />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Sort: Name/ }));
     await user.click(screen.getByRole("menuitem", { name: "Build status" }));
     expect(screen.getAllByRole("button", { name: /^Details for / })[0].getAttribute("aria-label")).toBe("Details for acme/zebra");
-    sourcesData = { sources: [makeSource({ latestBake: null })], builderAvailable: true };
+    sourcesData = { sources: [makeSource({ health: "unbaked", latestBake: null })], builderAvailable: true };
     rerender(<SourcesSection />);
-    expect(screen.getByText("Not built")).toBeTruthy();
-    expect(screen.queryByText("Built")).toBeNull();
+    expect(screen.getByText("Not built yet")).toBeTruthy();
+    expect(screen.queryByText(/^Healthy/)).toBeNull();
   });
 
   it.each([
-    ["pushed", "Built"], ["building", "Building"], ["queued", "Build queued"], ["failed", "Build failed"],
-  ] as const)("shows %s status while collapsed", (status, label) => {
-    sourcesData = { sources: [makeSource({ latestBake: { status, createdAt: 1000 } })], builderAvailable: true };
+    ["healthy", "ok", "Healthy, built 1h ago"],
+    ["stale", "ok", "Rebuilding"],
+    ["unbaked", "ok", "Not built yet"],
+  ] as const)("shows %s health while collapsed", (health, healthReason, label) => {
+    sourcesData = { sources: [makeSource({ health, healthReason, latestBake: { status: "pushed", createdAt: Date.now() - 3600_000 } })], builderAvailable: true };
     render(<SourcesSection />);
     expect(screen.getByText(label)).toBeTruthy();
     expect(screen.queryByText("Sandbox history")).toBeNull();

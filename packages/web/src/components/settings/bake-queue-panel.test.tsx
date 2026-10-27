@@ -20,7 +20,7 @@ function bake(id: string, overrides: Partial<BakeQueueItem> = {}): BakeQueueItem
     id, sourceId: `source-${id}`, sourceName: id, sourceKind: "repo", repoFullName: `acme/${id}`,
     identityHash: "hash", commitSha: "abcdef123", imageRef: "registry/image", status: "queued",
     builderBackend: "docker", error: null, logTail: null, createdAt: 1000, startedAt: 1000,
-    finishedAt: null, ...overrides,
+    finishedAt: null, contractVersion: 3, contractSource: "label", parentBakeId: null, ...overrides,
   };
 }
 

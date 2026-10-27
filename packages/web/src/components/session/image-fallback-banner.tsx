@@ -1,5 +1,6 @@
 import type { SessionSandboxImage } from "@valet/api/wire";
 import { sourceHealthGuidance } from "@valet/shared";
+import { Link } from "@tanstack/react-router";
 import { Callout } from "~/components/primitives";
 
 /** Spec 7.4 / 11.4: shown while `agent_sessions.image_fallback` is set. */
@@ -12,10 +13,9 @@ export function ImageFallbackBanner({ image, isOrgAdmin }: { image: SessionSandb
       <p>Running on the stock image. The `{repo}` image failed its compatibility check and is being rebuilt.</p>
       <p className="mt-1 text-muted">{sourceHealthGuidance(fallback.reason)}</p>
       {isOrgAdmin && (
-        // Plain href until the route's `source` search schema lands (Task 6).
-        <a className="mt-1 inline-block underline" href={`/settings/organization/sandbox-images?source=${encodeURIComponent(fallback.sourceId)}`}>
+        <Link className="mt-1 inline-block underline" to="/settings/organization/sandbox-images" search={{ source: fallback.sourceId }}>
           Manage images
-        </a>
+        </Link>
       )}
     </Callout>
   );

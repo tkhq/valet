@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ to, search, children, ...rest }: { to: string; search: { source: string }; children: React.ReactNode }) => (
+    <a href={`${to}?source=${search.source}`} {...rest}>{children}</a>
+  ),
+}));
 import { ImageFallbackBanner } from "./image-fallback-banner";
 
 const fallback = { source: "stock" as const, repoFullName: "acme/widgets", builtAt: null, fallback: { reason: "contract" as const, sourceId: "src1", bakeId: "pb", at: 1 } };
