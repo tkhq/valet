@@ -77,6 +77,7 @@ export async function startProxyKeyRequest(
     { device: opts.device ?? hostname(), purpose: "proxy-key", key_name: opts.keyName },
     { "x-api-key": opts.cliToken },
     opts.now,
+    "proxy-key",
   );
 }
 
@@ -85,6 +86,7 @@ async function startDeviceRequest(
   body: Record<string, string>,
   headers: Record<string, string>,
   now: () => number = Date.now,
+  expectPurpose?: "proxy-key",
 ): Promise<PendingLogin> {
   const started = await post<CliDeviceCodeResponse>(`${url}/api/cli/device/code`, body, headers);
   if (started.status === 401) throw new AuthError(errorOf(started.body).description ?? `Sign in first. Run \`valet login ${url}\`.`);
@@ -92,6 +94,11 @@ async function startDeviceRequest(
     throw new ApiError(started.status, errorOf(started.body).description ?? "the instance could not start a sign-in");
   }
   const code = started.body;
+  // An instance without proxy keys ignores `purpose` and starts a sign-in.
+  // Stop before the person approves a CLI sign-in this command did not ask for.
+  if (expectPurpose && code.purpose !== expectPurpose) {
+    throw new ApiError(started.status, `${url} does not support \`valet proxy setup\` yet. Ask your Valet admin to update the instance.`);
+  }
   return {
     url,
     deviceCode: code.device_code,

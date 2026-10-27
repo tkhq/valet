@@ -6648,6 +6648,10 @@ export interface CliDeviceCodeResponse {
   expires_in: number;
   /** Seconds between polls. */
   interval: number;
+  /** The request type the instance recorded. An instance without `valet
+   * proxy setup` support omits it, and the CLI stops before the person
+   * approves a sign-in it did not ask for. */
+  purpose?: CliDevicePurpose;
 }
 
 /** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
@@ -6674,6 +6678,14 @@ export interface CliDeviceInfo {
 }
 
 export type CliDevicePurpose = "login" | "proxy-key";
+
+/** `GET /api/proxy/keys/:id` — a proxy key the caller owns that still works. */
+export interface ProxyKeyStatusResponse {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  created_at: number;
+}
 
 /** `POST /api/cli/device/token` response for an approved `proxy-key`
  * request. The secret `key` appears only in this response. */

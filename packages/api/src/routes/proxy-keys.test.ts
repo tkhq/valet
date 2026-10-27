@@ -97,6 +97,8 @@ describe("proxy key device flow", () => {
     const started = await start(baseUrl, { device: "test-box", purpose: "proxy-key", key_name: "claude-code@test-box" }, cli.access_token);
     expect(started.status).toBe(200);
     const code = (await started.json()) as CliDeviceCodeResponse;
+    // The CLI checks this echo, so an older instance cannot turn the request into a sign-in.
+    expect(code.purpose).toBe("proxy-key");
 
     // Another person cannot see or approve it.
     expect((await browser(baseUrl, otherCookie).info(code.user_code)).status).toBe(404);
@@ -159,11 +161,20 @@ describe("proxy key device flow", () => {
     ]);
 
     const revoke = (id: string, token: string) => fetch(`${baseUrl}/api/proxy/keys/${id}`, { method: "DELETE", headers: { "x-api-key": token } });
-    // Another account's CLI cannot revoke it.
+    const status = (id: string, token: string) => fetch(`${baseUrl}/api/proxy/keys/${id}`, { headers: { "x-api-key": token } });
     const otherCli = await mintCliToken(providers.db, await userId(api, "other@example.test"), "other-box");
+    // The CLI token reads its key's status; another account's CLI sees nothing.
+    const live = await status(key.id, cli.access_token);
+    expect(live.status).toBe(200);
+    expect(await live.json()).toMatchObject({ id: key.id, name: "claude-code@test-box" });
+    expect((await status(key.id, otherCli.access_token)).status).toBe(404);
+    // Another account's CLI cannot revoke it.
     expect((await revoke(key.id, otherCli.access_token)).status).toBe(404);
     expect((await revoke(key.id, cli.access_token)).status).toBe(204);
-    expect((await message()).status).toBe(401);
+    const gone = await message();
+    expect(gone.status).toBe(401);
+    expect(((await gone.json()) as { error: { message: string } }).error.message).toContain("valet proxy setup");
+    expect((await status(key.id, cli.access_token)).status).toBe(404);
     expect((await revoke(key.id, cli.access_token)).status).toBe(404);
   });
 
@@ -183,7 +194,10 @@ describe("proxy key device flow", () => {
 
     // A login request: any signed-in person may decide it, and it yields a CLI token.
     const started = (await (await start(baseUrl, { device: "box" })).json()) as CliDeviceCodeResponse;
-    const info = (await (await browser(baseUrl, cookie).info(started.user_code)).json()) as CliDeviceInfo;
+    expect(started.purpose).toBe("login");
+    // A plain key is not a proxy key: the status route does not confirm it.
+    expect((await fetch(`${baseUrl}/api/proxy/keys/${plain.id}`, { headers: { "x-api-key": cli.access_token } })).status).toBe(404);
+    const info =(await (await browser(baseUrl, cookie).info(started.user_code)).json()) as CliDeviceInfo;
     expect(info.purpose).toBe("login");
     expect((await browser(baseUrl, cookie).decide(started.user_code, true)).status).toBe(200);
     const tokens = (await (await poll(baseUrl, started.device_code)).json()) as { access_token: string };

@@ -13,8 +13,21 @@ export type ProxyMode = ProxySettingsResponse["mode"];
 export interface HarnessTarget {
   /** Instance base URL, trailing slash stripped. */
   instanceUrl: string;
-  /** The shell command the harness runs to read the key (`valet proxy token <harness> ...`). */
+  /** The shell command the harness runs to read the key (`<valet> proxy token <harness> --instance <name>`). */
   helperCommand: string;
+  /** The end of `helperCommand` that names this harness and instance
+   * (`proxy token <harness> --instance <name>`). A helper with this suffix
+   * is setup's own value, wherever the valet binary was when setup wrote it. */
+  helperArgs: string;
+}
+
+/** Why setup would leave the harness broken, found before any change. */
+export interface HarnessPreflight {
+  /** Policy that setup cannot work around, such as admin-managed settings. Always refuses. */
+  blockers: string[];
+  /** Shell state the person can fix, such as an exported key. `--force` skips these. */
+  shellBlockers: string[];
+  warnings: string[];
 }
 
 /** The changes setup would make to the harness config, computed before any write. */
@@ -44,10 +57,12 @@ export interface HarnessAdapter {
   modes: readonly ProxyMode[];
   /** Why the adapter cannot run in `mode`. */
   modeRefusal(mode: ProxyMode): string;
+  /** Checks the environment and any admin policy before setup changes anything. */
+  preflight(env: NodeJS.ProcessEnv): HarnessPreflight;
   plan(target: HarnessTarget): HarnessPlan;
-  unapply(target: HarnessTarget): HarnessUnapplyReport;
-  /** Warnings about the current process environment, e.g. exported keys that bypass the proxy. */
-  envWarnings(env: NodeJS.ProcessEnv): string[];
+  unapply(target: Pick<HarnessTarget, "instanceUrl" | "helperArgs">): HarnessUnapplyReport;
+  /** What changes for the person after setup, printed before `nextStep`. */
+  notices: string[];
   /** The last line setup prints. */
   nextStep: string;
 }

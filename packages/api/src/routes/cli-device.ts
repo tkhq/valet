@@ -191,7 +191,7 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
   router.post("/device/code", async (c) => {
     const now = Date.now();
     if (!allowStart(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), now)) {
-      return c.json({ error: "slow_down", error_description: "Too many sign-ins started from this computer. Wait a minute, then run `valet login` again." }, 429);
+      return c.json({ error: "slow_down", error_description: "Too many requests started from this computer. Wait a minute, then run the command again." }, 429);
     }
     const body = await readOptionalJsonObject(c);
     const purpose = purposeOf(body?.purpose);
@@ -228,13 +228,14 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
       }).onConflictDoNothing().returning({ userCode: cliDeviceRequests.userCode });
       if (inserted.length > 0) userCode = candidate;
     }
-    if (userCode === "") return c.json({ error: "temporarily_unavailable", error_description: "Valet could not start a sign-in. Run `valet login` again." }, 503);
+    if (userCode === "") return c.json({ error: "temporarily_unavailable", error_description: "Valet could not start the request. Run the command again." }, 503);
     return c.json({
       device_code: deviceCode,
       user_code: userCode,
       verification_path: "/cli/device",
       expires_in: REQUEST_TTL_MS / 1000,
       interval: POLL_INTERVAL_S,
+      purpose,
     } satisfies CliDeviceCodeResponse);
   });
 
@@ -245,7 +246,7 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
     const hash = hashCode(deviceCode);
     const now = Date.now();
     const [request] = await db.select().from(cliDeviceRequests).where(eq(cliDeviceRequests.deviceCodeHash, hash)).limit(1);
-    if (!request || request.expiresAt <= now) return deviceError(c, "expired_token", "The sign-in code expired. Run `valet login` again.");
+    if (!request || request.expiresAt <= now) return deviceError(c, "expired_token", "The code expired.");
     if (request.status === "denied") {
       await db.delete(cliDeviceRequests).where(eq(cliDeviceRequests.deviceCodeHash, hash));
       return deviceError(c, "access_denied", "The sign-in was denied in the browser.");
@@ -261,7 +262,7 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
     const [taken] = await db.delete(cliDeviceRequests)
       .where(and(eq(cliDeviceRequests.deviceCodeHash, hash), eq(cliDeviceRequests.status, "approved")))
       .returning({ userId: cliDeviceRequests.userId, device: cliDeviceRequests.device, purpose: cliDeviceRequests.purpose, keyName: cliDeviceRequests.keyName });
-    if (!taken?.userId) return deviceError(c, "expired_token", "The sign-in code was already used. Run `valet login` again.");
+    if (!taken?.userId) return deviceError(c, "expired_token", "The code was already used.");
     if (taken.purpose === "proxy-key") {
       // Server-side call with metadata: the scope keeps the key off the Valet API.
       const created = await auth.api.createApiKey({
@@ -312,7 +313,7 @@ function decidable(userCode: string, userId: string) {
   );
 }
 
-const NOT_FOUND = "No sign-in is waiting for this code. Check the code in your terminal, or run `valet login` again.";
+const NOT_FOUND = "Nothing is waiting for this code. Check the code in your terminal, or run the command again. For `valet proxy setup`, sign in here with the account your CLI uses.";
 
 cliDeviceRouter.get("/", async (c) => {
   const refused = sessionOnly(c);

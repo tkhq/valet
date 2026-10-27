@@ -95,7 +95,8 @@ export function CliDevicePage() {
             />
             {info.isError && (
               <p className="text-sm text-danger-600">
-                No sign-in is waiting for this code. Check the code in your terminal, or run <code>valet login</code> again.
+                Nothing is waiting for this code. Check the code in your terminal, or run the command again. For{" "}
+                <code>valet proxy setup</code>, sign in here with the account your CLI uses.
               </p>
             )}
             <Button type="submit" className="w-full" disabled={!draft.trim()}>

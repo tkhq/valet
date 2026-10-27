@@ -76,11 +76,12 @@ describe("CLI device sign-in page", () => {
     expect(await screen.findByText(/receives the key/)).toBeTruthy();
   });
 
-  it("says when no sign-in waits for the code, and lets the person try again", async () => {
+  it("says when nothing waits for the code, names the CLI account rule, and lets the person try again", async () => {
     cliDevice.mockRejectedValue(new Error("404"));
     renderPage();
     enter("BBBB-BBBB");
-    expect(await screen.findByText(/No sign-in is waiting for this code/)).toBeTruthy();
+    expect(await screen.findByText(/Nothing is waiting for this code/)).toBeTruthy();
+    expect(screen.getByText(/sign in here with the account your CLI uses/)).toBeTruthy();
     expect(screen.getByLabelText("Code")).toBeTruthy();
   });
 });

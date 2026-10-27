@@ -6,24 +6,36 @@
  *   env.ANTHROPIC_BASE_URL = <instance>/proxy/anthropic
  *   apiKeyHelper           = <valet> proxy token claude-code --instance <name>
  *
- * Claude Code runs the helper for its key and sends the result as both
- * `x-api-key` and `Authorization: Bearer`. In pass-through mode the gateway
- * needs the person's own key in `x-api-key`, so this adapter supports
- * centralized mode only.
+ * Claude Code picks one credential in a fixed order: `ANTHROPIC_AUTH_TOKEN`,
+ * then `ANTHROPIC_API_KEY`, then `apiKeyHelper`, then a claude.ai login
+ * (https://code.claude.com/docs/en/authentication#authentication-precedence).
+ * So an exported key wins over the helper, and the helper wins over a
+ * subscription login. It sends the helper's key as both `x-api-key` and
+ * `Authorization: Bearer`. In pass-through mode the gateway needs the
+ * person's own key in `x-api-key`, so this adapter supports centralized mode
+ * only.
  *
  * The merge functions are pure over a settings object; the file read and
  * write is a thin shell around them.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { ConfigError } from "../../exit.js";
-import type { HarnessAdapter, HarnessPlan, HarnessTarget, HarnessUnapplyReport } from "./index.js";
+import type { HarnessAdapter, HarnessPlan, HarnessPreflight, HarnessTarget, HarnessUnapplyReport } from "./index.js";
 
 type Settings = Record<string, unknown>;
 
-/** Env values that make Claude Code skip the helper or the proxy. */
+/** Env values that Claude Code uses before the helper. */
 const OVERRIDING_ENV = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] as const;
+
+/** Where admins put Claude Code managed settings (https://code.claude.com/docs/en/managed-settings). */
+export function managedSettingsDirs(platform: NodeJS.Platform): string[] {
+  if (platform === "darwin") return ["/Library/Application Support/ClaudeCode"];
+  if (platform === "linux") return ["/etc/claude-code"];
+  if (platform === "win32") return ["C:\\Program Files\\ClaudeCode"];
+  return [];
+}
 
 export function claudeSettingsPath(env: NodeJS.ProcessEnv): string {
   const dir = env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
@@ -42,9 +54,9 @@ function envOf(settings: Settings): Record<string, unknown> {
   return isRecord(settings.env) ? settings.env : {};
 }
 
-/** A setup helper for any instance or valet path. Remove treats it as setup's own value. */
-function isProxyHelper(value: unknown): boolean {
-  return typeof value === "string" && / proxy token claude-code(\s|$)/.test(value);
+/** A helper setup wrote for this harness and instance, wherever the valet binary was. */
+function isOwnHelper(value: unknown, helperArgs: string): boolean {
+  return typeof value === "string" && value.endsWith(` ${helperArgs}`);
 }
 
 export interface SettingsPlan {
@@ -78,8 +90,7 @@ export function planClaudeSettings(current: Settings, target: HarnessTarget): Se
     delete nextEnv[name];
   }
   if (current.apiKeyHelper !== target.helperCommand) {
-    // An older setup helper (the valet binary moved) is setup's own value.
-    if (current.apiKeyHelper !== undefined && !isProxyHelper(current.apiKeyHelper)) {
+    if (current.apiKeyHelper !== undefined && !isOwnHelper(current.apiKeyHelper, target.helperArgs)) {
       conflicts.push(`apiKeyHelper is set to ${String(current.apiKeyHelper)}`);
     }
     changes.push(`apiKeyHelper = ${target.helperCommand}`);
@@ -89,17 +100,20 @@ export function planClaudeSettings(current: Settings, target: HarnessTarget): Se
   return { next: { ...current, env: nextEnv, apiKeyHelper: target.helperCommand }, changes, conflicts };
 }
 
-/** The settings after remove. Removes only values setup wrote. */
-export function unapplyClaudeSettings(current: Settings, target: HarnessTarget): { next: Settings; removed: string[]; kept: string[] } {
+/** The settings after remove. Removes only the values setup wrote for this instance. */
+export function unapplyClaudeSettings(
+  current: Settings,
+  target: Pick<HarnessTarget, "instanceUrl" | "helperArgs">,
+): { next: Settings; removed: string[]; kept: string[] } {
   const baseUrl = proxyBaseUrl(target.instanceUrl);
   const next: Settings = { ...current };
   const removed: string[] = [];
   const kept: string[] = [];
-  if (isProxyHelper(current.apiKeyHelper)) {
+  if (isOwnHelper(current.apiKeyHelper, target.helperArgs)) {
     delete next.apiKeyHelper;
     removed.push("apiKeyHelper");
   } else if (current.apiKeyHelper !== undefined) {
-    kept.push("apiKeyHelper (setup did not write it)");
+    kept.push("apiKeyHelper (setup did not write it for this instance)");
   }
   if (isRecord(current.env) && current.env.ANTHROPIC_BASE_URL !== undefined) {
     if (current.env.ANTHROPIC_BASE_URL === baseUrl) {
@@ -113,6 +127,55 @@ export function unapplyClaudeSettings(current: Settings, target: HarnessTarget):
     }
   }
   return { next, removed, kept };
+}
+
+/**
+ * Admin policy that stops Claude Code from using the helper or the proxy URL
+ * (https://code.claude.com/docs/en/authentication#restrict-login-to-your-organization).
+ * Pure over the parsed managed settings documents.
+ */
+export function managedSettingsBlockers(docs: Array<{ path: string; settings: Settings }>): string[] {
+  const blockers: string[] = [];
+  for (const { path, settings } of docs) {
+    for (const key of ["forceLoginMethod", "forceLoginOrgUUID"]) {
+      if (settings[key] !== undefined) {
+        blockers.push(`${path} sets ${key}. Under that policy Claude Code refuses to start with a key helper.`);
+      }
+    }
+    if (Array.isArray(settings.allowedProviders) && !settings.allowedProviders.includes("customEndpoint")) {
+      blockers.push(`${path} sets allowedProviders without "customEndpoint". Claude Code refuses requests to the Valet proxy URL.`);
+    }
+    if (settings.apiKeyHelper !== undefined) blockers.push(`${path} sets apiKeyHelper, which replaces the Valet key helper.`);
+    if (isRecord(settings.env) && settings.env.ANTHROPIC_BASE_URL !== undefined) {
+      blockers.push(`${path} sets env.ANTHROPIC_BASE_URL, which replaces the Valet proxy URL.`);
+    }
+  }
+  return blockers;
+}
+
+/** Managed settings files on this computer: `managed-settings.json` and `managed-settings.d/*.json`. Unreadable files are skipped. */
+function readManagedSettings(platform: NodeJS.Platform): Array<{ path: string; settings: Settings }> {
+  const docs: Array<{ path: string; settings: Settings }> = [];
+  for (const dir of managedSettingsDirs(platform)) {
+    const files = [join(dir, "managed-settings.json")];
+    const dropIns = join(dir, "managed-settings.d");
+    try {
+      for (const name of readdirSync(dropIns).sort()) {
+        if (name.endsWith(".json") && !name.startsWith(".")) files.push(join(dropIns, name));
+      }
+    } catch {
+      // No drop-in directory.
+    }
+    for (const path of files) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+        if (isRecord(parsed)) docs.push({ path, settings: parsed });
+      } catch {
+        // Missing or unreadable: Claude Code reports a broken policy file itself.
+      }
+    }
+  }
+  return docs;
 }
 
 /** Read the settings file. A missing file is `{}`; a file that is not a JSON object throws, and nothing is written. */
@@ -130,9 +193,18 @@ export function readClaudeSettings(path: string): Settings {
   return parsed;
 }
 
-function writeClaudeSettings(path: string, settings: Settings): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+/**
+ * Write the settings atomically: a temp file in the same directory, then a
+ * rename. A symlinked settings file (dotfiles) is written through to its
+ * target, so the link survives. The file keeps its mode.
+ */
+export function writeClaudeSettings(path: string, settings: Settings): void {
+  const target = existsSync(path) ? realpathSync(path) : path;
+  mkdirSync(dirname(target), { recursive: true });
+  const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
+  const temp = `${target}.valet-${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, mode === undefined ? {} : { mode });
+  renameSync(temp, target);
 }
 
 export const claudeCodeAdapter: HarnessAdapter = {
@@ -141,6 +213,17 @@ export const claudeCodeAdapter: HarnessAdapter = {
   modes: ["centralized"],
   modeRefusal: () =>
     "Your org's proxy runs in pass-through mode. `valet proxy setup claude-code` supports centralized mode only. Use the manual setup in Settings > Proxy.",
+
+  preflight(env: NodeJS.ProcessEnv): HarnessPreflight {
+    const shellBlockers = OVERRIDING_ENV
+      .filter((name) => env[name])
+      .map((name) =>
+        `Your shell exports ${name}. Claude Code uses it before the key helper, so it would send that key to the Valet proxy and fail. Remove the export from your shell profile, and open a new shell.`);
+    const warnings = env.ANTHROPIC_BASE_URL
+      ? ["Your shell exports ANTHROPIC_BASE_URL. Remove it from your shell profile, so it cannot point Claude Code away from the Valet proxy."]
+      : [];
+    return { blockers: managedSettingsBlockers(readManagedSettings(process.platform)), shellBlockers, warnings };
+  },
 
   plan(target: HarnessTarget): HarnessPlan {
     const path = claudeSettingsPath(process.env);
@@ -166,7 +249,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
     };
   },
 
-  unapply(target: HarnessTarget): HarnessUnapplyReport {
+  unapply(target): HarnessUnapplyReport {
     const path = claudeSettingsPath(process.env);
     if (!existsSync(path)) return { path, removed: [], kept: [] };
     const { next, removed, kept } = unapplyClaudeSettings(readClaudeSettings(path), target);
@@ -174,11 +257,10 @@ export const claudeCodeAdapter: HarnessAdapter = {
     return { path, removed, kept };
   },
 
-  envWarnings(env: NodeJS.ProcessEnv): string[] {
-    return [...OVERRIDING_ENV, "ANTHROPIC_BASE_URL"]
-      .filter((name) => env[name])
-      .map((name) => `Your shell exports ${name}. Claude Code can use it instead of the Valet proxy. Unset it in your shell profile.`);
-  },
+  notices: [
+    "Claude Code now authenticates with the Valet proxy key. The key helper ranks above a claude.ai login, so your model use bills through Valet, not your Claude subscription.",
+    "A repository's .claude/settings.json or settings.local.json can still override these values in that repository.",
+  ],
 
-  nextStep: "Start a new `claude` session to use the Valet proxy.",
+  nextStep: "Start a new `claude` session to use the Valet proxy. Run `/status` in it to check the key source.",
 };

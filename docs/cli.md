@@ -235,7 +235,7 @@ permissions (`0600`).
 The MCP tools let a local agent delegate work and follow it. See
 [MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).
 
-### `valet proxy setup|token|remove <harness> [--force] [--rotate]`
+### `valet proxy setup|token|remove <harness> [--no-wait] [--force] [--rotate]`
 
 Send a local coding tool's model calls through the instance's LLM proxy, so
 Valet records them and bills them to you. The supported harness is
@@ -252,18 +252,37 @@ mode. It works like this:
 1. The CLI asks for a proxy key, shows a code, and opens `/cli/device`.
 2. You approve the key in the browser. Only your own account can approve it.
 3. The CLI stores the key in the instance profile in `config.json`.
-4. The CLI writes `env.ANTHROPIC_BASE_URL` and `apiKeyHelper` to
+4. The CLI runs the key helper once and checks that it prints the key.
+5. The CLI writes `env.ANTHROPIC_BASE_URL` and `apiKeyHelper` to
    `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
 
-The key works only at the proxy. It cannot call the Valet API. It stays valid
-until you run `valet proxy remove` or revoke it in Settings > API keys.
-Disconnecting the CLI does not revoke it.
+An agent whose commands time out runs `valet proxy setup claude-code
+--no-wait`. That starts the request, prints the code, and exits. After you
+approve it, the agent runs setup again to finish.
 
-If the settings file holds a value that setup did not write, setup stops and
-lists it. `--force` replaces those values after it saves
-`settings.json.valet-backup`. `--rotate` replaces the stored key with a new one
-and revokes the old key. `token` prints the stored key. Claude Code runs it as
-its key helper.
+The key works only at the proxy. It cannot call the Valet API. It stays valid
+until you run `valet proxy remove` or `valet logout`, or revoke it in Settings >
+API keys. Disconnecting the CLI does not revoke it. If you revoke it in
+Settings, run setup again: setup checks the stored key and asks for a new one.
+
+The key helper ranks above a claude.ai login, so after setup your Claude Code
+model use bills through Valet, not your Claude subscription. Setup stops
+before it changes anything in these cases:
+
+- Your shell exports `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Claude Code
+  uses those before the key helper. Remove the export, or pass `--force`.
+- The settings file holds a value that setup did not write. `--force` replaces
+  it after it saves `settings.json.valet-backup`.
+- Claude Code managed settings (`managed-settings.json` or
+  `managed-settings.d/`) set `forceLoginMethod`, `forceLoginOrgUUID`,
+  `apiKeyHelper`, `env.ANTHROPIC_BASE_URL`, or an `allowedProviders` list
+  without `customEndpoint`. Setup cannot read MDM profiles or server-managed
+  settings. Ask your Claude Code admin if `claude` refuses to start after setup.
+
+A repository's `.claude/settings.json` or `.claude/settings.local.json` can
+override these values in that repository. `--rotate` replaces the stored key
+with a new one and revokes the old key. `token` prints the stored key. Claude
+Code runs it as its key helper.
 
 ### `valet tools search|describe|call`
 

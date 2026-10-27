@@ -1,11 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigError } from "../../exit.js";
-import { claudeCodeAdapter, claudeSettingsPath, planClaudeSettings, unapplyClaudeSettings } from "./claude-code.js";
+import {
+  claudeCodeAdapter, claudeSettingsPath, managedSettingsBlockers, planClaudeSettings, unapplyClaudeSettings, writeClaudeSettings,
+} from "./claude-code.js";
 
-const TARGET = { instanceUrl: "https://valet.example.com", helperCommand: "/usr/local/bin/valet proxy token claude-code --instance work" };
+const ARGS = "proxy token claude-code --instance work";
+const TARGET = { instanceUrl: "https://valet.example.com", helperCommand: `/usr/local/bin/valet ${ARGS}`, helperArgs: ARGS };
 const BASE = "https://valet.example.com/proxy/anthropic";
 
 let dir: string;
@@ -59,10 +62,12 @@ describe("planClaudeSettings", () => {
     expect(plan.next).toEqual({ env: { ANTHROPIC_BASE_URL: BASE }, apiKeyHelper: TARGET.helperCommand });
   });
 
-  it("treats an older setup helper (the valet binary moved) as its own value", () => {
-    const plan = planClaudeSettings({ env: { ANTHROPIC_BASE_URL: BASE }, apiKeyHelper: "/old/valet proxy token claude-code --instance work" }, TARGET);
-    expect(plan.conflicts).toEqual([]);
-    expect(plan.changes).toEqual([`apiKeyHelper = ${TARGET.helperCommand}`]);
+  it("treats its own helper for this instance as its own value after the valet binary moved, but not another instance's", () => {
+    const moved = planClaudeSettings({ env: { ANTHROPIC_BASE_URL: BASE }, apiKeyHelper: `/old/valet ${ARGS}` }, TARGET);
+    expect(moved.conflicts).toEqual([]);
+    expect(moved.changes).toEqual([`apiKeyHelper = ${TARGET.helperCommand}`]);
+    const other = planClaudeSettings({ env: { ANTHROPIC_BASE_URL: BASE }, apiKeyHelper: "/usr/local/bin/valet proxy token claude-code --instance home" }, TARGET);
+    expect(other.conflicts).toHaveLength(1);
   });
 });
 
@@ -80,6 +85,30 @@ describe("unapplyClaudeSettings", () => {
     expect(changed.next).toEqual({ env: { ANTHROPIC_BASE_URL: "https://gateway.other" }, apiKeyHelper: "~/bin/get-key.sh" });
     expect(changed.removed).toEqual([]);
     expect(changed.kept).toHaveLength(2);
+  });
+
+  it("leaves another instance's setup alone", () => {
+    const home = { env: { ANTHROPIC_BASE_URL: "https://home.example.com/proxy/anthropic" }, apiKeyHelper: "/usr/local/bin/valet proxy token claude-code --instance home" };
+    const out = unapplyClaudeSettings(home, TARGET);
+    expect(out.next).toEqual(home);
+    expect(out.removed).toEqual([]);
+  });
+});
+
+describe("managedSettingsBlockers", () => {
+  it("names each admin policy that stops the helper or the proxy URL", () => {
+    const blockers = managedSettingsBlockers([
+      { path: "/m/managed-settings.json", settings: { forceLoginMethod: "claudeai", allowedProviders: ["anthropic"] } },
+      { path: "/m/managed-settings.d/10.json", settings: { forceLoginOrgUUID: ["x"], apiKeyHelper: "vault", env: { ANTHROPIC_BASE_URL: "https://gw" } } },
+    ]);
+    expect(blockers.map((b) => b.split(" sets ")[1]?.split(/[ .,]/)[0])).toEqual([
+      "forceLoginMethod", "allowedProviders", "forceLoginOrgUUID", "apiKeyHelper", "env",
+    ]);
+  });
+
+  it("allows a policy that lists customEndpoint, and an empty policy", () => {
+    expect(managedSettingsBlockers([{ path: "/m", settings: { allowedProviders: ["anthropic", "customEndpoint"], model: "opus" } }])).toEqual([]);
+    expect(managedSettingsBlockers([])).toEqual([]);
   });
 });
 
@@ -114,15 +143,27 @@ describe("claudeCodeAdapter files", () => {
     expect(readSettings().apiKeyHelper).toBe(TARGET.helperCommand);
   });
 
+  it("writes through a symlinked settings file, keeps its mode, and leaves no temp file", () => {
+    const real = join(dir, "dotfiles-settings.json");
+    writeFileSync(real, "{}", { mode: 0o600 });
+    symlinkSync(real, settingsFile());
+    writeClaudeSettings(settingsFile(), { model: "opus" });
+    expect(lstatSync(settingsFile()).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(real, "utf8"))).toEqual({ model: "opus" });
+    expect(statSync(real).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
   it("unapply leaves a missing file missing", () => {
     expect(claudeCodeAdapter.unapply(TARGET)).toEqual({ path: settingsFile(), removed: [], kept: [] });
     expect(existsSync(settingsFile())).toBe(false);
   });
 
-  it("warns about shell exports that bypass the proxy", () => {
-    expect(claudeCodeAdapter.envWarnings({ ANTHROPIC_API_KEY: "sk", PATH: "/bin" })).toEqual([
-      expect.stringContaining("ANTHROPIC_API_KEY"),
-    ]);
-    expect(claudeCodeAdapter.envWarnings({})).toEqual([]);
+  it("refuses exported keys that outrank the helper, and warns about an exported base URL", () => {
+    const preflight = claudeCodeAdapter.preflight({ ANTHROPIC_API_KEY: "sk-mine", ANTHROPIC_BASE_URL: "https://x", PATH: "/bin" });
+    expect(preflight.shellBlockers).toEqual([expect.stringContaining("ANTHROPIC_API_KEY")]);
+    expect(preflight.shellBlockers.join(" ")).not.toContain("sk-mine");
+    expect(preflight.warnings).toEqual([expect.stringContaining("ANTHROPIC_BASE_URL")]);
+    expect(claudeCodeAdapter.preflight({}).shellBlockers).toEqual([]);
   });
 });
