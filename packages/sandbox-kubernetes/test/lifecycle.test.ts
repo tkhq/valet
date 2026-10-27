@@ -299,6 +299,32 @@ describe("init container startup classification", () => {
 });
 
 describe("classifyPodFailure (pure)", () => {
+  it("appends the last termination exit code and message to a crash loop", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{
+        name: "sandbox", image: "img", waitingReason: "CrashLoopBackOff",
+        lastTerminated: { exitCode: 127, reason: "Error", message: "valet-home-start: 14: exec: /usr/bin/tini: not found\n" },
+      }],
+    };
+    expect(classifyPodFailure(pod)).toBe(
+      "container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: 14: exec: /usr/bin/tini: not found",
+    );
+  });
+
+  it("falls back to the termination reason when the message is empty", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff", lastTerminated: { exitCode: 1, reason: "Error" } }],
+    };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff): exit 1: Error");
+  });
+
+  it("keeps the bare crash-loop text when there is no termination record", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }] };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
+  });
+
   it("returns null when the pod is absent (still provisioning, not error)", () => {
     expect(classifyPodFailure(null)).toBeNull();
   });
@@ -767,6 +793,22 @@ describe("applySandbox", () => {
 });
 
 describe("podStatusApiAdapter pod age and events (fix wave 2, B5)", () => {
+  it("carries lastState.terminated through the pod adapter", async () => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        spec: { containers: [{ name: "sandbox", image: "sandbox:v1" }] },
+        status: {
+          phase: "Running",
+          containerStatuses: [{ name: "sandbox", image: "sandbox:v1", imageID: "", ready: false, restartCount: 3,
+            state: { waiting: { reason: "CrashLoopBackOff" } },
+            lastState: { terminated: { exitCode: 127, reason: "Error", message: "boom\n" } } }],
+        },
+      }),
+    });
+    const pod = await adapter.getPodStatus("ns", "pod");
+    expect(pod?.containerStatuses?.[0]?.lastTerminated).toEqual({ exitCode: 127, reason: "Error", message: "boom\n" });
+  });
+
   it("reports the pod's creation time, ephemeral request, and events", async () => {
     let selector: string | undefined;
     const adapter = podStatusApiAdapter({

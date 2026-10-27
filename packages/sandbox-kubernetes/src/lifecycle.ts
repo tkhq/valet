@@ -1127,6 +1127,10 @@ export interface PodContainerStatus {
   image?: string;
   waitingReason?: string;
   waitingMessage?: string;
+  /** `status.lastState.terminated`, present after at least one crash. With
+   * `terminationMessagePolicy: FallbackToLogsOnError` the kubelet fills
+   * `message` with the log tail, which is the line a human needs. */
+  lastTerminated?: { exitCode?: number; reason?: string; message?: string };
 }
 
 /** Standard Kubernetes pod condition shape (`type`/`status`/`reason`/
@@ -1229,6 +1233,13 @@ export function podStatusApiAdapter(
         image: images.get(cs.name) ?? cs.image,
         waitingReason: cs.state?.waiting?.reason,
         waitingMessage: cs.state?.waiting?.message,
+        ...(cs.lastState?.terminated
+          ? { lastTerminated: {
+              exitCode: cs.lastState.terminated.exitCode,
+              reason: cs.lastState.terminated.reason,
+              message: cs.lastState.terminated.message,
+            } }
+          : {}),
       }));
       const conditions: PodStatusCondition[] = (pod.status?.conditions ?? [])
         .filter(
@@ -1423,7 +1434,13 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
   for (const cs of pod.containerStatuses ?? []) {
     if (cs.waitingReason === "CrashLoopBackOff") {
-      return "container crash-looping (CrashLoopBackOff)";
+      const base = "container crash-looping (CrashLoopBackOff)";
+      const last = cs.lastTerminated;
+      if (!last) return base;
+      const detail = (last.message?.trim().split("\n").filter(Boolean).pop() ?? last.reason ?? "").trim();
+      const exit = last.exitCode !== undefined ? `exit ${last.exitCode}` : "";
+      const parts = [exit, detail].filter(Boolean).join(": ");
+      return parts ? `${base}: ${parts}` : base;
     }
   }
 

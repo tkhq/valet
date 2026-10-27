@@ -648,6 +648,12 @@ describe("buildSandboxManifest", () => {
       expect(without).toEqual(alsoWithout);
     });
   });
+
+  it("asks the kubelet to copy the log tail into the termination message", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-tm", {});
+    const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+    expect(container?.terminationMessagePolicy).toBe("FallbackToLogsOnError");
+  });
 });
 
 describe("docker flag (rootless DinD)", () => {

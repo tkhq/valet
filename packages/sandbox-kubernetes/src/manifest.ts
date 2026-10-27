@@ -452,6 +452,7 @@ export function buildSandboxManifest(
 
   const container: SandboxContainer = {
     name: SANDBOX_CONTAINER_NAME,
+    terminationMessagePolicy: "FallbackToLogsOnError",
     image,
     // Non-terminating placeholder — mirrors sandbox-docker's
     // `sh -c "tail -f /dev/null"` idiom (packages/sandbox-docker/src/sandbox.ts).
