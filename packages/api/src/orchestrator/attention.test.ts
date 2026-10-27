@@ -252,6 +252,16 @@ describe("routeAttention (DB-backed)", () => {
     expect(await db.select().from(pendingChannelDeliveries)).toHaveLength(0);
   });
 
+  it("an org-owned approval keeps default channel delivery without teamDm", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await routeAttention({ db, channels: [{ id: "slack", order: 1, grace: "when-web-active", deliver: async () => {} }] }, {
+      kind: "approval", owner: { type: "org", id: "local-org" }, title: "t", dedupeKey: "org-approval-1",
+    });
+    const jobs = await db.select().from(pendingChannelDeliveries);
+    expect(jobs.map((j) => j.userId).sort()).toEqual(["local-user", "test-admin"]);
+  });
+
   it("platform defaults to the 300 second channel grace like notification", () => {
     expect(defaultChannelGraceSeconds("platform")).toBe(300);
   });

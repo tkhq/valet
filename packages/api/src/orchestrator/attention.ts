@@ -316,8 +316,8 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
           sessionId: event.sessionId ?? null, createdAt: now, readAt: null,
         }).onConflictDoNothing();
       }
-      // Team and org events are web-only unless the member opted in to DM copies.
-      if (event.owner.type !== "user" && preference?.teamDm !== true) return;
+      // Team events and platform notices are web-only unless the member opted in to DM copies; other org-owned kinds keep channel delivery.
+      if ((event.owner.type === "team" || event.kind === "platform") && preference?.teamDm !== true) return;
       let deliverAfter = now;
       let previousOrder: number | undefined;
       for (const tier of tiers) {
