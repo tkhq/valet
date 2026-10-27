@@ -14,6 +14,7 @@ import {
   VirtualSandboxProvider,
   type CreateSessionOptions,
   type SkillSource,
+  type ThreadPlanItem,
 } from "../src/index.js";
 
 const cleanups: Array<() => void> = [];
@@ -82,6 +83,11 @@ describe("readPlaybookSteps", () => {
   });
 });
 
+/** Plan items without their stored ids. */
+function steps(items: ThreadPlanItem[] | undefined) {
+  return items?.map(({ text, status }) => ({ text, status }));
+}
+
 function setup(provider: string, skills: SkillSource[]) {
   const faux = registerFauxProvider({ provider });
   cleanups.push(() => faux.unregister());
@@ -102,7 +108,7 @@ describe("playbook plan seeding", () => {
     expect((await session.thread().awaitResult(receipt.queueItemId)).outcome).toBe("completed");
 
     const stored = await providers.store.getThread(session.id, session.thread().id);
-    expect(readThreadPlan(stored?.metadata)?.items).toEqual([
+    expect(steps(readThreadPlan(stored?.metadata)?.items)).toEqual([
       { text: "Reproduce the bug", status: "in_progress" },
       { text: "Write a failing test", status: "pending" },
       { text: "Fix the cause", status: "pending" },
@@ -120,11 +126,12 @@ describe("playbook plan seeding", () => {
 
     await thread.setPlan([{ text: "My own step", status: "in_progress" }]);
     expect(await thread.seedPlaybookPlan(skill)).toEqual({ kind: "kept", steps: expect.any(Array) });
-    expect(readThreadPlan(thread.toThreadData().metadata)?.items).toEqual([{ text: "My own step", status: "in_progress" }]);
+    expect(steps(readThreadPlan(thread.toThreadData().metadata)?.items)).toEqual([{ text: "My own step", status: "in_progress" }]);
 
     await thread.setPlan([{ text: "My own step", status: "done" }]);
     expect((await thread.seedPlaybookPlan(skill)).kind).toBe("seeded");
-    expect(readThreadPlan(thread.toThreadData().metadata)?.items[0]).toEqual({ text: "Reproduce the bug", status: "in_progress" });
+    expect(steps(readThreadPlan(thread.toThreadData().metadata)?.items)?.[0]).toEqual({ text: "Reproduce the bug", status: "in_progress" });
+    expect(readThreadPlan(thread.toThreadData().metadata)?.title).toBe("bug-fix");
   });
 
   it("does not seed a plan from an invalid playbook", async () => {
