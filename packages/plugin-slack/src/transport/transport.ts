@@ -297,6 +297,12 @@ export class SlackTransport implements ChannelTransport {
    */
   private readonly lastTurn = new Map<string, string>();
   /**
+   * conversationKey → the person who last mentioned the app in a group DM.
+   * Slack streams into a conversation with more than one person only when the
+   * call names a recipient, so `startStream` reads it from here.
+   */
+  private readonly groupRecipients = new Map<string, { userId: string; teamId: string }>();
+  /**
    * conversationKeys minted for a fresh DM (`openDirectConversation`), whose
    * threadTs is synthetic and names no real message. A reply on such a key must
    * stay top-level, so `replyThreadTs` does not fall back to the key's threadTs
@@ -421,8 +427,11 @@ export class SlackTransport implements ChannelTransport {
     if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     if (subtype !== undefined && subtype !== "file_share") return null;
 
-    // The agent surface is the DM. Channel traffic is the event pipeline's.
-    if (str(event.channel_type) !== "im") return null;
+    // The agent surface is the DM, plus a group DM message that mentions the
+    // app. Other channel traffic is the event pipeline's.
+    const channelType = str(event.channel_type);
+    const group = channelType === "mpim";
+    if (channelType !== "im" && !(group && this.mentionsSelf(event))) return null;
 
     const channel = str(event.channel);
     const user = str(event.user);
@@ -436,6 +445,7 @@ export class SlackTransport implements ChannelTransport {
     const threadTs = str(event.thread_ts) ?? ts;
     const conversationKey = conversationKeyFor(teamId, channel, threadTs);
     this.remember(this.lastTurn, conversationKey, threadTs);
+    if (group) this.remember(this.groupRecipients, conversationKey, { userId: user, teamId });
 
     // Forwarded messages arrive as message unfurls in event.attachments, not
     // in event.text. Fold them in before the empty-turn drop below, or a
@@ -474,6 +484,7 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       raw: update,
     };
+    if (group) inbound.group = { channelId: channel, messageTs: ts };
     const context = this.contextOf(event);
     if (context) inbound.context = context;
     return inbound;
@@ -625,6 +636,12 @@ export class SlackTransport implements ChannelTransport {
     return media.length > 0 ? media : undefined;
   }
 
+  /** True when the message text mentions this app. Without the app's user id, nothing does. */
+  private mentionsSelf(event: Record<string, unknown>): boolean {
+    if (this.botUserId === undefined) return false;
+    return (str(event.text) ?? "").includes(`<@${this.botUserId}>`);
+  }
+
   private remember<V>(map: Map<string, V>, key: string, value: V): void {
     map.set(key, value);
     if (map.size > MAX_TRACKED_ENTRIES) {
@@ -751,10 +768,14 @@ export class SlackTransport implements ChannelTransport {
   async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
     const target = this.mustParse(conversationKey);
     try {
-      // No recipient_user_id: Slack requires it only when streaming into a
-      // channel, and this surface is a DM. Add it if `missing_recipient_user_id`
-      // ever comes back.
-      const res = await this.api.startStream({ channel: target.channelId, threadTs: ctx.threadTs });
+      // Slack requires a recipient only outside a DM. A group DM names the
+      // person whose mention started the turn.
+      const recipient = this.groupRecipients.get(conversationKey);
+      const res = await this.api.startStream({
+        channel: target.channelId,
+        threadTs: ctx.threadTs,
+        ...(recipient ? { recipientUserId: recipient.userId, recipientTeamId: recipient.teamId } : {}),
+      });
       return { conversationKey, messageId: res.ts, threadTs: ctx.threadTs };
     } catch (err) {
       asStreamError(err);

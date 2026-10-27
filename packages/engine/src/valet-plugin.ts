@@ -332,6 +332,12 @@ export interface InboundChannelEvent {
    */
   context?: { entities?: Array<{ type: string; value: string }> };
   /**
+   * Set when people other than the sender read the conversation (Slack: a
+   * group DM). The host tells the assistant so. On the assistant's first turn
+   * there, it reads the thread's messages before `messageTs` as context.
+   */
+  group?: { channelId: string; messageTs: string };
+  /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the
    * reply lands under the user's own message. Transports without threading

@@ -1779,7 +1779,9 @@ export class ChannelHost {
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
-    const processing = event.threadTs ? this.processingStatus.begin({
+    // Slack shows a thread status only in a one-person assistant thread, so a
+    // group conversation gets none.
+    const processing = event.threadTs && !event.group ? this.processingStatus.begin({
       channelType, conversationKey: event.conversationKey, threadTs: event.threadTs,
       sessionId: session.id, threadId: thread.id,
     }) : undefined;
@@ -1814,10 +1816,12 @@ export class ChannelHost {
         attachments.push({ type: "file", ...file });
       }
 
+      let body = text === "" ? "(media message)" : text;
+      if (event.group) body = await this.groupConversationBody(transport, session, thread.id, event, body);
       const content: SignalContent = {
         kind: "signal",
         signalType: `${channelType}.message`,
-        body: text === "" ? "(media message)" : text,
+        body,
         origin: { channelType, threadKey },
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
@@ -1858,6 +1862,33 @@ export class ChannelHost {
       activityAt: channelNow,
       emit: (activityEvent) => session.emit(activityEvent),
     });
+  }
+
+  /**
+   * The prompt body for a message from a conversation that other people read
+   * (a Slack group DM). The assistant learns that everyone there sees its
+   * reply. On its first turn in the thread, the earlier messages come first,
+   * so it joins the conversation with its context. A later turn already holds
+   * them. "First" also checks for an unsettled submission, as event delivery
+   * does, so two quick mentions do not seed the transcript twice.
+   */
+  private async groupConversationBody(
+    transport: ChannelTransport | undefined,
+    session: Session,
+    threadId: string,
+    event: InboundChannelEvent,
+    body: string,
+  ): Promise<string> {
+    const note = "This message is from a group conversation. Everyone in it reads your reply, so share only what the whole group may see.";
+    const group = event.group;
+    if (!group || !event.threadTs || !transport?.fetchThreadWindow) return `${note}\n\n${body}`;
+    const store = session.providers.store;
+    if ((await store.getEntries(session.id, threadId)).length > 0) return `${note}\n\n${body}`;
+    if ((await store.listUnsettledSubmissions(session.id)).some((item) => item.threadId === threadId)) return `${note}\n\n${body}`;
+    // The window ends before this message, so a top-level mention has no
+    // earlier messages, and the app's own posts stay out.
+    const transcript = await transport.fetchThreadWindow(group.channelId, event.threadTs, "0", group.messageTs).catch(() => null);
+    return transcript ? `${note}\n\nConversation so far in this thread:\n${transcript}\n\n---\n\n${body}` : `${note}\n\n${body}`;
   }
 
   private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {

@@ -23,6 +23,28 @@ the mobile Home spec. The desktop Home entry remains available.
 8. Independent chats keep separate histories and queues. This change does not
    create separate filesystems or merge memories across audiences.
 
+## Group DMs
+
+A group DM message that mentions the app follows the DM route. The Slack
+transport accepts a `message.mpim` event only when its text contains the app's
+own mention. A group DM message without a mention stays with the event
+pipeline. Each mention goes to the sender's own assistant. The Slack thread of
+the mention is the conversation, so a later mention in that thread continues
+the same chat. A second person who mentions the app in that thread gets a chat
+with their own assistant, because the binding scope includes the user.
+
+Everyone in a group DM reads the reply. The host adds a line to each group
+prompt that says so. On the assistant's first turn in the thread, the host adds
+the thread's earlier messages, minus the app's own posts. The stream names the
+mentioning person as its recipient, which Slack requires outside a 1:1 DM.
+Slack shows a thread status only in a 1:1 assistant thread, so a group turn
+sets none.
+
+Replies in the thread that do not mention the app reach no assistant. A
+mention rule whose channel filter names the group DM also delivers the
+mention, so that person gets two answers. The transport cannot see the
+rules, and no rule names a group DM today.
+
 ## Compatibility
 
 No transcript moves or disappears. Old Slack links and pending questions keep

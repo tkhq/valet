@@ -387,6 +387,35 @@ describe("parseUpdate — the agent surface events", () => {
     expect(transport.parseUpdate(envelope({ type: "app_mention", channel: "C1", user: "U1", text: "hi" }))).toBeNull();
   });
 
+  it("routes a group DM message that mentions the app, marked as a group conversation", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "<@UBOT> can you look at this?",
+      ts: "1700000000.000300", thread_ts: "1700000000.000100",
+    })));
+    expect(event).toMatchObject({
+      kind: "message",
+      conversationKey: conversationKeyFor(TEAM, "C0GROUP", "1700000000.000100"),
+      text: "can you look at this?",
+      threadTs: "1700000000.000100",
+      group: { channelId: "C0GROUP", messageTs: "1700000000.000300" },
+    });
+  });
+
+  it("leaves a group DM message without a mention to the event pipeline", () => {
+    const transport = makeTransport();
+    expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "lunch?" })))).toBeNull();
+    expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UOTHER> lunch?" })))).toBeNull();
+    // Without its own user id the app cannot tell that it was mentioned.
+    expect(makeTransport({ botUserId: undefined }).parseUpdate(
+      envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UBOT> hi" })),
+    )).toBeNull();
+  });
+
+  it("does not mark a direct message as a group conversation", () => {
+    expect(makeTransport().parseUpdate(envelope(imMessage()))).not.toHaveProperty("group");
+  });
+
   it("parses a link command DM into a command event", () => {
     const transport = makeTransport();
     const event = transport.parseUpdate(envelope(imMessage({ text: "link AbC123xyz" })));
@@ -860,6 +889,17 @@ describe("streaming", () => {
     const transport = makeTransport();
     await transport.startStream(KEY, { threadTs: "1700000000.000100" });
     expect(lastCall("chat.startStream")).not.toHaveProperty("recipient_user_id");
+  });
+
+  it("names the mentioning person as the recipient when it streams into a group DM", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", user: "U7", text: "<@UBOT> hi", ts: "1700000000.000400",
+    })));
+    await transport.startStream(conversationKeyFor(TEAM, "C0GROUP", "1700000000.000400"), { threadTs: "1700000000.000400" });
+    expect(lastCall("chat.startStream")).toMatchObject({
+      channel: "C0GROUP", thread_ts: "1700000000.000400", recipient_user_id: "U7", recipient_team_id: TEAM,
+    });
   });
 
   it("splits an append over the 12,000-character limit without losing a character", async () => {

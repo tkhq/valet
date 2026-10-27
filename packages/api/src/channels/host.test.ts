@@ -420,8 +420,9 @@ describe("ChannelHost.handleUpdate", () => {
     ]);
   });
 
-  async function startSlackHost() {
+  async function startSlackHost(extra: Partial<ChannelTransport> = {}) {
     const slack = {
+      ...extra,
       channelType: "slack",
       verifyWebhook: () => null,
       parseUpdate: () => null,
@@ -472,6 +473,41 @@ describe("ChannelHost.handleUpdate", () => {
       const after = await engineStore.getEntries(session.id, thread.id);
       expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
       expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
+    } finally {
+      await slackHost.stop();
+    }
+  });
+
+  it("tells the assistant a group DM reads its reply, and seeds the thread's earlier messages once", async () => {
+    const fetchThreadWindow = vi.fn(async () => "[Grace] did the deploy finish?");
+    const { slackHost } = await startSlackHost({ fetchThreadWindow });
+    try {
+      const key = "slack:T1:C0GROUP:111.1";
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:group-1", conversationKey: key, text: "can you check?", threadTs: "111.1",
+        group: { channelId: "C0GROUP", messageTs: "111.5" },
+      }));
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = await session.threadByKey("slack:C0GROUP:111.1");
+      if (!thread) throw new Error("Expected the group conversation's thread");
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
+      expect(fetchThreadWindow).toHaveBeenCalledWith("C0GROUP", "111.1", "0", "111.5");
+      const userTurns = async () => (await engineStore.getEntries(session.id, thread.id))
+        .filter((e) => e.type === "message" && e.role === "user").map((e) => e.type === "message" ? e.content : "");
+      const [first] = await userTurns();
+      expect(first).toContain("Everyone in it reads your reply");
+      expect(first).toContain("Conversation so far in this thread:\n[Grace] did the deploy finish?");
+      expect(first).toContain("can you check?");
+
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:group-2", conversationKey: key, text: "and the tests?", threadTs: "111.1",
+        group: { channelId: "C0GROUP", messageTs: "111.9" },
+      }));
+      await vi.waitFor(async () => expect(await userTurns()).toHaveLength(2));
+      const second = (await userTurns())[1];
+      expect(second).toContain("Everyone in it reads your reply");
+      expect(second).not.toContain("Conversation so far");
+      expect(fetchThreadWindow).toHaveBeenCalledTimes(1);
     } finally {
       await slackHost.stop();
     }
