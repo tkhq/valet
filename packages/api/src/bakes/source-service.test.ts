@@ -458,6 +458,34 @@ describe("SourceService", () => {
       expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "contract_unknown", detail: "reader exploded" });
     });
 
+    it("a credentials failure does not flap through a pending state: failing/credentials after every pass, checkedAt unchanged", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const src = await seedRepoSource(db);
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "credentials", checkedAt: NOW });
+      t = NOW + 60_000;
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "credentials", checkedAt: NOW });
+    });
+
+    it("a source whose newest bake failed stays failing/bake_failed across a retry pass until the retry pushes compatibly", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "old-pushed", contractVersion: 1, contractSource: "label", createdAt: NOW - 3000 });
+      await seedBake(db, src, { id: "newest-failed", status: "failed", error: "npm ci exploded", createdAt: NOW - 2000 });
+      let t = NOW;
+      const svc = makeService({ now: () => t, contractReader: async () => ({ ok: true, version: 3 }) });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "npm ci exploded");
+      t = NOW + 60_000;
+      await svc.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(1);
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "bake_failed", detail: "npm ci exploded", checkedAt: NOW });
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok", detail: null, checkedAt: NOW + 60_000 });
+    });
+
     it("a failed bake is stale/bake_failed when a compatible bake exists, else failing/bake_failed", async () => {
       const src = await seedRepoSource(db);
       const svc = makeService();

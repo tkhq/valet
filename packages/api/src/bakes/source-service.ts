@@ -1040,10 +1040,20 @@ export class SourceService {
   }
 
   /** Health for a source that needs (or is waiting on) a new bake. */
-  private pendingHealth(current: BakeRow | null): [SourceHealth, SourceHealthReason, string | null] {
+  private pendingHealth(current: BakeRow | null, newest: BakeRow | null): [SourceHealth, SourceHealthReason, string | null] {
+    // A bake that keeps failing stays failing/bake_failed (stale when a
+    // compatible pushed bake survives) instead of cycling through the pending
+    // states at every retry.
+    if (newest?.status === "failed") return [current && compatible(current) ? "stale" : "failing", "bake_failed", newest.error ?? null];
     if (!current) return ["unbaked", "ok", null];
     if (!compatible(current)) return ["incompatible", "contract", `current bake ${current.id} contract ${current.contractVersion ?? "missing"} < ${MIN_IMAGE_CONTRACT}`];
     return ["stale", "ok", null];
+  }
+
+  /** Newest bake of any status for a source, or null. */
+  private async newestBake(sourceId: string): Promise<BakeRow | null> {
+    const rows = await this.db.select().from(bakes).where(eq(bakes.sourceId, sourceId)).orderBy(desc(bakes.createdAt)).limit(1);
+    return rows[0] ?? null;
   }
 
   /** Newest `pushed` bake for a source, or null. */
@@ -1958,14 +1968,17 @@ export class SourceService {
     // have dispatched one that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     const contractRebake = Boolean(current && current.identityHash === identity && !compatible(current));
     recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : current ? "parent_changed" : "miss");
-    await this.setSourceHealth(source.id, ...this.pendingHealth(current));
+    // Health is written only after startBake resolves: a throw goes to the
+    // pass's catch (failing/<reason>) without flapping through pending first.
+    const newest = await this.newestBake(source.id);
     await this.startBake(source.id, "scheduler", { contractRebake });
+    await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
   }
 
   private async maybeScheduleRepo(source: ImageSourceRow): Promise<void> {
@@ -2018,18 +2031,19 @@ export class SourceService {
     // tick) may have dispatched a bake for this source that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     const contractRebake = Boolean(current && current.commitSha === head.sha && current.identityHash === identity && !compatible(current));
     recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
-    await this.setSourceHealth(source.id, ...this.pendingHealth(current));
+    const newest = await this.newestBake(source.id);
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
     try {
       await this.startBake(source.id, "scheduler", { contractRebake });
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
     } catch (err) {
       // A newly declared/changed `baseSetup` surfaces here on the first pass:
       // startRepoBake linked the synthetic base and kicked ITS bake instead.
