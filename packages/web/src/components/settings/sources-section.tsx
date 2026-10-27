@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
@@ -267,7 +267,7 @@ function BaseImageCard({
       {source && (
         <p className="flex items-center gap-2 text-xs text-muted">
           <StatusDot tone={HEALTH_TONE[source.health]} size="sm" />
-          {sourceHealthPhrase(source.health, source.healthReason, latestBake?.status === "pushed" ? latestBake.finishedAt ?? latestBake.createdAt : null, Date.now(), relativeTime)}
+          {sourceHealthPhrase(source.health, source.healthReason, builtAtOf(latestBake), Date.now(), relativeTime)}
         </p>
       )}
 
@@ -298,8 +298,13 @@ const REPO_SORT_OPTIONS: { value: RepoSort; label: string }[] = [
   { value: "status", label: "Build status" },
 ];
 
+/** When the image became usable: push time when known, else creation time. */
+function builtAtOf(bake: { status: string; createdAt: number; finishedAt?: number | null } | null | undefined): number | null {
+  return bake?.status === "pushed" ? bake.finishedAt ?? bake.createdAt : null;
+}
+
 function repoStatus(source: SourceSummary, now = Date.now()) {
-  const builtAt = source.latestBake?.status === "pushed" ? source.latestBake.createdAt : null;
+  const builtAt = builtAtOf(source.latestBake);
   return {
     label: sourceHealthPhrase(source.health, source.healthReason, builtAt, now, relativeTime),
     tone: HEALTH_TONE[source.health],
@@ -328,6 +333,10 @@ function RepoSourceRow({
   const [expanded, setExpanded] = useState(Boolean(initiallyExpanded));
   const [hasExpanded, setHasExpanded] = useState(Boolean(initiallyExpanded));
   const status = repoStatus(source);
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (initiallyExpanded) rowRef.current?.scrollIntoView?.({ block: "center" });
+  }, [initiallyExpanded]);
   const repoName = source.repoFullName ?? source.name;
   const detailsId = `repo-details-${source.id}`;
   const [bakeError, setBakeError] = useState<string | null>(null);
@@ -351,7 +360,7 @@ function RepoSourceRow({
   }
 
   return (
-    <div hidden={!visible} className="space-y-3 p-4">
+    <div ref={rowRef} hidden={!visible} className="space-y-3 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -416,7 +425,7 @@ function RepoSourceRow({
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
               {latest && <><dt className="text-muted">Current bake</dt><dd>{shortSha(latest.commitSha ?? "")} · Contract {latest.contractVersion ?? "unknown"} ({latest.contractSource ?? "unread"}){latest.parentBakeId ? ` · Parent bake ${latest.parentBakeId}` : ""}</dd></>}
               {source.health !== "healthy" && source.healthCheckedAt && <><dt className="text-muted">Status</dt><dd>{capitalize(source.health)} since {relativeTime(source.healthCheckedAt)}</dd></>}
-              {source.healthDetail && <><dt className="text-muted">Detail</dt><dd className="whitespace-pre-wrap break-all">{source.healthDetail}</dd></>}
+              {source.healthDetail && <><dt className="text-muted">Detail</dt><dd className="max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-xs">{source.healthDetail}</dd></>}
             </dl>
             <RepoSandboxResourcesForm source={source} />
             <div className="space-y-2">

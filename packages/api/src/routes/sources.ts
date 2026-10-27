@@ -100,6 +100,7 @@ sourcesRouter.get("/", async (c) => {
       sourceId: bakes.sourceId,
       status: bakes.status,
       createdAt: bakes.createdAt,
+      finishedAt: bakes.finishedAt,
     })
     .from(bakes)
     .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))

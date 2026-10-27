@@ -169,10 +169,24 @@ describe("GET /api/org/sources", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListSourcesResponse;
     expect(body.sources).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: source.id, latestBake: { status: "building", createdAt: 2000 } }),
+      expect.objectContaining({ id: source.id, latestBake: { status: "building", createdAt: 2000, finishedAt: null } }),
       expect.objectContaining({ id: unbuilt.id, latestBake: null }),
     ]));
     expect(JSON.stringify(body)).not.toContain("build log");
+  });
+
+  it("returns finishedAt for a pushed latest bake and null for a queued one", async () => {
+    api = await bootTestApi();
+    const pushed = await seedRepoSource(api);
+    const queued = await createExternal(api.baseUrl);
+    await api.providers.db.insert(bakes).values([
+      { id: `pb_${randomUUID()}`, sourceId: pushed.id, identityHash: "p", imageRef: "registry/p", status: "pushed", recipe: [], createdAt: 1000, finishedAt: 4000 },
+      { id: `pb_${randomUUID()}`, sourceId: queued.id, identityHash: "q", imageRef: "registry/q", status: "queued", recipe: [], createdAt: 1000 },
+    ]);
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
+    const body = (await res.json()) as ListSourcesResponse;
+    expect(body.sources.find((s) => s.id === pushed.id)?.latestBake).toEqual({ status: "pushed", createdAt: 1000, finishedAt: 4000 });
+    expect(body.sources.find((s) => s.id === queued.id)?.latestBake).toEqual({ status: "queued", createdAt: 1000, finishedAt: null });
   });
 
   it("exposes source health and bake contract fields on the wire", async () => {

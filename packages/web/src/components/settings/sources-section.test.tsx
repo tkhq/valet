@@ -104,7 +104,7 @@ describe("SourcesSection", () => {
 
   it("renders the health phrase and guidance per source", () => {
     sourcesData = { builderAvailable: true, sources: [
-      makeSource({ id: "s-ok", repoFullName: "acme/ok", latestBake: { status: "pushed", createdAt: Date.now() - 2 * 3600_000 } }),
+      makeSource({ id: "s-ok", repoFullName: "acme/ok", latestBake: { status: "pushed", createdAt: Date.now() - 20 * 3600_000, finishedAt: Date.now() - 2 * 3600_000 } }),
       makeSource({ id: "s-fail", repoFullName: "acme/fail", health: "failing", healthReason: "repo_unreachable", healthDetail: "GitHub API /repos/acme/fail responded 404" }),
       makeSource({ id: "s-old", repoFullName: "acme/old", health: "incompatible", healthReason: "contract" }),
       makeSource({ id: "s-new", repoFullName: "acme/new", health: "unbaked", latestBake: null }),
@@ -143,15 +143,22 @@ describe("SourcesSection", () => {
     expect(screen.getByText(/Contract 3 \(label\)/)).toBeTruthy();
     expect(screen.getByText(/Parent bake base-1/)).toBeTruthy();
     expect(screen.getByText(/Failing since 1h ago/)).toBeTruthy();
-    expect(screen.getByText("npm ci exploded")).toBeTruthy();
+    const detail = screen.getByText("npm ci exploded");
+    expect(detail.className).toContain("max-h-48");
+    expect(detail.className).toContain("overflow-auto");
   });
 
   it("expands the row named by initiallyExpandedId and ignores an unknown id (Review Focus 3)", () => {
-    sourcesData = { builderAvailable: true, sources: [makeSource({ id: "s1" })] };
+    sourcesData = { builderAvailable: true, sources: [makeSource({ id: "s1" }), makeSource({ id: "s2", repoFullName: "acme/other" })] };
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
     const { unmount } = render(<SourcesSection initiallyExpandedId="s1" />);
+    expect(scroll).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("true");
     unmount();
+    scroll.mockClear();
     render(<SourcesSection initiallyExpandedId="nope" />);
+    expect(scroll).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("false");
   });
 
@@ -407,7 +414,7 @@ describe("SourcesSection", () => {
   });
 
   it("updates collapsed status after a refresh and sorts failing builds first", async () => {
-    sourcesData = { sources: [makeSource({ latestBake: { status: "pushed", createdAt: 1 } }), makeSource({ id: "other", repoFullName: "acme/zebra", health: "failing", healthReason: "bake_failed", latestBake: { status: "failed", createdAt: 2 } })], builderAvailable: true };
+    sourcesData = { sources: [makeSource({ latestBake: { status: "pushed", createdAt: 1, finishedAt: 2 } }), makeSource({ id: "other", repoFullName: "acme/zebra", health: "failing", healthReason: "bake_failed", latestBake: { status: "failed", createdAt: 2, finishedAt: 3 } })], builderAvailable: true };
     const { rerender } = render(<SourcesSection />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Sort: Name/ }));
@@ -424,7 +431,7 @@ describe("SourcesSection", () => {
     ["stale", "ok", "Rebuilding"],
     ["unbaked", "ok", "Not built yet"],
   ] as const)("shows %s health while collapsed", (health, healthReason, label) => {
-    sourcesData = { sources: [makeSource({ health, healthReason, latestBake: { status: "pushed", createdAt: Date.now() - 3600_000 } })], builderAvailable: true };
+    sourcesData = { sources: [makeSource({ health, healthReason, latestBake: { status: "pushed", createdAt: Date.now() - 3600_000, finishedAt: Date.now() - 3600_000 } })], builderAvailable: true };
     render(<SourcesSection />);
     expect(screen.getByText(label)).toBeTruthy();
     expect(screen.queryByText("Sandbox history")).toBeNull();

@@ -5198,7 +5198,7 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 /** Mirrors the `image_sources` row for all kinds (external/base/repo). */
 export interface SourceSummary {
   /** Latest build summary on list responses. Older servers omit this field. */
-  latestBake?: Pick<BakeSummary, "status" | "createdAt"> | null;
+  latestBake?: Pick<BakeSummary, "status" | "createdAt" | "finishedAt"> | null;
   id: string;
   orgId: string;
   kind: "external" | "base" | "repo";
