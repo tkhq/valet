@@ -35,12 +35,17 @@ export function ServiceActionCombobox({
   onChange,
   id,
   placeholder,
+  teamId,
 }: {
   mode: "service" | "action";
   value: string;
   onChange: (v: string) => void;
   id?: string;
   placeholder?: string;
+  /** The team whose catalog to offer. A dynamic (MCP) service lists its
+   * tools from the team's own connection, the same one the team write
+   * verifies them against; without it, from the caller's own connection. */
+  teamId?: string;
 }): ReactElement {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -49,7 +54,7 @@ export function ServiceActionCombobox({
   const inputRef = useRef<HTMLInputElement>(null);
   const listboxRef = useRef<HTMLDivElement>(null);
 
-  const pluginsQ = usePlugins();
+  const pluginsQ = usePlugins(teamId);
   const loading = pluginsQ.isLoading;
   const plugins = pluginsQ.data?.plugins ?? [];
 

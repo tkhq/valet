@@ -774,6 +774,9 @@ export interface ToolResult {
    * successful call from a completed-but-failed one read this value.
    */
   ok?: boolean;
+  /** "automatic" when the action needed approval and ran without a card
+   * because the thread runs without asking. The UI names it on the step. */
+  approval?: "automatic";
 }
 
 export type ToolAttachment =
@@ -1253,7 +1256,10 @@ export type PolicyProvenanceSource =
   | "risk_default"
   | "resolver_error"
   /** The action would use another member's shared account (`PolicyDecision.approver`). */
-  | "shared_account";
+  | "shared_account"
+  /** The thread runs without asking, and this approval was one its person
+   * could stop for good themselves, so no gate opened. */
+  | "thread_bypass";
 
 /**
  * The host's decision for one action invocation. `mode` drives `call_tool`:
@@ -1927,7 +1933,11 @@ export type EngineEvent =
    * earlier version. `noteEntryId` is the branch note at the new leaf. */
   | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
-  | { type: "status"; threadId: string; status: EngineEventStatus }
+  /** `turnStartedAt` is when the running submission was claimed. A turn can
+   * end and go idle between model steps of one submission, and a replay
+   * delivers old frames at the replay time, so a client reads the start
+   * from here rather than from when a frame arrives. */
+  | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }
@@ -2372,6 +2382,9 @@ export interface SessionStore {
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
   listThreads(sessionId: string): Promise<ThreadData[]>;
+  /** The threads of every listed session, in one read. A workspace lists
+   * its history across one session per conversation. */
+  listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]>;
   getEntries(
     sessionId: string,
     threadId: string,

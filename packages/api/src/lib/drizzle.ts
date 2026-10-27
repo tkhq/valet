@@ -404,6 +404,12 @@ END $cost_view$`;
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
+  { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (
+    "org_id" text NOT NULL, "user_id" text NOT NULL, "session_id" text NOT NULL,
+    "channel_type" text NOT NULL, "conversation_key" text NOT NULL, "thread_id" text NOT NULL,
+    "created_at" bigint NOT NULL,
+    PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+  )` },
   { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
   { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
@@ -743,6 +749,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "session_threads.share_mode column",
     probe: { kind: "column", table: "session_threads", column: "share_mode" },
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
+  },
+  {
+    describe: "session_threads.approval_bypass_by column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_by" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_by" text',
+  },
+  {
+    describe: "session_threads.approval_bypass_at column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_at" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_at" bigint',
   },
   {
     describe: "session_repos.resolved_ref column",

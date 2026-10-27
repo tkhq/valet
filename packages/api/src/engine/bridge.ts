@@ -259,7 +259,10 @@ export function queuedItemToWire(item: EngineQueueItem): WireQueuedItem {
     text = content;
   } else if (isQueuedSignal(content)) {
     text = content.body;
-    signalType = content.tagName ?? content.signalType;
+    // A named tag, such as "wakeup", names the kind. The engine's default
+    // tag "signal" names nothing, so a child's result reads as its
+    // signalType, "child.settled".
+    signalType = content.tagName && content.tagName !== "signal" ? content.tagName : content.signalType;
     attachments = content.attachments?.length ?? 0;
   } else {
     text = content.text ?? "";
@@ -396,6 +399,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "status",
           threadId: e.threadId,
           status: e.status,
+          ...(e.turnStartedAt !== undefined ? { turnStartedAt: e.turnStartedAt } : {}),
         },
       ];
 

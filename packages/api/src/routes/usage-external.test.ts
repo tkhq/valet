@@ -297,6 +297,21 @@ it("does not disclose team thread intents to an admin outside their audience", a
   }
 });
 
+it("names the most common reasons a tool's calls failed", async () => {
+  api = await bootTestApi();
+  const failure = { surface: "hosted" as const, name: "granola.get_meetings", outcome: "error" as const };
+  for (let i = 0; i < 3; i++) await seed(api, `credential-${i}`, { ...failure, errorCode: "missing_credential" });
+  await seed(api, "failed", { ...failure, errorCode: "action_failed" });
+  await seed(api, "unrecorded", { ...failure, errorCode: null });
+  await seed(api, "worked", { surface: "hosted", name: "granola.get_meetings" });
+  await seed(api, "other-tool", { ...failure, name: "calendar.list_events", errorCode: "action_failed" });
+  const data = await (await read(api)).json() as ExternalUsageResponse;
+  expect(data.tools.find(tool => tool.name === "granola.get_meetings")).toMatchObject({ calls: 6, errorRate: 5 / 6, errors: [
+    { code: "missing_credential", calls: 3 }, { code: "action_failed", calls: 1 }, { code: "unspecified", calls: 1 },
+  ] });
+  expect(data.tools.find(tool => tool.name === "calendar.list_events")?.errors).toEqual([{ code: "action_failed", calls: 1 }]);
+});
+
 it("counts execution errors separately from policy denial and pending approval", async () => {
   api = await bootTestApi();
   for (const outcome of ["ok", "error", "denied", "pending-approval"] as const) await seed(api, outcome, { outcome });

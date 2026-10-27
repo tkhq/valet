@@ -10,6 +10,7 @@ import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
 import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -385,6 +386,8 @@ export interface EngineHostOpts {
    * A getter, because the tools need providers built after this host.
    */
   homeTools?: () => ToolDef[];
+  /** Tools for messaging the threads a branch links to this one (`home/thread-link-tools.ts`). */
+  threadLinkTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -402,6 +405,13 @@ export interface EngineHostOpts {
    * means the plugin-default rung falls through to the risk default.
    */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /**
+   * The cached tool listings of dynamic (MCP) services (`plugins/service-probe.ts`).
+   * The policy resolver reads them so an owner's "always allow" on an MCP
+   * tool passes the override bounds check (`PolicyResolverDeps.serviceProbes`).
+   * Absent: a dynamic tool is unverifiable and the gate hides that option.
+   */
+  serviceProbes?: ServiceProbes;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -2030,6 +2040,7 @@ export class EngineHost {
       this.policyResolverInstance = buildPolicyResolver({
         db: this.opts.db,
         actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+        ...(this.opts.serviceProbes ? { serviceProbes: this.opts.serviceProbes } : {}),
         credentials: this.opts.engineCredentials,
         ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
         ...(this.opts.plugins ? { plugins: this.opts.plugins } : {}),
@@ -3046,12 +3057,16 @@ export class EngineHost {
     const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
     // Existing scripts can depend on absolute paths. Keep the recorded working
     // directory when adopting a legacy runtime, rather than allocating a new one.
-    let workspace = legacyRuntime && existing ? existing.workspace : execution
-      ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
-      : join(homedir(), ".valet", "assistants", assistantId);
-    if (execution && principal.type === "user") {
-      // The personal root mounts its whole directory. Keep fork files outside it.
+    let workspace = legacyRuntime && existing ? existing.workspace : join(homedir(), ".valet", "assistants", assistantId);
+    if (execution) {
+      // The root sandbox mounts its whole directory, so an execution inside it
+      // would expose a private conversation's files to the root. A live
+      // browser sandbox also owns that directory, and the server could not
+      // create the execution there. Older team executions keep their
+      // recorded directory under `executions/`.
       workspace = existing?.workspace ?? join(homedir(), ".valet", "assistant-executions", assistantId, execution.sessionId);
+    }
+    if (execution && principal.type === "user") {
       const root = await this.opts.engineStore.getSession(assistant.sessionId);
       const sourcePath = resolve(root?.workspace ?? join(homedir(), ".valet", "assistants", assistantId));
       const executionPath = resolve(workspace);
@@ -3209,7 +3224,7 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...(this.opts.threadLinkTools?.() ?? []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this
@@ -4434,7 +4449,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,

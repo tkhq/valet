@@ -1,7 +1,7 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { uid } from "./ids.js";
-import { builtinTools, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
+import { builtinTools, CHILD_EXCLUDED_TOOL_NAMES, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
@@ -455,8 +455,12 @@ export class Session {
     // A session with no wakeup seam (a bare engine, a test) gets no wakeup
     // tools: each one would only refuse, and six tool schemas widen every
     // prompt. The api gives every session a seam (`host.ts`).
+    // A child never asks a person: nobody watches its conversation. It ends
+    // its turn with the question as its result, and its parent answers it
+    // or asks the person in the thread they watch.
     this.builtinTools = options.builtinTools
-      ?? (options.wakeups ? builtinTools : builtinTools.filter((tool) => !WAKEUP_TOOL_NAMES.has(tool.name)));
+      ?? builtinTools.filter((tool) => (options.wakeups || !WAKEUP_TOOL_NAMES.has(tool.name))
+        && !(options.purpose === "child" && CHILD_EXCLUDED_TOOL_NAMES.has(tool.name)));
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;
@@ -1018,6 +1022,7 @@ export class Session {
   private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
     await this.refreshUserTimezone();
     let data = this.buildThreadData(key, initial);
+    let restoreTranscript = false;
     try {
       await this.providers.store.saveThread(this.id, data);
     } catch (error) {
@@ -1026,14 +1031,29 @@ export class Session {
       const winner = (await this.providers.store.listThreads(this.id)).find(thread => thread.key === key);
       if (!winner) throw error;
       data = winner;
+      restoreTranscript = true;
     }
-    const thread = new Thread(this, data);
+    const thread = new Thread(this, data, { restoreTranscript });
     this.attachThread(thread);
     return thread;
   }
 
   threadById(id: string): Thread | null {
     return this.threads.get(id) ?? null;
+  }
+
+  /** Attach a persisted thread by ID, with lazy history restoration and no row creation. */
+  async loadThread(id: string): Promise<Thread | null> {
+    const existing = this.threads.get(id);
+    if (existing) return existing;
+    const data = await this.providers.store.getThread(this.id, id);
+    if (!data) return null;
+    // Concurrent lookups must share one in-process thread and its queue driver.
+    const loaded = this.threads.get(id);
+    if (loaded) return loaded;
+    const thread = new Thread(this, data, { restoreTranscript: true });
+    this.attachThread(thread);
+    return thread;
   }
 
   async threadByKey(key: string): Promise<Thread | null> {

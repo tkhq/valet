@@ -59,6 +59,90 @@ it("imports existing browser data once and retains its original copy", async () 
   expect(remote.change).toHaveBeenCalledTimes(1);
 });
 
+it("folds a folder at once and keeps the last state through quiet saves", async () => {
+  remote.read.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 0 });
+  remote.change.mockImplementation((_runtime: string, operations: Array<{ type: string; collapsed?: boolean; value?: boolean }>) => {
+    const fold = operations.find(op => op.type === "collapse-project");
+    const section = operations.find(op => op.type === "collapsed");
+    return Promise.resolve({ value: { ...empty, projects: [{ ...project, collapsed: fold?.collapsed ?? false }], collapsed: section?.value ?? false }, revision: remote.change.mock.calls.length });
+  });
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  act(() => {
+    hook.result.current.setCollapsed(true, project.id);
+    hook.result.current.setCollapsed(false, project.id);
+    hook.result.current.setCollapsed(true, project.id);
+  });
+  expect(hook.result.current.value.projects[0]!.collapsed).toBe(true);
+  expect(hook.result.current.isSaving).toBe(false);
+  await waitFor(() => expect(remote.change).toHaveBeenCalledTimes(3));
+  expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "collapse-project", id: project.id, collapsed: true }], "viewer");
+  await waitFor(() => expect(hook.result.current.value.projects[0]!.collapsed).toBe(true));
+  expect(hook.result.current.isSaving).toBe(false);
+});
+
+it("pins and moves a chat at once and puts it back with the error when the save fails", async () => {
+  remote.read.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 0 });
+  remote.change.mockRejectedValueOnce(new Error("Offline. Reconnect and retry."));
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  act(() => { void hook.result.current.update(value => ({ ...value, pinned: ["chat"], assignments: { chat: project.id } })); });
+  expect(hook.result.current.value.pinned).toEqual(["chat"]);
+  expect(hook.result.current.value.assignments).toEqual({ chat: project.id });
+  expect(hook.result.current.isSaving).toBe(false);
+  await waitFor(() => expect(hook.result.current.error).toContain("Reconnect and retry"));
+  expect(hook.result.current.value.pinned).toEqual([]);
+  expect(hook.result.current.value.assignments).toEqual({});
+});
+
+it("keeps a failed fold for Retry sync when a later change saves, and clears the error after the retry", async () => {
+  remote.read.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 0 });
+  remote.change
+    .mockRejectedValueOnce(new Error("Offline. Reconnect and retry."))
+    .mockResolvedValueOnce({ value: { ...empty, projects: [project], pinned: ["chat"] }, revision: 1 })
+    .mockResolvedValueOnce({ value: { ...empty, projects: [{ ...project, collapsed: true }], pinned: ["chat"] }, revision: 2 });
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  act(() => {
+    hook.result.current.setCollapsed(true, project.id);
+    void hook.result.current.update(value => ({ ...value, pinned: ["chat"] }));
+  });
+  await waitFor(() => expect(remote.change).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(hook.result.current.value.pinned).toEqual(["chat"]));
+  expect(hook.result.current.error).toContain("Reconnect and retry");
+  expect(hook.result.current.value.projects[0]!.collapsed).toBe(false);
+  await act(async () => { await hook.result.current.retry(); });
+  expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "collapse-project", id: project.id, collapsed: true }], "viewer");
+  await waitFor(() => expect(hook.result.current.value.projects[0]!.collapsed).toBe(true));
+  expect(hook.result.current.error).toBeUndefined();
+});
+
+it("shows a new folder at once with one stable id", async () => {
+  let finish: (value: ThreadProjectsResponse) => void = () => {};
+  remote.change.mockImplementationOnce(() => new Promise<ThreadProjectsResponse>(resolve => { finish = resolve; }));
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  act(() => { void hook.result.current.update(value => ({ ...value, projects: [...value.projects, { id: crypto.randomUUID(), name: "Fresh", collapsed: false }] })); });
+  const shown = hook.result.current.value.projects.map(item => item.id);
+  hook.rerender();
+  expect(hook.result.current.value.projects.map(item => item.id)).toEqual(shown);
+  expect(shown).toHaveLength(1);
+  await waitFor(() => expect(remote.change).toHaveBeenCalledWith("runtime", [{ type: "create", id: shown[0], name: "Fresh", collapsed: false }], "viewer"));
+  await act(async () => { finish({ value: { ...empty, projects: [{ id: shown[0]!, name: "Fresh", collapsed: false }] }, revision: 1 }); });
+  expect(hook.result.current.value.projects.map(item => item.id)).toEqual(shown);
+});
+
+it("shows the saved fold state and the error when a fold save fails", async () => {
+  remote.read.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 0 });
+  remote.change.mockRejectedValueOnce(new Error("Offline. Reconnect and retry."));
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  act(() => { hook.result.current.setCollapsed(true, project.id); });
+  expect(hook.result.current.value.projects[0]!.collapsed).toBe(true);
+  await waitFor(() => expect(hook.result.current.error).toContain("Reconnect and retry"));
+  expect(hook.result.current.value.projects[0]!.collapsed).toBe(false);
+});
+
 it("keeps pending legacy folders and offers retry after an import fails", async () => {
   const key = "valet:thread-projects:viewer:runtime";
   const original = JSON.stringify({ ...empty, projects: [project] });
@@ -185,7 +269,8 @@ it("tracks saving correctly after an uncounted continuation finishes in a reopen
   await act(async () => { finish({ value: { ...empty, projects: [project] }, revision: 2 }); await original; });
   await waitFor(() => expect(hook.result.current.value.projects).toEqual([project]));
   let next: Promise<ThreadProjects | undefined> | undefined;
-  act(() => { next = hook.result.current.update(value => ({ ...value, grouped: false })); });
+  // A multi-step operation still counts as saving; a single change does not.
+  act(() => { next = hook.result.current.beginOperation().update(value => ({ ...value, grouped: false })); });
   await waitFor(() => expect(remote.change).toHaveBeenCalledTimes(2));
   expect(hook.result.current.isSaving).toBe(true);
   await act(async () => { finish({ value: { ...empty, projects: [project], grouped: false }, revision: 3 }); await next; });

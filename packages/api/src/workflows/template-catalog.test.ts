@@ -11,9 +11,9 @@
  *   1. It calls no integration action. A seeded template must install on a
  *      deployment whatever set of plugins is loaded, and must run for a
  *      person who has connected nothing.
- *   2. It arms no schedule. A scheduled run puts `{ scheduleName, cron,
- *      input }` in `trigger.data` and applies NO `dataSchema` defaults, so
- *      a cron on any of these would read null every night forever.
+ *   2. It arms no schedule. A scheduled run fills `trigger.data` only from
+ *      the schedule's input and `dataSchema` defaults, so a cron on any of
+ *      these would read its per-run text as null every night forever.
  *   3. It hard-codes no person. Ownership and routing data arrive as
  *      workflow inputs, because a name baked into a shipped template is
  *      wrong within a month and takes a release to correct.

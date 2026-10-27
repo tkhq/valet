@@ -1,0 +1,36 @@
+# Workflow authoring: a weekly release report over many merged PRs.
+# Pattern: a production report of this shape listed its PRs in an agent
+# step with one search action, then rewrote the assembled report in a final
+# model step. The list of merged PRs is an integration call with known
+# inputs, so the workflows skill puts it in a tool step. Judgment about each
+# PR goes in a foreach, and the post is a tool step.
+id: workflow-release-report
+description: Draft a scheduled report that lists merged PRs, qualifies each one, and posts a summary to Slack.
+drive: product
+session_type: orchestrator
+connected: [slack, github]
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Build a workflow that posts a weekly release process report to the
+      Slack channel #release-coordination every Monday at 9:00
+      America/New_York. It covers the pull requests merged in the last 7
+      days in the GitHub repositories acme/mono, acme/gitops and
+      acme/infrastructure. A busy week has 150 or more merged PRs. For each
+      PR, decide whether it changes how the weekly release runs: the deploy
+      pipeline, Kargo stages, migrations, release tooling, or a manual
+      step. Post one message that lists the PRs that do, one line each with
+      the link and author, and one thread reply for each PR that needs a
+      manual step. Accuracy matters, because the release coordinator acts
+      on this report. Save the workflow and its schedule, but do not run
+      it.
+timeout_ms: 600000
+checks:
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    saved: true
+    foreach: true
+    run_date: true
+    tool_steps: ["github.search_issues|github.list_pull_requests", "slack.send_message"]

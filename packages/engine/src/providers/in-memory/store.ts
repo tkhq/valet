@@ -248,6 +248,10 @@ export class InMemorySessionStore implements SessionStore {
     return [...this.row(sessionId).threads.values()];
   }
 
+  async listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]> {
+    return [...new Set(sessionIds)].flatMap((id) => [...(this.rows.get(id)?.threads.values() ?? [])]);
+  }
+
   async getEntries(
     sessionId: string,
     threadId: string,

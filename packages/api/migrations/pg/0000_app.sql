@@ -258,7 +258,9 @@ CREATE TABLE "session_threads" (
 	"created_at" bigint NOT NULL,
 	"last_user_activity_at" bigint,
 	"archived_at" bigint,
-	"share_mode" text
+	"share_mode" text,
+	"approval_bypass_by" text,
+	"approval_bypass_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");
@@ -468,6 +470,17 @@ CREATE TABLE "channel_bindings" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "channel_bindings_conversation" ON "channel_bindings" ("org_id","channel_type","conversation_key");
+--> statement-breakpoint
+CREATE TABLE "channel_conversation_bindings" (
+  "org_id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+);
 --> statement-breakpoint
 CREATE TABLE "user_identity_links" (
 	"id" text PRIMARY KEY NOT NULL,

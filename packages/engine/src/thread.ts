@@ -2178,11 +2178,7 @@ export class Thread {
       }
       this.lastEmittedStatus = "blocked_on_decision_gate";
       await this.fencedEmit(
-        {
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        },
+        this.statusEvent("blocked_on_decision_gate"),
         { queueItemId: runningItemId },
       );
       await session.emit(
@@ -3579,6 +3575,16 @@ export class Thread {
     if (this.lastEmittedStatus === "blocked_on_decision_gate") return "tool_calling";
     if (this.lastEmittedStatus === "idle") return "thinking";
     return this.lastEmittedStatus;
+  }
+
+  /** When the running turn started, for a subscriber that connects mid-turn. */
+  get currentTurnStartedAt(): number | undefined {
+    return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
+  private statusEvent(status: EngineEventStatus): EngineEvent {
+    const turnStartedAt = this.currentTurnStartedAt;
+    return { type: "status", threadId: this.id, status, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
   }
 
   /**
@@ -6688,6 +6694,11 @@ export class Thread {
     return added;
   }
 
+  /** Set `metadata[key]` to a JSON value and persist it, such as the thread a fork came from. */
+  async setMetadataValue(key: string, value: unknown): Promise<void> {
+    await this.patchThreadMetadata((current) => ({ ...current, [key]: value }), "before-save");
+  }
+
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
   async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
     const plan: ThreadPlan = { items, updatedAt: Date.now() };
@@ -6878,7 +6889,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "thinking" },
+          this.statusEvent("thinking"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7116,7 +7127,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "tool_calling" },
+          this.statusEvent("tool_calling"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7315,7 +7326,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "idle";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "idle" },
+          this.statusEvent("idle"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7929,6 +7940,14 @@ export function userContentBlocks(
  */
 export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
   if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  // Another agent's signal, such as a child's result, joins only a turn that
+  // runs another signal from the same owner. It never joins a person's own
+  // turn, where its text would act with that person's authority.
+  const stamp = readSignalStamp(item.metadata);
+  if (stamp) {
+    const runningStamp = readSignalStamp(running.metadata);
+    if (!runningStamp || runningStamp.senderOwner.type !== stamp.senderOwner.type || runningStamp.senderOwner.id !== stamp.senderOwner.id) return false;
+  }
   if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
   if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
   if (item.author?.externalSender || running.author?.externalSender) return false;

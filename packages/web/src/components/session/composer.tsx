@@ -1060,16 +1060,21 @@ export function Composer({
           })}
           {queueState ? unresolvedQueuedIds.map((itemId) => {
             const item = queuedItemById.get(itemId);
+            // A signal (an event, a wake-up, a child's result) is not the
+            // person's message. It runs by itself: it joins the running turn
+            // or runs after it. Send now would only stop that turn.
+            const signal = item?.signal !== undefined;
             return (
               <QueuedRow
                 key={itemId}
                 cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
                 canceling={cancelQueued.isPending}
-                sendNow={guest || !item ? undefined : () => void promoteQueuedItem(itemId)}
+                sendNow={guest || !item || signal ? undefined : () => void promoteQueuedItem(itemId)}
                 sending={promotingItemId === itemId}
                 sendDisabled={send.isPending}
               >
                 <QueuedItemText item={item} />
+                {signal && <span className="shrink-0 text-muted">Runs next</span>}
               </QueuedRow>
             );
           }) : unresolvedQueuedCount > 0 && (

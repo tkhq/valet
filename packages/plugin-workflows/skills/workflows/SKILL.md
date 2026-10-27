@@ -19,11 +19,14 @@ Split the job by what each part needs. A workflow that does everything in one ag
 - Put an integration call with known inputs in a `tool` step. Put judgment in an `llm` step or an agent step (`session` or `orchestrator`). Put shell work, scripts, and data jobs with many calls in a `session` step.
 - Put every action that a person approves on each run in a `tool` step. Policy stops that step for approval on each run. For a sign-off that no action covers, add an `approval` step before the work. Never tell an agent step to ask for approval, to wait for a person, or to tell someone that an approval is ready: a run refuses the request, and nobody gets a card.
 - Publish a page or file from the step that writes it: `artifact_publish` with `path`, or `file_attach`. Pass only the URL, size, and hash to later steps. Never pass page content, base64, or chunks through a step's output, because a model copy corrupts them.
-- For a list of unknown size, list the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
+- For a list of unknown size, list the items in one step, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
+- If one action returns the list, list the items in a `tool` step, not an agent step. An agent step that lists data pays model turns on each run, and its list can drop or repeat items. For pull requests merged in a time window, use `github.search_issues` with `is:pr is:merged merged:>=@now-7d` and a `limit` up to 1000. If the list needs judgment, put an `llm` step after the tool step, or decide each item in the `foreach`.
+- Write each result in one model step. Do not add a model step that checks or rewrites another model step's draft before a tool step sends it. A second pass can change correct facts as easily as it fixes wrong ones. Put the rules in the first step's prompt and `outputSchema`. To check exact fields, use an `if` step.
 - Use `{{trigger.timestamp}}` for the run's date. Never write today's date into a prompt.
 - Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
 - Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`. If the draft changes a saved workflow, pass its `workflow_id`. Fix each warning it returns, or tell the person why it does not apply.
 - After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
+- On a saved workflow that the person did not ask you to restructure, mention a warning that an agent step builds a foreach list, or that a step rewrites a draft, in one sentence. Do not change the steps for it unless the person asks. A step change revokes the workflow's saved permissions, so the person must allow them again.
 
 ## Use the workflow tools, not raw API calls
 
@@ -48,7 +51,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.resolve_approval` — approve/deny a gate (an approval node, or a tool node that policy holds), ONLY when the user asks. Valet shows the user a card, and the gate resolves as the person who confirms it. Call it once per gate.
 - `workflows.list_event_types` — event keys workflows can be triggered by
 - `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events. Event data arrives as `{{trigger.data.payload...}}`.
-- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives as `{{trigger.data.input...}}`) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
+- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives at `{{trigger.data.<field>}}`, the same path a manual run uses) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 
@@ -223,7 +226,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - `start_run` (manual): the `input` you passed → `{{trigger.data.<field>}}`.
 - Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
 - Webhook: the raw JSON POST body.
-- Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
+- Schedule: `{ <input fields>, scheduleName, cron, input }`. Read the schedule's static input at `{{trigger.data.<field>}}`, as a manual run does. A field the schedule leaves out takes its `dataSchema` default. Reading `trigger.data.input.<field>` keeps that field nested only, with no default.
 
 **Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array` (`integer` is an accepted alias for `number` and adds no integer-only check, so a non-integer value like `7.5` is accepted):
 
@@ -238,7 +241,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 
 **Rendering rules.** A field that is exactly one `{{...}}` keeps the value's type (objects/arrays/numbers survive). Mixed text stringifies each expression. A path that resolves to nothing renders as `null` in a single-template field and `""` in mixed text — the save-time linter and the run-time error messages both name bad paths, but a syntactically-valid path to a missing key only surfaces at run time. When a tool param fails validation ("must be string"), suspect a template that rendered null; the node error lists the unresolved paths.
 
-**Step budgets.** A `session` or `orchestrator` step stops after `maxModelCalls` model calls (default 150, at most 500) and fails with that reason. Do not raise the limit to fit a list of unknown size. List the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step. `preview_workflow` warns when a step asks one agent to handle every item in a list.
+**Step budgets.** A `session` or `orchestrator` step stops after `maxModelCalls` model calls (default 150, at most 500) and fails with that reason. Do not raise the limit to fit a list of unknown size. List the items in one step (a `tool` step when one action returns them), handle one item in each iteration of a `foreach` step, then combine the results in a later step. `preview_workflow` warns when a step asks one agent to handle every item in a list.
 
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
 

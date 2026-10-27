@@ -1,7 +1,8 @@
 # Workflow authoring: a scheduled data refresh that commits a file to a
 # repository twice a day on weekdays. Scores the two schedule traps in the
-# workflows skill: schedule input arrives at trigger.data.input, and the
-# run date comes from trigger.timestamp, never from a date in a prompt.
+# workflows skill: every schedule input read must be one a scheduled run
+# fills, and the run date comes from trigger.timestamp, never from a date
+# in a prompt.
 id: workflow-scheduled-refresh
 description: Draft a weekday schedule workflow that refreshes a JSON file in a GitHub repository.
 drive: product

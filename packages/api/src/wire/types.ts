@@ -1017,6 +1017,8 @@ export interface ThreadSummary {
   channel?: ThreadChannel;
   /** Set when the owner shares this personal thread with the organization. */
   share?: ThreadShareMode;
+  /** True while the thread runs without asking (`PatchThreadRequest.approvalBypass`). */
+  approvalBypass?: true;
 }
 
 /**
@@ -1035,9 +1037,14 @@ export interface ThreadAddress {
   archivedAt: number | null;
   /** The thread's share, when it has one. */
   share?: ThreadShareMode;
+  /** True while the thread runs without asking. */
+  approvalBypass?: true;
   /** Present when the caller opens the thread through its share, not as its
    * owner or a member of its workspace. */
   guest?: { mode: ThreadShareMode; ownerName: string };
+  /** The thread's workspace, "user" or a team id, for `/chat?workspace=`.
+   * Absent for a guest and for a thread outside any workspace. */
+  workspace?: string;
 }
 
 /** One line of a thread recap. `forReader` marks the line that waits on the reader. */
@@ -1291,6 +1298,21 @@ export interface PatchThreadRequest {
   /** Share a personal thread with the organization, or "off" to stop. Only
    * the owner can change it. */
   share?: ThreadShareMode | "off";
+  /**
+   * "Run without asking": true turns it on, false turns it off. While it is
+   * on, an approval that the person could stop for good with "Always allow
+   * for me" (or "for this team") runs without a card in this thread and the
+   * child agents it starts. Critical actions, actions an admin rule names,
+   * another member's shared account, and actions that need the author's own
+   * consent still ask. The owner of a personal thread or a team admin turns
+   * it on, from a signed-in browser.
+   */
+  approvalBypass?: boolean;
+}
+
+/** `GET /api/threads/:id/tool-output`: one tool call's full result, in its stored shape. */
+export interface ToolOutputResponse {
+  result: unknown;
 }
 
 export type PatchThreadResponse = ThreadSummary & {
@@ -1377,6 +1399,12 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
+      /**
+       * Set only in the REST transcript when `result` holds the start and the
+       * end of a large output. `chars` is the full length. Load the full
+       * result with `GET /api/threads/:id/tool-output?entryId=&callId=`.
+       */
+      resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
   | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
 
@@ -1626,12 +1654,25 @@ export interface ForkThreadRequest {
    * the conversation up to just before it, and `draft` returns its text.
    */
   entryId: string;
+  /** "here" (the default) keeps the source's workspace and audience.
+   * "private" copies a team thread into the caller's private threads. */
+  destination?: "here" | "private";
 }
 
 export interface ForkThreadResponse {
   thread: ThreadSummary;
+  /** The new thread's workspace: "user" or a team id, for `/chat?workspace=`. */
+  workspace: string;
   /** The branched user message's text, for the new thread's composer. */
   draft?: string;
+}
+
+/** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
+export interface MoveThreadRequest {
+  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  to: "private" | { teamId: string };
+  /** Required to move into a team, which then reads the thread. */
+  confirm?: true;
 }
 
 /** `POST /api/threads/:threadId/branch/return`. */
@@ -1877,6 +1918,9 @@ export type WireEvent =
       type: "status";
       threadId: string;
       status: "idle" | "queued" | "thinking" | "tool_calling" | "streaming" | "blocked_on_decision_gate" | "error";
+      /** When the running submission was claimed. A replayed frame arrives
+       * with the replay time, so the start comes from here. */
+      turnStartedAt?: number;
     }
   | {
       seq: number;
@@ -3136,9 +3180,9 @@ export interface ListWorkflowTemplatesResponse {
 export interface InstallWorkflowTemplateRequest {
   /**
    * Values for `WorkflowTemplateSummary.inputs`, written into the installed
-   * definition. A scheduled run applies no `dataSchema` defaults, so a
-   * parameter the schedule needs is baked in here rather than read from the
-   * trigger at run time.
+   * definition. A scheduled run fills a field only from the schedule's input
+   * or the field's `dataSchema` default, so a parameter the schedule needs is
+   * baked in here rather than read from the trigger at run time.
    */
   inputs?: Record<string, unknown>;
   /**
@@ -3537,8 +3581,10 @@ export interface PluginServiceSummary {
    * array is the honest report that this token unlocks nothing, and the UI
    * says so instead of inventing a list.
    *
-   * Always empty for a `dynamic` service: its actions do not exist until a
-   * credential is connected and the upstream server is asked.
+   * For a `dynamic` service, empty until a credential is connected: then
+   * the tools the upstream server listed for this owner, TTL-cached
+   * server-side, in the same shape as static actions, so the Policies
+   * combobox offers them. Empty again when the listing fails or times out.
    */
   actions: PluginActionSummary[];
 }
@@ -6641,7 +6687,8 @@ export interface AgentAccessResponse {
 export interface ExternalUsageResponse {
   classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
-  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  /** `errors`: the most common error codes among the tool's failed calls. */
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number; errors: { code: string; calls: number }[] }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
   detailsVisible: boolean;
   recent: {

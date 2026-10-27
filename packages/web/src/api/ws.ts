@@ -15,6 +15,7 @@ import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
 import { qkThreadPlan } from "./thread-plan";
+import { api, ApiError } from "./client";
 import { backoffDelay, reportServerReachable, reportServerUnavailable } from "./connection";
 
 /** `WebSocket.OPEN`. */
@@ -241,11 +242,36 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
   /** Set when the socket closed under this connection, cleared by the next `init`. */
   let reconnecting = false;
 
+  /**
+   * The browser hides why a socket upgrade failed. A signed-out tab is
+   * refused before the upgrade, so it would retry for as long as it stays
+   * open. A REST read gets the 401, which opens sign-in (`client.ts`), and
+   * the retries stop. Any other failure keeps the backoff.
+   */
+  let checkingRefusal = false;
+  async function checkRefusedUpgrade(): Promise<void> {
+    if (checkingRefusal) return;
+    checkingRefusal = true;
+    try {
+      await api.getMe();
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 401 || cancelled) return;
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close();
+      setConnection(sessionId, "error");
+    } finally {
+      checkingRefusal = false;
+    }
+  }
+
   function open() {
     if (cancelled) return;
     const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
+    let opened = false;
     socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
     socket.onopen = () => {
+      opened = true;
       setConnection(sessionId, "open");
       onOpen();
     };
@@ -274,7 +300,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         // A finished turn can add an unread reply or a pull request to any thread
         // in the session. The list query carries both, so refresh it.
         if (wire.type === "turn_end") {
-          void qc.invalidateQueries(threadListFilters(sessionId));
+          void qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
           for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
         }
         // The context meter's reading moves when a turn ends, a compaction
@@ -288,7 +314,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched" || wire.type === "branch_switched") {
           void qc.invalidateQueries({
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
-          });
+          }, { cancelRefetch: false });
         }
         if (wire.type === "thread.viewers") {
           useActiveViewersStore.getState().set(sessionId, wire.threadId, wire.viewers);
@@ -340,6 +366,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
       // check decides whether the app shows the reconnecting state.
       reconnecting = true;
       reportServerUnavailable();
+      if (!opened) void checkRefusedUpgrade();
       retryAttempt += 1;
       retryTimer = setTimeout(open, backoffDelay(retryAttempt));
     };

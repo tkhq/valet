@@ -608,6 +608,37 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(resolveCalls.count).toBe(1);
   });
 
+  it("lists a connected dynamic service's resolved tools as actions, in both groupings", async () => {
+    const resolveCalls = { count: 0 };
+    api = await bootTestApi({ plugins: [dynamicPlugin(resolveCalls)] });
+    const read = async () => {
+      const res = await fetch(`${api!.baseUrl}/api/plugins`);
+      return (await res.json() as ListPluginsResponse).plugins.find((p) => p.name === "dyn");
+    };
+
+    // Disconnected: nothing to list, so the service offers no actions yet.
+    const before = await read();
+    expect(before?.services[0]?.actions).toEqual([]);
+    expect(before?.actionServices?.[0]?.actions).toEqual([]);
+
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    // Connected: the listing's tools are the service's actions, in the same
+    // wire shape as static ones, so the Policies combobox offers them and an
+    // override row written from one matches at resolution time.
+    const after = await read();
+    const expected = ["dyn.a", "dyn.b", "dyn.c"].map((id) => ({ id, name: id, riskLevel: "low", requiresApproval: false }));
+    expect(after?.services[0]?.actions).toEqual(expected);
+    expect(after?.actionServices?.[0]?.actions).toEqual(expected);
+    // The manifest's static count stays static (the wire doc promises that).
+    expect(after?.actionCount).toBe(0);
+    expect(resolveCalls.count).toBe(1);
+  });
+
   it("fails soft to no toolCount when resolveActions rejects", async () => {
     const plugin: ValetPlugin = {
       name: "dyn",

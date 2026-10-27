@@ -260,13 +260,15 @@ Two provider-side changes reached users first through failed runs. Metabase 1.64
 
 `GET /api/plugins` already lists the tools of each connected MCP service, for `toolCount`. The probe reads the answer to that same `tools/list` call and adds no network call. `ServiceProbes` (`plugins/service-probe.ts`) replaces `DynamicToolCounts` and keeps its limits: one probe per owner, service, and token in 5 minutes, one probe in flight per key, and a 2.5-second timeout. The cache key includes a hash of the access token, so a reconnect probes again at once. A timeout, a network error, or any other failure caches nothing and changes no health field.
 
+Since 2026-10-26 the cache holds the listing itself, not only its count: the tools mapped to `PluginAction`s the way `resolveActions` maps them (service-qualified id, risk level from annotations, the input schema as `parameters`). This is the tool schema the policy surfaces build on. `GET /api/plugins` emits those actions in `services[].actions` and `actionServices[].actions` for a connected dynamic service, in the same shape as static actions, so the Policies combobox offers them. `ServiceProbes.listedActionsFor(owner)` serves the same listing to the override bounds check and the tool-permissions read (`docs/specs/2026-07-16-action-policies-audit-design.md`, "Dynamic tools in the policy catalog"). A policy write with a cold cache lists live under the same limits; an unknown listing answers no tools.
+
 `mcpActionPlugin` exposes the probe as `McpActionPlugin.probe`. It sends the same token with the same app-identity fallback as `resolveActions`. It returns one of three results:
 
 | Server answer | Result | `health` fields |
 |---|---|---|
 | 403 with `error="insufficient_scope"` whose `scope` names a scope the grant lacks | `insufficient_scope` | `missingScopes`: the challenge `scope` minus the granted scopes |
 | 401, or any other 403 | `rejected` | `rejected: true` |
-| Tool list | `listed` | `missingScopes` and `blockedTools`, from the tools' `securitySchemes` |
+| Tool list | `listed`, with the tools as `actions` | `missingScopes` and `blockedTools`, from the tools' `securitySchemes` |
 
 A listing alone does not find the Metabase case: Metabase lists every tool whatever the token holds, and it refuses the call. Each tool also declares its scope in `securitySchemes` (draft SEP-1488). A tool is blocked when it declares schemes and the grant satisfies none of them. A `noauth` scheme is satisfied. An `oauth2` scheme is satisfied when the grant holds all of its scopes. The probe compares only against a known grant: `StoredCredential.scopes` when it is set. A pasted token stores no scopes, so the probe skips this check for it. An empty array is a known grant with no scopes.
 

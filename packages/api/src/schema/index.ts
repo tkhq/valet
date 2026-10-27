@@ -448,6 +448,12 @@ export const sessionThreads = pgTable(
     // Who else in the org may open this personal thread by its link:
     // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
     shareMode: text("share_mode", { enum: ["view", "reply"] }),
+    // "Run without asking": the person who turned it on, and when. Null when
+    // it is off. Approvals that this person could stop for good themselves
+    // run without a card in this thread and the child agents it starts
+    // (`services/thread-approval-bypass.ts`).
+    approvalBypassBy: text("approval_bypass_by"),
+    approvalBypassAt: bigint("approval_bypass_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -808,6 +814,21 @@ export const channelBindings = pgTable(
   (t) => [
     uniqueIndex("channel_bindings_conversation").on(t.orgId, t.channelType, t.conversationKey),
   ],
+);
+
+/** The first thread selected for one user's direct-channel conversation. */
+export const channelConversationBindings = pgTable(
+  "channel_conversation_bindings",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId, t.sessionId, t.channelType, t.conversationKey] })],
 );
 
 export const userIdentityLinks = pgTable(
@@ -2134,7 +2155,7 @@ export const workflowSchedules = pgTable(
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
-    /** Optional static payload delivered as `trigger.data.input`. */
+    /** Optional static input: copied to `trigger.data.<field>` and kept at `trigger.data.input` (`scheduledTriggerData`). */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
     /** Why the scheduler disabled this schedule: the pin text when its
