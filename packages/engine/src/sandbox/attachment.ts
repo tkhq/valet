@@ -12,6 +12,7 @@ import {
   recordSandboxCreated,
   recordSandboxDestroyed,
   recordSandboxProvision,
+  recordSandboxStartupFailure,
   type SandboxDestroyReason,
 } from "../metrics.js";
 import {
@@ -1275,6 +1276,7 @@ export class SandboxAttachment {
    */
   private recordStartFailure(err: unknown, epoch: number, phase: "create" | "resume"): void {
     this.lastStartError = formatSandboxErrorCause(err);
+    if (err instanceof SandboxStartupError) recordSandboxStartupFailure(err.kind);
     console.error("SandboxAttachment: sandbox start failed", { phase, epoch, ...formatSandboxErrorLog(err) });
   }
 

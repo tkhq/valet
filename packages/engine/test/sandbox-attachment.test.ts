@@ -15,6 +15,12 @@ import {
   type SandboxStatus,
 } from "../src/index.js";
 
+const startupFailures: string[] = [];
+vi.mock("../src/metrics.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/metrics.js")>();
+  return { ...actual, recordSandboxStartupFailure: (kind: string) => { startupFailures.push(kind); } };
+});
+
 // ── Fake provider ────────────────────────────────────────────────────
 
 /** A controllable in-memory Sandbox stub. exec/readFile/writeFile/mkdir are
@@ -161,6 +167,17 @@ describe("SandboxAttachment", () => {
 
     await attachment.destroy();
     expect(wrapper.resourceOverrides).toBeUndefined();
+  });
+
+  it("records a terminal startup failure by kind when create() rejects with SandboxStartupError", async () => {
+    startupFailures.length = 0;
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const d = provider.nextDeferred();
+    const ready = attachment.ensureReady({ timeoutMs: 1000 });
+    d.reject(new SandboxStartupError("sess-1", "image pull failed (ImagePullBackOff): x", "image_pull"));
+    await expect(ready).rejects.toBeInstanceOf(SandboxStartupError);
+    expect(startupFailures).toEqual(["image_pull"]);
   });
 
   it("1. lazy: constructing attachment + wrapper calls provider.create zero times", () => {

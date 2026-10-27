@@ -195,6 +195,10 @@ export class SandboxSupersededError extends Error {
   }
 }
 
+/** Bounded classification of a terminal startup failure, for the
+ * `valet.sandbox.startup_failed` counter. Free text stays in `reason`. */
+export type SandboxStartupKind = "crash_loop" | "image_pull" | "unschedulable" | "pod_failed" | "ownership" | "other";
+
 /**
  * Thrown by a `SandboxProvider.create` implementation when a sandbox
  * definitively FAILED to start (a terminal condition — image pull failure,
@@ -212,6 +216,7 @@ export class SandboxStartupError extends Error {
   constructor(
     public readonly sandboxId: string,
     public readonly reason: string,
+    public readonly kind: SandboxStartupKind = "other",
   ) {
     super(`sandbox failed to start: ${reason}`);
     this.name = "SandboxStartupError";

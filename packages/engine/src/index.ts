@@ -27,6 +27,7 @@ export {
   SandboxEvictedError,
   SandboxGoneError,
   SandboxStartupError,
+  type SandboxStartupKind,
   SandboxPreparationError,
   SandboxConnectionError,
   formatSandboxErrorCause,
