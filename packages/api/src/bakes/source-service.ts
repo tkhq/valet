@@ -2259,6 +2259,9 @@ export class SourceService {
    * carry a diagnosis, and any bake request or contract re-read runs off the
    * caller's path (one in flight per source). Never throws. */
   async handleImageFallback(event: ImageFallbackEvent): Promise<void> {
+    // The contract gates only kubernetes sandboxes; with another builder the
+    // scheduler would flip any incompatible health straight back.
+    if (!this.contractEnforced) return;
     try {
       const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason })
         .from(imageSources).where(eq(imageSources.id, event.sourceId)).limit(1);
@@ -2549,6 +2552,8 @@ export class SourceService {
       void this.runSchedulerPass().catch((err) => console.error("prebuild scheduler pass failed:", err));
     }, this.schedulerIntervalMs);
     this.schedulerTimer.unref();
+    // Arming counts as a pass, so a scheduler stuck from boot still ages.
+    recordSchedulerPass(this.now());
   }
 
   /** Clears all intervals. Safe to call even if `start()` was never

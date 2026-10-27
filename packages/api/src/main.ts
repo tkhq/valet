@@ -44,6 +44,8 @@ import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
 import { initTelemetry } from "./observability/otel.js";
+import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
+import { initSandboxMetrics } from "@valet/engine";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
@@ -283,6 +285,9 @@ const sandboxApiUrl = resolveSandboxApiUrl(
 // are live for everything built below — HTTP spans, engine spans, store
 // spans all resolve through this one registration.
 const telemetry = initTelemetry();
+// Counters are zero-initialized at boot so increase() sees the first event after a restart.
+initImageFallbackMetrics();
+initSandboxMetrics();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
 // `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins

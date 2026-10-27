@@ -208,6 +208,22 @@ export type SandboxStartupKind =
   | "capacity"
   | "other";
 
+// A Record over the union fails to compile when a kind is added or removed
+// without updating this list.
+const SANDBOX_STARTUP_KIND_SET: Record<SandboxStartupKind, true> = {
+  crash_loop: true,
+  image_pull: true,
+  unschedulable: true,
+  pod_failed: true,
+  ownership: true,
+  capacity: true,
+  other: true,
+};
+
+/** Every `SandboxStartupKind`, so the counter can zero-initialize each
+ * series at instrument creation. */
+export const SANDBOX_STARTUP_KINDS: readonly SandboxStartupKind[] = Object.keys(SANDBOX_STARTUP_KIND_SET) as SandboxStartupKind[];
+
 /**
  * Thrown by a `SandboxProvider.create` implementation when a sandbox
  * definitively FAILED to start (a terminal condition — image pull failure,

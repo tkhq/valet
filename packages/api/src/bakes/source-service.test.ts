@@ -402,6 +402,11 @@ describe("SourceService", () => {
   }
 
   describe("handleImageFallback", () => {
+    // The handler acts only on the kubernetes backend.
+    beforeEach(() => {
+      builder = new K8sFakeImageBuilder();
+    });
+
     it("marks the source incompatible/contract and starts one bake through the first-bake guards", async () => {
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
@@ -421,7 +426,6 @@ describe("SourceService", () => {
     });
 
     it("does not rebake or rewrite health when the triggered bake failed", async () => {
-      builder = new K8sFakeImageBuilder(); // contract-0 survivor counts as incompatible
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
@@ -497,6 +501,19 @@ describe("SourceService", () => {
       expect(builder.specs).toHaveLength(0);
       const stamped = (await db.select().from(bakes).where(eq(bakes.id, "unread")))[0];
       expect(stamped).toMatchObject({ contractVersion: 3, contractSource: "label" });
+    });
+
+    it("is a no-op on the docker backend: no health write, no bake", async () => {
+      builder = new FakeImageBuilder();
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      const before = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" });
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after).toMatchObject({ health: before.health, healthReason: before.healthReason, healthCheckedAt: before.healthCheckedAt });
     });
 
     it("never throws when the source is gone or the builder is missing", async () => {
@@ -640,6 +657,16 @@ describe("SourceService", () => {
       expect(healthReasonForError(new AnonymousImageBakesDisabledError())).toBe("credentials");
       expect(healthReasonForError(new RegistryCapacityError("full"))).toBe("registry_full");
       expect(healthReasonForError(new Error("boom"))).toBe("bake_failed");
+    });
+
+    it("start() records a pass time when it arms the scheduler, before any pass", async () => {
+      const svc = makeService({ now: () => NOW + 7 });
+      try {
+        await svc.start();
+        expect(lastSchedulerPassAt()).toBe(NOW + 7);
+      } finally {
+        svc.stop();
+      }
     });
 
     it("runSchedulerPass records its completion time", async () => {

@@ -73,7 +73,9 @@ import {
   recordScratchRequested,
   recordWakeupEnded,
   recordWakeupsActive,
+  initSandboxMetrics,
 } from "../src/metrics.js";
+import { SANDBOX_STARTUP_KINDS } from "../src/errors.js";
 
 describe("workspace grow metrics", () => {
   it("uses pending for a requested resize that has not landed", () => {
@@ -99,6 +101,16 @@ describe("sandbox startup failure metrics", () => {
     expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 1, attributes: { kind: "ownership" } });
     expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 1, attributes: { kind: "capacity" } });
     expect(metricState.descriptions.get("valet.sandbox.startup_failed")).toMatch(/terminal/i);
+  });
+});
+
+describe("startup failure zero-initialization", () => {
+  it("initSandboxMetrics emits a 0 point for every startup kind", () => {
+    initSandboxMetrics();
+    for (const kind of SANDBOX_STARTUP_KINDS) {
+      expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 0, attributes: { kind } });
+    }
+    expect(SANDBOX_STARTUP_KINDS).toEqual(["crash_loop", "image_pull", "unschedulable", "pod_failed", "ownership", "capacity", "other"]);
   });
 });
 

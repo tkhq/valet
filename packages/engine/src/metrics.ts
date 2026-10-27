@@ -17,7 +17,7 @@
  * rendered names.
  */
 import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
-import type { SandboxStartupKind } from "./errors.js";
+import { SANDBOX_STARTUP_KINDS, type SandboxStartupKind } from "./errors.js";
 import type { LeaseOwnerKind, WakeupCause, WakeupKind } from "./wakeups/types.js";
 
 const METER_NAME = "@valet/engine";
@@ -272,6 +272,9 @@ function inst(): Instruments {
   observeGauge(instruments.leasesUnannotated, leasesUnannotatedState);
   observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
   observeGauge(instruments.wakeupSweepOkAt, wakeupSweepOkState);
+  // Zero-initialize every kind so increase() sees the first failure after a
+  // process start (a series that appears at 1 has no increase).
+  for (const kind of SANDBOX_STARTUP_KINDS) instruments.sandboxStartupFailed.add(0, { kind });
   return instruments;
 }
 
@@ -382,6 +385,12 @@ export type WorkspaceGrowOutcome = "grown" | "refused" | "pending" | "error";
  * pre-read. */
 export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
   inst().sandboxWorkspaceGrow.add(1, { outcome });
+}
+
+/** Creates the engine instruments at boot, so zero-initialized series
+ * (`valet.sandbox.startup_failed` per kind) exist before the first event. */
+export function initSandboxMetrics(): void {
+  inst();
 }
 
 /** A terminal startup failure. Called once per SandboxStartupError the
