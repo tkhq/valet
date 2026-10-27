@@ -297,7 +297,7 @@ describe("api integration: Slack DM conversation routing", () => {
       status: "active", queueMode: "followup", createdAt: now, updatedAt: now,
     });
     await host.stop();
-    api.providers.engineHost.evictAll();
+    api.providers.engineHost.evictAll({ shutdown: false });
     const p = api.providers;
     host = new ChannelHost({
       db: p.db, engineHost: p.engineHost, engineStore: p.engineStore, eventStream: p.eventStream,
