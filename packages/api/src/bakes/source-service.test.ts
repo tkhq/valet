@@ -589,6 +589,65 @@ describe("SourceService", () => {
       expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
     });
 
+    it("failing -> stale -> failing (same reason) stays one episode: no re-notify, nothing read, no recovery", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "stale", "ok", null);
+      t = NOW + 120_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows.every((r) => r.readAt === null)).toBe(true);
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(0);
+    });
+
+    it("failing -> stale -> healthy closes the episode and posts recovery after a long span", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "repo_unreachable", "x");
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "stale", "ok", null);
+      let rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.every((r) => r.readAt === null)).toBe(true);
+      t = NOW + 20 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title.includes("cannot be rebuilt")).every((r) => r.readAt !== null)).toBe(true);
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a reason change inside an episode marks the old key read and notifies under the new key", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "repo_unreachable", "x");
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "y");
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows).toHaveLength(2 * ADMIN_COUNT);
+      expect(rows.filter((r) => r.id.includes(":repo_unreachable:")).every((r) => r.readAt !== null)).toBe(true);
+      const fresh = rows.filter((r) => r.id.includes(`:bake_failed:${NOW + 60_000}-`));
+      expect(fresh).toHaveLength(ADMIN_COUNT);
+      expect(fresh.every((r) => r.readAt === null)).toBe(true);
+    });
+
+    it("a restarted service still closes an episode that was open (seeded from the stored state)", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      await makeService({ attention: { db }, now: () => t }).setSourceHealth(src, "failing", "bake_failed", "x");
+      const svc2 = makeService({ attention: { db }, now: () => t });
+      t = NOW + 60_000;
+      await svc2.setSourceHealth(src, "stale", "ok", null); // seeds from the failing row's previous state
+      t = NOW + 20 * 60_000;
+      await svc2.setSourceHealth(src, "healthy", "ok", null);
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title.includes("cannot be rebuilt")).every((r) => r.readAt !== null)).toBe(true);
+    });
+
     it("a short episode whose fallback was since cleared still gets a recovery notification (in-process record)", async () => {
       builder = new K8sFakeImageBuilder();
       const src = await seedRepoSource(db, { lastBoundAt: NOW });

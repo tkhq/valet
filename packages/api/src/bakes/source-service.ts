@@ -835,6 +835,9 @@ export class SourceService {
   private readonly attention?: AttentionDeps;
   /** Last fallback seen per source by this process (recovery notification). */
   private readonly lastFallbackAt = new Map<string, number>();
+  /** Open notification episodes: opened on entering an unhealthy state, closed
+   * only on entering healthy. `keyAt` is the `at` in the live dedupe key. */
+  private readonly episodes = new Map<string, { reason: SourceHealthReason; keyAt: number; startedAt: number }>();
   private readonly contractReader: (backend: string, imageRef: string) => Promise<ContractRead>;
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthReporting = false;
@@ -1088,12 +1091,21 @@ export class SourceService {
     const name = source.repoFullName ?? source.name;
     const href = `/settings/organization/sandbox-images?source=${sourceId}`;
     const owner = { type: "org" as const, id: source.orgId };
-    const wasUnhealthy = UNHEALTHY.has(previous.health);
     const isUnhealthy = UNHEALTHY.has(next.health);
-    if (isUnhealthy && (!wasUnhealthy || previous.reason !== next.reason)) {
-      if (wasUnhealthy && previous.checkedAt !== null) {
-        await markAttentionNotificationsRead(this.attention.db, "platform", `image-source:${sourceId}:${previous.reason}:${previous.checkedAt}`);
-      }
+    // Seed from the previous state so a restart mid-episode still closes it.
+    // Known gap: failing -> stale -> restart -> healthy has no seed (stale is
+    // not unhealthy), so that recovery posts nothing.
+    let ep = this.episodes.get(sourceId);
+    if (!ep && UNHEALTHY.has(previous.health) && previous.checkedAt !== null) {
+      ep = { reason: previous.reason, keyAt: previous.checkedAt, startedAt: previous.checkedAt };
+      this.episodes.set(sourceId, ep);
+    }
+    const keyOf = (reason: SourceHealthReason, at: number) => `image-source:${sourceId}:${reason}:${at}`;
+    if (isUnhealthy) {
+      if (ep && ep.reason === next.reason) return; // the retry loop: same episode
+      if (ep) await markAttentionNotificationsRead(this.attention.db, "platform", keyOf(ep.reason, ep.keyAt));
+      const startedAt = ep?.startedAt ?? next.at;
+      this.episodes.set(sourceId, { reason: next.reason, keyAt: next.at, startedAt });
       const title = next.health === "failing" ? `Image for \`${name}\` cannot be rebuilt`
         : next.health === "incompatible" ? `Image for \`${name}\` is unusable; sessions are using the stock image`
         : `Image for \`${name}\` has not been built yet`;
@@ -1101,14 +1113,14 @@ export class SourceService {
       await routeAttention(this.attention, {
         kind: "platform", owner, urgency: next.health === "unbaked" ? "normal" : "high",
         title, body: [guidance, next.detail].filter(Boolean).join("\n\n"), href,
-        dedupeKey: `image-source:${sourceId}:${next.reason}:${next.at}`,
+        dedupeKey: keyOf(next.reason, next.at),
       });
       return;
     }
-    if (wasUnhealthy && !isUnhealthy && previous.checkedAt !== null) {
-      await markAttentionNotificationsRead(this.attention.db, "platform", `image-source:${sourceId}:${previous.reason}:${previous.checkedAt}`);
-      const lasted = next.at - previous.checkedAt;
-      if (lasted >= RECOVERY_MIN_EPISODE_MS || (await this.fellBackSince(source, previous.checkedAt))) {
+    if (next.health === "healthy" && ep) {
+      this.episodes.delete(sourceId);
+      await markAttentionNotificationsRead(this.attention.db, "platform", keyOf(ep.reason, ep.keyAt));
+      if (next.at - ep.startedAt >= RECOVERY_MIN_EPISODE_MS || (await this.fellBackSince(source, ep.startedAt))) {
         await routeAttention(this.attention, {
           kind: "platform", owner, urgency: "normal", title: `Image for \`${name}\` is healthy again`, href,
           dedupeKey: `image-source:${sourceId}:recovered:${next.at}`,
@@ -2343,7 +2355,6 @@ export class SourceService {
     // The contract gates only kubernetes sandboxes; with another builder the
     // scheduler would flip any incompatible health straight back.
     if (!this.contractEnforced) return;
-    this.lastFallbackAt.set(event.sourceId, this.now());
     try {
       const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason })
         .from(imageSources).where(eq(imageSources.id, event.sourceId)).limit(1);
@@ -2353,6 +2364,8 @@ export class SourceService {
       if (undiagnosed) {
         await this.setSourceHealth(event.sourceId, "incompatible", "contract", contractDetail(event.bakeId, event.contract));
       }
+      // After the health write, so a fallback that opens the episode counts.
+      this.lastFallbackAt.set(event.sourceId, this.now());
       // Act only when nothing newer was tried (failed or active) since the
       // bake this session fell back from.
       const newest = await this.newestBake(event.sourceId);
