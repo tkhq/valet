@@ -664,8 +664,10 @@ class OwnershipConditionObjectsApi extends FakeObjectsApi {
 class CountdownLivenessApi implements PodLivenessApi {
   calls = 0;
   gatedCalls = 0;
+  requests: Array<{ namespace: string; name: string }> = [];
   constructor(private present: number, private gate: () => boolean = () => true) {}
-  async getPodUid(): Promise<string | null> {
+  async getPodUid(namespace: string, name: string): Promise<string | null> {
+    this.requests.push({ namespace, name });
     this.calls++;
     if (!this.gate()) return null;
     this.gatedCalls++;
@@ -677,8 +679,10 @@ class CountdownLivenessApi implements PodLivenessApi {
 class CountdownPvcApi implements SandboxPvcApi {
   calls = 0;
   gatedCalls = 0;
+  requests: Array<{ namespace: string; name: string }> = [];
   constructor(private present: number, private gate: () => boolean = () => true) {}
-  async readPvc(): Promise<WorkspacePvcRead | null> {
+  async readPvc(namespace: string, name: string): Promise<WorkspacePvcRead | null> {
+    this.requests.push({ namespace, name });
     this.calls++;
     if (!this.gate()) return null;
     this.gatedCalls++;
@@ -690,6 +694,7 @@ class CountdownPvcApi implements SandboxPvcApi {
 /** Objects API whose fresh CR never becomes ready: pod status reports a
  * crash loop, so create() takes the failed-create path. */
 class CrashLoopObjectsApi extends FakeObjectsApi {
+  failDelete = false;
   deleteCalls = 0;
   deleted = false;
   cr: SandboxCRRead | null = null;
@@ -706,6 +711,7 @@ class CrashLoopObjectsApi extends FakeObjectsApi {
   override async deleteNamespacedCustomObject(): Promise<unknown> {
     this.deleteCalls++;
     this.deleted = true;
+    if (this.failDelete) throw new FakeApiError(500, "delete failed");
     this.cr = null;
     return {};
   }
@@ -1255,6 +1261,9 @@ describe("create() resource adoption and pod rollout", () => {
       expect(err).toBeInstanceOf(SandboxStartupError);
       expect((err as SandboxStartupError).kind).toBe("ownership");
       expect((err as SandboxStartupError).message).toContain("is owned by Sandbox/");
+      expect((err as SandboxStartupError).message).toContain(
+        "The controller is still waiting for the previous sandbox's pod and volume to be removed; this retries automatically.");
+      expect((err as SandboxStartupError).message).not.toContain("Check Kubernetes API access");
       expect(objectsApi.deleteCalls).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -2633,6 +2642,13 @@ describe("create() waits for its own cleanup and for orphans", () => {
       // loop reads both each pass, so create() returned only after 6 passes.
       expect(liveness.gatedCalls).toBe(6);
       expect(pvc.gatedCalls).toBe(6);
+      // Pin the names the wait polls: the CR name (not the annotated pod name),
+      // `workspace-<crName>`, and the provider's namespace.
+      const crName = sandboxCrName("/w");
+      expect(new Set(liveness.requests.map((r) => JSON.stringify(r)))).toEqual(
+        new Set([JSON.stringify({ namespace: providerCfg.namespace, name: crName })]));
+      expect(new Set(pvc.requests.map((r) => JSON.stringify(r)))).toEqual(
+        new Set([JSON.stringify({ namespace: providerCfg.namespace, name: `workspace-${crName}` })]));
     } finally {
       vi.useRealTimers();
     }
@@ -2659,6 +2675,34 @@ describe("create() waits for its own cleanup and for orphans", () => {
       expect(warn.mock.calls[0]?.[0]).toContain("still present after 30000ms");
     } finally {
       warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips the post-destroy wait when destroy itself failed", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const objectsApi = new CrashLoopObjectsApi();
+      objectsApi.failDelete = true;
+      const liveness = new CountdownLivenessApi(Number.MAX_SAFE_INTEGER, () => objectsApi.deleted);
+      const pvc = new CountdownPvcApi(Number.MAX_SAFE_INTEGER, () => objectsApi.deleted);
+      const provider = new KubernetesSandboxProvider(
+        { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi, livenessApi: liveness, pvcApi: pvc,
+          podStatusApi: crashLoopPodStatusApi, secretsApi: new FakeSecretsApi() },
+        providerCfg,
+      );
+      // No timer advance: any 30 s wait would leave this pending forever.
+      const err = await provider.create({ workspace: "/w", sessionId: "s-destroyfail" }).then(() => "resolved", (e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxStartupError);
+      expect((err as SandboxStartupError).kind).toBe("crash_loop");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(liveness.gatedCalls).toBe(0);
+      expect(pvc.gatedCalls).toBe(0);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toContain("CR cleanup after failed create failed");
+    } finally {
+      errorSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -2710,6 +2754,11 @@ describe("create() waits for its own cleanup and for orphans", () => {
       const pending = provider.create({ workspace: "/w", sessionId: "s-orphan" });
       await vi.advanceTimersByTimeAsync(0);
       expect(objectsApi.createCalled).toBe(false); // still waiting on the orphan
+      const orphanCrName = sandboxCrName("/w");
+      expect(liveness.requests.length).toBeGreaterThan(0);
+      expect(pvc.requests.length).toBeGreaterThan(0);
+      for (const r of liveness.requests) expect(r).toEqual({ namespace: providerCfg.namespace, name: orphanCrName });
+      for (const r of pvc.requests) expect(r).toEqual({ namespace: providerCfg.namespace, name: `workspace-${orphanCrName}` });
       await vi.advanceTimersByTimeAsync(RESOURCE_GONE_POLL_MS * 3);
       await pending;
       expect(objectsApi.createCalled).toBe(true);

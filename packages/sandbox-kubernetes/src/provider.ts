@@ -1286,13 +1286,20 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         // on a READY provision, so counting this cleanup would add a
         // destroy with no matching create and drive the created−destroyed
         // leak alarm negative during create-failure storms.
-        await this.destroy(name).catch((cleanupErr) => {
-          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
-        });
+        let destroyed = false;
+        await this.destroy(name).then(
+          () => { destroyed = true; },
+          (cleanupErr) => {
+            console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+          },
+        );
         // Spec 8.2: do not hand control back while the pod and PVC we just
         // orphaned are still terminating; the next create would race the
         // controller's garbage collection.
-        await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
+        // Skipped when destroy failed: the CR still exists, so the controller
+        // will not garbage-collect the pod or PVC and the wait would only
+        // burn the timeout.
+        if (destroyed) await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
       }
       throw err;
     }
@@ -1657,14 +1664,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       if (Date.now() >= deadline) {
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
         const conditionDetail = lastDetail ? ` Last condition: ${lastDetail}.` : "";
-        const message =
-          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${conditionDetail}${readDetail} ` +
-          "Check Kubernetes API access, the sandbox controller, and pod events, then retry.";
+        const leading = `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${conditionDetail}${readDetail} `;
+        const message = leading + "Check Kubernetes API access, the sandbox controller, and pod events, then retry.";
         if (lastDetail && OWNERSHIP_CONDITION_PATTERN.test(lastDetail)) {
           // Retry-shaped (spec 8.4): the controller heals this once garbage
           // collection finishes. Surface it fast and let the attachment back
           // off; create()'s cleanup keeps the CR for kind "ownership".
-          throw new SandboxStartupError(name, message, "ownership");
+          throw new SandboxStartupError(
+            name,
+            leading + "The controller is still waiting for the previous sandbox's pod and volume to be removed; this retries automatically.",
+            "ownership",
+          );
         }
         throw new Error(message);
       }
