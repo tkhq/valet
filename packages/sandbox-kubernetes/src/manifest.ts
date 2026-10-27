@@ -516,7 +516,13 @@ export function buildSandboxManifest(
       { name: "VALET_BROWSER_UID", value: "1501" }, { name: "VALET_BROWSER_GID", value: "1501" },
       ...(!companion && opts.browser?.viewer ? [{ name: "VALET_BROWSER_VIEWER", value: "1" }] : [])];
     target.env = target.env.filter(entry => !["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(entry.name) && !entry.name.startsWith("LD_") && !entry.name.startsWith("BASH_FUNC_"));
-    if (!companion && !isFullProfile) container.command = ["/usr/bin/tini", "-g", "--", "/bin/bash", "/start-headless.sh"];
+    if (!companion && !isFullProfile) {
+      container.command = [
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ];
+    }
   }
   if (isFullProfile) {
     container.command = FULL_PROFILE_COMMAND;

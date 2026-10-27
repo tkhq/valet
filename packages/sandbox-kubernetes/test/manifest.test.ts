@@ -13,6 +13,7 @@ import {
   DOCKER_WORKLOAD_FS_GROUP,
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
+  SANDBOX_CONTAINER_NAME,
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
   SCRATCH_MOUNT_PATH,
@@ -585,6 +586,24 @@ describe("buildSandboxManifest", () => {
       const headless = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "headless" });
       expect(omitted.spec.podTemplate.spec.containers[0]?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
       expect(headless.spec.podTemplate.spec.containers[0]?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
+    });
+  });
+
+  describe("browser-enabled headless command", () => {
+    it("guards tini so an image without /usr/bin/tini still starts", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-browser", {
+        profile: "headless",
+        sessionId: "session-browser",
+        browser: { enabled: true, viewer: true },
+      });
+      const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+      // The first four entries are the valet-home-start wrapper; slice them
+      // off the way the scratch tests do.
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ]);
     });
   });
 
