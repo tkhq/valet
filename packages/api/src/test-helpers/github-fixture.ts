@@ -84,6 +84,10 @@ export interface GithubFixtureHandlers {
    * request path rather than a single Hono `:path` param. `ref` is the
    * parsed `?ref=` query value. */
   getContents?: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/git/blobs/:sha` — what the reader falls back
+   * to when the contents endpoint answers `encoding: "none"` (files over
+   * 1 MB). */
+  getBlob?: (owner: string, repo: string, sha: string) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/compare/:base...:head` — the diff-scoped re-scan
    * flow reads `files[].filename`. `range` is the raw `base...head` segment. */
   getCompare?: (owner: string, repo: string, range: string) => GithubFixtureResponse;
@@ -165,6 +169,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   getCommit: () => ({ body: commitBody("f".repeat(40)) }),
   getTree: () => ({ body: { sha: "fixture-tree-sha", tree: [], truncated: false } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+  getBlob: () => ({ status: 404, body: { message: "Not Found" } }),
   getCompare: () => ({ body: { files: [] } }),
   getIssue: () => ({ status: 404, body: { message: "Not Found" } }),
   getPull: () => ({ status: 404, body: { message: "Not Found" } }),
@@ -371,6 +376,15 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     const recursive = c.req.query("recursive");
     record(c, { owner, repo, sha });
     const { status, body } = handlers.getTree(owner, repo, sha, recursive);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/git/blobs/:sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const sha = c.req.param("sha");
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.getBlob(owner, repo, sha);
     return c.json(body as object, status ?? 200);
   });
 
