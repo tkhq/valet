@@ -12,7 +12,7 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { imageSources, bakes } from "../schema/index.js";
 import type { SessionMeta } from "../engine/host.js";
 import type { RepoBinding } from "../wire/types.js";
-import { resolvePrebuildImage } from "./resolve.js";
+import { resolvePrebuildImage, repoBakeCompatibility, type IncompatibleImage } from "./resolve.js";
 
 const ORG = "org1";
 const NOW = 1_700_000_000_000;
@@ -92,9 +92,13 @@ async function seedPrebuild(
     createdAt: number;
     recipe?: unknown;
     sizeBytes?: number | null;
+    contractVersion?: number | null;
+    contractSource?: "label" | "missing" | "override" | null;
   },
 ): Promise<void> {
   await db.insert(bakes).values({
+    contractVersion: opts.contractVersion ?? null,
+    contractSource: opts.contractSource ?? null,
     id: opts.id,
     sourceId,
     identityHash: "",
@@ -253,6 +257,8 @@ describe("resolvePrebuildImage", () => {
         imageRef: "localhost:30500/cfg1/acme-widgets:newsha",
         commitSha: "newsha",
         createdAt: NOW,
+        contractVersion: 3,
+        contractSource: "label",
       });
     }
 
@@ -346,5 +352,67 @@ describe("resolvePrebuildImage", () => {
       ],
     });
     expect(await resolvePrebuildImage(db, m, fakeProvider(true))).toBeNull();
+  });
+});
+
+describe("resolvePrebuildImage contract gate (kubernetes only)", () => {
+  let harness: TestPgDb;
+  let db: AppDb;
+  beforeEach(async () => { harness = await freshTestPgDb(); db = harness.appDb; });
+  afterEach(async () => { await harness.cleanup(); });
+
+  const k8s = () => fakeProvider(true, "kubernetes");
+  const compatibleBake = { contractVersion: 3, contractSource: "label" as const };
+
+  it("a compatible bake resolves exactly as before", async () => {
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb", status: "pushed", imageRef: "r:1", commitSha: "s", createdAt: NOW, ...compatibleBake });
+    const calls: unknown[] = [];
+    const res = await resolvePrebuildImage(db, meta(), k8s(), undefined, (i) => { calls.push(i); });
+    expect(res?.imageRef).toBe("r:1");
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ["backfilled below the minimum", { contractVersion: 0, contractSource: "missing" as const }],
+    ["unstamped (null version, null source)", { contractVersion: null, contractSource: null }],
+    ["labelled below the minimum", { contractVersion: 2, contractSource: "label" as const }],
+  ])("%s -> null and the callback fires once with the bake", async (_name, contract) => {
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb-bad", status: "pushed", imageRef: "r:bad", commitSha: "s", createdAt: NOW, ...contract });
+    const calls: IncompatibleImage[] = [];
+    const res = await resolvePrebuildImage(db, meta(), k8s(), undefined, (i) => { calls.push(i); });
+    expect(res).toBeNull();
+    expect(calls).toEqual([{ sourceId: cfg, bakeId: "pb-bad", contract: contract.contractVersion, repoFullName: REPO }]);
+  });
+
+  it("an override bake with no label passes the gate", async () => {
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb-ovr", status: "pushed", imageRef: "r:ovr", commitSha: "s", createdAt: NOW, contractVersion: null, contractSource: "override" });
+    expect((await resolvePrebuildImage(db, meta(), k8s()))?.imageRef).toBe("r:ovr");
+  });
+
+  it("the gate does not apply on the docker backend", async () => {
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb", status: "pushed", imageRef: "r:docker", commitSha: "s", createdAt: NOW, contractVersion: 0, contractSource: "missing" });
+    const calls: unknown[] = [];
+    expect((await resolvePrebuildImage(db, meta(), fakeProvider(true, "docker"), undefined, (i) => { calls.push(i); }))?.imageRef).toBe("r:docker");
+    expect(calls).toEqual([]);
+  });
+
+  it("a throwing callback is swallowed and still yields null", async () => {
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb-bad", status: "pushed", imageRef: "r:bad", commitSha: "s", createdAt: NOW, contractVersion: 0, contractSource: "missing" });
+    expect(await resolvePrebuildImage(db, meta(), k8s(), undefined, () => { throw new Error("handler boom"); })).toBeNull();
+  });
+
+  it("repoBakeCompatibility reports the newest pushed bake's compatibility and null when there is none", async () => {
+    expect(await repoBakeCompatibility(db, meta(), k8s())).toBeNull();
+    const cfg = await seedConfig(db);
+    await seedPrebuild(db, cfg, { id: "pb-bad", status: "pushed", imageRef: "r:bad", commitSha: "s", createdAt: NOW, contractVersion: 0, contractSource: "missing" });
+    expect(await repoBakeCompatibility(db, meta(), k8s())).toEqual({ compatible: false, info: { sourceId: cfg, bakeId: "pb-bad", contract: 0, repoFullName: REPO } });
+    await seedPrebuild(db, cfg, { id: "pb-good", status: "pushed", imageRef: "r:good", commitSha: "s", createdAt: NOW + 1, ...compatibleBake });
+    expect((await repoBakeCompatibility(db, meta(), k8s()))?.compatible).toBe(true);
+    expect((await repoBakeCompatibility(db, meta(), fakeProvider(true, "docker")))?.compatible).toBe(true);
   });
 });
