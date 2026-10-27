@@ -188,7 +188,7 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
 
 /** Default delay while web delivery is actionable. General updates wait longer. */
 export function defaultChannelGraceSeconds(kind: AttentionKind): number {
-  return kind === "notification" ? 300 : 120;
+  return kind === "notification" || kind === "platform" ? 300 : 120;
 }
 
 function notificationId(event: AttentionEvent, userId: string): string {
@@ -316,7 +316,8 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
           sessionId: event.sessionId ?? null, createdAt: now, readAt: null,
         }).onConflictDoNothing();
       }
-      if (event.owner.type === "team" && preference?.teamDm !== true) return;
+      // Team and org events are web-only unless the member opted in to DM copies.
+      if (event.owner.type !== "user" && preference?.teamDm !== true) return;
       let deliverAfter = now;
       let previousOrder: number | undefined;
       for (const tier of tiers) {

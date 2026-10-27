@@ -4,7 +4,7 @@ import type { ListNotificationsResponse, NotificationKind, NotificationSummary, 
 import { HEX_300, MINUTE, NOW, STRING_2000, TITLE_400, URL_300 } from "./common";
 import { stressTitle } from "./approvals";
 
-const KINDS: NotificationKind[] = ["notification", "question", "escalation", "review", "approval"];
+const KINDS: NotificationKind[] = ["notification", "question", "escalation", "review", "approval", "platform"];
 const URGENCY: NotificationUrgency[] = ["low", "normal", "high"];
 
 const BODIES = [

@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
+  defaultChannelGraceSeconds,
   principalFromOwner,
   resolveAudience,
   routeAttention as enqueueAttention,
@@ -213,6 +214,46 @@ describe("routeAttention (DB-backed)", () => {
     const rows = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     // local-user and test-admin are seeded org admins (see _setup.ts); test-member is not.
     expect(rows.map((r) => r.userId).sort()).toEqual(["local-user", "test-admin"]);
+  });
+
+  it("platform kind for an org owner reaches org admins only and enqueues no DM without teamDm", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const deliver = vi.fn(async () => {});
+    await routeAttention({ db, channels: [{ id: "slack", order: 1, grace: "when-web-active", deliver }] }, {
+      kind: "platform", owner: { type: "org", id: "local-org" }, title: "Image for acme/widgets cannot be rebuilt", dedupeKey: "image-source:src1:bake_failed:1",
+    });
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+    expect(rows.map((r) => r.userId).sort()).toEqual(["local-user", "test-admin"]);
+    expect(rows.map((r) => r.id).sort()).toEqual(["n-platform-image-source:src1:bake_failed:1-local-user", "n-platform-image-source:src1:bake_failed:1-test-admin"]);
+    expect(await db.select().from(pendingChannelDeliveries)).toHaveLength(0);
+  });
+
+  it("platform kind enqueues a DM for an admin who opted in with teamDm", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(userNotificationPreferences).values({ userId: "test-admin", kind: "platform", web: true, teamDm: true });
+    await routeAttention({ db, channels: [{ id: "slack", order: 1, grace: "when-web-active", deliver: async () => {} }] }, {
+      kind: "platform", owner: { type: "org", id: "local-org" }, title: "t", dedupeKey: "image-source:src1:bake_failed:2",
+    });
+    const jobs = await db.select().from(pendingChannelDeliveries);
+    expect(jobs.map((j) => j.userId)).toEqual(["test-admin"]);
+  });
+
+  it("an admin with platform web delivery off gets no row and no job", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(userNotificationPreferences).values({ userId: "test-admin", kind: "platform", web: false });
+    await routeAttention({ db, channels: [{ id: "slack", order: 1, grace: "when-web-active", deliver: async () => {} }] }, {
+      kind: "platform", owner: { type: "org", id: "local-org" }, title: "t", dedupeKey: "image-source:src1:bake_failed:3",
+    });
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+    expect(rows.map((r) => r.userId)).toEqual(["local-user"]);
+    expect(await db.select().from(pendingChannelDeliveries)).toHaveLength(0);
+  });
+
+  it("platform defaults to the 300 second channel grace like notification", () => {
+    expect(defaultChannelGraceSeconds("platform")).toBe(300);
   });
 
   it("skips a user who disabled web delivery for the kind (default is enabled)", async () => {
