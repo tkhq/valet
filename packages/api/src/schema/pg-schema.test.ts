@@ -1310,6 +1310,8 @@ describe("pg app schema + migrations", () => {
       await bake("repo-after", "repo", TINI_EPOCH + 2000);   // newest earlier base bake: base-new -> 3
       await bake("repo-ext-1", "repo-ext", TINI_EPOCH + 9000); // external parent -> 0
       await bake("repo-orphan-1", "repo-orphan", TINI_EPOCH - 9000); // no base bake at or before -> 0
+      // D7: an override image keeps the lineage version but is tagged override.
+      await raw.query(`INSERT INTO bakes (id, source_id, identity_hash, image_ref, status, created_at, recipe) VALUES ('repo-override', 'repo', '', 'repo-override', 'pushed', $1, '{"recipe":[],"setup":[],"image":"ghcr.io/acme/custom:1"}'::jsonb)`, [TINI_EPOCH - 400]);
     }
 
     it("adds the columns and backfills contracts by lineage on an old-shaped database", async () => {
@@ -1331,6 +1333,7 @@ describe("pg app schema + migrations", () => {
         "repo-after": [3, "missing"],
         "repo-ext-1": [0, "missing"],
         "repo-orphan-1": [0, "missing"],
+        "repo-override": [0, "override"],
       });
       const health = await raw.query<{ health: string; health_reason: string }>(`SELECT health, health_reason FROM image_sources LIMIT 1`);
       expect(health.rows[0]).toEqual({ health: "healthy", health_reason: "ok" });

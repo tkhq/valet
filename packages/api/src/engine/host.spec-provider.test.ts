@@ -9,6 +9,14 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { metrics } from "@opentelemetry/api";
+import {
+  AggregationTemporality,
+  DataPointType,
+  InMemoryMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
 import {
   type ExecResult,
   type Sandbox,
@@ -417,54 +425,79 @@ describe("EngineHost buildSpecProvider", () => {
   });
 
   it("an incompatible repo bake records agent_sessions.image_fallback, calls the handler once, and clears on a compatible bake", async () => {
-    const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
-    api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
-    const events: ImageFallbackEvent[] = [];
-    api.providers.engineHost.setImageFallbackHandler(async (e) => { events.push(e); });
-
-    const now = Date.now();
-    await api.providers.db.insert(imageSources).values({
-      id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
-      setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
-      schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+    // Same in-memory harness as image-fallback-metrics.test.ts. The counter
+    // binds to the global provider on its first use, which is in this test.
+    metrics.disable();
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const meterProvider = new MeterProvider({
+      readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })],
     });
-    const bakeRow = (id: string, createdAt: number, contract: { contractVersion: number | null; contractSource: "label" | "missing" | "override" | null }) => ({
-      id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${id}`, status: "pushed" as const,
-      builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
-      startedAt: createdAt, finishedAt: createdAt, createdAt, ...contract,
-    });
-    await api.providers.db.insert(bakes).values(bakeRow("pb-bad", now, { contractVersion: 0, contractSource: "missing" }));
+    metrics.setGlobalMeterProvider(meterProvider);
+    const fallbackCount = async (): Promise<number> => {
+      await meterProvider.forceFlush();
+      const metric = exporter.getMetrics()
+        .flatMap((resource) => resource.scopeMetrics)
+        .flatMap((scope) => scope.metrics)
+        .filter((candidate) => candidate.descriptor.name === "valet.sandbox.image_fallback")
+        .at(-1);
+      if (!metric || metric.dataPointType !== DataPointType.SUM) throw new Error("expected a counter metric");
+      return metric.dataPoints.reduce((sum, point) => sum + point.value, 0);
+    };
+    try {
+      const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
+      api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
+      const events: ImageFallbackEvent[] = [];
+      api.providers.engineHost.setImageFallbackHandler(async (e) => { events.push(e); });
 
-    const sessionId = "fb-session";
-    await insertSession(api.providers.db, sessionId);
-    const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
-    const session = await api.providers.engineHost.sessionFor(sessionId, meta);
-    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      const now = Date.now();
+      await api.providers.db.insert(imageSources).values({
+        id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
+        setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
+        schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      const bakeRow = (id: string, createdAt: number, contract: { contractVersion: number | null; contractSource: "label" | "missing" | "override" | null }) => ({
+        id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${id}`, status: "pushed" as const,
+        builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
+        startedAt: createdAt, finishedAt: createdAt, createdAt, ...contract,
+      });
+      await api.providers.db.insert(bakes).values(bakeRow("pb-bad", now, { contractVersion: 0, contractSource: "missing" }));
 
-    // Stock image, not the bad bake; fallback recorded; handler called once.
-    expect(provider.createCalls[0].image).toBe("stock:img");
-    const row = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
-    expect(row.imageFallback).toMatchObject({ reason: "contract", sourceId: "fb-cfg1", bakeId: "pb-bad" });
-    expect(events).toEqual([expect.objectContaining({ sessionId, sourceId: "fb-cfg1", bakeId: "pb-bad", contract: 0, repoFullName: "acme/widgets" })]);
+      const sessionId = "fb-session";
+      await insertSession(api.providers.db, sessionId);
+      const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
+      const session = await api.providers.engineHost.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
 
-    // Re-evaluating while the bake is still bad stamps and counts nothing new.
-    const firstAt = (row.imageFallback as { at: number }).at;
-    await new Promise((r) => setTimeout(r, 5));
-    await session.options.specProvider!();
-    const again = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
-    expect((again.imageFallback as { at: number }).at).toBe(firstAt);
-    // The handler stays unconditional (workflow sessions have no row); the
-    // source service dedupes on its side.
-    expect(events).toHaveLength(2);
+      // Stock image, not the bad bake; fallback recorded; handler called once.
+      expect(provider.createCalls[0].image).toBe("stock:img");
+      const row = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect(row.imageFallback).toMatchObject({ reason: "contract", sourceId: "fb-cfg1", bakeId: "pb-bad" });
+      expect(events).toEqual([expect.objectContaining({ sessionId, sourceId: "fb-cfg1", bakeId: "pb-bad", contract: 0, repoFullName: "acme/widgets" })]);
 
-    // A compatible bake lands. Re-evaluating the spec provider (the same
-    // closure a reconcile sweep runs) clears the fallback and picks the bake.
-    await api.providers.db.insert(bakes).values(bakeRow("pb-good", now + 1000, { contractVersion: 3, contractSource: "label" }));
-    const desired = await session.options.specProvider!();
-    expect(desired.image).toBe("valet-prebuild/acme-widgets:pb-good");
-    const cleared = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
-    expect(cleared.imageFallback).toBeNull();
-    expect(events).toHaveLength(2);
+      // Re-evaluating while the bake is still bad stamps and counts nothing new.
+      const firstAt = (row.imageFallback as { at: number }).at;
+      expect(await fallbackCount()).toBe(1);
+      await new Promise((r) => setTimeout(r, 5));
+      await session.options.specProvider!();
+      const again = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect((again.imageFallback as { at: number }).at).toBe(firstAt);
+      expect(await fallbackCount()).toBe(1);
+      // The handler stays unconditional (workflow sessions have no row); the
+      // source service dedupes on its side.
+      expect(events).toHaveLength(2);
+
+      // A compatible bake lands. Re-evaluating the spec provider (the same
+      // closure a reconcile sweep runs) clears the fallback and picks the bake.
+      await api.providers.db.insert(bakes).values(bakeRow("pb-good", now + 1000, { contractVersion: 3, contractSource: "label" }));
+      const desired = await session.options.specProvider!();
+      expect(desired.image).toBe("valet-prebuild/acme-widgets:pb-good");
+      const cleared = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect(cleared.imageFallback).toBeNull();
+      expect(events).toHaveLength(2);
+    } finally {
+      await meterProvider.shutdown();
+      metrics.disable();
+    }
   });
 
   describe("startup warning", () => {

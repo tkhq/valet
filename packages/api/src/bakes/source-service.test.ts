@@ -49,7 +49,7 @@ const RESOLVED_NPM_RECIPE = {
 };
 
 class FakeImageBuilder implements ImageBuilder {
-  readonly backend = "docker";
+  readonly backend: string = "docker";
   readonly specs: PrebuildSpec[] = [];
   readonly buildIds: string[] = [];
   private readonly states = new Map<string, BuildStatus>();
@@ -72,6 +72,17 @@ class FakeImageBuilder implements ImageBuilder {
   setState(buildId: string, status: BuildStatus): void {
     this.states.set(buildId, status);
   }
+}
+
+/** The scheduler's contract logic runs only on the kubernetes backend. */
+class K8sFakeImageBuilder extends FakeImageBuilder {
+  override readonly backend = "kubernetes";
+}
+
+/** Waits until a service's off-path fallback work (bake request or contract
+ * re-read) has settled. */
+async function fallbackSettled(svc: SourceService): Promise<void> {
+  await vi.waitFor(() => expect((svc as unknown as { fallbackWork: Map<string, unknown> }).fallbackWork.size).toBe(0));
 }
 
 class QueueImageBuilder extends FakeImageBuilder {
@@ -399,6 +410,9 @@ describe("SourceService", () => {
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event); // second sweep of the same session
       await svc.handleImageFallback({ ...event, sessionId: "s2" }); // another session on the same source
+      await fallbackSettled(svc);
+      await svc.handleImageFallback(event); // a later sweep sees the active bake
+      await fallbackSettled(svc);
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("incompatible");
@@ -407,19 +421,82 @@ describe("SourceService", () => {
     });
 
     it("does not rebake or rewrite health when the triggered bake failed", async () => {
+      builder = new K8sFakeImageBuilder(); // contract-0 survivor counts as incompatible
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
       expect(builder.specs).toHaveLength(1);
       builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
       await svc.syncActiveBuilds();
       await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("failing");
       expect(row.healthReason).toBe("bake_failed");
+    });
+
+    it("does not overwrite a failing diagnosis, and a bake request that throws inserts no row", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      await svc.setSourceHealth(src, "failing", "credentials", "no org credential");
+      t = NOW + 60_000;
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await svc.handleImageFallback(event);
+      await new Promise((r) => setImmediate(r));
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      const failing = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(failing).toMatchObject({ health: "failing", healthReason: "credentials", healthCheckedAt: NOW });
+
+      // An undiagnosed source requests the bake; startBake throws on the
+      // missing credential before inserting a row, off the caller's path.
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      await svc.handleImageFallback(event);
+      await svc.handleImageFallback(event);
+      await new Promise((r) => setImmediate(r));
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      expect((await db.select().from(bakes).where(eq(bakes.sourceId, src))).map((b) => b.id)).toEqual(["bad"]);
+      const marked = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(marked).toMatchObject({ health: "incompatible", healthReason: "contract" });
+    });
+
+    it("leaves stale/waiting_for_base and an existing incompatible detail untouched", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      await svc.setSourceHealth(src, "stale", "waiting_for_base", null);
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "stale", healthReason: "waiting_for_base" });
+      await svc.setSourceHealth(src, "incompatible", "contract", "scheduler detail");
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "incompatible", healthDetail: "scheduler detail" });
+    });
+
+    it("re-reads a null contract on the newest pushed bake instead of baking (kubernetes)", async () => {
+      builder = new K8sFakeImageBuilder();
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "unread", contractVersion: null, contractSource: null });
+      let reads = 0;
+      const svc = makeService({ contractReader: async () => { reads++; return { ok: true, version: 3 }; } });
+      await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "unread", contract: null, repoFullName: "acme/widgets" });
+      await fallbackSettled(svc);
+      expect(reads).toBe(1);
+      expect(builder.specs).toHaveLength(0);
+      const stamped = (await db.select().from(bakes).where(eq(bakes.id, "unread")))[0];
+      expect(stamped).toMatchObject({ contractVersion: 3, contractSource: "label" });
     });
 
     it("never throws when the source is gone or the builder is missing", async () => {
@@ -509,6 +586,7 @@ describe("SourceService", () => {
     });
 
     it("a source whose newest bake failed stays failing/bake_failed across a retry pass until the retry pushes compatibly", async () => {
+      builder = new K8sFakeImageBuilder(); // the contract-1 survivor counts as incompatible
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "old-pushed", contractVersion: 1, contractSource: "label", createdAt: NOW - 3000 });
       await seedBake(db, src, { id: "newest-failed", status: "failed", error: "npm ci exploded", createdAt: NOW - 2000 });
@@ -970,6 +1048,23 @@ describe("SourceService", () => {
   // ── parent-first defer + same-night cascade ───────────────────────────
 
   describe("contract-driven rebakes", () => {
+    // The scheduler's contract logic applies only on the kubernetes backend.
+    beforeEach(() => {
+      builder = new K8sFakeImageBuilder();
+    });
+
+    it("on the docker backend, an identity-matching contract-0 bake is a hit and starts no bake", async () => {
+      builder = new FakeImageBuilder();
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const identity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0], null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 0, contractSource: "missing" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after).toMatchObject({ health: "healthy", healthReason: "ok" });
+    });
+
     it("rebakes a repo whose current bake matches head and identity but is incompatible, on a fresh tag", async () => {
       const src = await seedRepoSource(db);
       const svc = makeService();

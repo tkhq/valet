@@ -120,7 +120,7 @@ describe("preparation transport diagnostics", () => {
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
       podsApi: { listNamespacedPod: async () => ({ items: [
-        { name: "prep-pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] },
+        { name: "prep-pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", uid: "cr-uid-123", controller: true }] },
       ] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async () => { throw event; } },
       livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
@@ -2324,7 +2324,7 @@ describe("confirmed eviction reporting", () => {
     }) };
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", uid: "cr-uid-123", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi, livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => disappear && evicted ? null : { uid: "uid", reason: evicted ? "Evicted" : undefined, message: "docker-state exceeded 8Gi" },
@@ -2352,7 +2352,7 @@ describe("confirmed eviction reporting", () => {
     // A fresh instance without eviction evidence models an ordinary command failure.
     const ordinary = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", uid: "cr-uid-123", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async (_ns, _pod, _c, _cmd, _o, _e, _i, _t, cb) => {
         cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
         return { close() {} };
@@ -2377,7 +2377,7 @@ describe("job pod identity", () => {
     });
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", uid: "cr-uid-123", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec }, livenessApi: { getPodUid: async () => uid }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => ({ uid }),
@@ -2426,7 +2426,7 @@ describe("job pod identity", () => {
       });
       const sandbox = new KubernetesSandbox({
         objectsApi: new FakeObjectsApi(),
-        podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+        podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", uid: "cr-uid-123", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
         execApi: { exec }, livenessApi: { getPodUid: async () => "uid", getPodPhase: async () => phase }, cfg: providerCfg,
       }, "sandbox");
       return { sandbox, exec };
@@ -2483,7 +2483,7 @@ function podSummary(opts: {
 }): PodSummary {
   return {
     name: opts.name,
-    ownerReferences: [{ kind: SANDBOX_KIND, name: opts.crName ?? "sb-1", controller: true }],
+    ownerReferences: [{ kind: SANDBOX_KIND, name: opts.crName ?? "sb-1", uid: "cr-uid-123", controller: true }],
     annotations: opts.annotations,
     labels: opts.labels,
   };

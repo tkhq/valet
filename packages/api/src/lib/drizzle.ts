@@ -419,7 +419,7 @@ const CONTRACT_BACKFILL_SQL = `WITH base AS (
       FROM bakes pb JOIN image_sources ps ON ps.id = pb.source_id
       WHERE ps.kind = 'base' AND ps.id = s.parent_id AND pb.status = 'pushed' AND pb.created_at <= b.created_at
       ORDER BY pb.created_at DESC LIMIT 1), 0),
-    contract_source = 'missing'
+    contract_source = CASE WHEN b.recipe->>'image' IS NOT NULL THEN 'override' ELSE 'missing' END
   FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'repo' AND b.contract_version IS NULL
   RETURNING b.id
 )
