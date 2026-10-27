@@ -2240,7 +2240,15 @@ export class SourceService {
    * reconcile sweep cannot start a bake each. Never throws. */
   async handleImageFallback(event: ImageFallbackEvent): Promise<void> {
     try {
-      await this.setSourceHealth(event.sourceId, "incompatible", "contract", `bake ${event.bakeId} contract ${event.contract ?? "missing"} < ${MIN_IMAGE_CONTRACT}; session ${event.sessionId} fell back`);
+      const newest = await this.newestBake(event.sourceId);
+      // A failed newest bake keeps the scheduler's failing/bake_failed.
+      if (newest?.status !== "failed") {
+        await this.setSourceHealth(event.sourceId, "incompatible", "contract", `bake ${event.bakeId} contract ${event.contract ?? "missing"} < ${MIN_IMAGE_CONTRACT}`);
+      }
+      // Bake only when nothing newer was tried (failed or active) and the
+      // bake is not an already-retagged one that is still incompatible.
+      if (newest?.id !== event.bakeId) return;
+      if (this.contractRebakeFor(newest, newest.identityHash, newest.commitSha ?? undefined) === "stuck") return;
       await this.maybeFireFirstBake(event.sourceId, { fullName: event.repoFullName });
     } catch (err) {
       console.error(`image fallback handling for ${event.sourceId} failed:`, err);

@@ -447,6 +447,16 @@ describe("EngineHost buildSpecProvider", () => {
     expect(row.imageFallback).toMatchObject({ reason: "contract", sourceId: "fb-cfg1", bakeId: "pb-bad" });
     expect(events).toEqual([expect.objectContaining({ sessionId, sourceId: "fb-cfg1", bakeId: "pb-bad", contract: 0, repoFullName: "acme/widgets" })]);
 
+    // Re-evaluating while the bake is still bad stamps and counts nothing new.
+    const firstAt = (row.imageFallback as { at: number }).at;
+    await new Promise((r) => setTimeout(r, 5));
+    await session.options.specProvider!();
+    const again = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+    expect((again.imageFallback as { at: number }).at).toBe(firstAt);
+    // The handler stays unconditional (workflow sessions have no row); the
+    // source service dedupes on its side.
+    expect(events).toHaveLength(2);
+
     // A compatible bake lands. Re-evaluating the spec provider (the same
     // closure a reconcile sweep runs) clears the fallback and picks the bake.
     await api.providers.db.insert(bakes).values(bakeRow("pb-good", now + 1000, { contractVersion: 3, contractSource: "label" }));
@@ -454,7 +464,7 @@ describe("EngineHost buildSpecProvider", () => {
     expect(desired.image).toBe("valet-prebuild/acme-widgets:pb-good");
     const cleared = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
     expect(cleared.imageFallback).toBeNull();
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
   });
 
   describe("startup warning", () => {

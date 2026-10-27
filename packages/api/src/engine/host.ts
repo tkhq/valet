@@ -11,7 +11,7 @@ import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-
 import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -1823,8 +1823,9 @@ export class EngineHost {
         stockImage,
         preflight: host.opts.prebuildPreflight,
         onIncompatible: async (info) => {
-          recordImageFallback("contract");
-          await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
+          // Count and stamp once per (session, bake), not once per sweep.
+          const changed = await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
+          if (changed) recordImageFallback("contract");
           await host.imageFallbackHandler?.({ ...info, sessionId });
         },
       });
@@ -1909,19 +1910,31 @@ export class EngineHost {
   }
 
   /** Best-effort write of `agent_sessions.image_fallback` (spec 7.1). A null
-   * clears it; the clear is conditioned on the column being set so a
-   * steady-state session costs no row write per reconcile. */
-  private async recordImageFallback(sessionId: string, fallback: ImageFallback | null): Promise<void> {
-    if (!this.opts.db) return;
+   * clears it. Both writes are conditional (set only when absent or for a
+   * different bake; clear only when set) so a steady-state session costs no
+   * row write per reconcile. Returns whether a row changed. */
+  private async recordImageFallback(sessionId: string, fallback: ImageFallback | null): Promise<boolean> {
+    if (!this.opts.db) return false;
     try {
       if (fallback) {
-        await this.opts.db.update(agentSessions).set({ imageFallback: fallback }).where(eq(agentSessions.id, sessionId));
-      } else {
-        await this.opts.db.update(agentSessions).set({ imageFallback: null })
-          .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.imageFallback)));
+        const rows = await this.opts.db.update(agentSessions).set({ imageFallback: fallback })
+          .where(and(
+            eq(agentSessions.id, sessionId),
+            or(
+              isNull(agentSessions.imageFallback),
+              sql`${agentSessions.imageFallback}->>'bakeId' IS DISTINCT FROM ${fallback.bakeId}`,
+            ),
+          ))
+          .returning({ id: agentSessions.id });
+        return rows.length > 0;
       }
+      const rows = await this.opts.db.update(agentSessions).set({ imageFallback: null })
+        .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.imageFallback)))
+        .returning({ id: agentSessions.id });
+      return rows.length > 0;
     } catch (err) {
       console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
+      return false;
     }
   }
 

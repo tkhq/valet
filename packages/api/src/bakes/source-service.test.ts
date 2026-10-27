@@ -406,6 +406,22 @@ describe("SourceService", () => {
       expect(row.healthDetail).toContain("bad");
     });
 
+    it("does not rebake or rewrite health when the triggered bake failed", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      expect(builder.specs).toHaveLength(1);
+      builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
+      await svc.syncActiveBuilds();
+      await svc.handleImageFallback(event);
+      expect(builder.specs).toHaveLength(1);
+      const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(row.health).toBe("failing");
+      expect(row.healthReason).toBe("bake_failed");
+    });
+
     it("never throws when the source is gone or the builder is missing", async () => {
       const svc = makeService({ builder: null });
       await expect(svc.handleImageFallback({ sessionId: "s", sourceId: "src_missing", bakeId: "b", contract: 0, repoFullName: "x/y" })).resolves.toBeUndefined();
