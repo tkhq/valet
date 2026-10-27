@@ -13,9 +13,9 @@
 import { ExpiryCountdown } from "./expiry-countdown";
 import { rememberGateChoice } from "./gate-outcome";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
-import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
+import { Badge, Button, Spinner, StatusDot, Textarea, Tooltip, cardClass } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
 import { formatChord } from "~/lib/chat-keybindings";
@@ -40,7 +40,35 @@ const WRAPPING_BUTTON = "h-auto min-h-8 max-w-full whitespace-normal py-1.5 text
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
-export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate; placement?: "thread" | "notification" }) {
+const COLLAPSED_GATES_KEY = "valet:collapsed-gates";
+const MAX_COLLAPSED_GATES = 50;
+
+function readCollapsedIds(): string[] {
+  try {
+    const ids: unknown = JSON.parse(sessionStorage.getItem(COLLAPSED_GATES_KEY) ?? "[]");
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string").slice(-MAX_COLLAPSED_GATES) : [];
+  } catch { return []; }
+}
+
+function readCollapsed(gateId: string): boolean {
+  return readCollapsedIds().includes(gateId);
+}
+
+function writeCollapsed(gateId: string, collapsed: boolean) {
+  try {
+    const ids = readCollapsedIds().filter((id) => id !== gateId);
+    if (collapsed) ids.push(gateId);
+    sessionStorage.setItem(COLLAPSED_GATES_KEY, JSON.stringify(ids.slice(-MAX_COLLAPSED_GATES)));
+  } catch { /* storage unavailable: collapse still works for this mount */ }
+}
+
+export function DecisionGateCard(props: {
+  sessionId: string;
+  gate: DecisionGate;
+  placement?: "thread" | "notification";
+  /** Docked above the composer only: shows the collapse toggle. */
+  collapsible?: boolean;
+}) {
   return <DecisionGateResponse key={`${props.sessionId}:${props.gate.id}`} {...props} />;
 }
 
@@ -48,10 +76,12 @@ function DecisionGateResponse({
   sessionId,
   gate,
   placement = "thread",
+  collapsible = false,
 }: {
   sessionId: string;
   gate: DecisionGate;
   placement?: "thread" | "notification";
+  collapsible?: boolean;
 }) {
   const inNotification = placement === "notification";
   const columnClass = inNotification ? "min-w-0 w-full" : gateColumnClass;
@@ -67,6 +97,7 @@ function DecisionGateResponse({
   const readingRef = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(() => gate.expiresAt !== undefined && gate.expiresAt <= Date.now());
   // "Not now" hides a docked approval in this view only. The gate stays
   // pending, and a different gate shows again.
   const canHide = placement === "thread" && gate.type === "approval";
@@ -83,9 +114,72 @@ function DecisionGateResponse({
     (hidden ? showButton : notNowButton).current?.focus();
   }, [hidden]);
 
-  function setHidden(next: boolean) {
+  function setHidden(next: boolean, event: { detail: number; clientX: number; clientY: number }) {
     focusAfterToggle.current = true;
+    if (event.detail > 0) armSwallow(event);
     setHiddenGateId(next ? gate.id : null);
+  }
+
+  // A rejected attachment has nothing to retry, so the collapsed row says so.
+  const [attachmentRejected, setAttachmentRejected] = useState(false);
+  // Per gate: the card is keyed by gate id, so a new gate starts expanded.
+  const [collapsed, setCollapsedState] = useState(() => collapsible && readCollapsed(gate.id));
+  useLayoutEffect(() => {
+    setCollapsedState(collapsible && readCollapsed(gate.id));
+  }, [collapsible, gate.id]);
+  const expandButton = useRef<HTMLButtonElement>(null);
+  const collapseButton = useRef<HTMLButtonElement>(null);
+  const moveFocus = useRef(false);
+  function setCollapsed(next: boolean, event: { detail: number; clientX: number; clientY: number }) {
+    moveFocus.current = true;
+    if (event.detail > 0) armSwallow(event);
+    setCollapsedState(next);
+    writeCollapsed(gate.id, next);
+  }
+  // The toggled button unmounts, so hand focus to its counterpart.
+  useLayoutEffect(() => {
+    if (!moveFocus.current) return;
+    moveFocus.current = false;
+    (collapsed ? expandButton : collapseButton).current?.focus();
+  }, [collapsed]);
+  // Latch the decision at press start, even if release is after 600ms.
+  // Deliberate taps near the old toggle are ignored by design during that
+  // window: 24px for mouse, 48px for touch drift. Taps elsewhere work at once.
+  // Keep pointer defaults so compatibility mouse events still reach the guard.
+  const disarmSwallow = useRef<(() => void) | null>(null);
+  useEffect(() => () => disarmSwallow.current?.(), []);
+  function armSwallow(origin: { clientX: number; clientY: number }) {
+    const armedAt = performance.now();
+    disarmSwallow.current?.();
+    const types = ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick"] as const;
+    let press: "pointerdown" | "mousedown" | "click" | undefined;
+    let swallow = false;
+    const onEvent = (event: MouseEvent) => {
+      const { type, detail } = event;
+      const pointer = type.startsWith("pointer");
+      if (type === "click" && detail === 0) return disarm();
+      if (type === "pointerdown" || (type === "mousedown" && press !== "pointerdown")
+        || (type === "click" && (press === undefined || press === "click"))) {
+        const radius = "pointerType" in event && event.pointerType === "touch" ? 48 : 24;
+        swallow = performance.now() - armedAt < 600
+          && Math.hypot(event.clientX - origin.clientX, event.clientY - origin.clientY) <= radius;
+      }
+      // The compatibility mousedown can identify an OS repeat after pointerdown.
+      swallow ||= detail > 1;
+      if (type === "pointerdown" || type === "mousedown" || type === "click") press = type;
+      if (swallow) {
+        if (!pointer) event.preventDefault();
+        event.stopPropagation();
+      } else if (!pointer) {
+        disarm();
+      }
+    };
+    function disarm() {
+      for (const type of types) document.removeEventListener(type, onEvent, true);
+      disarmSwallow.current = null;
+    }
+    for (const type of types) document.addEventListener(type, onEvent, true);
+    disarmSwallow.current = disarm;
   }
 
   const busy = resolve.isPending || withdraw.isPending || reading;
@@ -102,8 +196,14 @@ function DecisionGateResponse({
     }
     setImages((current) => [...current, ...added]);
     setError(rejected.length ? rejected.join(" ") : null);
+    setAttachmentRejected(rejected.length > 0);
     readingRef.current = false;
     setReading(false);
+  }
+
+  function failAction(err: unknown) {
+    setError(errorText(err));
+    setAttachmentRejected(false);
   }
 
   const imageBody = images.length ? { attachments: toPromptAttachments(images) } : {};
@@ -115,7 +215,7 @@ function DecisionGateResponse({
       rememberGateChoice(gate.id, actionId);
       await resolve.mutateAsync({ gateId: gate.id, body: { actionId, ...imageBody } });
     } catch (err) {
-      setError(errorText(err));
+      failAction(err);
     }
   }
 
@@ -129,7 +229,7 @@ function DecisionGateResponse({
       setValue("");
       setImages([]);
     } catch (err) {
-      setError(errorText(err));
+      failAction(err);
     }
   }
 
@@ -139,7 +239,7 @@ function DecisionGateResponse({
     try {
       await withdraw.mutateAsync({ gateId: gate.id });
     } catch (err) {
-      setError(errorText(err));
+      failAction(err);
     }
   }
 
@@ -170,8 +270,44 @@ function DecisionGateResponse({
         <p role="status" className="flex min-w-0 items-center gap-1 text-xs text-muted">
           <span className="min-w-0 truncate" title={gate.title}>Approval waiting: {gate.title}</span>
           <span aria-hidden>·</span>
-          <Button ref={showButton} variant="ghost" size="sm" className="shrink-0" onClick={() => setHidden(false)}>Show</Button>
+          <Button ref={showButton} variant="ghost" size="sm" className="shrink-0" onClick={(event) => setHidden(false, event)}>Show</Button>
         </p>
+      </div>
+    );
+  }
+
+  if (collapsed) {
+    return (
+      <div className={columnClass}>
+        <div id={`gate-${gate.id}-card`} className={cn(surfaceClass, "relative border-l-2 border-l-amber-500")} role="region" aria-label="Pending request" data-testid="gate-collapsed">
+          <Button
+            variant="ghost"
+            size="md"
+            ref={expandButton}
+            type="button"
+            onClick={(event) => setCollapsed(false, event)}
+            aria-expanded={false}
+            aria-describedby={[
+              error ? `gate-${gate.id}-hint` : null,
+              gate.expiresAt !== undefined ? `gate-${gate.id}-expiry` : null,
+            ].filter(Boolean).join(" ") || undefined}
+            aria-controls={`gate-${gate.id}-card`}
+            className="flex w-full min-w-0 justify-start gap-2 rounded-md px-5 text-left max-sm:gap-1.5 max-sm:px-4 focus-visible:ring-inset focus-visible:ring-offset-0"
+          >
+            {error ? <StatusDot tone="danger" /> : <StatusDot tone={expired ? "neutral" : "warning"} pulse={!expired} />}
+            <Badge variant={kind.variant} className={error || gate.expiresAt !== undefined ? "max-sm:hidden" : undefined}>{kind.label}</Badge>
+            {(error || gate.expiresAt !== undefined) && <span className="sr-only sm:hidden">{kind.label}</span>}
+            {error && <span className="flex-none text-xs font-medium text-danger-600 sm:max-w-[50%] sm:truncate">
+              <span className="sm:hidden">{attachmentRejected ? "Rejected" : "Failed"}</span>
+              <span className="hidden sm:inline">{attachmentRejected ? "Attachment rejected" : "Failed"}</span>
+            </span>}
+            <span title={gate.title} className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{gate.title}</span>
+            {gate.expiresAt !== undefined && <span aria-hidden className="w-12 shrink-0 sm:w-24" />}
+            <ChevronUp aria-hidden className="h-4 w-4 shrink-0" />
+          </Button>
+          {gate.expiresAt !== undefined && <ExpiryCountdown expiresAt={gate.expiresAt} onExpiredChange={setExpired} compactBelowSm descriptionId={`gate-${gate.id}-expiry`} className="pointer-events-none absolute right-10 top-1/2 -translate-y-1/2 whitespace-nowrap sm:right-11" />}
+          {error && <span id={`gate-${gate.id}-hint`} hidden>{attachmentRejected ? "Expand to fix attachment" : "Expand to retry"}</span>}
+        </div>
       </div>
     );
   }
@@ -184,6 +320,7 @@ function DecisionGateResponse({
   return (
     <div className={columnClass}>
       <div
+        id={`gate-${gate.id}-card`}
         className={surfaceClass}
         role="dialog"
         aria-live="polite"
@@ -204,6 +341,11 @@ function DecisionGateResponse({
             </div>
             <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
+          {collapsible && (
+            <Button ref={collapseButton} variant="ghost" size="icon" onClick={(event) => setCollapsed(true, event)} disabled={busy} aria-label="Collapse request" aria-expanded={true} aria-controls={`gate-${gate.id}-card`}>
+              <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
             <X aria-hidden className="h-3.5 w-3.5" />
           </Button>
@@ -304,7 +446,7 @@ function DecisionGateResponse({
         ) : (
           <div className={cn(inset, "flex flex-wrap items-center gap-2", inNotification ? "justify-start pb-4 pt-1" : "justify-end pb-3")}>
             {canHide && (
-              <Button ref={notNowButton} variant="ghost" size="sm" onClick={() => setHidden(true)} disabled={busy}>
+              <Button ref={notNowButton} variant="ghost" size="sm" onClick={(event) => setHidden(true, event)} disabled={busy}>
                 Not now
               </Button>
             )}
