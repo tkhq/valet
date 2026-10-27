@@ -302,6 +302,14 @@ describe("SandboxChip — suspended state", () => {
     );
     expect(screen.getByLabelText("sleeping — will wake on message")).toBeTruthy();
   });
+  it("SandboxChip labels the image in its tooltip", async () => {
+    render(<TooltipProvider><SandboxChip sandbox={{ state: "ready", epoch: 1 }} image={{ source: "repo", repoFullName: "acme/widgets", builtAt: Date.now() - 2 * 3600_000, fallback: null }} /></TooltipProvider>);
+    expect(screen.getByLabelText(/workspace ready.*Image: `acme\/widgets`, built 2h ago/)).toBeTruthy();
+  });
+  it("SandboxChip says stock with the unavailable repo", () => {
+    render(<TooltipProvider><SandboxChip sandbox={{ state: "ready", epoch: 1 }} image={{ source: "stock", repoFullName: "acme/widgets", builtAt: null, fallback: { reason: "contract", sourceId: "s", bakeId: "b", at: 1 } }} /></TooltipProvider>);
+    expect(screen.getByLabelText(/Image: stock \(`acme\/widgets` unavailable\)/)).toBeTruthy();
+  });
 });
 
 describe("SessionHeader — thread-scoped model picker", () => {

@@ -1,7 +1,7 @@
 import { ArrowLeft, Info } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SandboxProfile } from "@valet/api/wire";
+import type { SandboxProfile, SessionSandboxImage } from "@valet/api/wire";
 import { useSandboxJwt } from "~/api/queries";
 import { Button, Spinner, TabBar, type TabDef } from "~/components/primitives";
 import { SandboxChip } from "~/components/session/session-header";
@@ -36,6 +36,7 @@ export interface SandboxTabsProps {
   activeTab: SandboxTabId;
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
+  image?: SessionSandboxImage;
   notice?: string;
   /**
    * True when the header's thread menu lists the sandbox views. Only then
@@ -52,6 +53,7 @@ export function SandboxTabs({
   activeTab,
   onTabChange,
   sandbox,
+  image,
   notice,
   viewsInMenu = false,
   compact = false,
@@ -85,7 +87,7 @@ export function SandboxTabs({
       </div>}
       {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
       {(activeTab === "terminal" || activeTab === "vscode") && (
-        <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} />
+        <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} image={image} />
       )}
     </div>
   );
@@ -103,10 +105,12 @@ function GatewayPane({
   sessionId,
   tab,
   sandbox,
+  image,
 }: {
   sessionId: string;
   tab: GatewayTabId;
   sandbox?: { state: string; epoch: number };
+  image?: SessionSandboxImage;
 }) {
   const jwt = useSandboxJwt(sessionId);
   const [src, setSrc] = useState<string | null>(null);
@@ -170,7 +174,7 @@ function GatewayPane({
         <Spinner />
         <div className="inline-flex items-center gap-1.5">
           starting workspace…
-          <SandboxChip sandbox={sandbox} />
+          <SandboxChip sandbox={sandbox} image={image} />
         </div>
       </div>
     );
