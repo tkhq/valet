@@ -29,6 +29,7 @@ import type {
   ListThreadsResponse,
   GetMeResponse,
   PostSessionFileUploadResponse,
+  ProxySettingsResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -158,6 +159,18 @@ export class InstanceClient {
    * cookie with the user. */
   me(): Promise<GetMeResponse> {
     return this.request<GetMeResponse>("GET", "/api/me");
+  }
+
+  // ── LLM proxy (`valet proxy`) ──────────────────────────────────────────
+
+  /** `GET /api/proxy/settings` — whether the org's gateway is on, and its credential mode. */
+  proxySettings(): Promise<ProxySettingsResponse> {
+    return this.request<ProxySettingsResponse>("GET", "/api/proxy/settings");
+  }
+
+  /** `DELETE /api/proxy/keys/:id` — revoke a proxy key from `valet proxy setup`. */
+  deleteProxyKey(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/proxy/keys/${encodeURIComponent(id)}`);
   }
 
   // ── orchestrator ───────────────────────────────────────────────────────

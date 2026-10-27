@@ -36,6 +36,15 @@ export interface ProfileConfig {
      * only this profile, again (`latestCredential`). */
     previousAccessTokens?: string[];
   };
+  /** Proxy keys from `valet proxy setup`, keyed by harness id. `createdAt` is epoch ms. */
+  proxyKeys?: Record<string, ProxyKeyRecord>;
+}
+
+export interface ProxyKeyRecord {
+  id: string;
+  key: string;
+  name: string;
+  createdAt: number;
 }
 
 /**

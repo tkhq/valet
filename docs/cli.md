@@ -235,6 +235,36 @@ permissions (`0600`).
 The MCP tools let a local agent delegate work and follow it. See
 [MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).
 
+### `valet proxy setup|token|remove <harness> [--force] [--rotate]`
+
+Send a local coding tool's model calls through the instance's LLM proxy, so
+Valet records them and bills them to you. The supported harness is
+`claude-code`.
+
+```bash
+valet proxy setup claude-code    # ask for a key, then configure Claude Code
+valet proxy remove claude-code   # undo setup and revoke the key
+```
+
+`setup` needs a `valet login` browser sign-in, and an org proxy in centralized
+mode. It works like this:
+
+1. The CLI asks for a proxy key, shows a code, and opens `/cli/device`.
+2. You approve the key in the browser. Only your own account can approve it.
+3. The CLI stores the key in the instance profile in `config.json`.
+4. The CLI writes `env.ANTHROPIC_BASE_URL` and `apiKeyHelper` to
+   `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
+
+The key works only at the proxy. It cannot call the Valet API. It stays valid
+until you run `valet proxy remove` or revoke it in Settings > API keys.
+Disconnecting the CLI does not revoke it.
+
+If the settings file holds a value that setup did not write, setup stops and
+lists it. `--force` replaces those values after it saves
+`settings.json.valet-backup`. `--rotate` replaces the stored key with a new one
+and revokes the old key. `token` prints the stored key. Claude Code runs it as
+its key helper.
+
 ### `valet tools search|describe|call`
 
 Use the integrations Valet brokers (GitHub, Slack, Linear, Google, and the MCP servers your organization connects) from a shell or an agent harness. Valet keeps the credentials. The organization's tool policies apply.
