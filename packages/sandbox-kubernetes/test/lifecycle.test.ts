@@ -299,6 +299,21 @@ describe("init container startup classification", () => {
 });
 
 describe("classifyPodFailure (pure)", () => {
+  it("treats the controller's ownership condition as still provisioning, not terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = {
+      type: "Ready", status: "False", reason: "PodFailed",
+      message: 'Error seen: PVC "workspace-a" is owned by Sandbox/a (UID: 8f3311cf), not by sandbox "a"',
+    };
+    expect(classifyPodFailure(pod, ready)).toBeNull();
+  });
+
+  it("still reports other PodFailed conditions as terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = { type: "Ready", status: "False", reason: "PodFailed", message: "node lost" };
+    expect(classifyPodFailure(pod, ready)).toBe("pod failed: node lost");
+  });
+
   it("appends the last termination exit code and message to a crash loop", () => {
     const pod: PodStatusInfo = {
       phase: "Running",

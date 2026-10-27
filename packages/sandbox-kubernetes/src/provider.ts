@@ -128,6 +128,7 @@ import {
   type PodEventSummary,
   type SandboxPodStatusApi,
   startupKindOf,
+  OWNERSHIP_CONDITION_PATTERN,
 } from "./lifecycle.js";
 import {
   buildSandboxManifest,
@@ -1560,10 +1561,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
+    let lastDetail: string | undefined;
     for (;;) {
       const pendingError = await this.pendingTerminalError(name, startedAtMs);
       if (pendingError !== null) throw pendingError;
       try {
+        const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+        lastDetail = cr?.status?.conditions?.find((c) => c.type === "Ready")?.message ?? lastDetail;
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
         lastState = status.state;
         if (this.deps.podStatusApi) {
@@ -1613,10 +1617,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       if (Date.now() >= deadline) {
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
-        throw new Error(
-          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
-            "Check Kubernetes API access, the sandbox controller, and pod events, then retry.",
-        );
+        const conditionDetail = lastDetail ? ` Last condition: ${lastDetail}.` : "";
+        const message =
+          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${conditionDetail}${readDetail} ` +
+          "Check Kubernetes API access, the sandbox controller, and pod events, then retry.";
+        if (lastDetail && OWNERSHIP_CONDITION_PATTERN.test(lastDetail)) {
+          // Retry-shaped (spec 8.4): the controller heals this once garbage
+          // collection finishes. Surface it fast and let the attachment back
+          // off; create()'s cleanup keeps the CR for kind "ownership".
+          throw new SandboxStartupError(name, message, "ownership");
+        }
+        throw new Error(message);
       }
       await sleep(READY_POLL_INTERVAL_MS);
     }

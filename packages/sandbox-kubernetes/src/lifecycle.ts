@@ -1397,6 +1397,13 @@ export async function livePodDrift(
   return { differs: true, podName, liveImage, imageDrift, resourcesDrift, ...(browserDrift ? { browserDrift } : {}) };
 }
 
+/** The agent-sandbox controller refuses to adopt a pod or PVC whose owner
+ * UID belongs to a deleted Sandbox of the same name. Kubernetes garbage
+ * collection removes those dependents once the old owner is gone and the
+ * controller then creates fresh ones, so this condition heals on its own.
+ * It must read as provisioning, never as a terminal failure. */
+export const OWNERSHIP_CONDITION_PATTERN = /is owned by Sandbox\//;
+
 /**
  * Pure classification of a backing pod's status (plus, for the `PodFailed`
  * case, the Sandbox CR's own `Ready` condition) into a terminal-startup-
@@ -1446,6 +1453,7 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
   if (pod.phase === "Failed" || crReadyCondition?.reason === "PodFailed") {
     const detail = crReadyCondition?.message ?? crReadyCondition?.reason ?? "pod entered phase Failed";
+    if (OWNERSHIP_CONDITION_PATTERN.test(detail)) return null;
     return `pod failed: ${detail}`;
   }
 

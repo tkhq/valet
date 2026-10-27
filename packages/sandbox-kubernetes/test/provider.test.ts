@@ -634,6 +634,29 @@ class FakeApiError extends Error {
   }
 }
 
+/** Fresh CR whose Ready condition is the controller's ownership refusal and
+ * never clears: the shape of the 2026-10-26 race. */
+class OwnershipConditionObjectsApi extends FakeObjectsApi {
+  deleteCalls = 0;
+  private cr: SandboxCRRead | null = null;
+  override async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
+    this.createCalled = true;
+    this.cr = { ...params.body, metadata: { ...params.body.metadata, uid: "cr-new", resourceVersion: "1" },
+      status: { conditions: [{ type: "Ready", status: "False", reason: "PodFailed",
+        message: 'Error seen: PVC "workspace-x" is owned by Sandbox/x (UID: 8f3311cf), not by sandbox "x"' }] } };
+    return this.cr;
+  }
+  override async getNamespacedCustomObject(): Promise<unknown> {
+    if (!this.cr) throw new FakeApiError(404, "not found");
+    return this.cr;
+  }
+  override async deleteNamespacedCustomObject(): Promise<unknown> {
+    this.deleteCalls++;
+    this.cr = null;
+    return {};
+  }
+}
+
 /** Existing CR with live compute. Replacement updates the template, not the pod. */
 class ResourceAdoptingObjectsApi extends FakeObjectsApi {
   cr: SandboxCRRead;
@@ -1140,6 +1163,24 @@ describe("create() resource adoption and pod rollout", () => {
       expect(settled).toBe(true);
       expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(2);
       expect(podStatusApi.getPodStatus.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out on a persistent ownership condition as a retry-shaped startup error that keeps the CR", async () => {
+    vi.useFakeTimers();
+    try {
+      const objectsApi = new OwnershipConditionObjectsApi();
+      const provider = makeProvider(new FakeSecretsApi(), objectsApi);
+      const pending = provider.create({ workspace: "/w", sessionId: "s-own" });
+      const outcome = pending.then(() => "resolved", (e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(61_000);
+      const err = await outcome;
+      expect(err).toBeInstanceOf(SandboxStartupError);
+      expect((err as SandboxStartupError).kind).toBe("ownership");
+      expect((err as SandboxStartupError).message).toContain("is owned by Sandbox/");
+      // Task 9 asserts deleteCalls === 0 once create() keeps the CR for kind "ownership".
     } finally {
       vi.useRealTimers();
     }
