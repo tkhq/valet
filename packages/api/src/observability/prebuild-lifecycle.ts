@@ -121,6 +121,12 @@ export function updatePrebuildQueueSnapshot(next: QueueSnapshot[]): void {
   getInstruments();
 }
 
+let schedulerPassAt: number | undefined;
+/** Spec 6.3: when `runSchedulerPass` last completed, in process memory. PR 3
+ * exports it as a gauge; the alert's `for` tolerates a restart. */
+export function recordSchedulerPass(at: number): void { schedulerPassAt = at; }
+export function lastSchedulerPassAt(): number | undefined { return schedulerPassAt; }
+
 export function recordPrebuildRequest(dimensions: PrebuildDimensions, outcome: "accepted" | "rejected", trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): void {
   getInstruments().requests.add(1, { ...boundedPrebuildAttributes(dimensions), outcome, trigger });
 }

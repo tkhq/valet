@@ -30,7 +30,12 @@ import {
   clearRepoPrebuildFlagsCache,
   resolveChangedFiles,
   fetchRepoFile,
+  healthReasonForError,
+  GitHubApiError,
+  AnonymousImageBakesDisabledError,
 } from "./source-service.js";
+import { RegistryCapacityError } from "./registry-health.js";
+import { lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -342,6 +347,8 @@ describe("SourceService", () => {
   let oversizedHasSha = true;
   // Repo-declared .valet/prebuild.yaml served by the fixture (null = absent).
   let prebuildYaml: string | null = null;
+  // When true, the repository lookup itself (GET /repos/:owner/:repo) 404s.
+  let repoMissing = false;
 
   function contentsFor(path: string): GithubFixtureResponse {
     if (lockfileOversized && path === "pnpm-lock.yaml") {
@@ -381,6 +388,120 @@ describe("SourceService", () => {
       ...overrides,
     });
   }
+
+  describe("source health", () => {
+    async function healthOf(id: string) {
+      const row = (await db.select().from(imageSources).where(eq(imageSources.id, id)))[0];
+      return { health: row.health, reason: row.healthReason, detail: row.healthDetail, checkedAt: row.healthCheckedAt };
+    }
+
+    it("a scheduler hit writes healthy/ok", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const identity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0], null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 3, contractSource: "label" });
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok" });
+    });
+
+    it("a repo with no pushed bake is unbaked after the pass starts its first bake", async () => {
+      const src = await seedRepoSource(db);
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "unbaked", reason: "ok" });
+    });
+
+    it("a repo whose head moved is stale when its current bake is compatible", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { commitSha: "old-sha", contractVersion: 3, contractSource: "label" });
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "ok" });
+    });
+
+    it("a repo deferring behind an unready base is stale/waiting_for_base", async () => {
+      const baseId = await seedBaseSource(db, ["echo base"]);
+      const src = await seedRepoSource(db, { parentId: baseId });
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "waiting_for_base" });
+    });
+
+    it("a thrown GitHub 404 on the repo path is failing/repo_unreachable, with the error text as detail", async () => {
+      const src = await seedRepoSource(db, { repoFullName: "acme/gone", name: "acme/gone" });
+      repoMissing = true;
+      await makeService().runSchedulerPass();
+      const h = await healthOf(src);
+      expect(h).toMatchObject({ health: "failing", reason: "repo_unreachable" });
+      expect(h.detail).toMatch(/404/);
+    });
+
+    it("a pushed bake with a compatible label makes the source healthy; a failed label read makes it stale/contract_unknown", async () => {
+      const src = await seedRepoSource(db);
+      const svcOk = makeService({ contractReader: async () => ({ ok: true, version: 3 }) });
+      await svcOk.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svcOk.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok" });
+
+      const svcBad = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+      await svcBad.startBake(src, "manual");
+      builder.setState(builder.buildIds[1], { state: "pushed" });
+      await svcBad.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "contract_unknown", detail: "registry 503" });
+    });
+
+    it("a rejecting contract reader is treated as a failed read", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService({ contractReader: async () => { throw new Error("reader exploded"); } });
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "contract_unknown", detail: "reader exploded" });
+    });
+
+    it("a failed bake is stale/bake_failed when a compatible bake exists, else failing/bake_failed", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "bake_failed", detail: "npm ci exploded" });
+
+      await seedBake(db, src, { id: "good", contractVersion: 3, contractSource: "label" });
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[1], { state: "failed", error: "npm ci exploded again" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "bake_failed" });
+    });
+
+    it("setSourceHealth truncates detail, stamps health_checked_at only on a transition, and reports the transition", async () => {
+      const src = await seedRepoSource(db);
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "x".repeat(5000))).toBe(true);
+      expect(await healthOf(src)).toMatchObject({ health: "failing", checkedAt: NOW });
+      expect((await healthOf(src)).detail).toHaveLength(2000);
+      t = NOW + 60_000;
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "new detail")).toBe(false);
+      expect(await healthOf(src)).toMatchObject({ detail: "new detail", checkedAt: NOW });
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "new detail")).toBe(false);
+      t = NOW + 120_000;
+      expect(await svc.setSourceHealth(src, "healthy", "ok", null)).toBe(true);
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok", detail: null, checkedAt: NOW + 120_000 });
+    });
+
+    it("healthReasonForError maps error classes", () => {
+      expect(healthReasonForError(new GitHubApiError(404, "/repos/acme/gone"))).toBe("repo_unreachable");
+      expect(healthReasonForError(new GitHubApiError(404, "/repos/acme/widgets/contents/pnpm-lock.yaml"))).toBe("resolve_failed");
+      expect(healthReasonForError(new GitHubApiError(500, "/repos/acme/widgets"))).toBe("resolve_failed");
+      expect(healthReasonForError(new AnonymousImageBakesDisabledError())).toBe("credentials");
+      expect(healthReasonForError(new RegistryCapacityError("full"))).toBe("registry_full");
+      expect(healthReasonForError(new Error("boom"))).toBe("bake_failed");
+    });
+
+    it("runSchedulerPass records its completion time", async () => {
+      await makeService().runSchedulerPass();
+      expect(lastSchedulerPassAt()).toBe(NOW);
+    });
+  });
 
   describe("cache and registry health", () => {
     it("reports protected over-budget logical bytes separately from registry bytes", async () => {
@@ -458,7 +579,11 @@ describe("SourceService", () => {
     lockfileOversized = false;
     oversizedHasSha = true;
     prebuildYaml = null;
+    repoMissing = false;
     fixture = startGithubFixture({
+      getRepo: (owner, repo) => repoMissing
+        ? { status: 404, body: { message: "Not Found" } }
+        : { body: { default_branch: "main", full_name: `${owner}/${repo}`, clone_url: `https://github.com/${owner}/${repo}.git` } },
       getCommit: () => ({ body: { sha: currentSha } }),
       getContents: (_owner, _repo, path) => contentsFor(path),
       getBlob: (_owner, _repo, sha) =>

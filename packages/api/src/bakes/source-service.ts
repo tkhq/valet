@@ -47,6 +47,8 @@ import {
   sessionRepos,
   type ImageSourceRow,
   type BakeRow,
+  type SourceHealth,
+  type SourceHealthReason,
 } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
@@ -67,13 +69,15 @@ import { pushRefFor } from "../prebuilds/k8s-builder.js";
 import { headRegistryManifest, parseRegistryImageRef } from "../prebuilds/registry.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { measureBakeSize } from "../prebuilds/bake-size.js";
-import { readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
+import { compatible, readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
+import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
   recordPrebuildCompletion,
   recordPrebuildDecision,
   recordPrebuildQueueWait,
+  recordSchedulerPass,
   recordPrebuildRequest,
   recordPrebuildTransition,
   recordRegistryOperation,
@@ -293,12 +297,30 @@ function githubFetchOf(deps: GitHubTokenDeps): typeof fetch {
  */
 export class GitHubApiError extends Error {
   readonly status: number;
+  readonly path: string;
   constructor(status: number, path: string, detail?: string) {
     super(`GitHub API ${path} ${status === 0 ? "request failed" : `responded ${status}`}${detail ? `: ${detail}` : ""}`);
     this.name = "GitHubApiError";
     this.status = status;
+    this.path = path;
   }
 }
+
+/** Spec 6.2: the health reason for a scheduler-pass failure, by error class.
+ * A 404 on the repository path itself (no `/contents/`, `/commits/`, or
+ * `/git/` segment) is the repo being unreachable; any other GitHub error is a
+ * resolve failure. */
+export function healthReasonForError(err: unknown): SourceHealthReason {
+  if (err instanceof GitHubApiError) {
+    const onRepoRoot = !/\/(contents|commits|git|branches)\//.test(err.path + "/");
+    return err.status === 404 && onRepoRoot ? "repo_unreachable" : "resolve_failed";
+  }
+  if (err instanceof AnonymousImageBakesDisabledError) return "credentials";
+  if (err instanceof RegistryCapacityError) return "registry_full";
+  return "bake_failed";
+}
+
+const HEALTH_DETAIL_MAX = 2000;
 
 async function fetchGithubJson(
   deps: GitHubTokenDeps,
@@ -997,6 +1019,33 @@ export class SourceService {
     return rows.length > 0;
   }
 
+  /** Spec 6.2 with plan refinement 9. Writes the health columns on a
+   * transition of health or reason; `health_checked_at` is the time the
+   * current (health, reason) was entered, so PR 3 can key a notification
+   * episode on it and the UI can say "failing since". A changed detail
+   * alone updates `health_detail` only. Returns true on a transition. */
+  async setSourceHealth(sourceId: string, health: SourceHealth, reason: SourceHealthReason, detail?: string | null): Promise<boolean> {
+    const trimmed = detail == null ? null : detail.slice(0, HEALTH_DETAIL_MAX);
+    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail })
+      .from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
+    if (!row) return false;
+    const transition = row.health !== health || row.reason !== reason;
+    if (!transition && row.detail === trimmed) return false;
+    await this.db.update(imageSources)
+      .set(transition
+        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: this.now() }
+        : { healthDetail: trimmed })
+      .where(eq(imageSources.id, sourceId));
+    return transition;
+  }
+
+  /** Health for a source that needs (or is waiting on) a new bake. */
+  private pendingHealth(current: BakeRow | null): [SourceHealth, SourceHealthReason, string | null] {
+    if (!current) return ["unbaked", "ok", null];
+    if (!compatible(current)) return ["incompatible", "contract", `current bake ${current.id} contract ${current.contractVersion ?? "missing"} < ${MIN_IMAGE_CONTRACT}`];
+    return ["stale", "ok", null];
+  }
+
   /** Newest `pushed` bake for a source, or null. */
   async currentBake(sourceId: string): Promise<BakeRow | null> {
     const rows = await this.db
@@ -1618,7 +1667,11 @@ export class SourceService {
         } catch {
           // best-effort — size measurement never blocks the push transition
         }
-        await this.stampContract(row, source);
+        const contract = await this.stampContract(row, source).catch((err): ContractRead => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        const stamped = (await this.db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+        if (!contract.ok) await this.setSourceHealth(row.sourceId, "stale", "contract_unknown", contract.error);
+        else if (stamped && compatible(stamped)) await this.setSourceHealth(row.sourceId, "healthy", "ok", null);
+        else await this.setSourceHealth(row.sourceId, "incompatible", "contract", `bake ${row.id} contract ${stamped?.contractVersion ?? "missing"} < ${MIN_IMAGE_CONTRACT}`);
         recordPrebuildTransition(dimensions, "succeeded");
         recordPrebuildCompletion(dimensions, observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, measuredSize);
         this.bakeSpans.get(row.id)?.end();
@@ -1640,6 +1693,8 @@ export class SourceService {
         span?.end();
         this.bakeSpans.delete(row.id);
         logPrebuildEvent(canceled ? "bake_canceled" : "bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, error: status.error });
+        const survivor = await this.currentBake(row.sourceId);
+        await this.setSourceHealth(row.sourceId, survivor && compatible(survivor) ? "stale" : "failing", "bake_failed", status.error ?? null);
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).
@@ -1867,8 +1922,11 @@ export class SourceService {
         else if (source.kind === "repo") await this.maybeScheduleRepo(source);
       } catch (err) {
         console.error(`prebuild scheduler: source ${source.id} (${source.repoFullName ?? source.name}) failed:`, err);
+        await this.setSourceHealth(source.id, "failing", healthReasonForError(err), err instanceof Error ? err.message : String(err))
+          .catch((healthErr) => console.error(`prebuild scheduler: health write for ${source.id} failed:`, healthErr));
       }
     }
+    recordSchedulerPass(this.now());
   }
 
   private schedulingBlocked(source: ImageSourceRow): boolean {
@@ -1882,6 +1940,7 @@ export class SourceService {
     const current = await this.currentBake(source.id);
     if (current && current.identityHash === identity) {
       recordPrebuildDecision(this.dimensions(source), "hit");
+      await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
@@ -1889,10 +1948,12 @@ export class SourceService {
     // have dispatched one that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     recordPrebuildDecision(this.dimensions(source), current ? "parent_changed" : "miss");
+    await this.setSourceHealth(source.id, ...this.pendingHealth(current));
     await this.startBake(source.id, "scheduler");
   }
 
@@ -1902,6 +1963,7 @@ export class SourceService {
     // Defer when the parent base has no consistent pushed bake yet — the
     // push-kick in `syncActiveBuilds` (or the next scheduler tick) rebakes.
     if (await this.repoBakeDefers(source)) {
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
       console.log(`prebuild scheduler: defer ${source.name}: waiting for base bake`);
       return;
     }
@@ -1937,6 +1999,7 @@ export class SourceService {
     const current = await this.currentBake(source.id);
     if (current && current.commitSha === head.sha && current.identityHash === identity) {
       recordPrebuildDecision(this.dimensions(source), "hit");
+      await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
@@ -1944,10 +2007,12 @@ export class SourceService {
     // tick) may have dispatched a bake for this source that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     recordPrebuildDecision(this.dimensions(source), !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
+    await this.setSourceHealth(source.id, ...this.pendingHealth(current));
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
@@ -1958,6 +2023,7 @@ export class SourceService {
       // startRepoBake linked the synthetic base and kicked ITS bake instead.
       // That is a defer, not a failure — the push cascade bakes this repo.
       if (err instanceof RepoBaseLayerBakingError) {
+        await this.setSourceHealth(source.id, "stale", "waiting_for_base", err.message);
         console.log(`prebuild scheduler: defer ${source.name}: ${err.message}`);
         return;
       }
