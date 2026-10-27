@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
-import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
+import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest, startupKindOf } from "../src/index.js";
 import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
   SANDBOX_KIND,
@@ -1542,4 +1542,19 @@ it.each([[409, 3], [503, 1]])("bounds resume retries for HTTP %s to %s attempts"
   await expect(resumeWithPersistentHomes(api, cfg, "conflict")).rejects.toBe(failure);
   expect(api.attempts).toBe(expectedAttempts);
   expect(api.reads).toBe(expectedAttempts);
+});
+
+describe("startupKindOf", () => {
+  it.each([
+    ["container crash-looping (CrashLoopBackOff)", "crash_loop"],
+    ["container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: exec: /usr/bin/tini: not found", "crash_loop"],
+    ["image pull failed (ImagePullBackOff): ghcr.io/x/y:z", "image_pull"],
+    ["pod failed: Error seen: PVC \"workspace-a\" is owned by Sandbox/a (UID: 1), not by sandbox \"a\"", "ownership"],
+    ["pod failed: pod entered phase Failed", "pod_failed"],
+    ["pod unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["something else entirely", "other"],
+  ])("maps %j to %s", (reason, expected) => {
+    expect(startupKindOf(reason)).toBe(expected);
+  });
 });

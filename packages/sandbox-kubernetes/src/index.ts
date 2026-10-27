@@ -68,6 +68,7 @@ export {
   SANDBOX_PLURAL,
   applySandbox,
   classifyPodFailure,
+  startupKindOf,
   classifyPodPending,
   customObjectsApiAdapter,
   deleteSandbox,

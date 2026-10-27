@@ -102,7 +102,7 @@ import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import type { Sandbox, SandboxResourceField, SandboxStatus } from "@valet/engine";
+import type { Sandbox, SandboxResourceField, SandboxStartupKind, SandboxStatus } from "@valet/engine";
 import {
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
@@ -1443,6 +1443,25 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
   }
 
   return null;
+}
+
+/** Bounded kind for the `valet.sandbox.startup_failed` counter, derived
+ * from the reason strings this module and the provider produce. Matched on
+ * stable prefixes so detail appended after a colon does not change the
+ * answer. */
+export function startupKindOf(reason: string): SandboxStartupKind {
+  if (reason.startsWith("container crash-looping")) return "crash_loop";
+  if (reason.startsWith("image pull failed")) return "image_pull";
+  if (reason.includes("is owned by Sandbox/")) return "ownership";
+  if (reason.startsWith("pod failed")) return "pod_failed";
+  if (
+    reason.startsWith("pod unschedulable") ||
+    reason.startsWith("unschedulable") ||
+    reason.includes("Unschedulable")
+  ) {
+    return "unschedulable";
+  }
+  return "other";
 }
 
 /**

@@ -127,6 +127,7 @@ import {
   type SandboxPodsApi,
   type PodEventSummary,
   type SandboxPodStatusApi,
+  startupKindOf,
 } from "./lifecycle.js";
 import {
   buildSandboxManifest,
@@ -1603,7 +1604,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           return;
         }
         if (status.state === "error") {
-          throw new SandboxStartupError(name, status.error ?? "unknown");
+          throw new SandboxStartupError(name, status.error ?? "unknown", startupKindOf(status.error ?? ""));
         }
         lastReadError = undefined;
       } catch (err) {
@@ -1691,6 +1692,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
     const message = `pod has been Pending for ${Math.floor(pending.ageMs / 60_000)} minutes ` +
       `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
-    return new PendingTerminalStartupError(name, message);
+    return new PendingTerminalStartupError(name, message, "unschedulable");
   }
 }
