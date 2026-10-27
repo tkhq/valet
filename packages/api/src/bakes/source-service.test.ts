@@ -12,7 +12,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, imageSources, bakes, agentSessions, sessionRepos } from "../schema/index.js";
+import { orgs, imageSources, bakes, agentSessions, sessionRepos, notifications, orgMembers, users } from "../schema/index.js";
 import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
@@ -519,6 +519,88 @@ describe("SourceService", () => {
     it("never throws when the source is gone or the builder is missing", async () => {
       const svc = makeService({ builder: null });
       await expect(svc.handleImageFallback({ sessionId: "s", sourceId: "src_missing", bakeId: "b", contract: 0, repoFullName: "x/y" })).resolves.toBeUndefined();
+    });
+  });
+
+  describe("health notifications", () => {
+    const ADMIN_COUNT = 2;
+    beforeEach(async () => {
+      for (const id of ["admin1", "admin2", "member1"]) {
+        await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
+        await db.insert(orgMembers).values({ orgId, userId: id, role: id.startsWith("admin") ? "admin" : "member", createdAt: NOW });
+      }
+    });
+
+    it("entering failing on a bound repo source notifies org admins once per episode, with the deep link", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      const svc = makeService({ attention: { db } });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "npm ci exploded");
+      await svc.setSourceHealth(src, "failing", "bake_failed", "npm ci exploded again"); // same episode
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows).toHaveLength(ADMIN_COUNT);
+      expect(rows[0]).toMatchObject({ urgency: "high", title: "Image for `acme/widgets` cannot be rebuilt", href: `/settings/organization/sandbox-images?source=${src}` });
+      expect(rows[0].body).toContain("The setup commands failed. The log tail shows where.");
+      expect(rows[0].body).toContain("npm ci exploded");
+      expect(rows[0].id).toBe(`n-platform-image-source:${src}:bake_failed:${NOW}-${rows[0].userId}`);
+    });
+
+    it("a dormant repo source (not bound in 7 days) does not notify", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW - 8 * 24 * 60 * 60 * 1000 });
+      await makeService({ attention: { db } }).setSourceHealth(src, "failing", "bake_failed", "x");
+      expect(await db.select().from(notifications)).toHaveLength(0);
+    });
+
+    it("a base source always matters when any bound repo sits beneath it", async () => {
+      const baseId = await seedBaseSource(db, []);
+      await seedRepoSource(db, { parentId: baseId, lastBoundAt: NOW });
+      await makeService({ attention: { db } }).setSourceHealth(baseId, "failing", "bake_failed", "x");
+      expect((await db.select().from(notifications)).length).toBeGreaterThan(0);
+    });
+
+    it("recovery after a long episode marks the episode read and posts one normal notification; a short flap posts none (Review Focus 1)", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "x");
+      t = NOW + 5 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null); // short episode: no recovery row
+      let rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.every((r) => r.readAt !== null)).toBe(true);
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(0);
+      t = NOW + 6 * 60_000;
+      await svc.setSourceHealth(src, "failing", "bake_failed", "y"); // new episode → new rows
+      rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.readAt === null)).toHaveLength(ADMIN_COUNT);
+      t = NOW + 20 * 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null); // long episode: recovery row
+      rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title === "Image for `acme/widgets` is healthy again")).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a short episode that caused a fallback still gets a recovery notification", async () => {
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "incompatible", "contract", "x");
+      await db.insert(agentSessions).values({ id: "s-fb", userId: "u1", orgId, workspace: "/w", status: "active", ownerType: "user", ownerId: "u1", profile: "headless", imageFallback: { reason: "contract", sourceId: src, bakeId: "b", at: NOW + 1 }, createdAt: NOW, updatedAt: NOW });
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
+    });
+
+    it("a short episode whose fallback was since cleared still gets a recovery notification (in-process record)", async () => {
+      builder = new K8sFakeImageBuilder();
+      const src = await seedRepoSource(db, { lastBoundAt: NOW });
+      let t = NOW;
+      const svc = makeService({ attention: { db }, now: () => t });
+      await svc.setSourceHealth(src, "incompatible", "contract", "x");
+      t = NOW + 1000;
+      await svc.handleImageFallback({ sessionId: "s", sourceId: src, bakeId: "none", contract: 0, repoFullName: "acme/widgets" });
+      t = NOW + 60_000;
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "platform"));
+      expect(rows.filter((r) => r.title.includes("healthy again"))).toHaveLength(ADMIN_COUNT);
     });
   });
 

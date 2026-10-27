@@ -37,7 +37,7 @@ import { recordBakeHealth } from "./metrics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { and, desc, eq, gte, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -72,6 +72,8 @@ import { measureBakeSize } from "../prebuilds/bake-size.js";
 import { compatible, readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
 import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { routeAttention, markAttentionNotificationsRead, type AttentionDeps } from "../orchestrator/attention.js";
+import { sourceHealthGuidance } from "@valet/shared";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
@@ -769,6 +771,10 @@ function readSetupCommands(source: ImageSourceRow): string[] {
   return raw.filter((v): v is string => typeof v === "string");
 }
 
+const RECOVERY_MIN_EPISODE_MS = 10 * 60_000;
+const BOUND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const UNHEALTHY: ReadonlySet<SourceHealth> = new Set(["incompatible", "failing", "unbaked"]);
+
 export interface SourceServiceDeps {
   db: AppDb;
   builder: ImageBuilder | null;
@@ -786,6 +792,8 @@ export interface SourceServiceDeps {
    * `readImageContractLabel` against this service's registry settings;
    * tests inject a fake. */
   contractReader?: (backend: string, imageRef: string) => Promise<ContractRead>;
+  /** Routes health-transition notifications to org admins. Unset: none. */
+  attention?: AttentionDeps;
 }
 
 function newBakeId(newId: () => string): string {
@@ -824,6 +832,9 @@ export class SourceService {
     createdAt: number;
   }> = [];
   private readonly registryFetch: typeof fetch;
+  private readonly attention?: AttentionDeps;
+  /** Last fallback seen per source by this process (recovery notification). */
+  private readonly lastFallbackAt = new Map<string, number>();
   private readonly contractReader: (backend: string, imageRef: string) => Promise<ContractRead>;
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthReporting = false;
@@ -833,6 +844,7 @@ export class SourceService {
   constructor(deps: SourceServiceDeps) {
     this.db = deps.db;
     this.registryFetch = deps.registryFetch ?? fetch;
+    this.attention = deps.attention;
     this.builder = deps.builder;
     this.githubTokenDeps = deps.githubTokenDeps;
     this.now = deps.now ?? Date.now;
@@ -1034,17 +1046,85 @@ export class SourceService {
    * alone updates `health_detail` only. Returns true on a transition. */
   async setSourceHealth(sourceId: string, health: SourceHealth, reason: SourceHealthReason, detail?: string | null): Promise<boolean> {
     const trimmed = detail == null ? null : detail.slice(0, HEALTH_DETAIL_MAX);
-    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail })
+    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail, checkedAt: imageSources.healthCheckedAt })
       .from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
     if (!row) return false;
     const transition = row.health !== health || row.reason !== reason;
     if (!transition && row.detail === trimmed) return false;
+    const at = this.now();
     await this.db.update(imageSources)
       .set(transition
-        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: this.now() }
+        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: at }
         : { healthDetail: trimmed })
       .where(eq(imageSources.id, sourceId));
+    if (transition) {
+      await this.notifyHealthTransition(sourceId, { health: row.health, reason: row.reason, checkedAt: row.checkedAt }, { health, reason, detail: trimmed, at })
+        .catch((err) => console.error(`health notification for ${sourceId} failed:`, err));
+    }
     return transition;
+  }
+
+  /** Spec 10/11 "bound": a repo bound in the last 7 days, or a base with
+   * such a repo beneath it. Dormant sources neither page nor notify. */
+  async sourceMatters(source: ImageSourceRow): Promise<boolean> {
+    const since = this.now() - BOUND_WINDOW_MS;
+    if (source.kind === "repo") return (source.lastBoundAt ?? 0) >= since;
+    if (source.kind === "base") {
+      const rows = await this.db.select({ id: imageSources.id }).from(imageSources)
+        .where(and(eq(imageSources.parentId, source.id), eq(imageSources.kind, "repo"), gte(imageSources.lastBoundAt, since))).limit(1);
+      return rows.length > 0;
+    }
+    return false;
+  }
+
+  private async notifyHealthTransition(
+    sourceId: string,
+    previous: { health: SourceHealth; reason: SourceHealthReason; checkedAt: number | null },
+    next: { health: SourceHealth; reason: SourceHealthReason; detail: string | null; at: number },
+  ): Promise<void> {
+    if (!this.attention) return;
+    const source = await this.loadSource(sourceId).catch(() => null);
+    if (!source || !(await this.sourceMatters(source))) return;
+    const name = source.repoFullName ?? source.name;
+    const href = `/settings/organization/sandbox-images?source=${sourceId}`;
+    const owner = { type: "org" as const, id: source.orgId };
+    const wasUnhealthy = UNHEALTHY.has(previous.health);
+    const isUnhealthy = UNHEALTHY.has(next.health);
+    if (isUnhealthy && (!wasUnhealthy || previous.reason !== next.reason)) {
+      if (wasUnhealthy && previous.checkedAt !== null) {
+        await markAttentionNotificationsRead(this.attention.db, "platform", `image-source:${sourceId}:${previous.reason}:${previous.checkedAt}`);
+      }
+      const title = next.health === "failing" ? `Image for \`${name}\` cannot be rebuilt`
+        : next.health === "incompatible" ? `Image for \`${name}\` is unusable; sessions are using the stock image`
+        : `Image for \`${name}\` has not been built yet`;
+      const guidance = sourceHealthGuidance(next.reason);
+      await routeAttention(this.attention, {
+        kind: "platform", owner, urgency: next.health === "unbaked" ? "normal" : "high",
+        title, body: [guidance, next.detail].filter(Boolean).join("\n\n"), href,
+        dedupeKey: `image-source:${sourceId}:${next.reason}:${next.at}`,
+      });
+      return;
+    }
+    if (wasUnhealthy && !isUnhealthy && previous.checkedAt !== null) {
+      await markAttentionNotificationsRead(this.attention.db, "platform", `image-source:${sourceId}:${previous.reason}:${previous.checkedAt}`);
+      const lasted = next.at - previous.checkedAt;
+      if (lasted >= RECOVERY_MIN_EPISODE_MS || (await this.fellBackSince(source, previous.checkedAt))) {
+        await routeAttention(this.attention, {
+          kind: "platform", owner, urgency: "normal", title: `Image for \`${name}\` is healthy again`, href,
+          dedupeKey: `image-source:${sourceId}:recovered:${next.at}`,
+        });
+      }
+    }
+  }
+
+  /** Whether a session fell back from this source since `since`. The
+   * in-process record survives a cleared `image_fallback`; the session
+   * query covers a restarted process. */
+  private async fellBackSince(source: ImageSourceRow, since: number): Promise<boolean> {
+    if ((this.lastFallbackAt.get(source.id) ?? 0) >= since) return true;
+    const rows = await this.db.select({ id: agentSessions.id }).from(agentSessions)
+      .where(and(eq(agentSessions.orgId, source.orgId), sql`${agentSessions.imageFallback} ->> 'sourceId' = ${source.id}`, sql`(${agentSessions.imageFallback} ->> 'at')::bigint >= ${since}`)).limit(1);
+    return rows.length > 0;
   }
 
   /** Spec 6.3: the image contract only gates the kubernetes provider (the
@@ -2263,6 +2343,7 @@ export class SourceService {
     // The contract gates only kubernetes sandboxes; with another builder the
     // scheduler would flip any incompatible health straight back.
     if (!this.contractEnforced) return;
+    this.lastFallbackAt.set(event.sourceId, this.now());
     try {
       const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason })
         .from(imageSources).where(eq(imageSources.id, event.sourceId)).limit(1);

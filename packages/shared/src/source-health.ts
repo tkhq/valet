@@ -1,3 +1,6 @@
+/** Spec 11.2: one guidance line per non-ok health reason, shared by the
+ * sources page, the session banner, the admin notification, and the runbook. */
+export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
 export type SourceHealthReason =
   | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
   | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
@@ -13,4 +16,33 @@ export const SOURCE_HEALTH_GUIDANCE: Record<Exclude<SourceHealthReason, "ok">, s
 };
 export function sourceHealthGuidance(reason: SourceHealthReason): string | null {
   return reason === "ok" ? null : SOURCE_HEALTH_GUIDANCE[reason];
+}
+
+/** Spec 11.3 row phrase. `relative` renders "2h ago"; callers pass their
+ * own formatter so the api and web agree on wording without sharing a
+ * date library. */
+export function sourceHealthPhrase(
+  health: SourceHealth,
+  reason: SourceHealthReason,
+  builtAt: number | null,
+  now: number,
+  relative: (ts: number, now: number) => string = defaultRelative,
+): string {
+  switch (health) {
+    case "healthy": return builtAt === null ? "Healthy" : `Healthy, built ${relative(builtAt, now)}`;
+    case "stale": return "Rebuilding";
+    case "incompatible": return "Unusable: image predates the current runtime";
+    case "failing": return `Failing: ${sourceHealthGuidance(reason) ?? reason}`;
+    case "unbaked": return "Not built yet";
+  }
+}
+
+function defaultRelative(ts: number, now: number): string {
+  const s = Math.max(0, Math.round((now - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
 }

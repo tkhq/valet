@@ -119,10 +119,8 @@ export interface RepoBinding {
   auth?: "auto" | "app" | "user";
 }
 
-export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
-export type SourceHealthReason =
-  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
-  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+import type { SourceHealth, SourceHealthReason } from "@valet/shared";
+export type { SourceHealth, SourceHealthReason };
 export interface ImageFallback { reason: "contract"; sourceId: string; bakeId: string; at: number }
 
 export interface SessionSandboxImage {
