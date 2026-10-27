@@ -11,7 +11,7 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ProviderFailureKind, ThreadPlan } from "@valet/shared";
 export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
@@ -1929,6 +1929,23 @@ export type WireEvent =
       code: string;
       message: string;
       recoverable: boolean;
+    }
+  | {
+      /**
+       * A failed model call the turn retries: progress for the working line,
+       * not an error. See the engine's `turn_retry` event.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "turn_retry";
+      threadId: string;
+      action: "retry" | "fallback";
+      provider: string;
+      reason: ProviderFailureKind;
+      attempt?: number;
+      maxAttempts?: number;
+      waitMs?: number;
+      toProvider?: string;
     }
   | {
       seq: number;

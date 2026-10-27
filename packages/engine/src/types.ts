@@ -1,7 +1,7 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -1939,6 +1939,13 @@ export type EngineEvent =
    * from here rather than from when a frame arrives. */
   | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
+  /** A failed model call that this turn retries. It is progress, not an
+   * error: a client shows it on the working line and keeps the turn open.
+   * `retry` calls `provider` again after `waitMs` (attempt `attempt` of
+   * `maxAttempts`). `fallback` continues the turn on `toProvider`. The turn
+   * fails only when the retries run out, as a failed assistant message. */
+  | { type: "turn_retry"; threadId: string; action: "retry" | "fallback"; provider: string; reason: ProviderFailureKind;
+      attempt?: number; maxAttempts?: number; waitMs?: number; toProvider?: string }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }
   | { type: "decision_gate_expired"; threadId: string; gateId: string }

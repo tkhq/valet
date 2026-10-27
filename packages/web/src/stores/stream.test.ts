@@ -1606,6 +1606,47 @@ describe("streaming tool calls", () => {
   });
 });
 
+describe("provider retries", () => {
+  beforeEach(reset);
+
+  const attemptError = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "error", threadId: THREAD,
+    code: "error", message: "overloaded_error: Overloaded", recoverable: false,
+  });
+  const retry = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "turn_retry", threadId: THREAD,
+    action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000,
+  });
+
+  it("does not flag the thread when an attempt fails and a retry follows", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 1));
+    ingest(SESSION, attemptError(2));
+    ingest(SESSION, retry(3));
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.errorByThread[THREAD]).toBeUndefined();
+    expect(slice.statusByThread[THREAD]?.status).toBe("thinking");
+    expect(slice.retryByThread[THREAD]).toMatchObject({ action: "retry", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+  });
+
+  it("clears the retry when the next attempt streams", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, retry(1));
+    ingest(SESSION, messageStart("m-2", 2));
+    expect(useStreamStore.getState().bySession[SESSION].retryByThread[THREAD]).toBeUndefined();
+  });
+
+  it("marks the thread failed when the turn settles failed after its retries", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "anthropic/claude"));
+    ingest(SESSION, retry(2));
+    ingest(SESSION, { seq: 3, ts: Date.now(), offset: offset(3), type: "submission.settled", sessionId: SESSION, threadId: THREAD, queueItemId: "q-1", outcome: "failed", error: "overloaded_error: Overloaded" });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.statusByThread[THREAD]?.status).toBe("error");
+    expect(slice.retryByThread[THREAD]).toBeUndefined();
+  });
+});
+
 describe("turn error visibility", () => {
   beforeEach(reset);
 

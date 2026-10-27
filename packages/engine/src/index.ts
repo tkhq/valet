@@ -370,7 +370,6 @@ export {
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,
-  formatTransientRetryMessage,
   parseProviderRetryHintMs,
   resolveModelId,
   type CompactionOutcome,

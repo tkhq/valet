@@ -317,6 +317,23 @@ describe("the turn fails mid-stream", () => {
     expect(h.streams.size()).toBe(0);
   });
 
+  it("keeps the reply open when a model call fails and may be retried", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m1"));
+    h.delta("Working on it.\n");
+    await advance(FLUSH_INTERVAL_MS);
+
+    // The engine sends a model call's failure before it decides to retry.
+    await h.emit({ type: "error", threadId: THREAD_ID, code: "error", error: "overloaded_error: Overloaded", recoverable: false });
+    await h.emit({ type: "turn_retry", threadId: THREAD_ID, action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+    await advance(0);
+
+    expect(h.transport.stopped).toHaveLength(0);
+    expect(h.transport.streamedText()).not.toContain("This turn failed");
+    expect(h.streams.size()).toBe(1);
+  });
+
   it("still closes the stream when the final flush itself fails", async () => {
     const h = makeHarness();
     h.bridge.noteInboundTurn(h.turn);

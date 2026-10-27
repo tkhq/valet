@@ -384,6 +384,10 @@ export class ChannelStreamBridge {
 
     if (e.type === "error") {
       if (!this.active.has(key)) return;
+      // A model call's own failure (code "error") comes before the engine
+      // decides to retry, so it must not end the reply with "This turn
+      // failed". Its message_end closes the stream.
+      if (e.code === "error") return;
       // The engine's own error text is the useful half; the corrective action
       // is ours to add.
       const note = `This turn failed: ${e.error}. Send the message again, or open the session in Valet.`;
