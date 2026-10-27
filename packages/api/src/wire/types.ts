@@ -119,7 +119,22 @@ export interface RepoBinding {
   auth?: "auto" | "app" | "user";
 }
 
+export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
+export type SourceHealthReason =
+  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
+  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+export interface ImageFallback { reason: "contract"; sourceId: string; bakeId: string; at: number }
+
+export interface SessionSandboxImage {
+  source: "repo" | "stock";
+  repoFullName: string | null;
+  builtAt: number | null;
+  fallback: ImageFallback | null;
+}
+
 export interface SessionDetail extends SessionSummary {
+  /** Which image the sandbox runs (spec 7.4). Absent on list rows. */
+  sandboxImage?: SessionSandboxImage;
   /** History remains readable; execution is disabled for this session. */
   readOnlyReason?: string;
   /** Permanent owner runtime; cannot be moved or deleted. */
@@ -2331,7 +2346,7 @@ export interface CreateTeamApiKeyResponse {
 // — every route derives `userId` from the caller's session, never a path
 // param. 30s polling from the web client; no WS plumbing this phase.
 
-export type NotificationKind = "notification" | "question" | "escalation" | "approval" | "review";
+export type NotificationKind = "notification" | "question" | "escalation" | "approval" | "review" | "platform";
 export type NotificationUrgency = "low" | "normal" | "high";
 
 export interface NotificationSummary {
@@ -5202,6 +5217,10 @@ export interface SourceSummary {
   schedule: "nightly" | "off";
   enabled: boolean;
   lastBoundAt: number | null;
+  health: SourceHealth;
+  healthReason: SourceHealthReason;
+  healthDetail: string | null;
+  healthCheckedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -5220,6 +5239,9 @@ export interface BakeSummary {
   startedAt: number | null;
   finishedAt: number | null;
   createdAt: number;
+  contractVersion: number | null;
+  contractSource: "label" | "missing" | "override" | null;
+  parentBakeId: string | null;
 }
 
 export interface ListSourcesResponse {

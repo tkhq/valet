@@ -889,6 +889,7 @@ export class SourceService {
       commitSha: bake.commitSha, imageRef: bake.imageRef, status: bake.status,
       builderBackend: bake.builderBackend, error: bake.error, logTail: bake.logTail,
       startedAt: bake.startedAt, finishedAt: bake.finishedAt, createdAt: bake.createdAt,
+      contractVersion: bake.contractVersion, contractSource: bake.contractSource, parentBakeId: bake.parentBakeId,
       sourceName: source.name, sourceKind: source.kind, repoFullName: source.repoFullName,
     });
     const snapshot = this.builder?.queueSnapshot?.();

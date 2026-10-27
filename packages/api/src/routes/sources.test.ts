@@ -9,13 +9,14 @@
 import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { MAX_SANDBOX_CPU } from "@valet/shared";
-import { bakes } from "../schema/index.js";
-import type { ListBakeQueueResponse, ListSourcesResponse } from "../wire/types.js";
+import { bakes, imageSources } from "../schema/index.js";
+import type { ListBakeQueueResponse, ListBakesResponse, ListSourcesResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -172,6 +173,17 @@ describe("GET /api/org/sources", () => {
       expect.objectContaining({ id: unbuilt.id, latestBake: null }),
     ]));
     expect(JSON.stringify(body)).not.toContain("build log");
+  });
+
+  it("exposes source health and bake contract fields on the wire", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    await api.providers.db.update(imageSources).set({ health: "failing", healthReason: "bake_failed", healthDetail: "npm ci exploded", healthCheckedAt: 1234 }).where(eq(imageSources.id, source.id));
+    await api.providers.db.insert(bakes).values({ id: "pb_contract", sourceId: source.id, identityHash: "x", imageRef: "registry/x", status: "pushed", recipe: [], createdAt: 1000, contractVersion: 3, contractSource: "label", parentBakeId: null, baseImageRef: "stock:ref" });
+    const list = (await (await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS })).json()) as ListSourcesResponse;
+    expect(list.sources.find((s) => s.id === source.id)).toMatchObject({ health: "failing", healthReason: "bake_failed", healthDetail: "npm ci exploded", healthCheckedAt: 1234 });
+    const history = (await (await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bakes`, { headers: HEADERS })).json()) as ListBakesResponse;
+    expect(history.bakes[0]).toMatchObject({ contractVersion: 3, contractSource: "label", parentBakeId: null });
   });
 
   it("lists all kinds for the caller's org", async () => {

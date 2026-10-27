@@ -39,7 +39,7 @@ import type { Providers } from "../providers/types.js";
 import { governingThreadKey, isPersonalThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
 import { notifications, pendingChannelDeliveries, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
-export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
+export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review" | "platform";
 export type AttentionUrgency = "low" | "normal" | "high";
 
 export interface AttentionEvent {

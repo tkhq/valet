@@ -32,6 +32,7 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   escalation: "Escalations",
   approval: "Approvals",
   review: "Team deletion requests",
+  platform: "Platform",
 };
 
 const KIND_DESCRIPTION: Record<NotificationKind, string> = {
@@ -40,6 +41,7 @@ const KIND_DESCRIPTION: Record<NotificationKind, string> = {
   escalation: "When something needs your attention urgently.",
   approval: "When a decision gate is waiting on you.",
   review: "When a team resource needs your review before deletion.",
+  platform: "When a sandbox image for your organization cannot be built or used. Org admins only.",
 };
 
 export function NotificationsPage() {

@@ -138,7 +138,7 @@ notificationsRouter.get("/decisions", async (c) => {
   return c.json({ items, nextCursor } satisfies ListNotificationDecisionsResponse);
 });
 
-const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];
+const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review", "platform"];
 
 function rowToSummary(row: NotificationRow): NotificationSummary {
   return {

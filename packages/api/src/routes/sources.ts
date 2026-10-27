@@ -433,6 +433,9 @@ sourcesRouter.get("/:id/bakes", async (c) => {
       startedAt: bakes.startedAt,
       finishedAt: bakes.finishedAt,
       createdAt: bakes.createdAt,
+      contractVersion: bakes.contractVersion,
+      contractSource: bakes.contractSource,
+      parentBakeId: bakes.parentBakeId,
     })
     .from(bakes)
     .where(eq(bakes.sourceId, id))

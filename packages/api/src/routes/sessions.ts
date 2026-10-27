@@ -55,6 +55,8 @@ import {
   childWatches,
   messages as messagesTable,
   sessionRepos,
+  bakes,
+  type ImageFallback,
 } from "../schema/index.js";
 import type {
   AssistantOwner,
@@ -69,6 +71,7 @@ import type {
   RepoBinding,
   SandboxJwtResponse,
   SandboxProfile,
+  SessionSandboxImage,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
@@ -121,6 +124,16 @@ function parseRepoBindings(body: CreateSessionRequest): { repos: RepoBinding[] }
     });
   }
   return { repos };
+}
+
+/** Spec 7.4. A missing bake row (pruned by retention) reads as stock. */
+async function sessionSandboxImage(db: AppDb, row: typeof agentSessions.$inferSelect, repoFullName: string | null): Promise<SessionSandboxImage> {
+  const fallback = row.imageFallback ?? null;
+  if (row.bakeId) {
+    const [bake] = await db.select({ finishedAt: bakes.finishedAt, createdAt: bakes.createdAt }).from(bakes).where(eq(bakes.id, row.bakeId)).limit(1);
+    if (bake) return { source: "repo", repoFullName, builtAt: bake.finishedAt ?? bake.createdAt, fallback: null };
+  }
+  return { source: "stock", repoFullName, builtAt: null, fallback };
 }
 
 async function getSessionRepos(db: AppDb, sessionId: string): Promise<RepoBinding[]> {
@@ -914,6 +927,7 @@ sessionsRouter.get("/:id", async (c) => {
   const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
     && !await isLegacyAssistantRuntime(db, id, row.orgId)
     ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
+  const sandboxImage = await sessionSandboxImage(db, row, repos[0]?.fullName ?? null);
   const detail: GetSessionResponse = {
     readOnlyReason,
     isWorkspaceRuntime: runtime !== undefined,
@@ -924,6 +938,7 @@ sessionsRouter.get("/:id", async (c) => {
     reasoning,
     profile: row.profile,
     docker: row.docker,
+    sandboxImage,
     ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail);
