@@ -113,6 +113,8 @@ describe("withSandboxCapacityGate", () => {
 
     await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(SandboxStartupError);
     await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(/VALET_ORG_SANDBOX_CEILING/);
+    const err = await createAs(gated, h, "org1", "s1").catch((e: unknown) => e);
+    expect((err as SandboxStartupError).kind).toBe("capacity");
     expect(inner.created).toEqual([]);
   });
 

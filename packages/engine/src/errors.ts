@@ -196,8 +196,17 @@ export class SandboxSupersededError extends Error {
 }
 
 /** Bounded classification of a terminal startup failure, for the
- * `valet.sandbox.startup_failed` counter. Free text stays in `reason`. */
-export type SandboxStartupKind = "crash_loop" | "image_pull" | "unschedulable" | "pod_failed" | "ownership" | "other";
+ * `valet.sandbox.startup_failed` counter. Free text stays in `reason`.
+ * `capacity` is the org sandbox ceiling, not an infrastructure failure, so
+ * alert expressions exclude it. */
+export type SandboxStartupKind =
+  | "crash_loop"
+  | "image_pull"
+  | "unschedulable"
+  | "pod_failed"
+  | "ownership"
+  | "capacity"
+  | "other";
 
 /**
  * Thrown by a `SandboxProvider.create` implementation when a sandbox

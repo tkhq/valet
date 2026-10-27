@@ -94,8 +94,10 @@ describe("sandbox startup failure metrics", () => {
   it("counts terminal sandbox startup failures by bounded kind", () => {
     recordSandboxStartupFailure("crash_loop");
     recordSandboxStartupFailure("ownership");
+    recordSandboxStartupFailure("capacity");
     expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 1, attributes: { kind: "crash_loop" } });
     expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 1, attributes: { kind: "ownership" } });
+    expect(metricState.points).toContainEqual({ name: "valet.sandbox.startup_failed", value: 1, attributes: { kind: "capacity" } });
     expect(metricState.descriptions.get("valet.sandbox.startup_failed")).toMatch(/terminal/i);
   });
 });
