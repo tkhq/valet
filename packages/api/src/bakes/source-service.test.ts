@@ -35,6 +35,7 @@ import {
   AnonymousImageBakesDisabledError,
 } from "./source-service.js";
 import { RegistryCapacityError } from "./registry-health.js";
+import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
 import { lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
 
 const orgId = "org1";
@@ -380,7 +381,7 @@ describe("SourceService", () => {
       githubTokenDeps: githubTokenDeps(),
       now: () => NOW,
       newId: () => `id${idSeq++}`,
-      contractReader: async () => ({ ok: true, version: 1 }),
+      contractReader: async () => ({ ok: true, version: MIN_IMAGE_CONTRACT }),
       retention: async (backend, imageRefs) => {
         retentionCalls.push({ backend, imageRefs });
         return true;
@@ -811,6 +812,7 @@ describe("SourceService", () => {
         commitSha: null,
         imageRef: "valet-prebuild/base/base:abc",
         identityHash: baseIdentity,
+        contractVersion: 3, contractSource: "label",
       });
       const srcId = await seedRepoSource(db, { parentId: baseId });
       const row = await service.startBake(srcId);
@@ -880,7 +882,7 @@ describe("SourceService", () => {
       // Seed a pushed base bake whose identity matches the current computed one.
       const [base] = await db.select().from(imageSources).where(eq(imageSources.id, baseId));
       const identity = service.identityHash(base, null);
-      await seedBake(db, baseId, { id: "b1", commitSha: null, imageRef: "reg/base:1", identityHash: identity });
+      await seedBake(db, baseId, { id: "b1", commitSha: null, imageRef: "reg/base:1", identityHash: identity, contractVersion: 3, contractSource: "label" });
       await service.runSchedulerPass();
       expect(builder.specs).toHaveLength(0);
     });
@@ -900,6 +902,61 @@ describe("SourceService", () => {
   });
 
   // ── parent-first defer + same-night cascade ───────────────────────────
+
+  describe("contract-driven rebakes", () => {
+    it("rebakes a repo whose current bake matches head and identity but is incompatible, on a fresh tag", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { id: "old", commitSha: currentSha, identityHash: identity, imageRef: "valet-prebuild/acme-widgets:head-abcdef", contractVersion: 0, contractSource: "missing" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      expect(builder.specs[0].imageRef).not.toBe("valet-prebuild/acme-widgets:head-abcdef");
+      const queued = (await db.select().from(bakes).where(eq(bakes.sourceId, src))).find((b) => b.status !== "pushed")!;
+      expect(queued.identityHash).toBe(identity);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after.health).toBe("incompatible");
+      expect(after.healthReason).toBe("contract");
+    });
+
+    it("does not rebake a compatible, up-to-date repo (identity skip still a hit)", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 3, contractSource: "label" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+    });
+
+    it("rebakes an incompatible base and defers its repo children until the base is compatible", async () => {
+      const baseId = await seedBaseSource(db, []);
+      const svc = makeService();
+      const baseIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, baseId)))[0], null);
+      await seedBake(db, baseId, { id: "base-old", identityHash: baseIdentity, imageRef: "valet-prebuild/base:x", contractVersion: 0, contractSource: "missing" });
+      const repoId = await seedRepoSource(db, { parentId: baseId });
+      await svc.runSchedulerPass();
+      // One base bake started (contract rebake), the repo deferred.
+      expect(builder.specs.map((s) => s.kind)).toEqual(["base"]);
+      expect(builder.specs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      const repo = (await db.select().from(imageSources).where(eq(imageSources.id, repoId)))[0];
+      expect(repo.health).toBe("stale");
+      expect(repo.healthReason).toBe("waiting_for_base");
+    });
+
+    it("an override-image repo bake is never rebaked for contract", async () => {
+      prebuildYaml = "image: ghcr.io/acme/custom:1\n";
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, { ...RESOLVED_NPM_RECIPE, image: "ghcr.io/acme/custom:1" });
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: null, contractSource: "override", recipe: { recipe: [], setup: [], image: "ghcr.io/acme/custom:1" } });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+    });
+  });
 
   describe("runSchedulerPass parent-first defer (derivation invariant)", () => {
     it("DEFERS the repo when its base parent has no pushed bake — only the base dispatches", async () => {
@@ -975,6 +1032,7 @@ describe("SourceService", () => {
         commitSha: null,
         imageRef: "reg/base:old",
         identityHash: oldIdentity,
+        contractVersion: 3, contractSource: "label",
       });
       await seedRepoSource(db, { id: "repo1", parentId: baseId });
       // Bake the repo FROM the old base ref and push it.

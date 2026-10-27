@@ -135,7 +135,7 @@ export function recordPrebuildTransition(dimensions: PrebuildDimensions, outcome
   getInstruments().builds.add(1, { ...boundedPrebuildAttributes(dimensions), outcome });
 }
 
-export function recordPrebuildDecision(dimensions: PrebuildDimensions, decision: "hit" | "miss" | "duplicate" | "coalesced" | "commit_changed" | "recipe_changed" | "parent_changed" | "expired" | "other"): void {
+export function recordPrebuildDecision(dimensions: PrebuildDimensions, decision: "hit" | "miss" | "duplicate" | "coalesced" | "commit_changed" | "recipe_changed" | "parent_changed" | "contract_changed" | "expired" | "other"): void {
   getInstruments().decisions.add(1, { ...boundedPrebuildAttributes(dimensions), decision });
 }
 

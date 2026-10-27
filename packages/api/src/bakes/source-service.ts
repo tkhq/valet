@@ -1092,6 +1092,10 @@ export class SourceService {
       // would FROM a stale layer while recording the fresh identity.
       const parentIdentity = this.baseIdentity(parent, await this.grandparentIdentity(parent));
       if (parentBake.identityHash !== parentIdentity) return { status: "defer" };
+      // Spec 5.3 via 6.3: a child must not FROM an incompatible base. The
+      // base scheduler rebakes it (contract_changed); children defer like
+      // they do for a stale base identity.
+      if (!compatible(parentBake)) return { status: "defer" };
       return { status: "ready", bake: parentBake };
     }
     return { status: "none" };
@@ -1186,13 +1190,14 @@ export class SourceService {
   async startBake(
     sourceId: string,
     trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other" = "manual",
+    opts: { contractRebake?: boolean } = {},
   ): Promise<BakeRow> {
     const source = await this.loadSource(sourceId);
     try {
       if (!this.builder) throw new PrebuildUnavailableError();
       await this.assertRegistryCapacity();
-      if (source.kind === "base") return await this.startBaseBake(source, trigger);
-      if (source.kind === "repo") return await this.startRepoBake(source, trigger);
+      if (source.kind === "base") return await this.startBaseBake(source, trigger, opts);
+      if (source.kind === "repo") return await this.startRepoBake(source, trigger, opts);
       throw new Error(`cannot bake source of kind '${source.kind}' (${source.id})`);
     } catch (error) {
       recordPrebuildRequest(this.dimensions(source, this.builder?.backend ?? "none"), "rejected", trigger);
@@ -1200,7 +1205,7 @@ export class SourceService {
     }
   }
 
-  private async startBaseBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): Promise<BakeRow> {
+  private async startBaseBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other", opts: { contractRebake?: boolean } = {}): Promise<BakeRow> {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const setup = readSetupCommands(source);
@@ -1209,7 +1214,11 @@ export class SourceService {
     const baseImage = await this.resolveBaseImage(source, undefined);
     const parentBakeId = parentBase.status === "ready" ? parentBase.bake.id : null;
     const identity = this.baseIdentity(source, parentIdent);
-    const imageRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
+    // Plan refinement 1: a contract rebake keeps the identity (same inputs)
+    // but must land on a fresh tag, or nodes with IfNotPresent keep serving
+    // the cached old layer.
+    const taggedRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = opts.contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
 
     const now = this.now();
     const row: BakeRow = {
@@ -1402,7 +1411,7 @@ export class SourceService {
     return token;
   }
 
-  private async startRepoBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): Promise<BakeRow> {
+  private async startRepoBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other", opts: { contractRebake?: boolean } = {}): Promise<BakeRow> {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const repoFullName = source.repoFullName ?? "";
@@ -1439,7 +1448,7 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const imageRef = imageRefFor(
+    const taggedRef = imageRefFor(
       builder.backend,
       source.id,
       owner,
@@ -1448,6 +1457,7 @@ export class SourceService {
       identity,
       this.env.VALET_PREBUILD_REGISTRY,
     );
+    const imageRef = opts.contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
     const now = this.now();
     const row: BakeRow = {
       id: newBakeId(this.newId),
@@ -1867,7 +1877,7 @@ export class SourceService {
         const identity = this.identityHash(child, parentIdent, snapshot);
 
         const current = await this.currentBake(child.id);
-        if (current && current.commitSha === head.sha && current.identityHash === identity) continue;
+        if (current && current.commitSha === head.sha && current.identityHash === identity && compatible(current)) continue;
         // Skip when a bake is already in flight — the scheduler tick may race
         // this cascade for the same child.
         if (await this.hasActiveBake(child.id)) continue;
@@ -1938,7 +1948,7 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.baseIdentity(source, parentIdent);
     const current = await this.currentBake(source.id);
-    if (current && current.identityHash === identity) {
+    if (current && current.identityHash === identity && compatible(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
       await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
@@ -1952,9 +1962,10 @@ export class SourceService {
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    recordPrebuildDecision(this.dimensions(source), current ? "parent_changed" : "miss");
+    const contractRebake = Boolean(current && current.identityHash === identity && !compatible(current));
+    recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : current ? "parent_changed" : "miss");
     await this.setSourceHealth(source.id, ...this.pendingHealth(current));
-    await this.startBake(source.id, "scheduler");
+    await this.startBake(source.id, "scheduler", { contractRebake });
   }
 
   private async maybeScheduleRepo(source: ImageSourceRow): Promise<void> {
@@ -1997,7 +2008,7 @@ export class SourceService {
     const identity = this.identityHash(source, parentIdent, snapshot);
 
     const current = await this.currentBake(source.id);
-    if (current && current.commitSha === head.sha && current.identityHash === identity) {
+    if (current && current.commitSha === head.sha && current.identityHash === identity && compatible(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
       await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
@@ -2011,13 +2022,14 @@ export class SourceService {
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    recordPrebuildDecision(this.dimensions(source), !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
+    const contractRebake = Boolean(current && current.commitSha === head.sha && current.identityHash === identity && !compatible(current));
+    recordPrebuildDecision(this.dimensions(source), contractRebake ? "contract_changed" : !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
     await this.setSourceHealth(source.id, ...this.pendingHealth(current));
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
     try {
-      await this.startBake(source.id, "scheduler");
+      await this.startBake(source.id, "scheduler", { contractRebake });
     } catch (err) {
       // A newly declared/changed `baseSetup` surfaces here on the first pass:
       // startRepoBake linked the synthetic base and kicked ITS bake instead.
