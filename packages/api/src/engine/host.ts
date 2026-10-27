@@ -1293,7 +1293,7 @@ export class EngineHost {
     // services START). The specProvider closure may resolve a bake image
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    const image = this.stockImage();
     // Authorized-scope egress allowlist env (M-P4b): a live persona child
     // carries VALET_SECURITY_AUTHORIZED_SCOPE so its live tools bound egress to
     // the human-declared scope. Merged over the mint env; empty otherwise, so a
@@ -1784,10 +1784,7 @@ export class EngineHost {
     // agree with the create-opts image in `buildSession`/`buildChild` or the
     // `spec.image !== stockImage` comparison below misreports the stock
     // case as an override.
-    const stockImage =
-      this.opts.defaultImages?.full ??
-      this.opts.defaultImage ??
-      "";
+    const stockImage = this.stockImage() ?? "";
 
     return async () => {
       const snap = await resolveSnapshot({
@@ -3188,7 +3185,7 @@ export class EngineHost {
         // session and a child both use. This path pinned `defaultImage`,
         // which is the wrong image for a `full` assistant: `/start-full.sh`
         // is baked into the full lineage only.
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -3481,6 +3478,15 @@ export class EngineHost {
     }
     this.draining.clear();
     this.clearSweepInterval();
+  }
+
+  /** The one stock image every session shape boots when no bake applies.
+   * `buildSpecProvider` compares the resolved spec against this same value
+   * (`spec.image !== stockImage` means an override), so every create site
+   * must use it; a site that pins `defaultImage` alone boots the headless
+   * image under a kubernetes deployment that only ships the full lineage. */
+  private stockImage(): string | undefined {
+    return this.opts.defaultImages?.full ?? this.opts.defaultImage;
   }
 
   /** Shared by `evictAll()`/`destroyAll()` — both are terminal, whole-host
@@ -4140,7 +4146,7 @@ export class EngineHost {
       provider: this.opts.sandboxProvider,
       meta,
       apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-      stockImage: this.opts.defaultImages?.full ?? this.opts.defaultImage ?? "",
+      stockImage: this.stockImage() ?? "",
       preflight: this.opts.prebuildPreflight,
     });
     // Use startup's repo -> base -> stock fallback, including its pull preflight.
@@ -4406,7 +4412,7 @@ export class EngineHost {
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         // Authorized-scope egress allowlist env (M-P4b): a live persona child
         // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
         // so the env stays byte-identical.
@@ -4623,7 +4629,7 @@ export class EngineHost {
       sandbox: {
         browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace,
-        image: this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile: "headless" as const,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
