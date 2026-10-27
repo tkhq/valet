@@ -26,6 +26,7 @@ import type {
   CreateThreadResponse,
   EditPreviewResponse,
   ForkThreadResponse,
+  MoveThreadRequest,
   ReturnToBranchResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
@@ -870,12 +871,34 @@ export function useCancelQueuedItem() {
  * the thread list; the caller opens it. */
 export function useForkThread(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string }>({
-    mutationFn: ({ threadId, entryId }) => api.forkThread(threadId, { entryId }),
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string; destination?: "here" | "private" }>({
+    mutationFn: ({ threadId, entryId, destination }) => api.forkThread(threadId, { entryId, ...(destination ? { destination } : {}) }),
     onSuccess: (result) => {
       void qc.invalidateQueries(threadListFilters(sessionId));
       if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
     },
+  });
+}
+
+/** Moves a thread into another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * The source is archived; the caller opens the copy. */
+export function useMoveThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string } & MoveThreadRequest>({
+    mutationFn: ({ threadId, ...body }) => api.moveThread(threadId, body),
+    // The copy joins another workspace's list, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Which workspace holds a thread, for a link to a thread outside the open one. */
+export function useThreadWorkspace(threadId: string | undefined) {
+  return useQuery({
+    queryKey: ["thread-address", threadId],
+    queryFn: () => api.getThreadAddress(threadId!),
+    enabled: !!threadId,
+    staleTime: 60_000,
+    select: (address) => address.workspace,
   });
 }
 

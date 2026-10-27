@@ -234,11 +234,11 @@ export function SessionView({
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
   const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
 
-  async function branch(message: StreamMessage) {
+  async function branch(message: StreamMessage, destination?: "private") {
     if (!effectiveThreadId || !onOpenThread || forkThread.isPending) return;
     setBranchError(undefined);
     try {
-      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id });
+      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id, ...(destination ? { destination } : {}) });
       if (result.draft) useComposerDraftStore.getState().setText(draftKey(result.thread.sessionId, result.thread.id), result.draft);
       onOpenThread(result.thread.id);
     } catch (err) {
@@ -440,6 +440,7 @@ export function SessionView({
               {...edit.list}
               onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
               onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+              onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
               onOpenThread={onOpenThread}
               newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
               emptyState={emptyState}

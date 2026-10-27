@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { useCreateThread, usePrefetchSession, usePrefetchTranscript, useThreads } from "~/api/queries";
+import { useCreateThread, usePrefetchSession, usePrefetchTranscript, useThreads, useThreadWorkspace } from "~/api/queries";
 import { useTeams } from "~/api/settings";
 import { Button } from "~/components/primitives";
 import { ThreadShell } from "~/components/session/message-list";
@@ -54,6 +54,12 @@ function ChatPage() {
   const threads = useThreads(runtimeId ?? "", undefined, thread);
   const list = threads.data?.threads ?? [];
   const active = list.find(t => t.id === (thread ?? threads.data?.defaultThreadId ?? defaultThreadId(list)));
+  // A thread from another workspace (a private branch, a moved thread, a
+  // branch note's source) opens in its own workspace.
+  const elsewhere = useThreadWorkspace(thread && threads.data && !active ? thread : undefined).data;
+  useEffect(() => {
+    if (elsewhere && elsewhere !== workspaceKey) void navigate({ search: (prev) => ({ ...prev, workspace: elsewhere }), replace: true });
+  }, [elsewhere, workspaceKey, navigate]);
   const sessionId = active?.sessionId ?? runtimeId;
   const activeKey = active?.key;
   usePageTitle(active?.title || "Chat");

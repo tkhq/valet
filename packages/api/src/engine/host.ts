@@ -386,6 +386,8 @@ export interface EngineHostOpts {
    * A getter, because the tools need providers built after this host.
    */
   homeTools?: () => ToolDef[];
+  /** Tools for messaging the threads a branch links to this one (`home/thread-link-tools.ts`). */
+  threadLinkTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -3222,7 +3224,7 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...(this.opts.threadLinkTools?.() ?? []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this

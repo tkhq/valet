@@ -62,6 +62,7 @@ import type {
   CreateThreadRequest,
   EditPreviewResponse,
   ForkThreadRequest,
+  MoveThreadRequest,
   ForkThreadResponse,
   ReturnToBranchRequest,
   ReturnToBranchResponse,
@@ -1010,6 +1011,8 @@ export const api = {
     request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
   forkThread: (threadId: string, body: ForkThreadRequest) =>
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  moveThread: (threadId: string, body: MoveThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/move`, body),
   returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
     request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>

@@ -1,4 +1,4 @@
-import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Pencil, Reply } from "lucide-react";
+import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Lock, Pencil, Reply } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import type {
   MessagePart,
@@ -18,7 +18,7 @@ import { cn } from "~/lib/cn";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
-import { Button, Tooltip } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Tooltip } from "~/components/primitives";
 
 /** Message actions show on hover, and always at phone width, where there is no hover. */
 const ROW_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100";
@@ -60,6 +60,7 @@ export const MessageItem = memo(function MessageItem({
   onReply,
   onEdit,
   onBranch,
+  onBranchPrivately,
   dimmed = false,
   ratings = true,
   readOnly = false,
@@ -82,6 +83,8 @@ export const MessageItem = memo(function MessageItem({
   onEdit?: (message: StreamMessage) => void;
   /** Copies the conversation up to this message into a new thread. */
   onBranch?: (message: StreamMessage) => void;
+  /** Copies it into the viewer's private threads instead. Set in a team thread only. */
+  onBranchPrivately?: (message: StreamMessage) => void;
   /** An edit in progress replaces this row. */
   dimmed?: boolean;
   /** The same assistant turn as the row above: no repeated author, time,
@@ -139,12 +142,27 @@ export const MessageItem = memo(function MessageItem({
         className="inline-flex items-center justify-center opacity-0 group-hover:opacity-100 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11"
       />
     )}
-    {onBranch && (
+    {onBranch && !onBranchPrivately && (
       <Tooltip content="Branch into a new thread">
         <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION} onClick={() => onBranch(message)}>
           <GitBranch className="h-3.5 w-3.5" aria-hidden />
         </Button>
       </Tooltip>
+    )}
+    {onBranch && onBranchPrivately && (
+      <DropdownMenu>
+        <Tooltip content="Branch into a new thread">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION}>
+              <GitBranch className="h-3.5 w-3.5" aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+        </Tooltip>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => onBranch(message)}><GitBranch aria-hidden />Branch for the team</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onBranchPrivately(message)}><Lock aria-hidden />Branch privately to me</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     )}
   </>;
   return (

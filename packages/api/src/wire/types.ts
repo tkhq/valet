@@ -1042,6 +1042,9 @@ export interface ThreadAddress {
   /** Present when the caller opens the thread through its share, not as its
    * owner or a member of its workspace. */
   guest?: { mode: ThreadShareMode; ownerName: string };
+  /** The thread's workspace, "user" or a team id, for `/chat?workspace=`.
+   * Absent for a guest and for a thread outside any workspace. */
+  workspace?: string;
 }
 
 /** One line of a thread recap. `forReader` marks the line that waits on the reader. */
@@ -1651,12 +1654,25 @@ export interface ForkThreadRequest {
    * the conversation up to just before it, and `draft` returns its text.
    */
   entryId: string;
+  /** "here" (the default) keeps the source's workspace and audience.
+   * "private" copies a team thread into the caller's private threads. */
+  destination?: "here" | "private";
 }
 
 export interface ForkThreadResponse {
   thread: ThreadSummary;
+  /** The new thread's workspace: "user" or a team id, for `/chat?workspace=`. */
+  workspace: string;
   /** The branched user message's text, for the new thread's composer. */
   draft?: string;
+}
+
+/** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
+export interface MoveThreadRequest {
+  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  to: "private" | { teamId: string };
+  /** Required to move into a team, which then reads the thread. */
+  confirm?: true;
 }
 
 /** `POST /api/threads/:threadId/branch/return`. */

@@ -5,6 +5,7 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
 import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ToolOutputResponse } from "../wire/types.js";
+import { threadOwner } from "../services/thread-links.js";
 import { readStoredThreadPlan } from "../services/thread-plan.js";
 import { activeViewers } from "../services/active-viewers.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
@@ -12,7 +13,7 @@ import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-acc
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, branchPreview, cancelQueuedItem, createThread, editPreview, forkThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
+  abortThread, branchPreview, cancelQueuedItem, createThread, editPreview, forkThread, moveThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
   listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
@@ -146,6 +147,8 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
     ...(meta?.approvalBypassBy ? { approvalBypass: true as const } : {}),
     ...(guest ? { guest: { mode: guest.mode, ownerName: await ownerName(c, sessionId) } } : {}),
   };
+  const owner = guest ? null : await threadOwner(c.var.providers.db, sessionId);
+  if (owner) body.workspace = owner.ownerType === "user" ? "user" : owner.ownerId;
   return c.json(body);
 }, "metadata", "read"));
 threadsRouter.patch("/:threadId", c => inThread(c, patchThread));
@@ -183,6 +186,7 @@ threadsRouter.post("/:threadId/branch/return", c => inThread(c, returnToBranch, 
 threadsRouter.get("/:threadId/edit-preview", c => inThread(c, editPreview, "content", "reply"));
 threadsRouter.get("/:threadId/branch-preview", c => inThread(c, branchPreview, "content", "read"));
 threadsRouter.post("/:threadId/fork", c => inThread(c, forkThread, "content"));
+threadsRouter.post("/:threadId/move", c => inThread(c, moveThread, "content"));
 threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));
