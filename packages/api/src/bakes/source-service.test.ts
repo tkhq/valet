@@ -373,6 +373,7 @@ describe("SourceService", () => {
       githubTokenDeps: githubTokenDeps(),
       now: () => NOW,
       newId: () => `id${idSeq++}`,
+      contractReader: async () => ({ ok: true, version: 1 }),
       retention: async (backend, imageRefs) => {
         retentionCalls.push({ backend, imageRefs });
         return true;
@@ -1499,6 +1500,80 @@ describe("SourceService", () => {
       expect(byId.get("done")?.status).toBe("pushed");
       expect(log).toHaveBeenCalledWith(expect.stringContaining('"event":"bake_failed"'));
       log.mockRestore();
+    });
+  });
+
+  describe("contract stamping and lineage", () => {
+    it("records parent_bake_id and base_image_ref on a repo bake chained on a base bake", async () => {
+      const baseId = await seedBaseSource(db, []);
+      const svc0 = makeService();
+      const baseIdentity = svc0.identityHash({ id: baseId, kind: "base", setupCommands: [] } as never, null);
+      await seedBake(db, baseId, { id: "base-1", identityHash: baseIdentity, imageRef: "valet-prebuild/base:abc", contractVersion: 3, contractSource: "label" });
+      const repoId = await seedRepoSource(db, { parentId: baseId });
+      const svc = makeService();
+      const row = await svc.startBake(repoId, "manual");
+      expect(row.parentBakeId).toBe("base-1");
+      expect(row.baseImageRef).toBe("valet-prebuild/base:abc");
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.parentBakeId).toBe("base-1");
+      expect(stored.baseImageRef).toBe("valet-prebuild/base:abc");
+    });
+
+    it("records base_image_ref = stock and a null parent on an unparented base bake", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const svc = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:pin" } });
+      const row = await svc.startBake(baseId, "manual");
+      expect(row.parentBakeId).toBeNull();
+      expect(row.baseImageRef).toBe("ghcr.io/tkhq/valet-sandbox:pin");
+    });
+
+    it("stamps contract_version and contract_source=label when the pushed image carries the label", async () => {
+      const reads: string[] = [];
+      const svc = makeService({ contractReader: async (_backend, ref) => { reads.push(ref); return { ok: true, version: 3 }; } });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.status).toBe("pushed");
+      expect(stored.contractVersion).toBe(3);
+      expect(stored.contractSource).toBe("label");
+      expect(reads).toEqual([row.imageRef]);
+    });
+
+    it("stamps contract_source=missing with a null version when the image has no label", async () => {
+      const svc = makeService({ contractReader: async () => ({ ok: true, version: null }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.contractVersion).toBeNull();
+      expect(stored.contractSource).toBe("missing");
+    });
+
+    it("stamps contract_source=override for a bake whose recipe pins its own image, keeping the read value", async () => {
+      prebuildYaml = "image: ghcr.io/acme/custom:1\n";
+      const svc = makeService({ contractReader: async () => ({ ok: true, version: null }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.contractSource).toBe("override");
+      expect(stored.contractVersion).toBeNull();
+    });
+
+    it("leaves both contract columns null when the label read fails, and the push transition still lands", async () => {
+      const svc = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.status).toBe("pushed");
+      expect(stored.contractVersion).toBeNull();
+      expect(stored.contractSource).toBeNull();
     });
   });
 

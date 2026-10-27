@@ -67,6 +67,7 @@ import { pushRefFor } from "../prebuilds/k8s-builder.js";
 import { headRegistryManifest, parseRegistryImageRef } from "../prebuilds/registry.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { measureBakeSize } from "../prebuilds/bake-size.js";
+import { readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
@@ -752,6 +753,10 @@ export interface SourceServiceDeps {
   registryPushHost?: string;
   env?: NodeJS.ProcessEnv;
   registryFetch?: typeof fetch;
+  /** Reads the image contract label after a push (spec 5.2). Defaults to
+   * `readImageContractLabel` against this service's registry settings;
+   * tests inject a fake. */
+  contractReader?: (backend: string, imageRef: string) => Promise<ContractRead>;
 }
 
 function newBakeId(newId: () => string): string {
@@ -790,6 +795,7 @@ export class SourceService {
     createdAt: number;
   }> = [];
   private readonly registryFetch: typeof fetch;
+  private readonly contractReader: (backend: string, imageRef: string) => Promise<ContractRead>;
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthReporting = false;
   private pollTimer?: ReturnType<typeof setInterval>;
@@ -807,6 +813,12 @@ export class SourceService {
     this.env = deps.env ?? process.env;
     this.registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
     this.registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
+    this.contractReader = deps.contractReader ?? ((backend, imageRef) => readImageContractLabel(backend, imageRef, {
+      fetchImpl: this.registryFetch,
+      spawnFn: spawn,
+      registryInsecure: this.registryInsecure,
+      registryPushHost: this.registryPushHost,
+    }));
     this.retention = deps.retention ?? defaultRetention(undefined, undefined, this.registryInsecure, this.registryPushHost);
     // Guard: Number("") === 0 and Number(undefined) === NaN; an empty env or a
     // non-positive value must NOT collapse the budget to 0 (which would evict
@@ -1143,8 +1155,10 @@ export class SourceService {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const setup = readSetupCommands(source);
-    const parentIdent = await this.parentIdentity(source);
+    const parentBase = await this.resolveParentBase(source);
+    const parentIdent = parentBase.status === "external" ? parentBase.ref : parentBase.status === "ready" ? parentBase.bake.identityHash : null;
     const baseImage = await this.resolveBaseImage(source, undefined);
+    const parentBakeId = parentBase.status === "ready" ? parentBase.bake.id : null;
     const identity = this.baseIdentity(source, parentIdent);
     const imageRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
 
@@ -1165,8 +1179,8 @@ export class SourceService {
       sizeBytes: null,
       contractVersion: null,
       contractSource: null,
-      parentBakeId: null,
-      baseImageRef: null,
+      parentBakeId,
+      baseImageRef: baseImage,
       createdAt: now,
     };
     await this.db.insert(bakes).values(row);
@@ -1366,6 +1380,8 @@ export class SourceService {
       throw new RepoBaseLayerBakingError(parent?.name ?? parentId ?? "unknown");
     }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
+    const parentBase = await this.resolveParentBase(source);
+    const parentBakeId = parentBase.status === "ready" ? parentBase.bake.id : null;
 
     const snapshot: RecipeSnapshot = {
       recipe: resolved.recipe, setup: resolved.setup, image: resolved.image,
@@ -1400,8 +1416,8 @@ export class SourceService {
       sizeBytes: null,
       contractVersion: null,
       contractSource: null,
-      parentBakeId: null,
-      baseImageRef: null,
+      parentBakeId,
+      baseImageRef: baseImage,
       createdAt: now,
     };
     await this.assertRepoBakeAllowed(source.orgId, gitToken.token);
@@ -1602,6 +1618,7 @@ export class SourceService {
         } catch {
           // best-effort — size measurement never blocks the push transition
         }
+        await this.stampContract(row, source);
         recordPrebuildTransition(dimensions, "succeeded");
         recordPrebuildCompletion(dimensions, observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, measuredSize);
         this.bakeSpans.get(row.id)?.end();
@@ -1652,6 +1669,27 @@ export class SourceService {
     } catch (err) {
       console.warn(`bake retention (source ${sourceId}):`, err);
     }
+  }
+
+  /**
+   * Spec 5.2: after a push, read the contract label and store it on the
+   * row. Override bakes (recipe.image set) are `override` whatever the read
+   * says (D7). A failed read leaves both columns null so the next pass can
+   * retry; the caller decides what that means for source health.
+   */
+  private async stampContract(row: BakeRow, source: ImageSourceRow): Promise<ContractRead> {
+    const override = typeof (row.recipe as { image?: unknown } | null)?.image === "string";
+    const read = await this.contractReader(row.builderBackend ?? this.builder?.backend ?? "none", row.imageRef);
+    if (!read.ok) {
+      console.warn(`prebuild poll: contract label read failed for ${row.imageRef} (${source.name}): ${read.error}`);
+      if (!override) return read;
+    }
+    const version = read.ok ? read.version : null;
+    await this.db
+      .update(bakes)
+      .set({ contractVersion: version, contractSource: override ? "override" : version === null ? "missing" : "label" })
+      .where(eq(bakes.id, row.id));
+    return read;
   }
 
   /** Keeps the newest 2 `pushed` bakes and all live-session bakes; deletes the images (never
