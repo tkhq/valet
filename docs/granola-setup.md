@@ -45,7 +45,7 @@ You can filter a subscription on `note_id`.
    ```
 
 7. Create a workflow trigger or an event subscription for one of the event keys above.
-8. In Granola, send a test event. Check that the event appears in the Valet event log.
+8. Keep the Granola confirmation dialog open from step 5. After you save the secret, send the test event from that dialog. Check that the event appears in the Valet event log.
 
 Valet saves the secret only as a direct `api_key` at `org` scope, and the value must start with `whsec_`. Valet refuses a 1Password reference, a `bot_token`, or any other form with a 400 answer, because it must read the secret on every unsigned request.
 
@@ -57,14 +57,14 @@ The same loss happens when a second, unsupported Granola webhook sends to the sa
 
 A Granola webhook is live as soon as you create it. Granola has no later enable step, and it shows the signing secret only once. Copy the secret carefully before you close the dialog.
 
-To avoid loss, check the secret before real notes reach the webhook:
+To avoid loss, check the secret before real notes reach the webhook. Granola documents the test event only in the confirmation dialog that appears when you create the webhook. The webhook is live while you use it.
 
-1. To keep real notes out during setup, create the webhook for an unused folder, or disable the endpoint in Granola until you finish the checks.
-2. Copy the secret from the Granola dialog without extra spaces.
-3. Save it in Valet.
-4. Send the test event from Granola. Check that it appears in the Valet event log.
-5. If the drop log shows `bad_signature`, the saved secret is wrong. If you can no longer copy the right secret, delete the webhook in Granola and create a new one. Save the new secret, then send another test event.
-6. When the test event works, widen the folders or enable the endpoint in Granola.
+1. Create the webhook for an unused folder, so that no real notes reach it during setup. Do not pause the endpoint for this. Granola does not replay deliveries that a paused endpoint misses, and the guide does not cover testing a paused endpoint.
+2. Keep the confirmation dialog open. Copy the secret without extra spaces.
+3. Save the secret in Valet.
+4. In the same dialog, send the test event. Check that it appears in the Valet event log.
+5. If the drop log shows `bad_signature`, the saved secret is wrong. If you can no longer copy the right secret, delete the webhook in Granola and create a new one for the unused folder. Save the new secret, then send the test event from the new dialog.
+6. When the test event works, change the webhook in Granola to the folders that you need.
 
 ## Limitation: one webhook for each organization
 
@@ -98,7 +98,7 @@ Granola retries on 408, 429, 5xx, and timeouts. The 503 answer makes Granola ret
 ## Troubleshooting
 
 - **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Without a saved secret, Valet answers 503 and Granola retries.
-- **`bad_signature` in the drop log.** The saved secret does not match the Granola webhook, or a second Granola webhook sends to this URL. Valet answers 403. Granola does not retry or replay 403 deliveries, so those events are lost. Save the right secret. If the secret is lost, create a new Granola webhook and save its secret. Delete extra Granola webhooks for this URL. Then send a test event.
+- **`bad_signature` in the drop log.** The saved secret does not match the Granola webhook, or a second Granola webhook sends to this URL. Valet answers 403. Granola does not retry or replay 403 deliveries, so those events are lost. Save the right secret. If the secret is lost, create a new Granola webhook and save its secret. Delete extra Granola webhooks for this URL. Then send the test event from the confirmation dialog of the new webhook.
 - **`secret_unavailable` in the drop log.** Valet has no readable secret. Save the secret with the command above. If you lost it, create a new Granola webhook and save its new secret.
 - **`stale_delivery` in the drop log.** Granola sent a validly signed delivery with an old or future timestamp, and Valet asked Granola to retry. If this repeats, check the clock on the Valet server.
 - **A subscription never fires.** Valet does not check that the secret exists when you create the subscription. Save the secret first.
