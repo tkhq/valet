@@ -192,11 +192,16 @@ ordinary action catalog. The `using-valet` skill supplies common product
 instructions and canonical Settings links. Advanced capability questions
 still require evidence from current product code.
 
-The host registers four actions under `settings`:
+The host registers five actions under `settings`:
 
-- `get_settings` reads account, named team, or organization settings.
+- `get_settings` reads account, notification, team, or organization
+  settings. Account is the default scope. A team read without a team id
+  reads the current team workspace.
 - `update_account` changes the authenticated person's name, timezone,
   default model, or default reasoning.
+- `update_notifications` changes the authenticated person's web delivery,
+  team direct-message copies, or direct-message delay for one notification
+  kind. It shares validation and storage with the Notifications page.
 - `update_team` changes a named team's default model or default reasoning.
 - `update_organization` changes the current organization's name or default
   model tier. It cannot change tier mappings.
