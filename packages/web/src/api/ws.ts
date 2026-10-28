@@ -24,7 +24,7 @@ const INITIAL_RETRY_MS = 500;
 
 function isSettingsWrite(toolName: string, args: unknown): boolean {
   const actionId = typeof args === "object" && args !== null && "tool_id" in args ? args.tool_id : undefined;
-  return ["settings.update_account", "settings.update_team", "settings.update_organization"].some(id =>
+  return ["settings.update_account", "settings.update_notifications", "settings.update_team", "settings.update_organization"].some(id =>
     toolName === id.replace(".", "__") || (toolName === "call_tool" && id === actionId));
 }
 
@@ -287,6 +287,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         }
         if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
           void qc.invalidateQueries({ queryKey: ["settings"] });
+          void qc.invalidateQueries({ queryKey: qk.notificationPreferences() });
         }
         // Only `update_plan` changes a thread's plan.
         if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {

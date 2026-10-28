@@ -100,6 +100,17 @@ describe("useSessionWebSocket", () => {
     },
   );
 
+  it("refreshes notification preferences after a successful notification settings change", () => {
+    const { queryClient } = renderSocketHook("s1");
+    const key = ["notifications", "preferences"];
+    queryClient.setQueryData(key, { preferences: [] });
+    const socket = FakeWebSocket.instances[0];
+    const frame = (value: object) => act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, threadId: "t", ...value }) }));
+    frame({ type: "tool_start", toolName: "call_tool", callId: "saved", args: { tool_id: "settings.update_notifications" } });
+    frame({ type: "tool_end", toolName: "call_tool", callId: "saved", result: "Saved", isError: false });
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
   it.each([
     { toolName: "call_tool", toolId: "settings.update_account", isError: false, refresh: true },
     { toolName: "settings__update_account", toolId: undefined, isError: false, refresh: true },
