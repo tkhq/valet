@@ -74,6 +74,9 @@ const columnClass = "mx-auto w-full max-w-5xl px-4 sm:px-6";
 const frameClass = "flex min-h-0 min-w-0 flex-col rounded-lg border border-line bg-paper";
 
 /** `wide` drops the column for a real page that brings its own. */
+/** One deadline for the gate frames, so a re-render does not restart their countdowns. */
+const GATE_DEADLINE = Date.now() + 8 * 60_000;
+
 function Section({ id, note, wide = false, children }: { id: SectionId; note: string; wide?: boolean; children: ReactNode }) {
   const title = UI_STRESS_SECTIONS.find((section) => section.id === id)?.title;
   return (
@@ -215,7 +218,7 @@ export default function UiStressGallery() {
                     <MessageList messages={stressThreadMessages} threadId={THREAD_ID} viewerId={stressMe.id} ratings={false} />
                   </div>
                   <PinnedPlan threadId={THREAD_ID} />
-                  <DecisionGateCard sessionId={gate.sessionId} gate={{ ...gate, expiresAt: Date.now() + 8 * 60_000 }} collapsible />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={{ ...gate, expiresAt: GATE_DEADLINE }} collapsible />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}
@@ -224,7 +227,7 @@ export default function UiStressGallery() {
               </Frame>
               {stressThreadGates.slice(2).map((gate) => (
                 <Frame key={gate.id} label={`Gate card: ${gate.type}${gate.approver ? " (shared account)" : ""}`}>
-                  <DecisionGateCard sessionId={gate.sessionId} gate={gate.type === "credential_request" ? { ...gate, expiresAt: Date.now() + 8 * 60_000 } : gate} collapsible={gate.type === "credential_request"} />
+                  <DecisionGateCard sessionId={gate.sessionId} gate={gate.type === "credential_request" ? { ...gate, expiresAt: GATE_DEADLINE } : gate} collapsible={gate.type === "credential_request"} />
                   <div className="h-4 shrink-0" />
                 </Frame>
               ))}

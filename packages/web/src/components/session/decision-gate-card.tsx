@@ -98,6 +98,11 @@ function DecisionGateResponse({
   const picker = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(() => gate.expiresAt !== undefined && gate.expiresAt <= Date.now());
+  // A refreshed gate can carry a new deadline under the same id. While the card
+  // is expanded no countdown reports it, so sync on the prop.
+  useEffect(() => {
+    setExpired(gate.expiresAt !== undefined && gate.expiresAt <= Date.now());
+  }, [gate.expiresAt]);
   // "Not now" hides a docked approval in this view only. The gate stays
   // pending, and a different gate shows again.
   const canHide = placement === "thread" && gate.type === "approval";

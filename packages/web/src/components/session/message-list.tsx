@@ -177,7 +177,9 @@ export function MessageList({
         el.scrollTop = el.scrollHeight;
         scrollHeader.syncPosition();
       }
-      setScrolledAway(el.scrollHeight - el.scrollTop - el.clientHeight >= 80);
+      // Content grows on every streamed chunk; keep the state when the side did not flip.
+      const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 80;
+      setScrolledAway((prev) => (prev === away ? prev : away));
     });
     observer.observe(el);
     if (contentRef.current) observer.observe(contentRef.current);
