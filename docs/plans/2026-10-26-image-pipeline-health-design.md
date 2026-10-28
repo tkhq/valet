@@ -444,11 +444,13 @@ when the session's recorded `bake_id` resolves to a bake, and otherwise
    `lastState`. On expiry with the ownership detail it throws a
    `SandboxStartupError` of kind `ownership` whose message says the
    controller is waiting for the previous sandbox's pod and volume to be
-   removed and that this retries automatically. Any other expiry throws a
-   plain `Error` that carries the condition text. `create()`'s failed-create
-   cleanup never deletes the CR for kind `ownership`, so no second cleanup
-   race occurs, the backoff in item 1 spaces the retries, and the next create
-   adopts the CR.
+   removed and asks the caller to retry shortly; the attachment is
+   caller-driven and schedules no retry of its own (item 1), so the next
+   `ensureReady` after the window re-creates and adopts the kept CR. Any
+   other expiry throws a plain `Error` that carries the condition text.
+   `create()`'s failed-create cleanup never deletes the CR for kind
+   `ownership`, so no second cleanup race occurs, the backoff in item 1 spaces
+   the retries, and the next create adopts the CR.
 5. **Crash-loop detail.** On `CrashLoopBackOff` the provider reads the sandbox
    container's `lastState.terminated` reason and message and the last line
    of its previous log (best effort, 2 second timeout) and appends them:
@@ -827,7 +829,7 @@ Changes made during implementation, so the text above matches what was built.
 - 7.1: `handleImageFallback` is idempotent per source with an in-flight map, re-reads instead of rebaking an unread label, and is a no-op on docker; the fallback write and counter are once per session and bake.
 - 7.2: the prompt paragraph lasts for the session build, not while `image_fallback` is set; interactive sessions also get a `noteSessionWarning` entry.
 - 8.2, 8.3: the waits use `pvcApi.readPvc`, run only after a successful destroy or when no CR exists; pod lookup matches by owner UID.
-- 8.4: the ownership timeout is a `SandboxStartupError` of kind `ownership` that keeps the CR, not a plain `Error`.
+- 8.4: the ownership timeout is a `SandboxStartupError` of kind `ownership` that keeps the CR, not a plain `Error`; its message asks the caller to retry shortly, since the attachment schedules no retry of its own (adversarial review on #1071, finding 1).
 - 8.7, 9: the startup counter attribute is `kind`, not `reason`, and the kinds include `capacity`.
 - 9: both counters are zero-initialized at boot; the seed pass is recorded only when a builder exists, so builder-less deployments have no age series; vanished gauge series observe 0.
 - 10: rules in `files/image-pipeline/rules.yaml` with promtool tests, `make validate-alerts`, and a CI job; promtool already existed; deployed by `make apply-platform`; startup alert excludes `capacity`; `ValetImageSourceUnusable` may page during long cascades (silence); dashboard row moved to PR 4.
