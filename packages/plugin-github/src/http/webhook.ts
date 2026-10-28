@@ -6,6 +6,7 @@
  * effects. The host binds those effects only after verification.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { isAssetsPush } from "../triggers.js";
 import type { PluginHttpRequest, TriggerDef } from "@valet/engine";
 import type {
   GithubDeliveryEffects,
@@ -127,6 +128,8 @@ export async function receiveWebhook(
   } catch {
     return json({ error: "invalid JSON" }, 400);
   }
+
+  if (request.headers["x-github-event"] === "push" && isAssetsPush(payload)) return noContent();
 
   const effects = await delivery.bind({ installationId: installationId(payload) });
   if (!effects) return noContent();
