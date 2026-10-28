@@ -1651,6 +1651,8 @@ export class Thread {
   }): Promise<void> {
     const { suspended, resolution } = args;
     this.rearmedGate = false;
+    // The replay appends to the live transcript, so it must be loaded.
+    await this.ensureTranscript();
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -3057,6 +3059,10 @@ export class Thread {
 
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
+    // Every caller is about to use the transcript, so mark it used even when
+    // it is already loaded: a gate reconcile awaits store calls before it sets
+    // `runningItem`, and the idle release must not land in that gap.
+    this.transcriptUsedAt = Date.now();
     if (!this.transcriptPending) return;
     if (!this.transcriptLoad) {
       this.transcriptLoad = withSpan(
@@ -4450,6 +4456,7 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    await this.ensureTranscript();
     return withSpan(
       "agent.turn",
       {
