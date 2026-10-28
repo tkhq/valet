@@ -107,7 +107,7 @@ vi.mock("~/api/thread-defaults", async (importOriginal) => ({
 
 vi.mock("~/api/settings", () => ({
   usePatchMe: () => ({ mutate: patchMeMutate, isPending: false }),
-  usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false }),
+  usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, reset: () => {}, error: null }),
   useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   useMe: () => ({ data: meData, isLoading: false, error: null }),
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
@@ -326,7 +326,7 @@ describe("SessionHeader — thread-scoped model picker", () => {
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads:/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Make default" }));
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
   });
 
@@ -337,7 +337,7 @@ describe("SessionHeader — thread-scoped model picker", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "low" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
-    await user.click(screen.getByRole("button", { name: "Make default" }));
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7" });
   });
 
@@ -349,7 +349,26 @@ describe("SessionHeader — thread-scoped model picker", () => {
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads:/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+    expect(screen.getByText("The assistant's own model setting outranks defaults, so new threads keep it.")).toBeTruthy();
+  });
+
+  it("asks before it changes the team default for every member", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    teamsData = {
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "admin", defaultModel: null }],
+    };
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: "team", reasoningScope: "team" };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    renderHeader(undefined, "th-1", { ...baseSession(), isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make team default" }));
+    expect(patchTeamMutate).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: "Change the team default?" });
+    expect(dialog.textContent).toContain("every member of Platform");
+    await user.click(within(dialog).getByRole("button", { name: "Make team default" }));
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-opus-4-7" } }, expect.anything());
   });
 
   it("shows a pending selection immediately without changing the saved pin", () => {

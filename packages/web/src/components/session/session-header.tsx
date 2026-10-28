@@ -32,7 +32,7 @@ import {
   useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, usePatchMe, usePatchTeam, useTeams } from "~/api/settings";
-import { defaultSaveBody, useThreadDefaults } from "~/api/thread-defaults";
+import { carriedFields, defaultSaveBody, useThreadDefaults } from "~/api/thread-defaults";
 import {
   Badge,
   Button,
@@ -269,6 +269,7 @@ export function SessionHeader({
   const [moving, setMoving] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [confirmBypass, setConfirmBypass] = useState(false);
+  const [confirmTeamDefault, setConfirmTeamDefault] = useState(false);
   const bypass = useSetThreadApprovalBypass(session.id);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
@@ -389,15 +390,24 @@ export function SessionHeader({
   const defaults = threadDefaults.data;
   const saveBody = defaults ? defaultSaveBody(defaults, { model: configuredModel, reasoning: configuredReasoning }) : undefined;
   const saveTo = defaults?.scope ?? defaults?.reasoningScope ?? null;
+  // A team default changes new threads for every member, so it confirms first.
   const makeDefault = saveBody && saveTo ? () => {
     if (saveTo === "personal") patchMe.mutate(saveBody);
-    else if (owner.type === "team") patchTeam.mutate({ id: owner.id, body: saveBody });
+    else if (owner.type === "team") {
+      patchTeam.reset();
+      setConfirmTeamDefault(true);
+    }
   } : undefined;
+  const carried = defaults && !makeDefault ? carriedFields(defaults, { model: configuredModel, reasoning: configuredReasoning }) : [];
   const newThreadDefault: NewThreadDefault | undefined = defaults ? {
     model: defaults.model,
     reasoning: defaults.reasoning,
     ...(makeDefault ? { onMakeDefault: makeDefault } : {}),
+    ...(saveTo ? { scope: saveTo } : {}),
     saving: patchMe.isPending || patchTeam.isPending,
+    ...(carried.length > 0
+      ? { blockedReason: `The assistant's own ${carried.join(" and ")} setting outranks defaults, so new threads keep it.` }
+      : {}),
   } : undefined;
 
   const title = activeThread?.title || (isWorkspaceRuntime ? "New thread" : session.title || "Untitled thread");
@@ -766,6 +776,22 @@ export function SessionHeader({
       >
         <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from this menu at any time.</p>
       </ConfirmDialog>
+      {owner.type === "team" && (
+        <ConfirmDialog
+          open={confirmTeamDefault}
+          onOpenChange={setConfirmTeamDefault}
+          title="Change the team default?"
+          description={`New threads for every member of ${team?.name ?? "this team"} start with this thread's model and reasoning.`}
+          confirmLabel="Make team default"
+          pendingLabel="Saving…"
+          confirmVariant="primary"
+          pending={patchTeam.isPending}
+          error={patchTeam.error ? extractActionError(patchTeam.error, "Could not save the team default. Try again.") : undefined}
+          onConfirm={() => {
+            if (saveBody) patchTeam.mutate({ id: owner.id, body: saveBody }, { onSuccess: () => setConfirmTeamDefault(false) });
+          }}
+        />
+      )}
       {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
         <DialogContent ref={modelDialog} data-mobile-model-settings title="Model and thinking" description="Choose the model and thinking level for this thread."
           onOpenAutoFocus={(event) => {

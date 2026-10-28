@@ -109,7 +109,14 @@ export interface NewThreadDefault {
   /** Saves the thread's choice as the default. Present only when the viewer
    * may change the default and the save would change what new threads get. */
   onMakeDefault?: () => void;
+  /** Whose default the save changes: the viewer's own, or every team
+   * member's. A team change asks for confirmation in a dialog, so the menu
+   * closes first. */
+  scope?: "personal" | "team";
   saving?: boolean;
+  /** Why no save is offered although this thread differs from the default:
+   * the assistant's own setting outranks the defaults. */
+  blockedReason?: string;
 }
 
 function isAnthropic(id: string): boolean {
@@ -585,12 +592,19 @@ export function ModelPicker({
                   className="shrink-0 max-sm:min-h-11 rounded-full border border-line px-2 py-0.5 text-ink hover:bg-moss-wash disabled:opacity-50"
                   // Keep focus in the menu on click; Enter and Space still activate it.
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => newThreadDefault.onMakeDefault?.()}
+                  onClick={() => {
+                    // A dialog cannot take focus from an open menu.
+                    if (newThreadDefault.scope === "team") setOpen(false);
+                    newThreadDefault.onMakeDefault?.();
+                  }}
                 >
-                  {newThreadDefault.saving ? "Saving…" : "Make default"}
+                  {newThreadDefault.saving ? "Saving…" : newThreadDefault.scope === "team" ? "Make team default" : "Make my default"}
                 </button>
               )}
             </div>
+          )}
+          {newThreadDefault?.blockedReason && !newThreadDefault.onMakeDefault && (
+            <p className="px-3 py-1.5 border-b border-line text-[10px] text-muted">{newThreadDefault.blockedReason}</p>
           )}
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
