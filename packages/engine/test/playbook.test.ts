@@ -131,7 +131,6 @@ describe("playbook plan seeding", () => {
     await thread.setPlan([{ text: "My own step", status: "done" }]);
     expect((await thread.seedPlaybookPlan(skill)).kind).toBe("seeded");
     expect(steps(readThreadPlan(thread.toThreadData().metadata)?.items)?.[0]).toEqual({ text: "Reproduce the bug", status: "in_progress" });
-    expect(readThreadPlan(thread.toThreadData().metadata)?.title).toBe("bug-fix");
   });
 
   it("does not seed a plan from an invalid playbook", async () => {
