@@ -379,9 +379,11 @@ describe("ChannelHost.handleUpdate", () => {
   });
 
   it("publishes a planned turn's progress through a capable non-Slack transport", async () => {
-    // Only a turn with a plan gets a progress card.
+    // Only a turn with a plan gets a progress card. The question keeps the
+    // turn open: a turn that settles before the first post gets no card.
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("update_plan", { items: [{ text: "Check the change", status: "in_progress" }] })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("update_plan", { items: [{ text: "Check the change", status: "in_progress" }] }),
+        fauxToolCall("ask_question", { question: "Which change?" })], { stopReason: "toolUse" }),
       fauxAssistantMessage("Checked."),
     ]);
     const publish = vi.fn(async () => ({ messageId: "progress-1" }));

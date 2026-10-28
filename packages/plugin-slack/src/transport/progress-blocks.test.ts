@@ -24,10 +24,25 @@ describe("native Slack progress", () => {
     expect(view.blocks[0]).toMatchObject({ tasks: [{ status: "complete" }, { status: "error" }] });
   });
 
-  it("does not leave an unfinished task spinning after the turn ends", () => {
-    const view = progressBlocks({ ...progress, status: "complete" }, "key");
+  it("leaves unfinished steps neutral after a successful turn", () => {
+    const view = progressBlocks({ ...progress, status: "complete", tasks: [...progress.tasks, { id: "ship", title: "Ship", status: "pending" }] }, "key");
+    expect(view.blocks[0]).toMatchObject({ tasks: [{ task_id: "read", status: "complete" }] });
     expect(JSON.stringify(view.blocks)).not.toContain('"in_progress"');
+    expect(JSON.stringify(view.blocks)).not.toContain('"error"');
+    expect(view.blocks[1]).toMatchObject({ type: "context", elements: [{ text: "2 more steps not done in this turn." }] });
+  });
+
+  it("marks unfinished steps not completed after a failed turn", () => {
+    const view = progressBlocks({ ...progress, status: "error" }, "key");
+    expect(view.blocks[0]).toMatchObject({ tasks: [{ status: "complete" }, { task_id: "group", status: "error" }] });
     expect(JSON.stringify(view.blocks)).toContain("Not completed in this turn");
+  });
+
+  it("shows the current step and counts pending steps instead of spinning them", () => {
+    const view = progressBlocks({ ...progress, tasks: [...progress.tasks, { id: "a", title: "Write notes", status: "pending" }, { id: "b", title: "Post", status: "pending" }] }, "key");
+    expect(view.blocks[0]).toMatchObject({ tasks: [{ task_id: "read" }, { task_id: "group", status: "in_progress" }] });
+    expect(JSON.stringify(view.blocks[0])).not.toContain("Write notes");
+    expect(view.blocks[1]).toMatchObject({ type: "context", elements: [{ text: "2 more steps planned." }] });
   });
 
   it("shows waiting and includes omitted tasks without a second message", () => {

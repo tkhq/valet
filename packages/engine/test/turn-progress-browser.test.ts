@@ -10,5 +10,7 @@ it("projects a bounded deterministic revision without Node crypto", () => {
   expect(first?.revision).toBeTypeOf("string");
   expect(first?.revision.length).toBeLessThanOrEqual(32);
   expect(projectTurnProgress(item, [], [])?.revision).toBe(first?.revision);
-  expect(projectTurnProgress({ ...item, updatedAt: 3 }, [], [])?.revision).not.toBe(first?.revision);
+  // The revision follows displayed content, not timestamps.
+  expect(projectTurnProgress({ ...item, updatedAt: 3 }, [], [])?.revision).toBe(first?.revision);
+  expect(projectTurnProgress({ ...item, status: "blocked_on_decision_gate" }, [], [])?.revision).not.toBe(first?.revision);
 });

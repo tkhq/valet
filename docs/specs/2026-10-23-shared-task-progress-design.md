@@ -12,12 +12,14 @@ Show the same task progress in the web app and channel conversations. Keep one c
 4. An interrupted turn stays interrupted. A completed turn does not mark unfinished plan steps complete. Pending approvals and questions show waiting. Raw tool arguments, output, and model reasoning do not enter progress summaries.
 5. The web app reads an authorized progress endpoint. Live events invalidate its snapshot. Reuse the existing plan surface and primitives. Collapse steps by default and fit phone width.
 6. A channel transport can publish a progress snapshot. The host stores a durable delivery intent, native message reference, and last revision. Serialize updates per turn, coalesce bursts, bound recovery pages, and isolate organizations and destinations.
-7. Create an intent before posting. Recover an uncertain creation by finding its existing native message. Do not create another card when the provider outcome is uncertain. Known message references are updated in place.
-8. Slack renders native plan and task_card blocks through chat.postMessage and chat.update. This supports long turns without the ten-minute stream limit. Keep Slack block JSON and provider limits in the plugin.
-9. Limit the first view to meaningful plan steps or safe tool labels. Show an omitted count for longer runs. Keep approvals and questions on their existing interactive cards.
-10. Count plan steps when a plan exists. Do not count the tools used to complete those steps again. Keep unfinished steps distinct from completed steps after a turn stops.
-11. Publish channel progress only for a turn that can reply to that destination. A manual or overheard signal does not authorize a progress message. A successful reply to the origin can authorize progress for that turn.
-12. Retry a rejected creation only when the provider confirms that no message was created. Keep network failures and unknown outcomes in recovery mode. Hash internal delivery keys before sending them to a provider.
+7. The revision covers only displayed fields: title, status, visible tasks, omitted count, and the plan flag. A timestamp or a hidden task alone does not change it. The publisher updates a card only when the revision changes, and at most once every 3 seconds per card. Slack asks for that rate, and approval cards share the chat.update limit. A failed update also waits 3 seconds before its retry.
+8. A turn that settles before its first post gets no card. Its answer is already in the thread. A card posted earlier still gets its final update.
+9. Create an intent before posting. Recover an uncertain creation by finding its existing native message. Do not create another card when the provider outcome is uncertain. Known message references are updated in place.
+10. Slack renders native plan and task_card blocks through chat.postMessage and chat.update. This supports long turns without the ten-minute stream limit. Keep Slack block JSON and provider limits in the plugin. A task_card has only three states: in_progress, complete, and error. While a turn runs, the card shows started steps, and a context line counts the pending steps ("2 more steps planned."). After a successful turn, it omits unfinished steps and counts them ("2 more steps not done in this turn."). After a failed or interrupted turn, unfinished steps show as error with "Not completed in this turn."
+11. Limit the first view to meaningful plan steps or safe tool labels. Show an omitted count for longer runs. Keep approvals and questions on their existing interactive cards.
+12. Count plan steps when a plan exists. Do not count the tools used to complete those steps again. Keep unfinished steps distinct from completed steps after a turn stops.
+13. Publish channel progress only for a turn that can reply to that destination. A manual or overheard signal does not authorize a progress message. A successful reply to the origin can authorize progress for that turn.
+14. Retry a rejected creation only when the provider confirms that no message was created. Keep network failures and unknown outcomes in recovery mode. Hash internal delivery keys before sending them to a provider.
 
 ## Implementation plan
 

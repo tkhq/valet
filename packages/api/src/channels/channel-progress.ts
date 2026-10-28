@@ -11,6 +11,8 @@ export const CHANNEL_PROGRESS_PAGE_SIZE = 50;
 export const CHANNEL_PROGRESS_MAX_ATTEMPTS = 8;
 const LEASE_MS = 60_000;
 const REFRESH_MS = 2_000;
+/** Slack asks for at most one update per message every 3 seconds. Approval cards share the chat.update budget. */
+export const CHANNEL_PROGRESS_MIN_UPDATE_MS = 3_000;
 const terminal = (progress: Progress) => ["complete", "error", "interrupted"].includes(progress.status);
 export const channelProgressRetryDelay = (attempts: number) => Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1));
 
@@ -201,8 +203,10 @@ export class ChannelProgressPublisher {
       const transport = this.deps.transportFor(row.channelType);
       if (!transport?.publishProgress) throw new Error("Progress transport unavailable");
       // Only a plan gets a card, as on the web. A turn without one shows
-      // the transport's working status. A card already posted keeps updating.
-      if (!progress.planned && !row.messageId && !row.createStarted) {
+      // the transport's working status. A turn that settled before its first
+      // post gets no card: its answer already arrived. A card already posted
+      // keeps updating.
+      if ((!progress.planned || terminal(progress)) && !row.messageId && !row.createStarted) {
         await this.deps.db.update(deliveries).set({ nextAttemptAt: this.now() + REFRESH_MS,
           completedAt: terminal(progress) ? this.now() : null }).where(owned);
         return;
@@ -242,12 +246,13 @@ export class ChannelProgressPublisher {
       }
       if (!sent?.messageId) throw new Error("Progress provider returned no message");
       await this.deps.db.update(deliveries).set({ messageId: sent.messageId, lastRevision: progress.revision,
-        attempts: 0, lastError: null, nextAttemptAt: this.now() + REFRESH_MS,
+        attempts: 0, lastError: null, nextAttemptAt: this.now() + CHANNEL_PROGRESS_MIN_UPDATE_MS,
         completedAt: terminal(progress) ? this.now() : null }).where(owned);
     } catch (error) {
       const attempts = row.attempts + 1;
       await this.deps.db.update(deliveries).set({ attempts, lastError: error instanceof Error ? error.message.slice(0, 500) : "Progress delivery failed",
-        nextAttemptAt: this.now() + channelProgressRetryDelay(attempts),
+        // A failed request may still have reached the provider, so a retry keeps the update spacing.
+        nextAttemptAt: this.now() + Math.max(CHANNEL_PROGRESS_MIN_UPDATE_MS, channelProgressRetryDelay(attempts)),
         failedAt: attempts >= CHANNEL_PROGRESS_MAX_ATTEMPTS ? this.now() : null }).where(owned);
     } finally {
       clearInterval(heartbeat);

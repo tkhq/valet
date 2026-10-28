@@ -31,6 +31,13 @@ describe("turn progress", () => {
     const second = projectTurnProgress(item, [], [], { turnId: "turn", updatedAt: 2, items: [{ id: "step", text: "Step", status: "done" }] });
     expect(second?.revision).not.toBe(first?.revision);
   });
+  it("keeps the revision when only timestamps change", () => {
+    const plan = { turnId: "turn", updatedAt: 2, items: [{ id: "step", text: "Step", status: "in_progress" as const }] };
+    const first = projectTurnProgress(item, [], [], plan);
+    const later = projectTurnProgress({ ...item, updatedAt: 50 }, [{ ...entry, createdAt: 60 }], [], { ...plan, updatedAt: 70 });
+    expect(later?.updatedAt).toBe(70);
+    expect(later?.revision).toBe(first?.revision);
+  });
   it("keeps a failed root even when every task is complete", () => {
     const progress = projectTurnProgress({ ...item, status: "settled", outcome: { outcome: "failed" } }, [], [], { turnId: "turn", updatedAt: 3, items: [{ id: "step", text: "Step", status: "done" }] });
     expect(progress?.status).toBe("error");

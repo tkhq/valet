@@ -4,7 +4,7 @@ import { PgSessionStore } from "@valet/store-postgres";
 import { channelProgressDeliveries as deliveries } from "../schema/index.js";
 import { applyAppMigrations, missingSchemaRepairs } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { CHANNEL_PROGRESS_MAX_ATTEMPTS, ChannelProgressPublisher, type ProgressTransport } from "./channel-progress.js";
+import { CHANNEL_PROGRESS_MAX_ATTEMPTS, CHANNEL_PROGRESS_MIN_UPDATE_MS, ChannelProgressPublisher, type ProgressTransport } from "./channel-progress.js";
 
 async function setup() {
   const { pgdb, appDb } = await freshTestPgDb();
@@ -162,7 +162,7 @@ describe("channel progress durable publisher", () => {
   it("does not reset creation state for a known-message rejection", async () => {
     await f.seed();
     await f.make().poll();
-    await f.pgdb.query("UPDATE engine_queue_items SET updated_at=1 WHERE id='q'");
+    await f.pgdb.query("UPDATE engine_queue_items SET status='blocked_on_decision_gate' WHERE id='q'");
     f.publish.mockRejectedValueOnce(new ChannelProgressRejectedError("invalid_auth"));
     f.advance(); await f.make().poll();
     expect((await f.rows())[0]).toMatchObject({ createStarted: true, messageId: "native-1", attempts: 1 });
@@ -296,19 +296,42 @@ describe("channel progress durable publisher", () => {
     expect((await f.rows())[0].messageId).toBe("native-1");
   });
 
-  it("subscribes on start, discovers live settlement, and unsubscribes on stop", async () => {
+  it("subscribes on start, discovers live settlement without posting a card, and unsubscribes on stop", async () => {
     await f.seed();
     // A settled item is discoverable only through an event or an existing intent.
     await f.pgdb.query("UPDATE engine_queue_items SET status='settled', outcome='aborted' WHERE id='q'");
     const publisher = f.make();
     publisher.start();
     await publisher.poll();
+    expect(await f.rows()).toHaveLength(0);
     await f.events.append({ sessionId: "s", queueItemId: "q", timestamp: 1, event: {
       type: "submission_settled", sessionId: "s", threadId: "t", queueItemId: "q", outcome: { outcome: "aborted" },
     } }, "settled");
     await publisher.poll();
-    expect(f.publish.mock.calls[0][1].status).toBe("interrupted");
+    // The turn settled before its first post, so no new card follows the answer.
+    expect(f.publish).not.toHaveBeenCalled();
+    expect((await f.rows())[0]?.completedAt).toBeTruthy();
     await publisher.stop();
+  });
+
+  it("updates a card at most once per 3 seconds and only when its display changes", async () => {
+    await f.seed();
+    const publisher = f.make();
+    await publisher.poll();
+    expect(f.publish).toHaveBeenCalledTimes(1);
+    // A timestamp change alone does not change the card.
+    await f.pgdb.query("UPDATE engine_queue_items SET updated_at=50 WHERE id='q'");
+    f.advance(CHANNEL_PROGRESS_MIN_UPDATE_MS); await publisher.poll();
+    expect(f.publish).toHaveBeenCalledTimes(1);
+    await f.pgdb.query("UPDATE engine_queue_items SET status='blocked_on_decision_gate' WHERE id='q'");
+    f.advance(CHANNEL_PROGRESS_MIN_UPDATE_MS); await publisher.poll();
+    expect(f.publish).toHaveBeenCalledTimes(2);
+    await f.pgdb.query("UPDATE engine_queue_items SET status='settled', outcome='completed' WHERE id='q'");
+    f.advance(CHANNEL_PROGRESS_MIN_UPDATE_MS - 1); await publisher.poll();
+    expect(f.publish).toHaveBeenCalledTimes(2);
+    f.advance(1); await publisher.poll();
+    expect(f.publish).toHaveBeenCalledTimes(3);
+    expect(f.publish.mock.calls[2][1].status).toBe("complete");
   });
 });
 

@@ -22,11 +22,12 @@ function source(source: { url: string; title: string }): Record<string, unknown>
   } catch { return undefined; }
 }
 
-function taskBlock(task: ProgressTask, terminal: boolean): Record<string, unknown> {
-  const unfinished = terminal && ["pending", "in_progress", "waiting"].includes(task.status);
-  const status = unfinished || task.status === "interrupted" ? "error" : task.status === "waiting" || task.status === "pending" ? "in_progress" : task.status;
+function taskBlock(task: ProgressTask): Record<string, unknown> {
+  // A task_card accepts only in_progress, complete, and error. A pending
+  // plan step never gets a card; the context line counts it. Only the state
+  // row of a queued turn can still be pending here.
+  const status = task.status === "interrupted" ? "error" : task.status === "waiting" || task.status === "pending" ? "in_progress" : task.status;
   const details = task.status === "interrupted" ? "Interrupted. This task did not finish."
-    : unfinished ? "Not completed in this turn."
     : task.status === "pending" ? "Not started."
     : task.status === "waiting" ? task.details ?? "Waiting for your response."
     : task.details;
@@ -40,22 +41,34 @@ function taskBlock(task: ProgressTask, terminal: boolean): Record<string, unknow
   };
 }
 
+const UNFINISHED: readonly ProgressStatus[] = ["pending", "in_progress", "waiting"];
+
 /** Render the shared snapshot with Slack's native collapsible plan. */
 export function progressBlocks(progress: TurnProgress, key: string): { blocks: Record<string, unknown>[]; text: string } {
   const terminal = ["complete", "error", "interrupted"].includes(progress.status);
   const title = `${publicText(progress.title, 180)} · ${LABEL[progress.status]}`;
-  const needsState = progress.tasks.length > 0 && ["error", "interrupted", "waiting", "in_progress"].includes(progress.status)
-    && !progress.tasks.some(task => task.status === progress.status);
-  const tasks = progress.tasks.slice(0, needsState ? 49 : 50);
-  const omitted = progress.omittedTasks + Math.max(0, progress.tasks.length - tasks.length);
-  const displayed = tasks.length ? [...tasks] : [{ id: `${progress.turnId}:state`, title: LABEL[progress.status], status: progress.status }];
+  // After a successful turn, an unfinished step is neither running nor failed.
+  // After a failed turn, it shows as not completed.
+  const hidden = (task: ProgressTask) => progress.status === "complete" ? UNFINISHED.includes(task.status) : !terminal && task.status === "pending";
+  const shown = progress.tasks.filter(task => !hidden(task)).map(task => terminal && UNFINISHED.includes(task.status)
+    ? { ...task, status: "error" as const, details: "Not completed in this turn." } : task);
+  const notShown = progress.tasks.length - shown.length;
+  const needsState = shown.length > 0 && ["error", "interrupted", "waiting", "in_progress"].includes(progress.status)
+    && !shown.some(task => task.status === progress.status);
+  const tasks = shown.slice(0, needsState ? 49 : 50);
+  const omitted = progress.omittedTasks + Math.max(0, shown.length - tasks.length);
+  const displayed: ProgressTask[] = tasks.length ? [...tasks] : [{ id: `${progress.turnId}:state`, title: LABEL[progress.status], status: progress.status }];
   if (needsState) displayed.push({ id: `${progress.turnId}:state`, title: progress.status === "in_progress" ? "Continue work" : LABEL[progress.status], status: progress.status });
   const blockId = createHash("sha256").update(`${key}:${progress.revision}`).digest("hex");
   const blocks: Record<string, unknown>[] = [{
     type: "plan", block_id: `progress-${blockId}`, title,
-    tasks: displayed.map(task => taskBlock(task, terminal)),
+    tasks: displayed.map(taskBlock),
   }];
-  if (omitted > 0) blocks.push({ type: "context", elements: [{ type: "plain_text", text: `${omitted} more tasks. Open Valet for the full conversation.` }] });
-  const text = publicText([title, ...tasks.map(task => `${LABEL[task.status]}: ${task.title}`), ...(omitted ? [`${omitted} more tasks`] : [])].join("\n"), 3500);
+  const notes = [
+    ...(notShown > 0 ? [progress.status === "complete" ? `${notShown} more ${notShown === 1 ? "step" : "steps"} not done in this turn.` : `${notShown} more ${notShown === 1 ? "step" : "steps"} planned.`] : []),
+    ...(omitted > 0 ? [`${omitted} more tasks. Open Valet for the full conversation.`] : []),
+  ];
+  if (notes.length) blocks.push({ type: "context", elements: [{ type: "plain_text", text: notes.join(" ") }] });
+  const text = publicText([title, ...tasks.map(task => `${LABEL[task.status]}: ${task.title}`), ...notes].join("\n"), 3500);
   return { blocks, text };
 }
