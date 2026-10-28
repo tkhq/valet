@@ -6544,7 +6544,9 @@ export class Thread {
 
   /** Whether the transcript already holds the user entry of queue item `itemId`. */
   private async hasUserEntry(itemId: string): Promise<boolean> {
-    const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+    // Only this item's entries: a whole-thread read here ran once per queued
+    // message that joined a running turn.
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: itemId });
     return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
   }
 
