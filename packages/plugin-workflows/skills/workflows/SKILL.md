@@ -164,7 +164,7 @@ Every step has `id` and `type`. A step accepts only the fields listed for its ty
   - `maxModelCalls` (optional): an integer from 1 to 500
   - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
   - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
-  - `thread` (optional): "run" (default) or "step"; `step` gives the step, or each foreach entry, its own new thread. Foreach entries run in parallel only with `concurrency` above 1
+  - `thread` (optional): "run" (default) or "step"; `step` gives the step, or each foreach entry, its own new thread that runs in parallel
 - `tool`:
   - `service` (required): the plugin service, such as "github"
   - `action` (required): the action name, such as "create_issue"
