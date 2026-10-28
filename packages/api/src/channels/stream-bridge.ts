@@ -99,6 +99,9 @@ export const STREAM_MAX_AGE_MS = 30 * 60_000;
  */
 export const STREAM_ABANDON_AFTER_MS = 24 * 60 * 60_000;
 
+/** The last line of a reply whose turn failed. */
+const TURN_FAILED_NOTE = "This turn failed. Send the message again, or open the session in Valet.";
+
 /** Cap on the streamed-message marker set. Same shape as the host's own dedup LRU. */
 const STREAMED_CAP = 2048;
 
@@ -171,6 +174,12 @@ interface ActiveStream {
   /** The provider stream is gone. Remaining text goes out as plain messages. */
   degraded: boolean;
   closed: boolean;
+  /**
+   * The model call behind this stream failed before any text reached the
+   * reader, and the engine may retry it. The stream stays open until the
+   * retry's `message_start` takes it over or the submission settles.
+   */
+  awaitingRetry: boolean;
 }
 
 function stateKey(sessionId: string, threadId: string): string {
@@ -227,7 +236,7 @@ export class ChannelStreamBridge {
   start(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end"] },
+      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end", "submission_settled"] },
       (event) => this.onBusEvent(event),
     );
     this.sweepTimer = setInterval(() => {
@@ -325,6 +334,18 @@ export class ChannelStreamBridge {
 
     if (e.type === "message_start") {
       if (e.role !== "assistant") return;
+      const held = this.active.get(key);
+      if (held?.awaitingRetry) {
+        // The engine retried the failed model call, or moved it to a fallback
+        // provider. The new message continues the same reply.
+        if (held.turn.queueItemId !== undefined && event.queueItemId !== undefined && event.queueItemId !== held.turn.queueItemId) return;
+        this.deps.markDelivered(`${held.turn.sessionId}:${held.engineMessageId}`);
+        held.engineMessageId = e.messageId;
+        held.buffer = "";
+        held.awaitingRetry = false;
+        this.markStreamed(event.sessionId, e.messageId);
+        return;
+      }
       const turn = this.pending.get(key);
       if (!turn || this.active.has(key)) return;
       // The registration belongs to ONE submission. A message from any other
@@ -371,12 +392,24 @@ export class ChannelStreamBridge {
     }
 
     if (e.type === "message_end") {
-      if (!this.active.has(key)) return;
+      const stream = this.active.get(key);
+      if (!stream) return;
+      // A model call that failed before the reader saw any text may be
+      // retried. Closing now would post "This turn failed" above the retry's
+      // answer, so hold the stream until the retry starts or the submission
+      // settles. A failure after visible text still closes: a stream cannot
+      // take that text back.
+      if (e.reason === "error" && !stream.turn.streamedText && !stream.inFlight) {
+        stream.awaitingRetry = true;
+        if (stream.timer) clearTimeout(stream.timer);
+        stream.timer = null;
+        return;
+      }
       const note =
         e.reason === "abort"
           ? "Stopped."
           : e.reason === "error"
-            ? "This turn failed. Send the message again, or open the session in Valet."
+            ? TURN_FAILED_NOTE
             : undefined;
       void this.guard("finish", () => this.finish(key, note));
       return;
@@ -395,7 +428,26 @@ export class ChannelStreamBridge {
       return;
     }
 
+    if (e.type === "submission_settled") {
+      const stream = this.active.get(key);
+      if (!stream?.awaitingRetry) return;
+      if (stream.turn.queueItemId !== undefined && e.queueItemId !== stream.turn.queueItemId) return;
+      // No retry took the held stream over: the turn ended on that failure.
+      this.pending.delete(key);
+      const note =
+        e.outcome.outcome === "aborted"
+          ? "Stopped."
+          : e.outcome.outcome === "failed"
+            ? TURN_FAILED_NOTE
+            : undefined;
+      void this.guard("finish", () => this.finish(key, note));
+      return;
+    }
+
     if (e.type === "turn_end") {
+      // A failed attempt's turn_end comes before the engine decides to
+      // retry. Keep the registration and the held stream for the retry.
+      if (this.active.get(key)?.awaitingRetry) return;
       this.pending.delete(key);
       // A turn can end without a message_end for an open stream (a crash
       // between rounds). Close anything still open rather than trust that
@@ -446,6 +498,7 @@ export class ChannelStreamBridge {
       retryAfter: 0,
       degraded: false,
       closed: false,
+      awaitingRetry: false,
     };
     // Registered before the opener runs so deltas that arrive during
     // startStream are buffered rather than dropped.
