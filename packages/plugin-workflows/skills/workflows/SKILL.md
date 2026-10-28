@@ -84,7 +84,7 @@ Node types:
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
 - `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `maxModelCalls`, `wait`)
-- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `maxModelCalls`, `wait`, `thread`). The app labels this step "Thread". By default it runs on the run's one thread, after the earlier agent steps and with their transcript. Set `"thread": "step"` to give it a new conversation of its own: a `foreach` body then runs its entries in parallel, and a `wait: none` step runs beside the steps after it. These threads share the run's working directory, so parallel entries must write to different paths.
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `maxModelCalls`, `wait`, `thread`). The app labels this step "Thread". By default it runs on the run's one thread, after the earlier agent steps and with their transcript. Set `"thread": "step"` to give it a new conversation of its own, without the earlier steps' transcript. A `foreach` body with `"thread": "step"` runs its entries in parallel only when the foreach sets `concurrency` above 1; the default of 1 runs them one at a time. A `wait: none` step on its own thread runs beside the steps after it. These threads share the run's working directory, so tell each parallel entry to write to its own path or clone into its own folder.
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — run one inline `body` node once for each entry of `items` (optional `itemAlias`, `indexAlias`, `maxItems`, `concurrency`, `onItemError`). See Loop over a list.
@@ -164,7 +164,7 @@ Every step has `id` and `type`. A step accepts only the fields listed for its ty
   - `maxModelCalls` (optional): an integer from 1 to 500
   - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
   - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
-  - `thread` (optional): "run" (default) or "step"; `step` gives the step, or each foreach entry, its own new thread that runs in parallel
+  - `thread` (optional): "run" (default) or "step"; `step` gives the step, or each foreach entry, its own new thread. Foreach entries run in parallel only with `concurrency` above 1
 - `tool`:
   - `service` (required): the plugin service, such as "github"
   - `action` (required): the action name, such as "create_issue"

@@ -1,4 +1,5 @@
-import type { ForeachBodyNode, ForeachNode } from "@valet/workflow";
+import { sharedWorkingDirectoryWarning, type ForeachBodyNode, type ForeachNode } from "@valet/workflow";
+import { Callout } from "~/components/primitives";
 import { LabeledInput, NumberField, SelectField } from "../fields";
 import { LlmForm } from "./llm-form";
 import { ThreadForm } from "./thread-form";
@@ -23,6 +24,7 @@ export function ForeachForm({
   node: ForeachNode;
   onChange: (patch: Record<string, unknown>) => void;
 }) {
+  const sharedWorkingDirectory = sharedWorkingDirectoryWarning(node);
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput
@@ -48,6 +50,11 @@ export function ForeachForm({
         min={1}
         max={10}
       />
+      {sharedWorkingDirectory && (
+        <Callout role="status" tone="warning" className="text-xs">
+          {sharedWorkingDirectory}
+        </Callout>
+      )}
       <SelectField
         label="On item error"
         value={node.onItemError ?? "fail"}
@@ -76,7 +83,8 @@ function defaultForeachBody(type: ForeachBodyNode["type"], id: string): ForeachB
     case "set":
       return { id, type: "set", values: {} };
     case "orchestrator":
-      // Each entry gets its own conversation, so entries run in parallel.
+      // Each entry gets its own conversation. Entries run in parallel only
+      // when the foreach's concurrency is above 1 (the default is 1).
       return { id, type: "orchestrator", prompt: "", thread: "step" };
     case "session":
       return { id, type: "session", mode: "start", prompt: "" };

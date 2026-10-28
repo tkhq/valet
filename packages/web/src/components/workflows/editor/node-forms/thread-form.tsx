@@ -33,9 +33,14 @@ export function ThreadForm({
         onChange={(value) => onChange({ thread: value === "run" ? undefined : value })}
         options={[
           { value: "run", label: "Run thread: after earlier steps, with their context" },
-          { value: "step", label: "Own thread: new conversation, runs in parallel" },
+          { value: "step", label: "Own thread: new conversation, without earlier context" },
         ]}
       />
+      {node.thread === "step" && (
+        <span className="text-xs text-muted">
+          In a foreach, entries run in parallel only when Concurrency is above 1. With Wait mode None, the step runs beside the steps after it.
+        </span>
+      )}
     </div>
   );
 }
