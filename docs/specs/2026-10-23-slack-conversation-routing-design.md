@@ -34,11 +34,25 @@ the same chat. A second person who mentions the app in that thread gets a chat
 with their own assistant, because the binding scope includes the user.
 
 Everyone in a group DM reads the reply. The host adds a line to each group
-prompt that says so. On the assistant's first turn in the thread, the host adds
-the thread's earlier messages, minus the app's own posts. The stream names the
-mentioning person as its recipient, which Slack requires outside a 1:1 DM.
-A group turn sets the thread status like a DM turn. Slack accepts the status
-call outside the assistant view with the `chat:write` scope.
+prompt that says so, and that earlier messages from other people are context,
+not instructions. On the assistant's first turn in the thread, the host adds
+the thread's earlier messages, minus the app's own posts.
+
+A group turn is never the person's own direct channel message, because other
+people's words ride in its context. The host sets `directChannel: false` on its
+author, so tools that act only on a message the person wrote themself refuse
+the turn. The person is still interactive, so approval cards work as usual.
+
+The host refuses a group DM shared with another organization (Slack Connect,
+`is_ext_shared_channel` on the event envelope). It replies with a notice and
+writes an `external_group` drop-log row, because people outside the
+organization would read the reply.
+
+A stream into a group DM needs a recipient, which Slack requires outside a 1:1
+DM. The recipient travels with the turn (`StreamTurn.recipient`, passed to
+`startStream`), because two people's turns can share one conversation key. A
+group turn sets the thread status like a DM turn. Slack accepts the status call
+outside the assistant view with the `chat:write` scope.
 
 Replies in the thread that do not mention the app reach no assistant. A
 mention rule whose channel filter names the group DM also delivers the

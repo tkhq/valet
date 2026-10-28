@@ -301,7 +301,6 @@ export class SlackTransport implements ChannelTransport {
    * Slack streams into a conversation with more than one person only when the
    * call names a recipient, so `startStream` reads it from here.
    */
-  private readonly groupRecipients = new Map<string, { userId: string; teamId: string }>();
   /**
    * conversationKeys minted for a fresh DM (`openDirectConversation`), whose
    * threadTs is synthetic and names no real message. A reply on such a key must
@@ -445,7 +444,6 @@ export class SlackTransport implements ChannelTransport {
     const threadTs = str(event.thread_ts) ?? ts;
     const conversationKey = conversationKeyFor(teamId, channel, threadTs);
     this.remember(this.lastTurn, conversationKey, threadTs);
-    if (group) this.remember(this.groupRecipients, conversationKey, { userId: user, teamId });
 
     // Forwarded messages arrive as message unfurls in event.attachments, not
     // in event.text. Fold them in before the empty-turn drop below, or a
@@ -484,7 +482,11 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       raw: update,
     };
-    if (group) inbound.group = { channelId: channel, messageTs: ts };
+    if (group) {
+      // The envelope marks a conversation shared with another organization.
+      const external = rec(update)?.is_ext_shared_channel === true;
+      inbound.group = { channelId: channel, messageTs: ts, ...(external ? { external } : {}) };
+    }
     const context = this.contextOf(event);
     if (context) inbound.context = context;
     return inbound;
@@ -765,12 +767,12 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Streaming egress ─────────────────────────────────────────────────
 
-  async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
+  async startStream(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef> {
     const target = this.mustParse(conversationKey);
     try {
-      // Slack requires a recipient only outside a DM. A group DM names the
-      // person whose mention started the turn.
-      const recipient = this.groupRecipients.get(conversationKey);
+      // Slack requires a recipient only outside a DM. A group DM turn names
+      // the person whose mention started it.
+      const recipient = ctx.recipient;
       const res = await this.api.startStream({
         channel: target.channelId,
         threadTs: ctx.threadTs,

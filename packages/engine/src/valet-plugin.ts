@@ -335,8 +335,10 @@ export interface InboundChannelEvent {
    * Set when people other than the sender read the conversation (Slack: a
    * group DM). The host tells the assistant so. On the assistant's first turn
    * there, it reads the thread's messages before `messageTs` as context.
+   * `external` is set when the conversation includes people from another
+   * organization (Slack Connect); the host refuses such a conversation.
    */
-  group?: { channelId: string; messageTs: string };
+  group?: { channelId: string; messageTs: string; external?: boolean };
   /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the
@@ -566,8 +568,13 @@ export interface ChannelTransport {
   // `ChannelStreamError` so the host can tell a retryable rate limit from a
   // dead stream without reading provider error codes.
 
-  /** Open a stream. `threadTs` anchors it to the user's own message. */
-  startStream?(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef>;
+  /**
+   * Open a stream. `threadTs` anchors it to the user's own message.
+   * `recipient` names the person the stream is for, in provider ids. Slack
+   * requires it outside a 1:1 DM. It travels with the turn, because two
+   * people's turns can share one conversation.
+   */
+  startStream?(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef>;
   /** Append markdown to an open stream. */
   appendStream?(ref: StreamRef, markdown: string): Promise<void>;
   /** Close a stream. `final` carries the last markdown and any trailing blocks. */

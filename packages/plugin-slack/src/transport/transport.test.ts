@@ -412,6 +412,14 @@ describe("parseUpdate — the agent surface events", () => {
     )).toBeNull();
   });
 
+  it("marks a group DM shared with another organization as external", () => {
+    const event = makeTransport().parseUpdate({
+      ...envelope(imMessage({ channel_type: "mpim", channel: "C0EXT", text: "<@UBOT> hi", ts: "1700000000.000500" })),
+      is_ext_shared_channel: true,
+    });
+    expect(event?.group).toEqual({ channelId: "C0EXT", messageTs: "1700000000.000500", external: true });
+  });
+
   it("does not mark a direct message as a group conversation", () => {
     expect(makeTransport().parseUpdate(envelope(imMessage()))).not.toHaveProperty("group");
   });
@@ -891,12 +899,11 @@ describe("streaming", () => {
     expect(lastCall("chat.startStream")).not.toHaveProperty("recipient_user_id");
   });
 
-  it("names the mentioning person as the recipient when it streams into a group DM", async () => {
+  it("names the turn's recipient when it streams into a group DM", async () => {
     const transport = makeTransport();
-    transport.parseUpdate(envelope(imMessage({
-      channel_type: "mpim", channel: "C0GROUP", user: "U7", text: "<@UBOT> hi", ts: "1700000000.000400",
-    })));
-    await transport.startStream(conversationKeyFor(TEAM, "C0GROUP", "1700000000.000400"), { threadTs: "1700000000.000400" });
+    await transport.startStream(conversationKeyFor(TEAM, "C0GROUP", "1700000000.000400"), {
+      threadTs: "1700000000.000400", recipient: { userId: "U7", teamId: TEAM },
+    });
     expect(lastCall("chat.startStream")).toMatchObject({
       channel: "C0GROUP", thread_ts: "1700000000.000400", recipient_user_id: "U7", recipient_team_id: TEAM,
     });
