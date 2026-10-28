@@ -478,9 +478,10 @@ describe("ChannelHost.handleUpdate", () => {
     }
   });
 
-  it("tells the assistant a group DM reads its reply, and seeds the thread's earlier messages once", async () => {
+  it("shows a group DM turn's status, tells the assistant the group reads its reply, and seeds the thread once", async () => {
     const fetchThreadWindow = vi.fn(async () => "[Grace] did the deploy finish?");
-    const { slackHost } = await startSlackHost({ fetchThreadWindow });
+    const setStatus = vi.fn(async () => {});
+    const { slackHost } = await startSlackHost({ fetchThreadWindow, setStatus });
     try {
       const key = "slack:T1:C0GROUP:111.1";
       await slackHost.handleUpdate("slack", inbound({
@@ -492,6 +493,7 @@ describe("ChannelHost.handleUpdate", () => {
       if (!thread) throw new Error("Expected the group conversation's thread");
       await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
       expect(fetchThreadWindow).toHaveBeenCalledWith("C0GROUP", "111.1", "0", "111.5");
+      expect(setStatus).toHaveBeenCalledWith(key, "111.1", "is thinking…");
       const userTurns = async () => (await engineStore.getEntries(session.id, thread.id))
         .filter((e) => e.type === "message" && e.role === "user").map((e) => e.type === "message" ? e.content : "");
       const [first] = await userTurns();

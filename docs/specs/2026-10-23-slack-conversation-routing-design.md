@@ -37,8 +37,8 @@ Everyone in a group DM reads the reply. The host adds a line to each group
 prompt that says so. On the assistant's first turn in the thread, the host adds
 the thread's earlier messages, minus the app's own posts. The stream names the
 mentioning person as its recipient, which Slack requires outside a 1:1 DM.
-Slack shows a thread status only in a 1:1 assistant thread, so a group turn
-sets none.
+A group turn sets the thread status like a DM turn. Slack accepts the status
+call outside the assistant view with the `chat:write` scope.
 
 Replies in the thread that do not mention the app reach no assistant. A
 mention rule whose channel filter names the group DM also delivers the

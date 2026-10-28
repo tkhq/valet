@@ -1779,9 +1779,7 @@ export class ChannelHost {
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
-    // Slack shows a thread status only in a one-person assistant thread, so a
-    // group conversation gets none.
-    const processing = event.threadTs && !event.group ? this.processingStatus.begin({
+    const processing = event.threadTs ? this.processingStatus.begin({
       channelType, conversationKey: event.conversationKey, threadTs: event.threadTs,
       sessionId: session.id, threadId: thread.id,
     }) : undefined;
