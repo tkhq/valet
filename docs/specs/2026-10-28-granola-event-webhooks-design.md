@@ -27,7 +27,7 @@ Workflows can trigger on GitHub, Slack, and Linear events but not on Granola. Gr
 
 ## Known limit: wrong secret
 
-The save route checks the `whsec_` format only. It cannot check the secret against Granola. A wrong secret gives 403 on every delivery, and Granola fails those permanently and does not replay them. Keeping 403 is deliberate, so authentication is not weakened. The setup guide tells admins to send a test event and read the drop log before they enable the webhook.
+The save route checks the `whsec_` format only. It cannot check the secret against Granola. A wrong secret gives 403 on every delivery, and Granola fails those permanently and does not replay them. Valet keeps 403 for an invalid signature. The trade-off: 403 stops retries of unauthenticated traffic, but it permanently loses deliveries when a real endpoint is configured with the wrong secret. Granola enables a webhook when it creates it, so the setup guide tells admins to keep real notes out until a test event verifies the secret, and to create a new webhook if the secret is lost.
 
 ## Out of scope
 
