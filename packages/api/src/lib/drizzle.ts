@@ -799,6 +799,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "cli_tokens.prev_refresh_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_refresh_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_refresh_hash" text' },
   { describe: "cli_tokens.rotated_at column", probe: { kind: "column", table: "cli_tokens", column: "rotated_at" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "rotated_at" bigint' },
   { describe: "cli_device_requests_expires", probe: { kind: "index", index: "cli_device_requests_expires" }, sql: 'CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");' },
+  { describe: "cli_device_requests.purpose column", probe: { kind: "column", table: "cli_device_requests", column: "purpose" }, sql: `ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "purpose" text NOT NULL DEFAULT 'login'` },
+  { describe: "cli_device_requests.key_name column", probe: { kind: "column", table: "cli_device_requests", column: "key_name" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "key_name" text' },
+  { describe: "cli_device_requests.requested_by column", probe: { kind: "column", table: "cli_device_requests", column: "requested_by" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "requested_by" text REFERENCES "user"("id") ON DELETE cascade' },
 
   {
     describe: "action_invocations.thread_id column",

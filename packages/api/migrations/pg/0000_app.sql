@@ -2786,7 +2786,9 @@ CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, ses
 CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
-  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint,
+  "purpose" text NOT NULL DEFAULT 'login', "key_name" text,
+  "requested_by" text REFERENCES "user"("id") ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");

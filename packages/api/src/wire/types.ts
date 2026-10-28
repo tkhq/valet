@@ -6648,6 +6648,10 @@ export interface CliDeviceCodeResponse {
   expires_in: number;
   /** Seconds between polls. */
   interval: number;
+  /** The request type the instance recorded. An instance without `valet
+   * proxy setup` support omits it, and the CLI stops before the person
+   * approves a sign-in it did not ask for. */
+  purpose?: CliDevicePurpose;
 }
 
 /** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
@@ -6664,9 +6668,35 @@ export interface CliDeviceInfo {
   /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
   device: string;
   user_code: string;
+  /** `login` for `valet login`; `proxy-key` for `valet proxy setup`. */
+  purpose: CliDevicePurpose;
+  /** The name of the key a `proxy-key` request creates. */
+  key_name?: string;
   access: string[];
   /** What the CLI cannot do. */
   limits: string[];
+}
+
+export type CliDevicePurpose = "login" | "proxy-key";
+
+/** `GET /api/proxy/keys/:id` — a proxy key the caller owns that still works. */
+export interface ProxyKeyStatusResponse {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  created_at: number;
+}
+
+/** `POST /api/cli/device/token` response for an approved `proxy-key`
+ * request. The secret `key` appears only in this response. */
+export interface CliProxyKeyResponse {
+  proxy_key: {
+    id: string;
+    key: string;
+    name: string;
+    /** Epoch ms. */
+    created_at: number;
+  };
 }
 
 /** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */

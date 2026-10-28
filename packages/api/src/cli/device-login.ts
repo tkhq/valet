@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
 import type { PendingLogin } from "./config.js";
-import type { CliDeviceCodeResponse, CliTokenResponse } from "../wire/types.js";
+import type { CliDeviceCodeResponse, CliProxyKeyResponse, CliTokenResponse } from "../wire/types.js";
 
 export interface DeviceLoginOpts {
   /** Instance base URL, trailing slash stripped. */
@@ -29,10 +29,14 @@ export interface DeviceLoginOpts {
   now?: () => number;
 }
 
-async function post<T>(url: string, body: unknown): Promise<{ status: number; body: T | { error?: string; error_description?: string } }> {
+async function post<T>(
+  url: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: T | { error?: string; error_description?: string } }> {
   let res: Response;
   try {
-    res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   } catch (err) {
     throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
   }
@@ -56,11 +60,45 @@ function errorOf(body: unknown): { error?: string; description?: string } {
 
 /** Ask the instance for a device code and a user code. */
 export async function startDeviceLogin(url: string, device: string = hostname(), now: () => number = Date.now): Promise<PendingLogin> {
-  const started = await post<CliDeviceCodeResponse>(`${url}/api/cli/device/code`, { device });
+  return startDeviceRequest(url, { device }, {}, now);
+}
+
+/**
+ * Ask the instance for a proxy key (`valet proxy setup`). The CLI token
+ * names the account; only that account can approve the request in the
+ * browser.
+ */
+export async function startProxyKeyRequest(
+  url: string,
+  opts: { cliToken: string; keyName: string; device?: string; now?: () => number },
+): Promise<PendingLogin> {
+  return startDeviceRequest(
+    url,
+    { device: opts.device ?? hostname(), purpose: "proxy-key", key_name: opts.keyName },
+    { "x-api-key": opts.cliToken },
+    opts.now,
+    "proxy-key",
+  );
+}
+
+async function startDeviceRequest(
+  url: string,
+  body: Record<string, string>,
+  headers: Record<string, string>,
+  now: () => number = Date.now,
+  expectPurpose?: "proxy-key",
+): Promise<PendingLogin> {
+  const started = await post<CliDeviceCodeResponse>(`${url}/api/cli/device/code`, body, headers);
+  if (started.status === 401) throw new AuthError(errorOf(started.body).description ?? `Sign in first. Run \`valet login ${url}\`.`);
   if (started.status !== 200 || !("device_code" in started.body)) {
     throw new ApiError(started.status, errorOf(started.body).description ?? "the instance could not start a sign-in");
   }
   const code = started.body;
+  // An instance without proxy keys ignores `purpose` and starts a sign-in.
+  // Stop before the person approves a CLI sign-in this command did not ask for.
+  if (expectPurpose && code.purpose !== expectPurpose) {
+    throw new ApiError(started.status, `${url} does not support \`valet proxy setup\` yet. Ask your Valet admin to update the instance.`);
+  }
   return {
     url,
     deviceCode: code.device_code,
@@ -72,10 +110,10 @@ export async function startDeviceLogin(url: string, device: string = hostname(),
 }
 
 /** The lines that tell the person where to enter the code. */
-export function deviceCodeInstructions(pending: PendingLogin, opened: boolean): string[] {
+export function deviceCodeInstructions(pending: PendingLogin, opened: boolean, action = "sign in"): string[] {
   const pageUrl = `${pending.url}${pending.verificationPath}`;
   return [
-    `To sign in, ${opened ? "use the browser page that opened" : `open ${pageUrl} in a browser on any computer`}, and enter this code:`,
+    `To ${action}, ${opened ? "use the browser page that opened" : `open ${pageUrl} in a browser on any computer`}, and enter this code:`,
     "",
     `    ${pending.userCode}`,
     "",
@@ -91,6 +129,26 @@ export async function pollDeviceLogin(
   pending: PendingLogin,
   opts: { sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
 ): Promise<CliTokenResponse> {
+  return pollDeviceRequest(pending, (body): body is CliTokenResponse => "access_token" in body, { noun: "sign-in", retry: "valet login" }, opts);
+}
+
+/** Poll a proxy-key request until the person allows or denies it, or it expires. */
+export async function pollProxyKeyRequest(
+  pending: PendingLogin,
+  opts: { sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<CliProxyKeyResponse["proxy_key"]> {
+  const done = await pollDeviceRequest(
+    pending, (body): body is CliProxyKeyResponse => "proxy_key" in body, { noun: "proxy key request", retry: "valet proxy setup" }, opts,
+  );
+  return done.proxy_key;
+}
+
+async function pollDeviceRequest<T extends object>(
+  pending: PendingLogin,
+  isDone: (body: object) => body is T,
+  flow: { noun: string; retry: string },
+  opts: { sleep?: (ms: number) => Promise<void>; now?: () => number },
+): Promise<T> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = opts.now ?? Date.now;
   let intervalMs = pending.interval * 1000;
@@ -98,19 +156,19 @@ export async function pollDeviceLogin(
   while (now() < pending.expiresAt) {
     if (!first) await sleep(intervalMs);
     first = false;
-    const polled = await post<CliTokenResponse>(`${pending.url}/api/cli/device/token`, { device_code: pending.deviceCode });
-    if (polled.status === 200 && "access_token" in polled.body) return polled.body;
+    const polled = await post<T>(`${pending.url}/api/cli/device/token`, { device_code: pending.deviceCode });
+    if (polled.status === 200 && polled.body && typeof polled.body === "object" && isDone(polled.body)) return polled.body;
     const { error, description } = errorOf(polled.body);
     if (error === "authorization_pending") continue;
     if (error === "slow_down") {
       intervalMs += 5_000;
       continue;
     }
-    if (error === "access_denied") throw new AuthError("the sign-in was denied in the browser. To try again, run `valet login` again.");
-    if (error === "expired_token") throw new AuthError(`${description ?? "the sign-in code expired."} Run \`valet login\` again.`);
-    throw new ApiError(polled.status, description ?? error ?? "the sign-in failed");
+    if (error === "access_denied") throw new AuthError(`the ${flow.noun} was denied in the browser. To try again, run \`${flow.retry}\` again.`);
+    if (error === "expired_token") throw new AuthError(`${description ?? `the ${flow.noun} code expired.`} Run \`${flow.retry}\` again.`);
+    throw new ApiError(polled.status, description ?? error ?? `the ${flow.noun} failed`);
   }
-  throw new AuthError("the sign-in code expired before anyone chose Allow. Run `valet login` again, and enter the new code in the browser.");
+  throw new AuthError(`the ${flow.noun} code expired before anyone chose Allow. Run \`${flow.retry}\` again, and enter the new code in the browser.`);
 }
 
 /** Start a sign-in, show the code, and wait for it. Returns a CLI token pair. */
