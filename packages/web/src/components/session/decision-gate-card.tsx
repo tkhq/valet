@@ -145,8 +145,11 @@ function DecisionGateResponse({
 
   const Icon = ICON_FOR_TYPE[gate.type];
   const kind = KIND_FOR_TYPE[gate.type];
-  // Named approvals wait for that member. Policy provenance identifies account borrowing.
-  const waitingOn = gate.approver && gate.approver.userId !== meQ.data?.id ? gate.approver : undefined;
+  // Named approvals wait for that member. Policy provenance identifies account
+  // borrowing. Until the viewer is known, show the full card: the api refuses
+  // an answer from anyone else, and hiding the buttons from the approver
+  // leaves the turn stuck with nothing to click.
+  const waitingOn = gate.approver && meQ.data && gate.approver.userId !== meQ.data.id ? gate.approver : undefined;
   if (waitingOn) {
     return (
       <div className={columnClass}>

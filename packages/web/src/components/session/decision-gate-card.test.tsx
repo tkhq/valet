@@ -186,6 +186,13 @@ describe("DecisionGateCard — another member's shared account", () => {
     expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   });
 
+  it("shows the buttons while the viewer is still loading", () => {
+    meData = undefined;
+    renderCard(borrow);
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+    expect(screen.queryByText("Asked Bea for permission")).toBeNull();
+  });
+
   it("describes an actor-only approval as a review request", () => {
     meData = { id: "al", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
     renderCard({ ...borrow, title: "Approve Update account?" });

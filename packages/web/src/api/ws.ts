@@ -288,6 +288,12 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
           void qc.invalidateQueries({ queryKey: ["settings"] });
         }
+        // A gate frame changes the session's decisions. Refetch them, so a
+        // later seed from REST (stores/stream.ts setPendingGates) is current.
+        if (wire.type === "decision_gate" || wire.type === "decision_gate_resolved" ||
+          wire.type === "decision_gate_expired" || wire.type === "decision_gate_withdrawn") {
+          void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+        }
         // Only `update_plan` changes a thread's plan.
         if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {
           void qc.invalidateQueries({ queryKey: qkThreadPlan(wire.threadId) });

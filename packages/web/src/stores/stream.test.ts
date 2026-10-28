@@ -660,6 +660,25 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].pendingGates).toEqual({});
   });
 
+  it("keeps a gate that arrived after the REST snapshot, and drops one closed after it", () => {
+    const { ingest, setPendingGates } = useStreamStore.getState();
+    const gate = (id: string) => ({
+      id, sessionId: SESSION, threadId: THREAD, type: "approval" as const, title: "Approve?",
+      actions: [], status: "pending" as const, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    });
+    const snapshotAt = Date.now() - 1_000;
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate: gate("live") });
+    ingest(SESSION, { seq: 2, ts: Date.now(), offset: offset(2), type: "decision_gate_resolved", threadId: THREAD, gateId: "answered",
+      resolution: { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() } });
+    // A cached snapshot from before both frames: it lacks the new gate and
+    // still lists the one answered since.
+    setPendingGates(SESSION, [gate("answered"), gate("older")], snapshotAt);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates).sort()).toEqual(["live", "older"]);
+    // A snapshot fetched after the frames is the truth.
+    setPendingGates(SESSION, [gate("older")], Date.now() + 1_000);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates)).toEqual(["older"]);
+  });
+
   it("applies sandbox.status updates", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, {
