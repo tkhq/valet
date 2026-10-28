@@ -689,7 +689,10 @@ UI: background work shows in three places, all read from one
   when the thread has no background work.
 - **Thread list line.** A thread row with an active timer shows one quiet
   line, `Waiting · next wakeup in 26m`, with the fire time on hover.
-  Processes, watches, and holds get no row line.
+  Processes, watches, and holds get no row line. The line is part of the
+  row element, under the title. The selected tint, the accent bar, and the
+  hover tint cover the title and the line together. The line refreshes its
+  relative time every 30 seconds.
 
 The query polls once a minute while one of these reads it. A
 `queue.state` frame and every cancel, pause, replace, or forced action
@@ -1592,3 +1595,5 @@ with an earlier entry, the entry below wins.
   work that a turn starts or ends shows without the one-minute poll.
 
 - **A session without a wakeup seam offers no wakeup tools (2026-10-19).** `Session` leaves `watch`, `wake_at`, `hold_sandbox`, `process_read`, `wakeup_list`, and `wakeup_cancel` out of its builtin tools when `CreateSessionOptions.wakeups` is absent (a bare engine, a test). Each would only refuse, and six schemas widen every prompt. The api gives every session a seam.
+
+- **The thread list line is inside its row (2026-10-28).** The line was a sibling rendered after the row element, and the row element held the selected tint, the accent bar, and the hover tint. On the open thread the line hung below the tinted row and read as part of the next row. The row now wraps, and the line is a full-width item inside it. The wakeup data was correct: the listing reads only `pending` and `running` rows, and a fire or a cancel ends the row, so the line clears at the next `queue.state` refresh.
