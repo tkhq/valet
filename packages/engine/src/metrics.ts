@@ -79,6 +79,7 @@ interface Instruments {
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
+  toolStopTimeouts: Counter;
   wakeupsTotal: Counter;
   wakeupSignalsLost: Counter;
   wakeupKillsFailed: Counter;
@@ -180,6 +181,10 @@ function inst(): Instruments {
     compactionCoverageGaps: meter.createCounter("valet.compaction.coverage_gap", {
       description:
         "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
+    }),
+    toolStopTimeouts: meter.createCounter("valet.tool.stop_timeouts", {
+      description:
+        "Tool calls still running after their turn was stopped and the grace period ended. The turn stopped waiting and the call kept running detached. Any rate means a tool ignores its abort signal: fix that tool.",
     }),
     wakeupsTotal: meter.createCounter("valet.wakeups.total", {
       description:
@@ -311,6 +316,12 @@ export function recordSettlement(outcome: string, queueWaitMs?: number): void {
 
 export function recordToolExecution(tool: string, durationMs: number, ok: boolean): void {
   inst().toolDuration.record(durationMs, { tool, ok });
+}
+
+/** A tool that ignored its abort signal past the stop grace period. Alert on
+ * any rate: the call keeps running after its turn ended. */
+export function recordToolStopTimeout(tool: string): void {
+  inst().toolStopTimeouts.add(1, { tool });
 }
 
 export function recordCacheBreak(cause: string, model?: string): void {

@@ -279,6 +279,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+  // Same instance for `/api/plugins`, the policy routes, and the host's
+  // policy resolver, as in `providers/node.ts`.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
   const blobs = new FsBlobStore(blobsRoot);
 
   // Resolve callback URLs only after the server binds. Keeping port 0 bound
@@ -353,6 +356,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
+    serviceProbes,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -631,7 +635,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     plugins,
     configMcpServers: opts.mcpServers ?? [],
     actionPluginByService,
-    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
     scratchCaps,
   };

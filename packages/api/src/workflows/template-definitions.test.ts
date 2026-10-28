@@ -14,8 +14,8 @@
  *   1. `trigger.<field>` — the payload is `{ type, triggerId, timestamp,
  *      data, metadata }`, so an input field lives at `trigger.data.<field>`
  *      and `trigger.<field>` renders null.
- *   2. A scheduled run gets `{ scheduleName, cron, input }` in
- *      `trigger.data`, and NO `dataSchema` defaults — so a field a
+ *   2. A scheduled run fills `trigger.data` only from the schedule's input
+ *      and `dataSchema` defaults, so a required field with no default that a
  *      scheduled template reads must be gone before the schedule fires.
  *      Install is what removes it: `bakeInputs` rewrites the reference to
  *      a literal for every field it resolved a value for. It resolves one
@@ -338,9 +338,9 @@ describe("plugin workflow templates", () => {
         return;
       }
 
-      // A scheduled run puts { scheduleName, cron, input } in `trigger.data`
-      // and applies no dataSchema defaults, so a reference that survives
-      // install reads null every night and nothing reports it. Install is
+      // A scheduled run fills `trigger.data` only from the schedule's input
+      // and dataSchema defaults, so a reference that survives install can
+      // read null every night and nothing reports it. Install is
       // what removes it, and `unbakeable` lists every way that rewrite can
       // miss.
       const wrong: string[] = [];

@@ -148,6 +148,18 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(threads.map((t) => t.key).sort()).toEqual(["task:A", "task:B"]);
     });
 
+    it("listThreadsForSessions reads the threads of several sessions at once", async () => {
+      await store.saveSession(newSession());
+      await store.saveSession({ ...newSession(), id: "sess-2" });
+      await store.saveSession({ ...newSession(), id: "sess-3" });
+      await store.saveThread("sess-1", newThread("sess-1", "task:A", "th-1"));
+      await store.saveThread("sess-2", newThread("sess-2", "task:B", "th-2"));
+      await store.saveThread("sess-3", newThread("sess-3", "task:C", "th-3"));
+      const threads = await store.listThreadsForSessions(["sess-1", "sess-2", "sess-1", "missing"]);
+      expect(threads.map((t) => `${t.sessionId}:${t.key}`).sort()).toEqual(["sess-1:task:A", "sess-2:task:B"]);
+      expect(await store.listThreadsForSessions([])).toEqual([]);
+    });
+
     it("getThreadSnapshot keeps its active leaf in the returned entries", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

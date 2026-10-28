@@ -12,6 +12,7 @@ import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
 import { CLI_ACCESS_PREFIX, verifyCliAccessToken } from "../auth/cli-tokens.js";
 import {
   isAgentCaller,
+  isProxyScopedKeyMetadata,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
   userPrincipal,
@@ -162,6 +163,9 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     return undefined;
   }
   if (!result.valid || !result.key) return undefined;
+  // A proxy key (`valet proxy setup`) sits in a local file that agents can
+  // read. It works only at the gateway, which verifies keys on its own path.
+  if (isProxyScopedKeyMetadata(result.key.metadata)) return undefined;
   const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
@@ -456,6 +460,9 @@ const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "DELETE", pattern: /^\/api\/artifacts\/[^/]+$/ },
   // A policy preview changes nothing.
   { method: "POST", pattern: /^\/api\/org\/policies\/preview$/ },
+  // `valet proxy remove` revokes the CLI's proxy key. Removing a key grants nothing,
+  // and the route deletes only proxy-scoped keys.
+  { method: "DELETE", pattern: /^\/api\/proxy\/keys\/[^/]+$/ },
 ];
 
 /** Whether an agent caller is refused this request. */

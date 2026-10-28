@@ -6,6 +6,7 @@ function comment(overrides: Partial<ArtifactCommentWire>): ArtifactCommentWire {
   return {
     id: "c1",
     vdid: null,
+    anchorLabel: null,
     parentId: null,
     body: "body",
     authorUserId: "u1",

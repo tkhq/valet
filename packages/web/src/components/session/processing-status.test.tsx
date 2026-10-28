@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WireQueueState } from "@valet/api/wire";
 import { TypingLine } from "./viewer-faces";
-import { ProcessingStatus } from "./processing-status";
+import { formatElapsed, ProcessingStatus, retryLabel } from "./processing-status";
 
 afterEach(cleanup);
 const base: WireQueueState = { mode: "followup", status: "idle", pendingIds: [], collectingIds: [] };
@@ -54,5 +54,46 @@ describe("ProcessingStatus", () => {
   it("does not treat a stale active item on an idle queue as running", () => {
     render(<ProcessingStatus status="idle" queue={{ ...base, activeItemId: "settled" }} />);
     expect(screen.getByRole("status").textContent).toBe("");
+  });
+});
+
+describe("ProcessingStatus activity", () => {
+  it("names the running step and the turn's elapsed time, and announces only the step", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    try {
+      render(<ProcessingStatus status="tool_calling" activity="Merge-test the branch" startedAt={75_000} />);
+      expect(screen.getByRole("status").textContent).toBe("Merge-test the branch");
+      expect(screen.getByText("25s").getAttribute("aria-hidden")).toBe("true");
+      act(() => { vi.advanceTimersByTime(5_000); });
+      expect(screen.getByText("30s")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("formats elapsed time compactly", () => {
+    expect(formatElapsed(9_400)).toBe("9s");
+    expect(formatElapsed(185_000)).toBe("3m 5s");
+    expect(formatElapsed(3_720_000)).toBe("1h 2m");
+  });
+});
+
+describe("retryLabel", () => {
+  const retry = { threadId: "t", action: "retry" as const, provider: "openai", reason: "server_error" as const, attempt: 2, maxAttempts: 4, waitMs: 4_000, at: 10_000 };
+
+  it("counts down to the retry and names the attempt, as Claude Code does", () => {
+    expect(retryLabel(retry, 10_500)).toBe("OpenAI had a server error. Retrying in 4s · attempt 2/4");
+    expect(retryLabel(retry, 14_500)).toBe("OpenAI had a server error. Retrying · attempt 2/4");
+  });
+
+  it("names the provider the turn moved to", () => {
+    expect(retryLabel({ threadId: "t", action: "fallback", provider: "anthropic", reason: "overloaded", toProvider: "openai", at: 0 }, 0))
+      .toBe("Anthropic is overloaded. Continuing with OpenAI…");
+  });
+
+  it("replaces the working label while the turn waits on a retry", () => {
+    render(<ProcessingStatus status="idle" queue={{ ...base, status: "running", activeItemId: "q" }} retry={{ ...retry, at: Date.now() }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/^OpenAI had a server error\. Retrying/);
   });
 });

@@ -11,7 +11,7 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ProviderFailureKind, ThreadPlan } from "@valet/shared";
 export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
@@ -1042,6 +1042,9 @@ export interface ThreadAddress {
   /** Present when the caller opens the thread through its share, not as its
    * owner or a member of its workspace. */
   guest?: { mode: ThreadShareMode; ownerName: string };
+  /** The thread's workspace, "user" or a team id, for `/chat?workspace=`.
+   * Absent for a guest and for a thread outside any workspace. */
+  workspace?: string;
 }
 
 /** One line of a thread recap. `forReader` marks the line that waits on the reader. */
@@ -1307,6 +1310,11 @@ export interface PatchThreadRequest {
   approvalBypass?: boolean;
 }
 
+/** `GET /api/threads/:id/tool-output`: one tool call's full result, in its stored shape. */
+export interface ToolOutputResponse {
+  result: unknown;
+}
+
 export type PatchThreadResponse = ThreadSummary & {
   /** Ids of the background work a forced archive cancelled. Absent when it cancelled none. */
   cancelledWork?: string[];
@@ -1391,6 +1399,12 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
+      /**
+       * Set only in the REST transcript when `result` holds the start and the
+       * end of a large output. `chars` is the full length. Load the full
+       * result with `GET /api/threads/:id/tool-output?entryId=&callId=`.
+       */
+      resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
   | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
 
@@ -1640,12 +1654,25 @@ export interface ForkThreadRequest {
    * the conversation up to just before it, and `draft` returns its text.
    */
   entryId: string;
+  /** "here" (the default) keeps the source's workspace and audience.
+   * "private" copies a team thread into the caller's private threads. */
+  destination?: "here" | "private";
 }
 
 export interface ForkThreadResponse {
   thread: ThreadSummary;
+  /** The new thread's workspace: "user" or a team id, for `/chat?workspace=`. */
+  workspace: string;
   /** The branched user message's text, for the new thread's composer. */
   draft?: string;
+}
+
+/** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
+export interface MoveThreadRequest {
+  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  to: "private" | { teamId: string };
+  /** Required to move into a team, which then reads the thread. */
+  confirm?: true;
 }
 
 /** `POST /api/threads/:threadId/branch/return`. */
@@ -1883,6 +1910,9 @@ export type WireEvent =
       type: "status";
       threadId: string;
       status: "idle" | "queued" | "thinking" | "tool_calling" | "streaming" | "blocked_on_decision_gate" | "error";
+      /** When the running submission was claimed. A replayed frame arrives
+       * with the replay time, so the start comes from here. */
+      turnStartedAt?: number;
     }
   | {
       seq: number;
@@ -1899,6 +1929,23 @@ export type WireEvent =
       code: string;
       message: string;
       recoverable: boolean;
+    }
+  | {
+      /**
+       * A failed model call the turn retries: progress for the working line,
+       * not an error. See the engine's `turn_retry` event.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "turn_retry";
+      threadId: string;
+      action: "retry" | "fallback";
+      provider: string;
+      reason: ProviderFailureKind;
+      attempt?: number;
+      maxAttempts?: number;
+      waitMs?: number;
+      toProvider?: string;
     }
   | {
       seq: number;
@@ -2647,6 +2694,8 @@ export interface WorkflowRunConversation {
   threadId: string;
   title?: string;
   nodeId?: string;
+  /** The foreach entry a step's own thread ran, from 0. Absent for other threads. */
+  iteration?: number;
 }
 
 /**
@@ -3142,9 +3191,9 @@ export interface ListWorkflowTemplatesResponse {
 export interface InstallWorkflowTemplateRequest {
   /**
    * Values for `WorkflowTemplateSummary.inputs`, written into the installed
-   * definition. A scheduled run applies no `dataSchema` defaults, so a
-   * parameter the schedule needs is baked in here rather than read from the
-   * trigger at run time.
+   * definition. A scheduled run fills a field only from the schedule's input
+   * or the field's `dataSchema` default, so a parameter the schedule needs is
+   * baked in here rather than read from the trigger at run time.
    */
   inputs?: Record<string, unknown>;
   /**
@@ -3543,8 +3592,10 @@ export interface PluginServiceSummary {
    * array is the honest report that this token unlocks nothing, and the UI
    * says so instead of inventing a list.
    *
-   * Always empty for a `dynamic` service: its actions do not exist until a
-   * credential is connected and the upstream server is asked.
+   * For a `dynamic` service, empty until a credential is connected: then
+   * the tools the upstream server listed for this owner, TTL-cached
+   * server-side, in the same shape as static actions, so the Policies
+   * combobox offers them. Empty again when the listing fails or times out.
    */
   actions: PluginActionSummary[];
 }
@@ -4198,6 +4249,8 @@ export interface ArtifactCommentWire {
   id: string;
   /** Element anchor; null = a page-level comment. */
   vdid: string | null;
+  /** The anchored element's leading text when the comment was written. */
+  anchorLabel: string | null;
   /** Root-thread id; null = this IS a root. One level of nesting. */
   parentId: string | null;
   body: string;
@@ -4222,9 +4275,23 @@ export interface ListArtifactCommentsResponse {
   canResolveAll: boolean;
 }
 
+/** `GET /api/artifacts/:id/comments`: the comments on one artifact for an
+ * agent or API caller, addressed by artifact id or link token. */
+export interface ArtifactCommentsResponse {
+  artifact: { id: string; title: string; url: string; version: number };
+  /** Root comments, oldest first, each with its replies. */
+  threads: ArtifactCommentThreadWire[];
+}
+
+export interface ArtifactCommentThreadWire extends ArtifactCommentWire {
+  replies: ArtifactCommentWire[];
+}
+
 export interface AddArtifactCommentRequest {
   body: string;
   vdid?: string;
+  /** The picked element's text label, stored with the anchor. */
+  anchorLabel?: string;
   parentId?: string;
   /** Also deliver the comment into the artifact's source session as a
    * prompt. Requires session view access; when the caller lacks it the
@@ -6616,6 +6683,10 @@ export interface CliDeviceCodeResponse {
   expires_in: number;
   /** Seconds between polls. */
   interval: number;
+  /** The request type the instance recorded. An instance without `valet
+   * proxy setup` support omits it, and the CLI stops before the person
+   * approves a sign-in it did not ask for. */
+  purpose?: CliDevicePurpose;
 }
 
 /** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
@@ -6632,9 +6703,35 @@ export interface CliDeviceInfo {
   /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
   device: string;
   user_code: string;
+  /** `login` for `valet login`; `proxy-key` for `valet proxy setup`. */
+  purpose: CliDevicePurpose;
+  /** The name of the key a `proxy-key` request creates. */
+  key_name?: string;
   access: string[];
   /** What the CLI cannot do. */
   limits: string[];
+}
+
+export type CliDevicePurpose = "login" | "proxy-key";
+
+/** `GET /api/proxy/keys/:id` — a proxy key the caller owns that still works. */
+export interface ProxyKeyStatusResponse {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  created_at: number;
+}
+
+/** `POST /api/cli/device/token` response for an approved `proxy-key`
+ * request. The secret `key` appears only in this response. */
+export interface CliProxyKeyResponse {
+  proxy_key: {
+    id: string;
+    key: string;
+    name: string;
+    /** Epoch ms. */
+    created_at: number;
+  };
 }
 
 /** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */
@@ -6647,7 +6744,8 @@ export interface AgentAccessResponse {
 export interface ExternalUsageResponse {
   classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
-  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  /** `errors`: the most common error codes among the tool's failed calls. */
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number; errors: { code: string; calls: number }[] }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
   detailsVisible: boolean;
   recent: {

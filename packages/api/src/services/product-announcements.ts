@@ -32,7 +32,7 @@ async function hasExistingWorkflowThread(deps: AnnouncementDeps, userId: string,
           OR s.owner_type='team' AND EXISTS (
             SELECT 1 FROM team_members tm JOIN teams team ON team.id=tm.team_id
             WHERE tm.team_id=s.owner_id AND tm.user_id=${userId} AND team.org_id=${orgId}))
-        AND (t.key ~ '^(signal:workflow:|slack-events:[^:]+:workflow:)[A-Za-z0-9_-]+$'
+        AND (t.key ~ '^(signal:workflow:|slack-events:[^:]+:workflow:)[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+(:[1-9][0-9]*)?)?$'
           OR s.id ~ '^wf:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+(:[0-9]+)?$')
         AND t.id > ${afterId}
       ORDER BY t.id LIMIT 100`) as { rows: Array<{ id: string; session_id: string; owner_type: string }> };

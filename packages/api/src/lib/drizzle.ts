@@ -428,6 +428,12 @@ SELECT id FROM base UNION ALL SELECT id FROM repo`;
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
+  { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (
+    "org_id" text NOT NULL, "user_id" text NOT NULL, "session_id" text NOT NULL,
+    "channel_type" text NOT NULL, "conversation_key" text NOT NULL, "thread_id" text NOT NULL,
+    "created_at" bigint NOT NULL,
+    PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+  )` },
   { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
   { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
@@ -817,6 +823,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "cli_tokens.prev_refresh_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_refresh_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_refresh_hash" text' },
   { describe: "cli_tokens.rotated_at column", probe: { kind: "column", table: "cli_tokens", column: "rotated_at" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "rotated_at" bigint' },
   { describe: "cli_device_requests_expires", probe: { kind: "index", index: "cli_device_requests_expires" }, sql: 'CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");' },
+  { describe: "cli_device_requests.purpose column", probe: { kind: "column", table: "cli_device_requests", column: "purpose" }, sql: `ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "purpose" text NOT NULL DEFAULT 'login'` },
+  { describe: "cli_device_requests.key_name column", probe: { kind: "column", table: "cli_device_requests", column: "key_name" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "key_name" text' },
+  { describe: "cli_device_requests.requested_by column", probe: { kind: "column", table: "cli_device_requests", column: "requested_by" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "requested_by" text REFERENCES "user"("id") ON DELETE cascade' },
 
   {
     describe: "action_invocations.thread_id column",
@@ -1273,6 +1282,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       "artifact_id" text NOT NULL,
       "version" bigint NOT NULL,
       "vdid" text,
+      "anchor_label" text,
       "parent_id" text,
       "body" text NOT NULL,
       "author_user_id" text NOT NULL,
@@ -1287,6 +1297,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "index", index: "artifact_comments_artifact" },
     sql: 'CREATE INDEX IF NOT EXISTS "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")',
   },
+  { describe: "artifact_comments.anchor_label column", probe: { kind: "column", table: "artifact_comments", column: "anchor_label" }, sql: 'ALTER TABLE "artifact_comments" ADD COLUMN IF NOT EXISTS "anchor_label" text' },
   {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
     // the model catalog to the bundled compile-time list, so a deployment

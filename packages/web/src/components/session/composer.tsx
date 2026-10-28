@@ -1086,7 +1086,7 @@ export function Composer({
           inputRef.current?.focus({ preventScroll: true });
         }}
         className={cn(
-          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
+          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm [container-type:inline-size] transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
           expanded ? "p-2" : "p-1",
         )}
       >
@@ -1231,8 +1231,11 @@ export function Composer({
                 </Button>
               </>
             )}
-            <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden")}>
-              <span className="hidden sm:inline">
+            {/* The box's width decides, not the viewport's: the Ask Valet dock
+                is narrow on a wide screen, and a wrapped hint stacked one word
+                per line between the buttons. */}
+            <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", !expanded && "hidden")}>
+              <span className="hidden [@container(min-width:34rem)]:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
                 {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>

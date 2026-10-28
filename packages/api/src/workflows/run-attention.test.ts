@@ -376,6 +376,36 @@ describe("buildRunThreadArchive", () => {
     expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining([expect.objectContaining({ id: thread.id, archivedAt: 5_000 })]));
   });
 
+  it("archives each step's own thread with the run's, and evicts a team run execution that only steps used", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Step archive", creatorUserId: LOCAL_USER.id });
+    await db.insert(workflowDefinitions).values({ id: "wf_steps", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Step archive", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_steps", { workflowId: "wf_steps", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const entries = await Promise.all([0, 1].map(async (iteration) => {
+      const receipt = await deps.promptOrchestrator("check one", {
+        dispatchId: `workflow:run_steps:each${iteration > 0 ? `:${iteration}` : ""}`, queueMode: "followup",
+        ownerHint: { ownerType: "team", ownerId: team.id }, stepThread: { nodeId: "each", iteration },
+      });
+      await workflowStore.putIntent({ runId: "run_steps", nodeId: "each", iteration, status: "intent", attempt: 1, createdAt: Date.now(),
+        effects: { sessionId: receipt.sessionId, receipt: { threadId: receipt.threadId, queueItemId: receipt.queueItemId }, repairAttempted: false } });
+      await engineStore.forceSettle(receipt.sessionId, receipt.queueItemId, "aborted");
+      return receipt;
+    }));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).not.toBeNull();
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost })(settledRun("run_steps", "wf_steps"));
+
+    expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining(entries.map((entry) =>
+      expect.objectContaining({ id: entry.threadId, sessionId: entry.sessionId, archivedAt: 5_000 }))));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).toBeNull();
+  });
+
   it("keeps the thread of a run that settled while its assistant turn is unsettled", async () => {
     // An orchestrator node with `wait: { mode: "none" }` completes its
     // checkpoint at dispatch, so the run can settle while the prompt is

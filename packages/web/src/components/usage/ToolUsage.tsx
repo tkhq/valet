@@ -7,6 +7,11 @@ import { IntentKeys } from "./IntentKeys";
 const SURFACES = [{ id: "all", label: "All surfaces" }, { id: "hosted", label: "Hosted" }, { id: "mcp", label: "MCP" }, { id: "cli", label: "CLI" }] as const;
 type Surface = (typeof SURFACES)[number]["id"];
 const LABELS = { hosted: "Hosted", mcp: "MCP", cli: "CLI" };
+/** Error codes from `call_tool` and the MCP and CLI surfaces, in words. */
+const ERROR_LABELS: Record<string, string> = {
+  action_failed: "Tool failed", missing_credential: "Not connected", unknown: "No such tool", invalid_args: "Invalid input",
+  service_unavailable: "Service unavailable", resolve_failed: "Tools did not load", unspecified: "No reason recorded",
+};
 const COLORS = { hosted: "fill-moss", mcp: "fill-accent-500", cli: "fill-muted" };
 
 function CallsChart({ daily }: { daily: ExternalUsageResponse["daily"] }) {
@@ -75,7 +80,8 @@ export function ToolUsage({ period, scope, teamId }: { period: UsagePeriodSelect
               </tr></thead><tbody>{data.tools.map(row => <tr key={`${row.surface}:${row.name}`} className="border-t border-line hover:bg-ink-wash">
                 <td className="px-5 py-3"><div className="break-all font-medium text-ink">{row.name}</div><div className="mt-1 text-xs text-muted">{LABELS[row.surface]}</div></td>
                 <td className="px-3 py-3 text-right tabular-nums">{row.calls.toLocaleString()}</td>
-                <td className="px-3 py-3 text-right tabular-nums text-muted">{(row.errorRate * 100).toFixed(1)}%</td>
+                <td className="px-3 py-3 text-right tabular-nums text-muted">{(row.errorRate * 100).toFixed(1)}%
+                  {row.errors.map(error => <div key={error.code} className="mt-1 whitespace-nowrap text-xs">{ERROR_LABELS[error.code] ?? error.code} {error.calls.toLocaleString()}</div>)}</td>
                 <td className="px-5 py-3 text-right tabular-nums text-muted">{row.uniqueUsers.toLocaleString()}</td>
               </tr>)}</tbody></table></div>}
           </Card>

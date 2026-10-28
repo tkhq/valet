@@ -9,7 +9,7 @@ import { visibleThreadIds } from "./thread-access.js";
 import { getTeamInOrg, isTeamMember } from "./teams.js";
 import type { ToolUsageFact } from "@valet/shared";
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, externalCalls, mcpClientInfo, sessionThreads, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { UsageScope } from "./usage.js";
@@ -98,7 +98,7 @@ export async function getExternalUsage(db: AppDb, opts: {
   const where = and(baseWhere, intentKeyFilter(opts.key));
   const classification = await toolIntentUsage(db, scope.orgId, baseWhere, opts.canManage ?? false, registry);
   const detailsVisible = scope.scope !== "team" || scope.byMember;
-  const [daily, tools, clients] = await Promise.all([
+  const [daily, toolRows, clients] = await Promise.all([
     db.select({ dayMs: sql<number>`floor(${externalCalls.createdAt}::numeric / 86400000) * 86400000`.mapWith(Number),
       surface: externalCalls.surface, calls: sql<number>`count(*)`.mapWith(Number) }).from(externalCalls)
       .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
@@ -112,6 +112,15 @@ export async function getExternalUsage(db: AppDb, opts: {
       .leftJoin(intentLabelJoin, intentLabelOn).where(where).groupBy(externalCalls.clientName, externalCalls.clientVersion, externalCalls.surface)
       .orderBy(sql`count(*) desc`, externalCalls.clientName, externalCalls.clientVersion).limit(25),
   ]);
+  // Why the listed tools failed: an error rate alone does not say whether to
+  // connect an account, fix a tool id, or fix the tool.
+  const errorRows = toolRows.length === 0 ? [] : await db.select({ name: externalCalls.name, surface: externalCalls.surface,
+    code: sql<string>`coalesce(${externalCalls.errorCode}, 'unspecified')`, calls: sql<number>`count(*)`.mapWith(Number) })
+    .from(externalCalls).leftJoin(intentLabelJoin, intentLabelOn)
+    .where(and(where, eq(externalCalls.outcome, "error"), inArray(externalCalls.name, toolRows.map(row => row.name))))
+    .groupBy(externalCalls.name, externalCalls.surface, sql`3`).orderBy(sql`count(*) desc`, sql`3`);
+  const tools = toolRows.map(row => ({ ...row, errors: errorRows
+    .filter(error => error.name === row.name && error.surface === row.surface).slice(0, 3).map(({ code, calls }) => ({ code, calls })) }));
   const counts = new Map(daily.map(row => [`${row.dayMs}:${row.surface}`, row.calls]));
   const filledDaily: ExternalUsageResponse["daily"] = [];
   for (let dayMs = Math.floor(period.startMs / 86400000) * 86400000; dayMs < period.endMs; dayMs += 86400000) {

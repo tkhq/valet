@@ -4,6 +4,7 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { useEffect } from "react";
 import { threadOriginBucket } from "~/lib/thread-origin";
 import { isAppAssistantThread } from "~/lib/thread-default";
 import {
@@ -25,6 +26,7 @@ import type {
   CreateThreadResponse,
   EditPreviewResponse,
   ForkThreadResponse,
+  MoveThreadRequest,
   ReturnToBranchResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
@@ -100,6 +102,17 @@ export function threadListFilters(sessionId: string) {
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────
+
+/** Starts loading a session's detail, which the thread view needs before it can show the thread. */
+export function prefetchSession(qc: QueryClient, id: string) {
+  void qc.prefetchQuery({ queryKey: qk.session(id), queryFn: () => api.getSession(id), staleTime: 15_000 });
+}
+
+/** Starts a session's detail as soon as its id is known. */
+export function usePrefetchSession(id: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (id) prefetchSession(qc, id); }, [qc, id]);
+}
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
@@ -203,14 +216,49 @@ export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<Li
   });
 }
 
+/** A thread opens with its newest entries; older ones load when the reader scrolls up. */
+export const TRANSCRIPT_TAIL = 50;
+export const TRANSCRIPT_FULL = 200;
+
+/** Keyed by thread alone, so a request can start before the thread's
+ * session is known: from the chat route's URL, or from a sidebar hover. */
+const qkTranscript = (threadId: string, limit: number) => ["thread-transcript", threadId, limit] as const;
+const transcriptQuery = (threadId: string, limit: number) => ({
+  queryKey: qkTranscript(threadId, limit),
+  queryFn: () => api.listMessages("", { limit, threadId }),
+});
+
+/** Starts loading a thread's newest page; a later `useMessages` shares the request or its answer. */
+export function prefetchTranscript(qc: QueryClient, threadId: string) {
+  void qc.prefetchQuery({ ...transcriptQuery(threadId, TRANSCRIPT_TAIL), staleTime: 15_000 });
+}
+
+/** Starts a thread's transcript as soon as its id is known, such as from the URL. */
+export function usePrefetchTranscript(threadId: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (threadId) prefetchTranscript(qc, threadId); }, [qc, threadId]);
+}
+
 export function useMessages(
   id: string,
   threadId?: string,
   opts?: Partial<UseQueryOptions<ListMessagesResponse>>,
+  limit: number = TRANSCRIPT_TAIL,
 ) {
+  const qc = useQueryClient();
+  // A workflow step's transcript has no thread route, so it has no early request.
+  const early = threadId && !id.startsWith("wf:") ? transcriptQuery(threadId, limit) : undefined;
   return useQuery<ListMessagesResponse>({
-    queryKey: qk.messages(id, threadId),
-    queryFn: () => api.listMessages(id, { limit: 200, threadId }),
+    queryKey: [...qk.messages(id, threadId), limit],
+    // Joins a prefetch still in flight; every later fetch reads the server.
+    queryFn: () => early ? qc.fetchQuery({ ...early, staleTime: 0 }) : api.listMessages(id, { limit, threadId }),
+    // A finished prefetch shows at once, with its own age.
+    initialData: early ? () => qc.getQueryData<ListMessagesResponse>(early.queryKey) : undefined,
+    initialDataUpdatedAt: early ? () => qc.getQueryState(early.queryKey)?.dataUpdatedAt : undefined,
+    // The newest page stays on screen while the full history loads. Another
+    // thread's data never stands in for this one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === id && previousQuery?.queryKey[3] === threadId ? previous : undefined,
     enabled: !!id,
     // Background refetches (window focus, network reconnect) would call
     // setThreadMessages and risk wiping in-flight optimistic / live state.
@@ -823,12 +871,34 @@ export function useCancelQueuedItem() {
  * the thread list; the caller opens it. */
 export function useForkThread(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string }>({
-    mutationFn: ({ threadId, entryId }) => api.forkThread(threadId, { entryId }),
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string; destination?: "here" | "private" }>({
+    mutationFn: ({ threadId, entryId, destination }) => api.forkThread(threadId, { entryId, ...(destination ? { destination } : {}) }),
     onSuccess: (result) => {
       void qc.invalidateQueries(threadListFilters(sessionId));
       if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
     },
+  });
+}
+
+/** Moves a thread into another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * The source is archived; the caller opens the copy. */
+export function useMoveThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string } & MoveThreadRequest>({
+    mutationFn: ({ threadId, ...body }) => api.moveThread(threadId, body),
+    // The copy joins another workspace's list, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Which workspace holds a thread, for a link to a thread outside the open one. */
+export function useThreadWorkspace(threadId: string | undefined) {
+  return useQuery({
+    queryKey: ["thread-address", threadId],
+    queryFn: () => api.getThreadAddress(threadId!),
+    enabled: !!threadId,
+    staleTime: 60_000,
+    select: (address) => address.workspace,
   });
 }
 

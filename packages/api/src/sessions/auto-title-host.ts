@@ -10,6 +10,7 @@ import {
   type AutoTitleInput,
   type AutoTitleResult,
   type Namer,
+  skipsAutoTitle,
 } from "./auto-title.js";
 
 export interface AutoTitleHostDeps {
@@ -38,8 +39,10 @@ export function createAutoTitleHost(deps: {
 }): AutoTitleHost {
   return new AutoTitleHost({
     eventStream: deps.eventStream,
-    title: (input) =>
-      autoTitle(
+    title: async (input) => {
+      // Home is a place with one name, so it never spends a naming call.
+      if (input.threadId && skipsAutoTitle(await deps.engineStore.getThread(input.sessionId, input.threadId))) return { ok: false, reason: "home_thread" };
+      return autoTitle(
         {
           db: deps.db,
           ...(deps.namer ? { namer: deps.namer } : {}),
@@ -57,7 +60,8 @@ export function createAutoTitleHost(deps: {
           },
         },
         input,
-      ),
+      );
+    },
   });
 }
 

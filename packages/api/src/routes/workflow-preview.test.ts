@@ -305,13 +305,13 @@ describe("POST /api/workflows/:id/preview — step design", () => {
     expect(nodeNamed(response, "finish").warnings.join(" ")).not.toContain("approval");
   });
 
-  it("warns when a step reads a trigger field that the workflow's schedule sends under trigger.data.input", async () => {
+  it("warns when a step reads a trigger field that the workflow also reads under trigger.data.input, once a schedule starts it", async () => {
     api = await bootTestApi();
     const created = await createWorkflow(api.baseUrl, {
       version: "dag/v1",
       nodes: [
         { id: "trigger", type: "trigger" },
-        { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
+        { id: "refresh", type: "session", mode: "start", prompt: "Scheduled push: {{trigger.data.input.push}}. If {{trigger.data.push}} is true, save the report." },
       ],
       edges: [{ from: "trigger", to: "refresh" }],
     });

@@ -149,7 +149,7 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
   // refreshed a profile, and saving the startup copy would undo that.
   await updateConfig((current) => ({
     ...withoutPending(current, name),
-    profiles: { ...(current.profiles ?? {}), [name]: profile },
+    profiles: { ...(current.profiles ?? {}), [name]: withProxyKeys(profile, current.profiles?.[name]) },
     defaultProfile: name,
   }));
 
@@ -162,6 +162,21 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
  * Lazily imports `node:readline` so non-`login` commands never pay for it and
  * the module stays side-effect-free on import.
  */
+/**
+ * Carry `valet proxy setup` keys over to the new sign-in. A harness key
+ * helper reads them, and signing in again is how a person recovers an
+ * expired CLI sign-in. Keys for another URL do not belong to the new
+ * profile: they are dropped with a warning, since only that instance can
+ * revoke them.
+ */
+export function withProxyKeys(next: ProfileConfig, previous: ProfileConfig | undefined): ProfileConfig {
+  if (!previous?.proxyKeys) return next;
+  const sameInstance = previous.url.replace(/\/$/, "") === next.url.replace(/\/$/, "");
+  if (sameInstance) return { ...next, proxyKeys: previous.proxyKeys };
+  printErr(`warning: the old profile had proxy keys for ${previous.url}. They still work. Revoke them in that instance's Settings > API keys.`);
+  return next;
+}
+
 /** `config` without a waiting sign-in for profile `name`. */
 function withoutPending(config: ValetConfig, name: string): ValetConfig {
   const { [name]: _ended, ...rest } = config.pendingLogins ?? {};

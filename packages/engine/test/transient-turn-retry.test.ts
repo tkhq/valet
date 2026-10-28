@@ -15,8 +15,8 @@ import {
   InMemorySessionStore,
   MESSAGE_TURN_ERROR_KEY,
   VirtualSandboxProvider,
-  formatTransientRetryMessage,
   parseProviderRetryHintMs,
+  turnRetryWaitMs,
   type BusEvent,
   type MessageEntry,
   type PromptContent,
@@ -39,6 +39,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+describe("turnRetryWaitMs", () => {
+  it("moves the backoff by up to 25% either way", () => {
+    // Threads on one provider key fail together; equal waits would make
+    // them retry together and fail together again.
+    expect(turnRetryWaitMs(10_000, undefined, () => 0)).toBe(7_500);
+    expect(turnRetryWaitMs(10_000, undefined, () => 0.5)).toBe(10_000);
+    expect(turnRetryWaitMs(10_000, undefined, () => 1)).toBe(12_500);
+  });
+
+  it("never waits less than the provider's hint", () => {
+    expect(turnRetryWaitMs(2_000, 8_000, () => 0)).toBe(8_000);
+    expect(turnRetryWaitMs(2_000, 8_000, () => 1)).toBe(10_000);
+  });
+});
 
 // The classifier is pi-ai's, not ours — these tests document the
 // dependency behavior the retry relies on, so a pi-ai upgrade that shifts
@@ -71,60 +86,6 @@ describe("isRetryableAssistantError (pi-ai taxonomy, TKAI-319)", () => {
     expect(
       isRetryableAssistantError(errored("reached its monthly limit of 1,500 requests")),
     ).toBe(true);
-  });
-});
-
-// Message copy the retry event carries (TKAI-325). The old text embedded
-// the provider's raw JSON error blob verbatim and named no corrective
-// action — these tests pin the replacement.
-describe("formatTransientRetryMessage (TKAI-325)", () => {
-  const rawAnthropicError =
-    '{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CeecukWxUPBswkk1ZCLgg"}';
-
-  it("names the upstream cause, the wait, the counter, and the corrective action — never the raw JSON", () => {
-    const msg = formatTransientRetryMessage({
-      provider: "anthropic",
-      errorMessage: rawAnthropicError,
-      waitMs: 30_000,
-      attempt: 2,
-      maxAttempts: 2,
-    });
-    expect(msg).toContain("Anthropic's API");
-    expect(msg).toContain("30s");
-    expect(msg).toContain("attempt 2/2");
-    expect(msg).toContain("If retries fail");
-    expect(msg).toContain("switch to a different model");
-    expect(msg).toContain("req_011CeecukWxUPBswkk1ZCLgg");
-    // No raw JSON — a support escalation only needs the request id.
-    expect(msg).not.toContain('"type":"error"');
-    expect(msg).not.toContain("overloaded_error");
-    expect(msg).not.toContain("{");
-  });
-
-  it("omits the request ID clause when the upstream error carries none", () => {
-    const msg = formatTransientRetryMessage({
-      provider: "openai",
-      errorMessage: "429 rate limit exceeded",
-      waitMs: 10_000,
-      attempt: 1,
-      maxAttempts: 2,
-    });
-    expect(msg).toContain("Openai's API");
-    expect(msg).toContain("If retries fail, switch to a different model");
-    expect(msg).not.toContain("request ID");
-  });
-
-  it("handles a missing error message without crashing", () => {
-    const msg = formatTransientRetryMessage({
-      provider: "anthropic",
-      errorMessage: undefined,
-      waitMs: 10_000,
-      attempt: 1,
-      maxAttempts: 2,
-    });
-    expect(msg).toContain("Anthropic's API");
-    expect(msg).toContain("attempt 1/2");
-    expect(msg).not.toContain("request ID");
   });
 });
 
@@ -178,18 +139,13 @@ describe("turn-level transient retry (TKAI-319)", () => {
       (e) => e.type === "message" && e.role === "assistant",
     );
     expect(lastAssistant?.type === "message" && lastAssistant.content).toBe("recovered response");
-    // The retry announced itself with human-readable text — no raw JSON,
-    // provider named, corrective action stated (TKAI-325).
-    const retryEvent = events.find(
-      (e) => e.event.type === "error" && e.event.code === "turn_transient_retry",
-    )?.event;
-    expect(retryEvent).toBeDefined();
-    if (retryEvent && retryEvent.type === "error") {
-      expect(retryEvent.error).toContain("API");
-      expect(retryEvent.error).toContain("If retries fail");
-      expect(retryEvent.error).not.toContain('"type":"error"');
-      expect(retryEvent.error).not.toContain("{");
-    }
+    // The retry is progress, not an error: no error event, and the event
+    // names the provider, the reason and the attempt for the working line.
+    const retryEvent = events.find((e) => e.event.type === "turn_retry")?.event;
+    expect(retryEvent).toMatchObject({ action: "retry", reason: "overloaded", attempt: 1, maxAttempts: 2 });
+    // Only the failed call's own "error" event, which clients treat as not
+    // yet a failed turn. The retry itself sends no error.
+    expect(events.filter((e) => e.event.type === "error" && e.event.code !== "error").map((e) => e.event)).toEqual([]);
     faux.unregister();
   });
 
@@ -216,11 +172,11 @@ describe("turn-level transient retry (TKAI-319)", () => {
     await waitFor(
       () =>
         events.filter(
-          (e) => e.event.type === "error" && e.event.code === "turn_transient_retry",
+          (e) => e.event.type === "turn_retry" && e.event.action === "retry",
         ).length >= 2,
     );
     const retries = events.filter(
-      (e) => e.event.type === "error" && e.event.code === "turn_transient_retry",
+      (e) => e.event.type === "turn_retry" && e.event.action === "retry",
     );
     expect(retries).toHaveLength(2);
     faux.unregister();
@@ -250,7 +206,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
     await session.thread().resume();
     await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === first.queueItemId));
     expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome?.outcome).toBe("failed");
-    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    expect(events.some((e) => e.event.type === "turn_retry" && e.event.action === "retry")).toBe(false);
     await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === queued.queueItemId));
     expect((await store.getQueueItem(session.id, queued.queueItemId))?.outcome?.outcome).toBe("completed");
     expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
@@ -284,7 +240,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
     const receipt = await session.prompt("do the thing", { author: { id: "u" } });
     await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId));
     expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("completed");
-    const retries = events.filter((e) => e.event.type === "error" && e.event.code === "turn_transient_retry");
+    const retries = events.filter((e) => e.event.type === "turn_retry" && e.event.action === "retry");
     expect(retries).toHaveLength(1);
     const entries = await store.getEntries(session.id, receipt.threadId);
     const lastAssistant = [...entries].reverse().find((e) => e.type === "message" && e.role === "assistant");
@@ -332,7 +288,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
     const receipt = await session.prompt("do the thing", { author: { id: "u" } });
     await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId));
     expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("failed");
-    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    expect(events.some((e) => e.event.type === "turn_retry" && e.event.action === "retry")).toBe(false);
     expect(faux.getPendingResponseCount()).toBe(1);
     faux.unregister();
   });

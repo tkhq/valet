@@ -96,7 +96,7 @@ mePolicyOverridesRouter.get("/", async (c) => {
 // ── PUT /api/me/policy-overrides — upsert by target ──────────────────────
 
 mePolicyOverridesRouter.put("/", async (c) => {
-  const { db, actionPluginByService } = c.var.providers;
+  const { db, actionPluginByService, serviceProbes } = c.var.providers;
   const user = c.var.user;
 
   let body: PutPolicyOverrideRequest;
@@ -140,7 +140,9 @@ mePolicyOverridesRouter.put("/", async (c) => {
       paramMatchers,
       now: Date.now(),
     },
-    actionPluginByService,
+    // The caller's own listing verifies a dynamic (MCP) tool: the tools
+    // their credential gets are the tools a session of theirs would call.
+    { actionPluginByService, dynamicActions: serviceProbes.listedActionsFor({ type: "user", id: user.id }) },
   );
   if (!result.ok) return c.json({ error: result.error }, 400);
 
@@ -228,7 +230,7 @@ meGrantsRouter.delete("/", async (c) => {
 // ── GET /api/me/tool-permissions — effective mode per catalog action ─────
 
 meToolPermissionsRouter.get("/", async (c) => {
-  const { db, actionPluginByService } = c.var.providers;
+  const { db, actionPluginByService, serviceProbes } = c.var.providers;
   const user = c.var.user;
   const service = c.req.query("service");
   const teamId = c.req.query("teamId");
@@ -240,7 +242,16 @@ meToolPermissionsRouter.get("/", async (c) => {
   if (service !== undefined && actionPlugins.length === 0) {
     return c.json({ error: `No tools for service "${service}". Check the service name in /api/plugins.` }, 404);
   }
-  const tools = await listToolPermissions(db, { orgId: user.orgId, userId: user.id, ...(teamId ? { teamId } : {}) }, actionPlugins, Date.now());
+  // A dynamic service's tools are the ones its listing returns for the
+  // account the rows belong to: the team's for a team read, else the caller's.
+  const owner = teamId ? { type: "team" as const, id: teamId } : { type: "user" as const, id: user.id };
+  const tools = await listToolPermissions(
+    db,
+    { orgId: user.orgId, userId: user.id, ...(teamId ? { teamId } : {}) },
+    actionPlugins,
+    Date.now(),
+    serviceProbes.listedActionsFor(owner),
+  );
   const resp: ListToolPermissionsResponse = { tools };
   return c.json(resp);
 });

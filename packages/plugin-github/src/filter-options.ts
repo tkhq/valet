@@ -1,7 +1,6 @@
 import type { FilterOption, FilterOptionContext, FilterOptionResolver } from "@valet/engine";
 import { credentialSecret } from "@valet/engine";
-import { Octokit } from "octokit";
-import { resolveGithubApiUrl } from "./actions/api.js";
+import { githubOctokit } from "./actions/api.js";
 
 /**
  * Provider-populated filter-option resolvers for the GitHub plugin.
@@ -27,10 +26,6 @@ const MAX_OPTIONS = 100;
 function tokenFrom(ctx: FilterOptionContext): string | null {
   const token = credentialSecret(ctx.credential);
   return typeof token === "string" && token.length > 0 ? token : null;
-}
-
-function octokitFor(token: string): Octokit {
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
 }
 
 /** Case-insensitive substring match against the typeahead query. An empty
@@ -63,7 +58,7 @@ const reposResolver: FilterOptionResolver = async (ctx) => {
   const token = tokenFrom(ctx);
   if (!token) return [];
 
-  const octokit = octokitFor(token);
+  const octokit = githubOctokit(token);
   const options: FilterOption[] = [];
 
   try {
@@ -110,7 +105,7 @@ const branchesResolver: FilterOptionResolver = async (ctx) => {
   const owner = repo.slice(0, slash);
   const name = repo.slice(slash + 1);
 
-  const octokit = octokitFor(token);
+  const octokit = githubOctokit(token);
   const options: FilterOption[] = [];
 
   try {

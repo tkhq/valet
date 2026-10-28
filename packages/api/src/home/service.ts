@@ -177,7 +177,7 @@ export async function messageHomeTask(deps: HomeDeps, user: HomeUser, threadId: 
     workspace: { key: ws?.key ?? row.ownerId, name: ws?.name ?? "Workspace" }, ...(receipt.queueItemId ? { queueItemId: receipt.queueItemId } : {}) };
 }
 
-async function sessionFor(deps: HomeDeps, row: { ownerType: string; ownerId: string; sessionId: string; orgId: string; userId: string }): Promise<Session> {
+export async function sessionFor(deps: HomeDeps, row: { ownerType: string; ownerId: string; sessionId: string; orgId: string; userId: string }): Promise<Session> {
   const owner: Principal = row.ownerType === "team" ? { type: "team", id: row.ownerId } : { type: "user", id: row.ownerId };
   const meta = { actorUserId: row.userId, orgId: row.orgId };
   const root = await ensureDefaultAssistantSession(deps, owner, meta);

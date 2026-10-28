@@ -355,6 +355,7 @@ CREATE TABLE "artifact_comments" (
   "artifact_id" text NOT NULL,
   "version" bigint NOT NULL,
   "vdid" text,
+  "anchor_label" text,
   "parent_id" text,
   "body" text NOT NULL,
   "author_user_id" text NOT NULL,
@@ -367,6 +368,11 @@ CREATE INDEX "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")
 ```
 
 - `vdid` null means a page-level comment (no element selected).
+- `anchor_label` is the picked element's text as the popover showed it
+  (`label` from the picker, whitespace collapsed, capped at 160 characters).
+  The page supplies it, so it is plain text and can be false. It exists so an
+  agent that reads the comment can tell which element it is on. It is null
+  for a page-level comment.
 - `parent_id` threads replies under a root comment. One level: a reply's
   parent is always a root.
 - `version` records which version the commenter was looking at. Threads
@@ -387,8 +393,8 @@ knows its token) but resolve the caller themselves and 401 without one:
 
 - `GET /api/artifacts/:token/comments` — threads, plus each author's display
   name and `canSendToSession` for the caller.
-- `POST /api/artifacts/:token/comments` — `{ body, vdid?, parentId?,
-  sendToSession? }`.
+- `POST /api/artifacts/:token/comments` — `{ body, vdid?, anchorLabel?,
+  parentId?, sendToSession? }`.
 - `POST /api/artifacts/:token/comments/:commentId/resolve` — commenter,
   sharer, or org admin.
 
@@ -398,7 +404,7 @@ A comment with `sendToSession: true` is delivered into the artifact's
 `sourceSessionId` as a user prompt, attributed to the commenter:
 
 ```
-[artifact comment] on "<title>" (<element|page>): <body>
+[artifact comment] on "<title>" (<element "label"|element vdid|page>): <body>
 ```
 
 Authorization is **session view access** (`canViewSession`), the same check
@@ -410,6 +416,35 @@ lies about delivery.
 
 The comments response carries `canSendToSession` so the page shows the
 "Send to Claude"-style control only to callers whose send would succeed.
+
+### Agents read comments
+
+A comment that was not sent stays on the page, so an agent needs a way to
+read it. `GET /api/artifacts/:ref/comment-threads` is on the authed router.
+`:ref` is the artifact id or the link token. It returns the artifact's id,
+title, link, and current version, plus the root comments oldest first, each
+with its replies. It is not `/:token/comments`, because the public router is
+mounted first and owns that path.
+
+The route reads as the calling user: a session, a personal API key, an MCP
+client, or an internal tool call. An internal tool call reads as its
+`x-valet-actor` in this deployment's org. Access is the page's comment rule:
+the reader is a member of the artifact's org, `decideArtifactAccess` serves the
+page, and a team page needs team membership. The route also applies the list
+rule: a team page published from a thread the reader cannot see, such as
+another member's helper thread, answers 404. A team API key gets no access.
+
+Two tools use the route and share one digest
+(`lib/artifact-comment-digest.ts`): `artifact_comments` for the assistant
+(`orchestrator/memory-tools.ts`, `sideEffect: "none"`, `ownerOnly`) and
+`list_artifact_comments` for MCP clients. Each takes the page link, the
+token, or the id. For each thread the digest gives the author, time, what it
+is on (`page` or `element "<anchor_label>"`), the page version the commenter
+saw, open or resolved, whether it was sent to the agent, and the replies.
+
+A new comment does not notify the source thread unless the commenter sends it.
+Automatic notification needs a design for who may wake whose thread; it is
+not built.
 
 ### The picker
 

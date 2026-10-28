@@ -26,6 +26,7 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions, users } from "../schema/index.js";
 import { activeViewers } from "../services/active-viewers.js";
+import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
@@ -220,7 +221,7 @@ export function registerWsRoutes(
             if (lifecycle.closed) return;
             const engineSession = await providers.engineHost.sessionFor(sessionId, sessionMeta);
             if (lifecycle.closed) return;
-            await engineSession.ensureDefaultThread();
+            await ensureDefaultThreadWhereOwned(sessionId, engineSession);
             if (lifecycle.closed) return;
 
             if (row.ownerType === "team" && !guestOnly) {
@@ -288,7 +289,8 @@ export function registerWsRoutes(
               deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
               const agentStatus = thread.currentAgentStatus;
               if (agentStatus !== "idle") {
-                deliver(ws, { type: "status", threadId: thread.id, status: agentStatus });
+                const turnStartedAt = thread.currentTurnStartedAt;
+                deliver(ws, { type: "status", threadId: thread.id, status: agentStatus, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) });
               }
             }
 

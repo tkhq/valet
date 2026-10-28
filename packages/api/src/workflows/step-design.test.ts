@@ -28,6 +28,22 @@ describe("stepDesignWarnings", () => {
     expect(warnings.get("each")?.join(" ")).toContain("tool step");
   });
 
+  it("reports a foreach whose Thread entries run in parallel in one working directory", () => {
+    const body = { id: "fix", type: "orchestrator", prompt: "Fix the failing test.", thread: "step" };
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "parallel", type: "foreach", items: "{{trigger.data.repos}}", concurrency: 4, body },
+        { id: "serial", type: "foreach", items: "{{trigger.data.repos}}", body },
+      ],
+      edges: [],
+    };
+    const warnings = stepDesignWarnings(definition, []);
+    expect([...warnings.keys()]).toEqual(["parallel"]);
+    expect(warnings.get("parallel")?.join(" ")).toContain("share one working directory");
+  });
+
   it("says nothing for an allowed action, a tool step's own gate, or a step that does not ask", () => {
     expect(heldActionWarning({ ...held, mode: "allow" })).toBeUndefined();
     expect(heldActionWarning({ ...held, agentStep: undefined })).toBeUndefined();
@@ -39,10 +55,11 @@ describe("stepDesignWarnings", () => {
 describe("stepDesignWarnings: what a run reads and runs as", () => {
   const steps = (...nodes: Record<string, unknown>[]) => ({ version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, ...nodes], edges: [] });
 
-  it("warns when a step reads a trigger field that a schedule sends under trigger.data.input", () => {
+  it("warns when a step reads a trigger field that the workflow also reads under trigger.data.input", () => {
     const definition = steps(
       { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
       { id: "each", type: "foreach", items: "{{trigger.data.input.rows}}", body: { type: "tool", service: "slack", action: "post_message", params: { channel: "{{trigger.data.channel}}" } } },
+      { id: "note", type: "session", mode: "start", prompt: "Scheduled push {{trigger.data.input.push}} to {{trigger.data.input.channel}}." },
     );
     const warnings = stepDesignWarnings(definition, [], { schedules: ["Nightly refresh"] });
     expect([...warnings.keys()].sort()).toEqual(["each", "refresh"]);
@@ -57,7 +74,7 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
       nodes: [
         { id: "trigger", type: "trigger" },
         { id: "gate", type: "if", conditions: [{ left: "trigger.data.dryRun", dataType: "boolean", operation: "false" }] },
-        { id: "publish", type: "session", mode: "start", prompt: "Publish the report." },
+        { id: "publish", type: "session", mode: "start", prompt: "Publish the report (scheduled dry run {{trigger.data.input.dryRun}}, limit {{trigger.data.input.limit}})." },
       ],
       edges: [{ from: "trigger", to: "gate" }, { from: "gate", to: "publish", when: "trigger.data.limit > 0" }],
     };
@@ -74,6 +91,8 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
   it("stays quiet with no schedule, a read that covers both paths, or a field the schedule sets itself", () => {
     const read = (prompt: string) => steps({ id: "refresh", type: "session", mode: "start", prompt });
     expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), []).size).toBe(0);
+    // A scheduled run copies its input to trigger.data.push, so a top-level read works.
+    expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), [], { schedules: ["Nightly"] }).size).toBe(0);
     expect(stepDesignWarnings(read("Push: {{trigger.data.input.push || trigger.data.push}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
     expect(stepDesignWarnings(read("{{trigger.data.scheduleName}} fired at {{trigger.data.cron}} with {{trigger.data.input}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
   });
@@ -94,6 +113,27 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
     expect(stepDesignWarnings(definition, [], { ownerType: "org" }).get("refresh")?.join(" ")).toContain("Vercel");
     expect(stepDesignWarnings(definition, [], { ownerType: "user" }).size).toBe(0);
     expect(stepDesignWarnings(definition, []).size).toBe(0);
+  });
+});
+
+describe("stepDesignWarnings: steps that make the output drift", () => {
+  it("reports an agent step that builds a foreach list and a model step that rewrites a draft", () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "inventory", type: "session", mode: "start", prompt: "List the merged PRs.", toolScope: { actions: ["github.search_issues"] } },
+        { id: "qualify", type: "foreach", items: "{{nodes.inventory.result.output.prs}}", body: { type: "llm", prompt: "{{item.title}}" } },
+        { id: "assemble", type: "llm", prompt: "Write the report from {{nodes.qualify.result.items}}." },
+        { id: "revise", type: "llm", prompt: "Verify and revise {{nodes.assemble.result.output}}." },
+        { id: "post", type: "tool", service: "slack", action: "send_message", params: { text: "{{nodes.revise.result.output.text}}" } },
+      ],
+      edges: [],
+    };
+    const warnings = stepDesignWarnings(definition, []);
+    expect([...warnings.keys()].sort()).toEqual(["inventory", "revise"]);
+    expect(warnings.get("inventory")?.join(" ")).toContain("tool step");
+    expect(warnings.get("revise")?.join(" ")).toContain('"assemble"');
   });
 });
 

@@ -1017,6 +1017,43 @@ describe("pluginCatalogTools: call_tool", () => {
     );
   });
 
+  it("names a connected MCP tool in usage and treats its missing account as a missing credential", async () => {
+    const meetings: PluginAction = {
+      id: "get_meetings", name: "Get meetings", description: "Read meeting notes", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => { throw new Error("granola: no credential connected"); },
+    };
+    const mcp: ActionPlugin = { service: "granola", actions: [], resolveActions: async () => [meetings] };
+    const [, callTool] = pluginCatalogTools({ plugins: [mcp] });
+    const result = await callTool.execute({ tool_id: "granola.get_meetings", params: {}, summary: "Read this week's meeting notes" }, makeCtx());
+    expect(result.text).toContain("Connect granola on the Integrations page");
+    expect(result.usageOutcome).toMatchObject({ name: "granola.get_meetings", outcome: "error", errorCode: "missing_credential" });
+  });
+
+  it("records the tool id an agent asked for when no such tool exists", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [makeMockPlugin().plugin] });
+    const result = await callTool.execute({ tool_id: "github.get_everything", params: {}, summary: "Read the repository" }, makeCtx());
+    expect(result.usageOutcome).toMatchObject({ name: "github.get_everything", outcome: "error", errorCode: "unknown" });
+  });
+
+  it("runs a tool written with the service name list_tools reports, under its catalog id and scope", async () => {
+    const listEvents: PluginAction = {
+      id: "calendar.list_events", name: "List events", description: "List events", riskLevel: "low",
+      parameters: Type.Object({}), execute: async () => ({ success: true, data: { events: [] } }),
+    };
+    const calendar: ActionPlugin = { service: "google_calendar", actions: [listEvents] };
+    const [, callTool] = pluginCatalogTools({ plugins: [calendar] });
+    for (const written of ["google_calendar.list_events", "google-calendar.list_events", "google_calendar.calendar.list_events"]) {
+      const result = await callTool.execute({ tool_id: written, params: {}, summary: "Read today's calendar" }, makeCtx());
+      expect(result.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "ok" });
+    }
+    const outOfScope = await callTool.execute({ tool_id: "google_calendar.list_events", params: {}, summary: "Read today's calendar" },
+      makeCtx({ toolScope: { actions: ["github.get_issue"] } }));
+    expect(outOfScope.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "denied", errorCode: "policy_denied" });
+    const unknown = await callTool.execute({ tool_id: "outlook.list_events", params: {}, summary: "Read today's calendar" }, makeCtx());
+    expect(unknown.text).toContain('Did you mean "calendar.list_events"?');
+  });
+
   it("dispatches by tool_id and returns rendered data with credentials available", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });

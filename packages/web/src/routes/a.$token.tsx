@@ -157,7 +157,7 @@ export function ArtifactPage() {
   const submitComment = (opts: { body: string; sendToSession: boolean }) => {
     if (!pendingPick) return;
     addComment.mutate(
-      { body: opts.body, vdid: pendingPick.vdid, sendToSession: opts.sendToSession },
+      { body: opts.body, vdid: pendingPick.vdid, anchorLabel: pendingPick.label, sendToSession: opts.sendToSession },
       {
         onSuccess: () => {
           setPendingPick(null);

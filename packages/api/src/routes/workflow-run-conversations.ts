@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, assistantExecutions, sessionThreads } from "../schema/index.js";
 import type { WorkflowRunConversation } from "../wire/types.js";
+import { workflowStepFromThreadKey } from "../workflows/run-conversations.js";
 import { loadOwnedSession } from "./messages.js";
 import { threadsVisibleTo } from "./_thread-access.js";
 
@@ -17,7 +18,7 @@ export async function workflowRunConversations(c: Context<AppEnv>, runId: string
     .leftJoin(assistantExecutions, eq(assistantExecutions.sessionId, agentSessions.id))
     .leftJoin(sessionThreads, and(eq(sessionThreads.sessionId, agentSessions.id), sql`${sessionThreads.id} = t.id`))
     .where(and(eq(agentSessions.orgId, c.var.user.orgId), sql`${agentSessions.status} <> 'deleted'`,
-      sql`(${key} = ${`signal:workflow:${runId}`}
+      sql`((${key} ~ '^signal:workflow:' AND split_part(${key}, ':', 3) = ${runId})
         OR (${key} ~ '^slack-events:[^:]+:workflow:' AND split_part(${key}, ':', 4) = ${runId})
         OR (split_part(${agentSessions.id}, ':', 1) = 'wf' AND split_part(${agentSessions.id}, ':', 2) = ${runId}))`,
       // Empty root anchors authorize execution sessions but contain no conversation.
@@ -28,10 +29,19 @@ export async function workflowRunConversations(c: Context<AppEnv>, runId: string
   for (const row of rows) {
     const session = await loadOwnedSession(c, row.sessionId);
     if (!session || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.sessionId, row.threadId, row.key))) continue;
+    const step = workflowStepFromThreadKey(row.key);
     conversations.push({ sessionId: row.sessionId, threadId: row.threadId,
       ...(row.title ? { title: row.title } : {}),
-      ...(row.sessionId.startsWith(`wf:${runId}:`) ? { nodeId: row.sessionId.split(":")[2] } : {}),
+      ...(row.sessionId.startsWith(`wf:${runId}:`) ? { nodeId: row.sessionId.split(":")[2] }
+        : step ? { nodeId: step.nodeId, iteration: step.iteration } : {}),
     });
   }
-  return conversations;
+  // Entry 0 of a foreach carries no key suffix, so the key alone cannot tell
+  // it from a single step. A node with several entries numbers all of them.
+  const entries = new Map<string, number>();
+  for (const item of conversations) {
+    if (item.iteration !== undefined && item.nodeId) entries.set(item.nodeId, (entries.get(item.nodeId) ?? 0) + 1);
+  }
+  return conversations.map(({ iteration, ...item }) =>
+    iteration !== undefined && item.nodeId && (entries.get(item.nodeId) ?? 0) > 1 ? { ...item, iteration } : item);
 }

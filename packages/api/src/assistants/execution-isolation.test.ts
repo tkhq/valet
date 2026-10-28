@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -26,7 +26,7 @@ it("keeps team helper files and memory separate across members and cache rebuild
   expect(alice.sessionId).toBe(repeated.sessionId);
   const bob = await open("test-member");
   expect(bob.sessionId).not.toBe(alice.sessionId);
-  expect(alice.session.options.workspace).toBe(join(homedir(), ".valet", "assistants", alice.assistant.id, "executions", alice.sessionId));
+  expect(alice.session.options.workspace).toBe(join(homedir(), ".valet", "assistant-executions", alice.assistant.id, alice.sessionId));
   expect(bob.session.options.workspace).not.toBe(alice.session.options.workspace);
   await alice.session.sandbox.writeFile("/workspace/private.txt", "Private acquisition");
   await expect(bob.session.sandbox.readFile("/workspace/private.txt")).rejects.toThrow();
@@ -490,4 +490,37 @@ it("preserves a recorded disjoint personal execution directory on restore", asyn
   p.engineHost.evictCache(execution.sessionId);
   const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-disjoint", { isolated: true });
   expect(restored.session.options.workspace).toBe(workspace);
+});
+
+it("keeps a team execution's recorded directory under the root on restore", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Recorded execution", creatorUserId: "local-user" });
+  const owner = { type: "team" as const, id: team.id };
+  const meta = { orgId: "local-org", actorUserId: "local-user" };
+  const execution = await ensureAssistantExecution(p, owner, meta, "web:recorded-team");
+  const workspace = join(homedir(), ".valet", "assistants", execution.assistant.id, "executions", execution.sessionId);
+  await p.db.execute(sql`UPDATE engine_sessions SET workspace = ${workspace} WHERE id = ${execution.sessionId}`);
+  p.engineHost.evictCache(execution.sessionId);
+  const restored = await ensureAssistantExecution(p, owner, meta, "web:recorded-team");
+  expect(restored.session.options.workspace).toBe(workspace);
+});
+
+it("lists a team's threads with one thread read for every conversation", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Many conversations", creatorUserId: "local-user" });
+  await addMember(p.db, { teamId: team.id, userId: "test-member", role: "member" });
+  const owner = { type: "team" as const, id: team.id };
+  for (const [index, user] of ["local-user", "test-member", "local-user", "test-member", "local-user"].entries()) {
+    const execution = await ensureAssistantExecution(p, owner, { orgId: "local-org", actorUserId: user }, `app-assistant:${user}:${index}`);
+    await execution.session.ensureDefaultThread();
+  }
+  const perSession = vi.spyOn(p.engineStore, "listThreads");
+  const batched = vi.spyOn(p.engineStore, "listThreadsForSessions");
+  const response = await fetch(`${api.baseUrl}/api/threads?workspace=${team.id}&limit=10`);
+  expect(response.status).toBe(200);
+  expect(batched).toHaveBeenCalledTimes(1);
+  expect(batched.mock.calls[0]?.[0]).toHaveLength(6);
+  expect(perSession).not.toHaveBeenCalled();
 });

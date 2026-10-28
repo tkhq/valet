@@ -186,6 +186,17 @@ export function workflowRunThreadKey(runId: string, slackChannel?: string): stri
   return slackChannel ? slackEventsThreadKey(slackChannel, `workflow:${runId}`) : `signal:workflow:${runId}`;
 }
 
+/**
+ * The key of one step's own thread (`thread: "step"`): the run's key with
+ * the step id appended, the same `{nodeId}[:{iteration}]` suffix a dispatch
+ * id carries. It lives in the session the run's thread would, so it keeps
+ * the run's audience, memory and working directory. A deterministic key is
+ * what makes a re-issued dispatch find the thread it was admitted on.
+ */
+export function workflowStepThreadKey(runId: string, nodeId: string, iteration: number, slackChannel?: string): string {
+  return `${workflowRunThreadKey(runId, slackChannel)}:${nodeId}${iteration > 0 ? `:${iteration}` : ""}`;
+}
+
 interface RunContext {
   presence?: Appearance;
   legacyRuntimeId?: string;
@@ -618,11 +629,20 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // archives the thread when the run settles, so the sidebar does not
       // fill up. An attended run reports into the thread it was started
       // from instead.
+      //
+      // A `thread: "step"` step gets its own thread in the same session, so
+      // its turn runs beside the run's other agent work (the engine claims
+      // one item per thread) with a new conversation. Its dispatch id is
+      // only ever admitted there: the run snapshot fixes the node's
+      // placement, and a retry starts a new run.
+      const stepKey = promptOpts.stepThread
+        ? workflowStepThreadKey(runId, promptOpts.stepThread.nodeId, promptOpts.stepThread.iteration, ctx.slackChannel)
+        : undefined;
       let thread = origin
         ? session.threadById(origin.threadId)
         // `createThread`, not `thread`: a new run thread stamps the user's
         // current timezone (TKAI-584).
-        : await session.createThread(workflowRunThreadKey(runId, ctx.slackChannel));
+        : await session.createThread(stepKey ?? runKey);
       if (!thread) {
         throw new Error(
           `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
@@ -630,8 +650,10 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         );
       }
       if (origin) {
+        // A step dispatch has no admission from before execution mappings
+        // existed, so only a run-thread dispatch looks one up.
         const target = await resolveWorkflowReportTarget(deps,
-          { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
+          { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, stepKey ? undefined : promptOpts.dispatchId);
         if (target.priorQueueItemId) {
           const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
           const content = item?.content;
@@ -642,6 +664,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           return { sessionId: session.id, threadId: thread.id, queueItemId: target.priorQueueItemId };
         }
         ({ session, thread } = target);
+        if (stepKey) thread = await session.createThread(stepKey);
       }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and

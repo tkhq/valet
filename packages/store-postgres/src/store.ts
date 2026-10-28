@@ -764,6 +764,12 @@ export class PgSessionStore implements SessionStore {
     return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
   }
 
+  async listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]> {
+    if (sessionIds.length === 0) return [];
+    const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = ANY($1::text[])", [[...new Set(sessionIds)]]);
+    return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
+  }
+
   async getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]> {
     return withSpan(
       "store.entries.read",
