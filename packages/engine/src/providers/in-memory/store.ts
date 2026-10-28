@@ -648,6 +648,9 @@ export class InMemorySessionStore implements SessionStore {
     // non-empty set; an active steer with no queued sibling keeps its time.
     const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
       ? Math.min(...queuedCreatedAt) - 1
+      // A correction that carries queued inputs takes the oldest one's
+      // place, so work queued after those inputs does not run first.
+      : carried.length > 0 ? Math.min(...carried.map((candidate) => candidate.createdAt))
       : item.createdAt;
     const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt,
       ...((originScope || promotionSource) ? { metadata: carryInputMetadata(item, carried, promotionSource) } : {}),

@@ -216,6 +216,16 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(rows.rows).toEqual([{ session_id: first.sessionId }]);
   });
 
+  it("recovers an event admitted before the sender flag existed when it is retried after the deploy", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const signal = (attributes: Record<string, string>) => ({ kind: "signal" as const, signalType: "github.issue_comment", body: "New comment", attributes });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, dispatchId: "event:pre-deploy",
+      destination: { kind: "key" as const, key: "events:pre-deploy", title: "Events" }, mismatchReason: "test", unattended: true };
+    const first = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1" }) });
+    const retry = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1", senderBot: "false" }) });
+    expect(retry).toEqual({ ...first, recovered: true });
+  });
+
   it("recovers a routine slot retried after its prompt was edited (INV-D4)", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);

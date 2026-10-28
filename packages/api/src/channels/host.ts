@@ -1827,10 +1827,14 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          // A reply waits for the running turn. Only a stop phrase from the
-          // turn's own sender interrupts it; the store checks the sender.
+          // A reply waits for a running turn. A stop phrase, or any reply
+          // while the turn waits on a decision, takes the turn's place, so a
+          // person who moves on does not leave the turn stuck on an approval.
+          // The store interrupts only a turn from the same sender.
           ...(channelType === "slack"
-            ? isSlackStopRequest(content) ? { queueMode: "steer" as const, steerScope: "active-origin" as const } : { queueMode: "inject" as const }
+            ? isSlackStopRequest(content) || thread.pendingDecisionGates().length > 0
+              ? { queueMode: "steer" as const, steerScope: "active-origin" as const }
+              : { queueMode: "inject" as const }
             : {}),
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its

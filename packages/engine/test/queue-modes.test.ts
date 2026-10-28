@@ -75,6 +75,37 @@ describe("origin correction context", () => {
     }
   });
 
+  it("runs a stop that carries queued input in that input's place, before later work", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry-order", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("web done")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const slack = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
+    const pause = () => new Promise((r) => setTimeout(r, 5));
+    try {
+      // An unrelated web turn runs, so the stop has no matching turn to replace.
+      await thread.submitPrompt("unrelated web task", { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      await thread.submitPrompt(slack("deploy now"), { queueMode: "followup", author: sender });
+      await pause();
+      const web = await thread.submitPrompt("later web task", { queueMode: "followup", author: { id: "owner" } });
+      await pause();
+      const stop = await thread.submitPrompt(slack("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
+      await thread.awaitResult(web.queueItemId);
+      const users = (await session.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      const carriedAt = users.findIndex(e => e.content.includes("deploy now"));
+      const webAt = users.findIndex(e => e.content.includes("later web task"));
+      expect(carriedAt).toBeGreaterThan(0);
+      expect(carriedAt).toBeLessThan(webAt);
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
   it("keeps another sender's active turn running", async () => {
     const faux = registerFauxProvider({ provider: "origin-other-sender", tokensPerSecond: 60 });
     faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("later")]);
