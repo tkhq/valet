@@ -19,6 +19,7 @@ import { assistantSessionSender } from "../services/workspace-sender.js";
 import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   ConflictError,
+  isSlackStopRequest,
   parseAssistantSessionId,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
@@ -1807,8 +1808,11 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
-          queueMode: channelType === "slack" ? "steer" : undefined,
-          ...(channelType === "slack" ? { steerScope: "active-origin" as const } : {}),
+          // A reply waits for the running turn. Only a stop phrase from the
+          // turn's own sender interrupts it; the store checks the sender.
+          ...(channelType === "slack"
+            ? isSlackStopRequest(content) ? { queueMode: "steer" as const, steerScope: "active-origin" as const } : { queueMode: "inject" as const }
+            : {}),
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say

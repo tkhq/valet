@@ -13,7 +13,7 @@ import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
  * The workspace owner determines the assistant.
  */
 import { isDeepStrictEqual } from "node:util";
-import { isInteractiveSlackSignal } from "@valet/engine";
+import { isSlackStopRequest } from "@valet/engine";
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -466,9 +466,11 @@ async function deliverToAssistantThreadInner(
     }
     return { sessionId: session.id, threadId: thread.id };
   }
-  // Only an addressed human reply can interrupt its conversation.
-  // Passive follows and bot events retain injection and digest coalescing.
-  const interrupts = !args.unattended && isInteractiveSlackSignal(signal);
+  // Every delivery waits for the running turn. Only a stop phrase in a
+  // mention can interrupt, and the store checks it came from the turn's own
+  // sender. A channel subscription delivers every message with reply "auto",
+  // so a plain channel message never interrupts.
+  const interrupts = !args.unattended && signal.signalType !== "slack.message" && isSlackStopRequest(signal);
   const receipt = args.recordOnly
     ? await thread.recordSignal(signal, { dispatchId: args.dispatchId, author: args.author ?? { id: args.actorUserId } })
     : await thread.submitPrompt(signal, {

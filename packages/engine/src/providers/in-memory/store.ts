@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
-import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, sameSubmissionOrigin, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
+import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, interruptibleBy, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
 import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -576,7 +576,7 @@ export class InMemorySessionStore implements SessionStore {
     const matchingActive = !originScope || (isInteractiveSlackInput(item) && [...r.queueItems.values()].some(candidate =>
       candidate.threadId === threadId && !candidate.supersededByItemId &&
       (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
-      isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, item.content) &&
+      interruptibleBy(candidate, item) &&
       (r.entriesByThread.get(threadId) ?? []).some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === candidate.id)));
     if (originScope && opts?.maxPending !== undefined) {
       const unsettled = [...r.queueItems.values()].filter(candidate => candidate.status !== "settled");
@@ -613,7 +613,7 @@ export class InMemorySessionStore implements SessionStore {
       for (const other of r.queueItems.values()) {
         if (other.id === stored.id) continue;
         if (originScope && !carriedIds.has(other.id) &&
-          (!matchingActive || !isInteractiveSlackInput(other) || !sameSubmissionOrigin(other.content, item.content))) continue;
+          (!matchingActive || !interruptibleBy(other, item))) continue;
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;

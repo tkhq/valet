@@ -1,6 +1,6 @@
 import {
   boundEventDigest,
-  sameSubmissionOrigin,
+  interruptibleBy,
   isInteractiveSlackInput,
   queuedOriginInputs,
   carryInputMetadata,
@@ -979,7 +979,7 @@ export class PgSessionStore implements SessionStore {
           const carriedIds = new Set(carried.map(candidate => candidate.id));
           const matchingActive = !originScope || (isInteractiveSlackInput(item) && lockedPending.some(candidate =>
             (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
-            isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, item.content) && enteredIds.has(candidate.id)));
+            interruptibleBy(candidate, item) && enteredIds.has(candidate.id)));
           if (originScope && opts?.maxPending !== undefined) {
             const remaining = lockedPending.length - (matchingActive ? 1 : 0) - carried.length;
             if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
@@ -1043,7 +1043,7 @@ export class PgSessionStore implements SessionStore {
                       (carriedIds.has(candidate.id) || candidate.id === opts.promoteFromItemId ||
                       candidate.status === "running" ||
                       candidate.status === "blocked_on_decision_gate") &&
-                      (!originScope || carriedIds.has(candidate.id) || (matchingActive && isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, item.content))),
+                      (!originScope || carriedIds.has(candidate.id) || (matchingActive && interruptibleBy(candidate, item))),
                   )
                   .map((candidate) => candidate.id)
               : (

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import {
+  MID_TURN_DELIVERY_KEY,
   VirtualSandboxProvider,
   type ChannelTransport,
   type FetchedChannelMedia,
@@ -440,7 +441,9 @@ describe("ChannelHost.handleUpdate", () => {
       await linkIdentity(testDb.appDb, { provider: "slack", externalId: "77", userId: USER_ID });
       const admission = vi.spyOn(engineStore, "admitSubmission");
       await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
-      expect(admission).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(Object), expect.objectContaining({ steer: true, steerScope: "active-origin" }));
+      // A reply waits for the running turn. It never cancels it.
+      expect(admission.mock.calls[0][3]?.steer).toBeUndefined();
+      expect(admission.mock.calls[0][2].metadata?.[MID_TURN_DELIVERY_KEY]).toBe(true);
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
       const home = await session.threadByKey(HOME_THREAD_KEY);
       expect(home).not.toBeNull();
@@ -464,6 +467,10 @@ describe("ChannelHost.handleUpdate", () => {
       });
       const after = await engineStore.getEntries(session.id, home!.id);
       expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+      // Only a whole-message stop phrase asks to interrupt the sender's turn.
+      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "Stop.", dispatchId: "home-dm-stop" }));
+      expect(admission.mock.calls.at(-1)?.[3]).toMatchObject({ steer: true, steerScope: "active-origin" });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
     } finally {
       await slackHost.stop();
     }

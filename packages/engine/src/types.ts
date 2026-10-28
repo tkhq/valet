@@ -393,8 +393,8 @@ export interface PromptOptions {
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
   queueMode?: QueueMode;
-  /** Limit steering to the active turn, optionally in the same external conversation. */
-  steerScope?: "active" | "active-origin";
+  /** Stop only the sender's own active turn in the same external conversation. */
+  steerScope?: "active-origin";
   model?: string;
   role?: string;
   resultSchema?: TSchema;
@@ -2169,10 +2169,12 @@ export interface SessionStore {
    * inserts the promoted successor at the runnable head. "active" does the
    * same without a source item: a message edit stops the running turn and
    * runs next, and queued messages run after it.
-   * "active-origin" requires an explicit auto-reply human Slack signal. It
-   * interrupts only a matching active input already in history. In the same
-   * transaction, it carries matching queued inputs by durable, ordered IDs
-   * and settles them superseded. Caller metadata cannot create carry IDs.
+   * "active-origin" requires an explicit auto-reply human Slack signal.
+   * Callers send it only for a stop request. It interrupts only an active
+   * input from the same sender and conversation that is already in history.
+   * In the same transaction, it carries that sender's queued inputs from the
+   * conversation by durable, ordered IDs and settles them superseded.
+   * Caller metadata cannot create carry IDs.
    * The successor keeps its own author, content, and authority metadata.
    * Unrelated inputs retain their order and status. Carry overflow or an
    * unsupported attachment rejects the entire admission without changing rows.

@@ -495,6 +495,26 @@ export function isInteractiveSlackSignal(content: PromptContent): content is Sig
     content.attributes?.feedback === undefined;
 }
 
+/** Whole-message stop phrases. Every other reply waits for the turn and never cancels it. */
+const STOP_PHRASES = new Set(["stop", "cancel", "wait", "hold on", "nevermind", "never mind"]);
+
+/** An addressed Slack message whose whole text is a stop phrase, ignoring case and punctuation. */
+export function isSlackStopRequest(content: PromptContent): boolean {
+  if (!isInteractiveSlackSignal(content) || content.attachments?.length) return false;
+  return STOP_PHRASES.has(content.body.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).join(" "));
+}
+
+/** Only the person who sent an input can interrupt it or have it carried. */
+export function sameSubmissionAuthor(left: QueueItem, right: QueueItem): boolean {
+  return left.author?.id === right.author?.id && left.author?.externalId === right.author?.externalId;
+}
+
+/** An active input that a stop request from its own sender in its own conversation may interrupt. */
+export function interruptibleBy(candidate: QueueItem, incoming: QueueItem): boolean {
+  return isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, incoming.content) &&
+    sameSubmissionAuthor(candidate, incoming);
+}
+
 /** A record-only note or unattended delivery must keep its own queue behavior. */
 export function isInteractiveSlackInput(item: QueueItem): boolean {
   return isInteractiveSlackSignal(item.content) && item.metadata?.[UNATTENDED_DELIVERY_KEY] !== true &&
@@ -510,12 +530,12 @@ export function carriedInputIds(item: QueueItem): string[] {
   return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
 }
 
-/** Select only queued human inputs on this engine thread and external conversation. */
+/** Select only the sender's queued human inputs on this engine thread and external conversation. */
 export function queuedOriginInputs(items: Iterable<QueueItem>, incoming: QueueItem): QueueItem[] {
   if (!isInteractiveSlackInput(incoming)) return [];
   return [...items].filter(candidate => candidate.threadId === incoming.threadId &&
     candidate.status === "queued" && !candidate.supersededByItemId && isInteractiveSlackInput(candidate) &&
-    sameSubmissionOrigin(candidate.content, incoming.content))
+    sameSubmissionOrigin(candidate.content, incoming.content) && sameSubmissionAuthor(candidate, incoming))
     .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 

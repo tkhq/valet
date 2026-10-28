@@ -33,36 +33,60 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
 }
 
 describe("origin correction context", () => {
-  it("runs only the correction with older authors as context and keeps its own authority", async () => {
+  it("carries only the sender's queued inputs into a stop and leaves other senders queued", async () => {
     const faux = registerFauxProvider({ provider: "origin-carry", tokensPerSecond: 30 });
-    faux.setResponses([fauxAssistantMessage(Array.from({ length: 80 }, () => "working").join(" ")), fauxAssistantMessage("stopped")]);
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 80 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("other done")]);
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
     const thread = session.thread();
     const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
     try {
-      const active = await thread.submitPrompt(content("start"), {});
+      const active = await thread.submitPrompt(content("start"), { author: sender });
       await waitFor(() => events.some(e => e.event.type === "text_delta"));
-      const older = await thread.submitPrompt({ ...content("deploy now"), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]), name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf", bytes: 12, sha256: "abc", name: "queued.pdf" }] }, { queueMode: "followup", author: { id: "requester", name: "Requester" } });
-      const correction = await thread.submitPrompt(content("stop deployment"), { queueMode: "steer", steerScope: "active-origin", author: { id: "corrector" } });
-      await thread.awaitResult(correction.queueItemId);
+      const older = await thread.submitPrompt({ ...content("deploy now"), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]), name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf", bytes: 12, sha256: "abc", name: "queued.pdf" }] }, { queueMode: "followup", author: sender });
+      const other = await thread.submitPrompt(content("also check the logs"), { queueMode: "followup", author: { id: "other", name: "Other" } });
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
       expect((await thread.awaitResult(older.queueItemId)).outcome).toBe("superseded");
       expect((await store.getQueueItem(session.id, active.queueItemId))?.outcome?.outcome).toBe("superseded");
+      expect((await thread.awaitResult(other.queueItemId)).outcome).toBe("completed");
       const entries = await session.readEntries("web:default");
       const userEntries = entries.filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
-      expect(userEntries).toHaveLength(2);
+      expect(userEntries).toHaveLength(3);
       const newest = userEntries[1];
-      expect(newest.author).toEqual({ id: "corrector" });
-      expect(newest.content).toContain("requester");
-      expect(newest.content).toContain("deploy now");
-      expect(newest.content.indexOf("deploy now")).toBeLessThan(newest.content.indexOf("stop deployment"));
+      expect(newest.author).toEqual(sender);
+      expect(newest.content).toMatch(/^Messages received while you worked, in order:/);
+      expect(newest.content).toContain("> Sender · sender\n> deploy now");
+      expect(newest.content).toContain("> Sender · sender\n> stop");
+      expect(newest.content.indexOf("deploy now")).toBeLessThan(newest.content.indexOf("> stop"));
       expect(newest.content.match(/deploy now/g)).toHaveLength(1);
-      expect(newest.content).toContain("> Requester · requester\n> deploy now");
+      expect(newest.content).not.toContain("also check the logs");
+      expect(newest.content).not.toContain("correction");
       expect(newest.content).not.toContain('"signalType"');
       expect(newest.attachments).toMatchObject([{ type: "image", mimeType: "image/png", name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf" }]);
       const messages = entriesToAgentMessages([newest], faux.getModel());
       expect(messages[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
       expect(JSON.stringify(messages[0].content)).toContain("/workspace/uploads/queued.pdf");
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
+  it("keeps another sender's active turn running", async () => {
+    const faux = registerFauxProvider({ provider: "origin-other-sender", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("later")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    try {
+      const active = await thread.submitPrompt(content("start"), { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: { id: "other" } });
+      expect((await thread.awaitResult(active.queueItemId)).outcome).toBe("completed");
+      expect((await thread.awaitResult(stop.queueItemId)).outcome).toBe("completed");
     } finally {
       await session.destroy();
       faux.unregister();
@@ -112,11 +136,11 @@ describe("origin correction recovery", () => {
     const thread = await session.ensureDefaultThread();
     await thread.pause();
     const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
-    const original = await thread.submitPrompt({ ...content(""), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] }, { author: { id: "image-author" }, dispatchId: "restore-original" });
+    const original = await thread.submitPrompt({ ...content(""), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] }, { author: { id: "sender" }, dispatchId: "restore-original" });
     const originalItem = await store.getQueueItem(session.id, original.queueItemId);
     if (!originalItem) throw new Error("Expected queued input");
-    const middle = { ...originalItem, id: "restore-middle", dispatchId: "restore-middle", content: content("review image"), author: { id: "middle-author" } };
-    const latest = { ...middle, id: "restore-latest", dispatchId: "restore-latest", content: content("stop deployment"), author: { id: "corrector" } };
+    const middle = { ...originalItem, id: "restore-middle", dispatchId: "restore-middle", content: content("review image") };
+    const latest = { ...middle, id: "restore-latest", dispatchId: "restore-latest", content: content("stop deployment") };
     const opts = { steer: true, steerScope: "active-origin" as const };
     await store.admitSubmission(session.id, thread.id, middle, opts);
     await store.admitSubmission(session.id, thread.id, latest, opts);
@@ -131,11 +155,10 @@ describe("origin correction recovery", () => {
       expect((await restoredThread.awaitResult(original.queueItemId)).outcome).toBe("superseded");
       const users = (await restored.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
       expect(users).toHaveLength(1);
-      expect(users[0].content).toContain("> image-author");
-      expect(users[0].content.indexOf("image-author")).toBeLessThan(users[0].content.indexOf("middle-author"));
+      expect(users[0].content.match(/^> sender$/gm)).toHaveLength(3);
       expect(users[0].content.indexOf("review image")).toBeLessThan(users[0].content.indexOf("stop deployment"));
       expect(entriesToAgentMessages(users, faux.getModel())[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
-      expect(users[0].author).toEqual({ id: "corrector" });
+      expect(users[0].author).toEqual({ id: "sender" });
       const replay = await store.admitSubmission(session.id, thread.id, latest, opts);
       expect(replay.admitted).toBe(false);
       expect(replay.item.metadata?.carriedInputIds).toEqual([original.queueItemId, middle.id]);

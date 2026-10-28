@@ -582,33 +582,41 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     }
   });
 
-  it("interrupts a running turn for a Slack reply without dropping queued work", async () => {
+  it.each([
+    ["the sender's stop phrase", "Stop!", "app_mention", USER, true],
+    ["a reply that is not a stop phrase", "thanks, how is it going?", "app_mention", USER, false],
+    ["a channel subscription message", "stop", "slack.message", USER, false],
+    ["another person's stop phrase", "stop", "app_mention", "someone-else", false],
+  ])("stops a running Slack turn only for %s", async (_label, body, signalType, authorId, stops) => {
     const deps = { db: testDb.appDb, engineHost };
     const personal = { type: "user" as const, id: USER };
     const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
-    const thread = await session.createThread("reply-interrupt");
+    const thread = await session.createThread(`reply-stop-${signalType}-${authorId}-${stops}`);
+    const origin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which task?" }, { id: "reply-ask" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("Updated."),
-      fauxAssistantMessage("Queued work done."),
-      fauxAssistantMessage("Done."),
+      fauxAssistantMessage("Stopped."),
     ]);
-    const first = await thread.submitPrompt({ ...signal("start work"), origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" } }, { dispatchId: "reply-running" });
+    const first = await thread.submitPrompt({ ...signal("start work"), signalType: "app_mention", origin }, { dispatchId: `reply-running-${body}-${authorId}`, author: { id: USER } });
     await vi.waitFor(async () => expect((await session.providers.store.getQueueItem(session.id, first.queueItemId))?.status).toBe("blocked_on_decision_gate"));
-    const queued = await thread.submitPrompt("keep this queued work", { dispatchId: "reply-queued", queueMode: "followup" });
+    const queued = await thread.submitPrompt("keep this queued work", { dispatchId: `reply-queued-${body}-${authorId}`, queueMode: "followup" });
     const reply = await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: personal, actorUserId: USER,
+      orgId: ORG, owner: personal, actorUserId: USER, author: { id: authorId },
       destination: { kind: "target", sessionId: session.id, threadId: thread.id },
-      signal: { ...signal("change direction now"), origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" } }, dispatchId: "reply-interrupt", mismatchReason: "test",
+      signal: { ...signal(body), signalType, origin }, dispatchId: `reply-${body}-${authorId}`, mismatchReason: "test",
     });
-    await vi.waitFor(async () => expect((await session.providers.store.getQueueItem(session.id, first.queueItemId))?.supersededByItemId).toBe(reply.queueItemId));
+    const active = await session.providers.store.getQueueItem(session.id, first.queueItemId);
+    expect(active?.supersededByItemId).toBe(stops ? reply.queueItemId : undefined);
+    if (!stops) expect(active?.status).toBe("blocked_on_decision_gate");
     expect((await session.providers.store.getQueueItem(session.id, queued.queueItemId))?.supersededByItemId).toBeUndefined();
-    if (!reply.queueItemId) throw new Error("Expected reply queue item");
-    expect((await thread.awaitResult(reply.queueItemId)).outcome).toBe("completed");
-    expect((await thread.awaitResult(queued.queueItemId)).outcome).toBe("completed");
+    if (stops) {
+      if (!reply.queueItemId) throw new Error("Expected reply queue item");
+      expect((await thread.awaitResult(first.queueItemId)).outcome).toBe("superseded");
+    }
+    await thread.abort();
   });
 
-  it.each(["manual", "bot", "rehydrated", "unspecified"])("keeps %s Slack delivery on the injection path", async (kind) => {
+  it.each(["manual", "bot", "rehydrated", "unspecified"])("keeps a %s Slack stop phrase on the injection path", async (kind) => {
     const deps = { db: testDb.appDb, engineHost };
     const personal = { type: "user" as const, id: USER };
     const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
@@ -617,7 +625,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: personal, actorUserId: USER,
       destination: { kind: "target", sessionId: session.id, threadId: thread.id },
-      signal: { ...signal("side comment"), attributes: kind === "bot" ? { senderBot: "true" } : kind === "rehydrated" ? { rehydrated: "true" } : {},
+      signal: { ...signal("stop"), attributes: kind === "bot" ? { senderBot: "true" } : kind === "rehydrated" ? { rehydrated: "true" } : {},
         origin: { channelType: "slack", threadKey: "slack:C1:1.2", ...(kind === "unspecified" ? {} : { reply: kind === "manual" ? "manual" as const : "auto" as const }) } },
       dispatchId: `passive-${kind}`, mismatchReason: "test",
     });

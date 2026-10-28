@@ -306,28 +306,40 @@ The engine rechecks durable abort intent after asynchronous model resolution and
 Cancellation during turn setup must not start new provider work after the setup resolves.
 
 
-## Slack corrections and queued inputs
+## Slack stop requests and queued inputs
 
-An attended human Slack reply with explicit `origin.reply: "auto"` can interrupt the active input from the same external conversation.
-The active input must already have a user entry in history. Manual follows, unspecified reply policies, bot events, and rehydrated context retain injection behavior.
+An addressed Slack reply uses `inject`. It waits for the running turn and never cancels it.
+A channel-origin signal does not join the running turn (`canDeliverMidTurn`), so the reply runs as the next followup.
+
+Only a stop request interrupts. A stop request is an addressed human Slack message whose whole text is a stop phrase: stop, cancel, wait, hold on, nevermind, or never mind.
+The check ignores case and punctuation (`isSlackStopRequest`). A message with an attachment is not a stop request.
+Direct channel input (a DM) and a mention delivered by the event dispatcher can send a stop request.
+A channel subscription stamps `reply: "auto"` on every `slack.message`, so a plain channel message never interrupts. Manual follows, unspecified reply policies, bot events, and rehydrated context never interrupt.
+The Slack Stop control on a streamed reply aborts the turn through the stream bridge (`stopped_by_user`).
+
+The store admits a stop request with `steerScope: "active-origin"` in one atomic operation.
+It interrupts the active input only when that input came from the same sender (`author.id` and `author.externalId`) in the same Slack origin, and already has a user entry in history.
+A stop request from another person interrupts nothing and runs after the active turn. That turn keeps its decision gates.
+A rule owned by a person delivers mentions with that owner as the author and no Slack sender ID, so on that rule the sender check compares the owner.
 The dispatcher forwards the normalized bot flag and checks bot payload fields on older event rows. Direct channel input stamps `reply: "auto"`.
 
-The store admits each correction in one atomic operation. It selects only eligible queued human inputs from the same session, engine thread, and Slack origin.
-It persists ordered, transitive `metadata.carriedInputIds` on the correction and settles those queued receipts as `superseded`, pointing to their successor.
-An older queued deploy request therefore cannot execute separately before or after a newer stop correction.
-Unrelated inputs keep their state and order. An unrelated active turn keeps its decision gates.
+In the same operation, the store carries the queued inputs of the same sender, engine thread, and Slack origin.
+It persists ordered, transitive `metadata.carriedInputIds` on the stop request and settles those queued receipts as `superseded`, pointing to their successor.
+An older queued deploy request therefore cannot execute separately before or after a newer stop request.
+Inputs from other senders and other conversations keep their state and order.
 The pending cap counts the inputs that remain after replacement.
 
-Original queue rows retain their exact content, authors, attachments, and metadata. The correction keeps its own author and authority metadata.
+The model reads the carried inputs and the stop request as one list under the heading "Messages received while you worked, in order".
+Original queue rows retain their exact content, authors, attachments, and metadata. The stop request keeps its own author and authority metadata.
 Caller metadata cannot supply carry references, including on ordinary queued submissions. Dispatch deduplication compares the unchanged original content.
-Before rendering, `Thread` verifies each referenced row's session, thread, origin, eligibility, settled outcome, and supersession chain to the correction.
-It renders readable author names, IDs, and quoted bodies before the correction, inside the escaped signal envelope.
+Before rendering, `Thread` verifies each referenced row's session, thread, origin, sender, eligibility, settled outcome, and supersession chain to the stop request.
+It renders readable author names, IDs, and quoted bodies in order, inside the escaped signal envelope.
 It feeds original images and files through the normal attachment path. It does not copy older permission grants or expose internal attributes in chat text.
 
-A promotion rebuilds carry references from its locked source. Internal `carriedInputBridgeIds` retain source provenance without displaying the correction twice.
+A promotion rebuilds carry references from its locked source. Internal `carriedInputBridgeIds` retain source provenance without displaying the stop request twice.
 The reader checks every supersession path through those bridges. Caller-supplied bridge metadata is stripped.
 Postgres restores byte-backed image attachments from their persisted indexed JSON representation before model conversion.
 
 The carry limit is 128 original inputs and promotion bridges combined. An overflow or unsupported attachment rejects admission before any row changes; the error directs the caller to stop and retry.
 No inputs are silently dropped. A crash after admission leaves both the context references and superseded receipts durable.
-A retry returns the same correction and ordered references. A restored thread reads the original inputs once and persists one combined user entry.
+A retry returns the same stop request and ordered references. A restored thread reads the original inputs once and persists one combined user entry.

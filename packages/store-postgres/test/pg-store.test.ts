@@ -78,7 +78,7 @@ describe("PgSessionStore (PGlite)", () => {
     await store.saveThread(sessionId, { id: threadId, sessionId, key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
     const item = (id: string, body: string): QueueItem => ({ id, threadId, dispatchId: id,
       content: { kind: "signal", signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" } },
-      author: { id }, status: "queued", attemptCount: 0, maxAttempts: 3, timeoutAt: 1_000_000, createdAt: 1, updatedAt: 1 });
+      author: { id: "sender" }, status: "queued", attemptCount: 0, maxAttempts: 3, timeoutAt: 1_000_000, createdAt: 1, updatedAt: 1 });
     const older = item("older", "deploy");
     const correction = item("correction", "stop");
     await store.admitSubmission(sessionId, threadId, older);

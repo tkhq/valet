@@ -58,6 +58,7 @@ import {
   MAX_CARRIED_INPUTS,
   isInteractiveSlackInput,
   sameSubmissionOrigin,
+  sameSubmissionAuthor,
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
@@ -4484,7 +4485,7 @@ export class Thread {
       const bridge = bridgeIds.includes(id);
       const superseded = original?.status === "settled" && original.outcome?.outcome === "superseded";
       if (!original || original.threadId !== this.id || !isInteractiveSlackInput(original) ||
-          !sameSubmissionOrigin(original.content, item.content) ||
+          !sameSubmissionOrigin(original.content, item.content) || !sameSubmissionAuthor(original, item) ||
           (!superseded && !(bridge && original.status === "queued" && original.supersededByItemId))) {
         throw new ValidationError("Carried input is unavailable. Restore the original submission, then retry.");
       }
@@ -4533,13 +4534,12 @@ export class Thread {
       entryContent = item.content.body;
       if (originals.length) {
         const quote = (value: string) => value.split(/\r?\n/).map(line => `> ${line}`).join("\n");
-        const blocks = originals.map(original => {
-          const author = original.author;
+        const blocks = [...originals, item].map(input => {
+          const author = input.author;
           const label = [author?.name, author?.id].filter(Boolean).join(" · ") || "Unknown sender";
-          return quote(label) + "\n" + quote(isSignalContent(original.content) ? original.content.body : promptText(original.content));
+          return quote(label) + "\n" + quote(isSignalContent(input.content) ? input.content.body : promptText(input.content));
         });
-        entryContent = "Earlier queued inputs (the latest correction takes precedence):\n\n" +
-          blocks.join("\n\n") + "\n\nLatest correction:\n" + entryContent;
+        entryContent = "Messages received while you worked, in order:\n\n" + blocks.join("\n\n");
       }
       text = renderSignalEnvelope(signalMeta, entryContent);
     } else {

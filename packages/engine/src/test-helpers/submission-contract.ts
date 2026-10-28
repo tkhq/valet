@@ -425,7 +425,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       }))?.id).toBe(edit.id);
     });
 
-    it.each(["same", "different-thread", "different-channel", "no-origin", "not-entered"])("origin steering isolates %s conversations and keeps queued work", async (variant) => {
+    it.each(["same", "different-thread", "different-channel", "different-author", "no-origin", "not-entered"])("origin steering isolates %s conversations and keeps queued work", async (variant) => {
       const active = makeItem({ createdAt: 100, updatedAt: 100, content: {
         kind: "signal", signalType: "slack.message", body: "working", origin: { channelType: "slack", threadKey: "slack:D1:1", reply: "auto" },
       } });
@@ -437,7 +437,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
         id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
         type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
       }], { itemId: active.id, attemptId: "origin-active" });
-      const incoming = makeItem({ createdAt: 300, updatedAt: 300, content: variant === "no-origin" ? "web message" : {
+      const incoming = makeItem({ createdAt: 300, updatedAt: 300, ...(variant === "different-author" ? { author: { id: "someone-else" } } : {}), content: variant === "no-origin" ? "web message" : {
         kind: "signal", signalType: "slack.message", body: "reply", origin: {
           channelType: variant === "different-channel" ? "telegram" : "slack",
           threadKey: variant === "different-thread" ? "slack:D1:2" : "slack:D1:1", reply: "auto",
@@ -454,30 +454,35 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
         kind: "signal" as const, signalType: "slack.message", body,
         origin: { channelType: "slack", threadKey, reply: "auto" as const },
       });
-      const active = makeItem({ content: content("working", matchingActive ? "slack:C1:1" : "slack:C2:1"), createdAt: 100 });
+      const sender = { id: "sender" };
+      const active = makeItem({ content: content("working", matchingActive ? "slack:C1:1" : "slack:C2:1"), createdAt: 100, author: sender });
       await store.admitSubmission(SESSION_ID, THREAD_ID, active);
       await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "carry-active", ownerId: "o" });
       await store.appendEntries(SESSION_ID, THREAD_ID, [{ id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
         type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
       }], { itemId: active.id, attemptId: "carry-active" });
-      const deploy = makeItem({ content: content("deploy"), createdAt: 200, dispatchId: "carry-deploy", author: { id: "requester" }, metadata: { [TOOL_SCOPE_KEY]: { actions: ["deploy"] } } });
-      const unrelated = makeItem({ content: content("other work", "slack:C3:1"), createdAt: 210 });
+      const deploy = makeItem({ content: content("deploy"), createdAt: 200, dispatchId: "carry-deploy", author: sender, metadata: { [TOOL_SCOPE_KEY]: { actions: ["deploy"] } } });
+      const unrelated = makeItem({ content: content("other work", "slack:C3:1"), createdAt: 210, author: sender });
+      const otherSender = makeItem({ content: content("other request"), createdAt: 220, author: { id: "other" } });
       await store.admitSubmission(SESSION_ID, THREAD_ID, deploy);
       await store.admitSubmission(SESSION_ID, THREAD_ID, unrelated);
-      const stop = makeItem({ content: content("stop deploy"), createdAt: 300, dispatchId: "carry-stop", author: { id: "corrector" } });
-      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 3 };
+      await store.admitSubmission(SESSION_ID, THREAD_ID, otherSender);
+      const stop = makeItem({ content: content("stop"), createdAt: 300, dispatchId: "carry-stop", author: sender });
+      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 4 };
       const result = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
       expect(result.item.metadata?.carriedInputIds).toEqual([deploy.id]);
-      expect(result.item.author).toEqual({ id: "corrector" });
+      expect(result.item.author).toEqual(sender);
       expect(result.item.metadata?.[TOOL_SCOPE_KEY]).toBeUndefined();
-      expect(await store.getQueueItem(SESSION_ID, deploy.id)).toMatchObject({ status: "settled", outcome: { outcome: "superseded" }, supersededByItemId: stop.id, author: { id: "requester" } });
+      expect(await store.getQueueItem(SESSION_ID, deploy.id)).toMatchObject({ status: "settled", outcome: { outcome: "superseded" }, supersededByItemId: stop.id, author: sender });
       expect((await store.getQueueItem(SESSION_ID, unrelated.id))?.supersededByItemId).toBeUndefined();
+      expect(await store.getQueueItem(SESSION_ID, otherSender.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, otherSender.id))?.supersededByItemId).toBeUndefined();
       expect((await store.getQueueItem(SESSION_ID, active.id))?.supersededByItemId).toBe(matchingActive ? stop.id : undefined);
       expect(await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: deploy.id, attemptId: "unsafe-deploy", ownerId: "o" })).toBeNull();
       const replay = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
       expect(replay.admitted).toBe(false);
       expect(replay.item.metadata?.carriedInputIds).toEqual([deploy.id]);
-      const newest = makeItem({ content: content("keep stopped"), createdAt: 400 });
+      const newest = makeItem({ content: content("keep stopped"), createdAt: 400, author: sender });
       const next = await store.admitSubmission(SESSION_ID, THREAD_ID, newest, { steer: true, steerScope: "active-origin" });
       expect(next.item.metadata?.carriedInputIds).toEqual([deploy.id, stop.id]);
       expect(next.item.content).toEqual(newest.content);
@@ -498,14 +503,15 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect((await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ content }), opts)).item.metadata?.carriedInputIds).toEqual([reply.id]);
     });
 
-    it.each(["manual", "unspecified", "bot", "unattended", "record-only", "other-thread", "other-session"])("origin carry preserves %s queued inputs", async (variant) => {
+    it.each(["manual", "unspecified", "bot", "unattended", "record-only", "other-thread", "other-session", "other-author"])("origin carry preserves %s queued inputs", async (variant) => {
       const content = { kind: "signal" as const, signalType: "slack.message", body: "older",
         origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
       const incoming = makeItem({ content: { ...content, body: "correction" } });
       const older = makeItem({ content: variant === "manual" ? { ...content, origin: { ...content.origin, reply: "manual" } } :
         variant === "unspecified" ? { ...content, origin: { channelType: "slack", threadKey: "slack:C1:1" } } :
         variant === "bot" ? { ...content, attributes: { senderBot: "true" } } : content,
-        metadata: variant === "unattended" ? { unattendedDelivery: true } : variant === "record-only" ? { recordOnly: true } : undefined });
+        metadata: variant === "unattended" ? { unattendedDelivery: true } : variant === "record-only" ? { recordOnly: true } : undefined,
+        ...(variant === "other-author" ? { author: { id: "other" } } : {}) });
       let sessionId = SESSION_ID;
       let threadId = THREAD_ID;
       if (variant === "other-session") { sessionId = "other-session"; await store.saveSession(newSession({ id: sessionId })); }
