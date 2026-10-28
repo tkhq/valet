@@ -1017,6 +1017,7 @@ export class Session {
   private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
     await this.refreshUserTimezone();
     let data = this.buildThreadData(key, initial);
+    let restoreTranscript = false;
     try {
       await this.providers.store.saveThread(this.id, data);
     } catch (error) {
@@ -1025,14 +1026,29 @@ export class Session {
       const winner = (await this.providers.store.listThreads(this.id)).find(thread => thread.key === key);
       if (!winner) throw error;
       data = winner;
+      restoreTranscript = true;
     }
-    const thread = new Thread(this, data);
+    const thread = new Thread(this, data, { restoreTranscript });
     this.attachThread(thread);
     return thread;
   }
 
   threadById(id: string): Thread | null {
     return this.threads.get(id) ?? null;
+  }
+
+  /** Attach a persisted thread by ID, with lazy history restoration and no row creation. */
+  async loadThread(id: string): Promise<Thread | null> {
+    const existing = this.threads.get(id);
+    if (existing) return existing;
+    const data = await this.providers.store.getThread(this.id, id);
+    if (!data) return null;
+    // Concurrent lookups must share one in-process thread and its queue driver.
+    const loaded = this.threads.get(id);
+    if (loaded) return loaded;
+    const thread = new Thread(this, data, { restoreTranscript: true });
+    this.attachThread(thread);
+    return thread;
   }
 
   async threadByKey(key: string): Promise<Thread | null> {

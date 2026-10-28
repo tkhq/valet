@@ -71,16 +71,27 @@ describe("Thread.currentAgentStatus", () => {
     const thread = await session.ensureDefaultThread();
 
     expect(thread.currentAgentStatus).toBe("idle");
+    expect(thread.currentTurnStartedAt).toBeUndefined();
 
+    const submittedAt = Date.now();
     const receipt = await thread.submitPrompt("run the blocking tool", {});
     await entered;
     // Mid-tool: the turn owns the execution context and must read as such.
     expect(thread.currentAgentStatus).toBe("tool_calling");
     expect(thread.hasActiveRun).toBe(true);
+    expect(thread.currentTurnStartedAt).toBeGreaterThanOrEqual(submittedAt);
+    expect(thread.currentTurnStartedAt).toBeLessThanOrEqual(Date.now());
+    const claimedAt = thread.currentTurnStartedAt;
 
     release();
     await waitForStatus(events, receipt.threadId, "idle");
     expect(thread.currentAgentStatus).toBe("idle");
+    expect(thread.currentTurnStartedAt).toBeUndefined();
+    // The tool step and the reply are two model steps of one submission:
+    // every working status names the submission's start.
+    const working = events.flatMap((e) => e.event.type === "status" && e.event.threadId === receipt.threadId && e.event.status !== "idle" ? [e.event] : []);
+    expect(working.length).toBeGreaterThanOrEqual(2);
+    for (const event of working) expect(event.turnStartedAt).toBe(claimedAt);
 
     faux.unregister();
   });

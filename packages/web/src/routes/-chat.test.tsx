@@ -23,12 +23,16 @@ vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: teamMetadata ? { tea
 let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
+  usePrefetchTranscript: () => undefined,
+  usePrefetchSession: () => undefined,
   useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: scopeKey === "user" ? "personal-session" : "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
+  useThreadWorkspace: (threadId: string | undefined) => ({ data: threadId ? elsewhere : undefined }),
 }));
 vi.mock("~/components/session/session-view", () => ({ SessionView: ({ sessionId, activeThreadId, scopeNotice }: { sessionId: string; activeThreadId?: string; scopeNotice?: string }) => <div data-testid="conversation" data-scope-notice={scopeNotice}>{sessionId}:{activeThreadId}</div> }));
 vi.mock("~/components/session/child-panel", () => ({ ChildPanel: () => null }));
-beforeEach(() => { scopeKey = "team-a"; threadKey = "web:default"; data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });
+let elsewhere: string | undefined;
+beforeEach(() => { elsewhere = undefined; scopeKey = "team-a"; threadKey = "web:default"; data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });
 function show() { if (!capture.page) throw new Error("missing route"); const Page = capture.page; return render(<PageTitleProvider workspaceName="Platform"><Page /></PageTitleProvider>); }
 it("opens the resolved workspace thread and labels its audience", () => {
   show(); expect(document.title).toBe("Fix login · Platform · Valet"); expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
@@ -50,7 +54,8 @@ it("tells a helper thread's person that only they can see it", () => {
 });
 it("does not read a conversation before its session is ensured", () => {
   data = undefined; show(); expect(screen.queryByTestId("conversation")).toBeNull();
-  expect(screen.getByText("Opening threads…")).toBeTruthy();
+  // The thread layout shows while the workspace resolves.
+  expect(screen.getByRole("status", { name: "Opening the thread" })).toBeTruthy();
 });
 it("shows errors without silently substituting a personal conversation", () => {
   data = undefined; error = new Error("not found"); show();
@@ -67,4 +72,11 @@ it("opens a selected private Home thread on the desktop chat route", () => {
   scopeKey = "user"; threadKey = "home"; data = { sessionId: "personal-session" }; show();
   expect(screen.getByTestId("conversation").textContent).toBe("personal-session:thread-a");
   expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toBeNull();
+});
+
+it("opens a thread from another workspace in that workspace", async () => {
+  empty = true; elsewhere = "user"; show();
+  await waitFor(() => expect(navigate).toHaveBeenCalled());
+  const [navigation] = navigate.mock.calls[0];
+  expect(navigation.search({ thread: "thread-a", workspace: "team-a" })).toEqual({ thread: "thread-a", workspace: "user" });
 });

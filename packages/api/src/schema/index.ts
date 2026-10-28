@@ -819,6 +819,21 @@ export const channelBindings = pgTable(
   ],
 );
 
+/** The first thread selected for one user's direct-channel conversation. */
+export const channelConversationBindings = pgTable(
+  "channel_conversation_bindings",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId, t.sessionId, t.channelType, t.conversationKey] })],
+);
+
 export const userIdentityLinks = pgTable(
   "user_identity_links",
   {
@@ -1031,8 +1046,10 @@ export const artifactVersions = pgTable(
 
 // Element-anchored comments on a published page (artifact-pages design).
 // `vdid` is the content-hashed element id the viewer's comment runtime
-// computes (null = a page-level comment); `version` records what the
-// commenter was looking at. `parent_id` threads replies one level under a
+// computes (null = a page-level comment); `anchor_label` is that element's
+// leading text as the viewer showed it, so an agent reading the comment knows
+// what it points at; `version` records what the commenter was looking at.
+// `parent_id` threads replies one level under a
 // root. `sent_to_session` records delivery of the comment into the source
 // session's prompt queue — allowed only when the commenter passes
 // `canViewSession` there, so sending grants nothing that typing into the
@@ -1044,6 +1061,7 @@ export const artifactComments = pgTable(
     artifactId: text("artifact_id").notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
     vdid: text("vdid"),
+    anchorLabel: text("anchor_label"),
     parentId: text("parent_id"),
     body: text("body").notNull(),
     authorUserId: text("author_user_id").notNull(),
@@ -2173,7 +2191,7 @@ export const workflowSchedules = pgTable(
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
-    /** Optional static payload delivered as `trigger.data.input`. */
+    /** Optional static input: copied to `trigger.data.<field>` and kept at `trigger.data.input` (`scheduledTriggerData`). */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
     /** Why the scheduler disabled this schedule: the pin text when its
@@ -2699,6 +2717,12 @@ export const cliDeviceRequests = pgTable("cli_device_requests", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
   lastPollAt: bigint("last_poll_at", { mode: "number" }),
+  /** `login` (`valet login`) or `proxy-key` (`valet proxy setup`). */
+  purpose: text("purpose").$type<"login" | "proxy-key">().notNull().default("login"),
+  /** The API key name a `proxy-key` request creates. */
+  keyName: text("key_name"),
+  /** The CLI's user on a `proxy-key` request. Only this user can approve it. */
+  requestedBy: text("requested_by").references(() => users.id, { onDelete: "cascade" }),
 }, (t) => [
   uniqueIndex("cli_device_requests_user_code").on(t.userCode),
   index("cli_device_requests_expires").on(t.expiresAt),

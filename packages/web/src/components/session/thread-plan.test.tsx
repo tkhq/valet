@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, renderHook, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ThreadPlan, ThreadPlanResponse } from "@valet/api/wire";
-import { PinnedPlan, PlanProgress } from "./thread-plan";
+import { PinnedPlan, PlanProgress, useCurrentStep } from "./thread-plan";
 
 const PLAN: ThreadPlan = {
   items: [
@@ -25,52 +26,31 @@ function renderPlan(plans: Record<string, ThreadPlan | null>, threadId: string |
 }
 
 describe("PinnedPlan", () => {
-  it("shows one collapsed row with progress and the current item", () => {
+  it("lists every step with its mark, as a to-do list", () => {
     renderPlan({ t1: PLAN });
-    const toggle = screen.getByRole("button", { expanded: false });
-    expect(toggle.textContent).toContain("Plan · 2 of 5");
-    expect(toggle.textContent).toContain("Run the full suite");
-    expect(screen.queryByRole("list")).toBeNull();
+    const steps = within(screen.getByRole("region", { name: "Plan" })).getAllByRole("listitem");
+    expect(steps).toHaveLength(5);
+    expect(steps.map(step => within(step).getByRole("img").getAttribute("aria-label"))).toEqual(["Done", "Done", "In progress", "Not started", "Not started"]);
+    expect(steps[2]!.textContent).toContain("Run the full suite");
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("opens the full checklist with each item's state", () => {
-    renderPlan({ t1: PLAN });
-    fireEvent.click(screen.getByRole("button", { expanded: false }));
-    const list = screen.getByRole("list");
-    expect(screen.getByRole("button", { expanded: true }).getAttribute("aria-controls")).toBe(list.id);
-    const items = within(list).getAllByRole("listitem");
-    expect(items.map((item) => item.textContent)).toEqual(PLAN.items.map((item) => item.text));
-    expect(within(items[0]).getByRole("img", { name: "Done" })).toBeTruthy();
-    expect(within(items[2]).getByRole("img", { name: "In progress" })).toBeTruthy();
-    expect(within(items[3]).getByRole("img", { name: "Not started" })).toBeTruthy();
-    expect(items[0].querySelector(".line-through")).not.toBeNull();
-    expect(items[2].querySelector(".font-medium")).not.toBeNull();
+  it("leaves once every step is done", () => {
+    renderPlan({ t1: { ...PLAN, items: PLAN.items.map(item => ({ ...item, status: "done" as const })) } });
+    expect(screen.queryByRole("region", { name: "Plan" })).toBeNull();
   });
 
-  it("marks an unfinished plan with the Valet mascot and a finished one with a check", () => {
-    renderPlan({ t1: PLAN, t2: { ...PLAN, items: PLAN.items.map(item => ({ ...item, status: "done" as const })) } }, "t1");
-    const toggle = screen.getByRole("button", { expanded: false });
-    expect(within(toggle).getByRole("img", { name: "Plan in progress" }).getAttribute("src")).toBe("/icons/valet-mascot.webp");
-    fireEvent.click(toggle);
-    expect(within(screen.getAllByRole("listitem")[2]!).getByRole("img", { name: "In progress" }).getAttribute("src")).toBe("/icons/valet-mascot.webp");
-  });
-
-  it("marks a finished plan with a green check", () => {
-    renderPlan({ t2: { ...PLAN, items: PLAN.items.map(item => ({ ...item, status: "done" as const })) } }, "t2");
-    expect(within(screen.getByRole("button", { expanded: false })).getByRole("img", { name: "Plan done" }).getAttribute("class")).toContain("text-success-600");
-  });
-
-  it("says the plan is done when every item is done", () => {
-    renderPlan({ t1: { ...PLAN, items: PLAN.items.map((item) => ({ ...item, status: "done" })) } });
-    expect(screen.getByRole("button", { expanded: false }).textContent).toContain("Plan done · 5 of 5");
-  });
-
-  it("collapses again on another thread", () => {
-    const { rerender } = renderPlan({ t1: PLAN, t2: PLAN });
-    fireEvent.click(screen.getByRole("button", { expanded: false }));
-    expect(screen.getByRole("list")).toBeTruthy();
+  it("follows the open thread", () => {
+    const { rerender } = renderPlan({ t1: PLAN, t2: { items: [{ text: "Other thread step", status: "in_progress" }], updatedAt: 1 } });
     rerender("t2");
-    expect(screen.queryByRole("list")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Plan" })).getAllByRole("listitem").map(step => step.textContent)).toEqual(["Other thread step"]);
+  });
+
+  it("names the step in progress for the working line", () => {
+    const client = new QueryClient();
+    client.setQueryData<ThreadPlanResponse>(["thread-plan", "t1"], { plan: PLAN });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    expect(renderHook(() => useCurrentStep("t1"), { wrapper }).result.current).toContain("Run the full suite");
   });
 
   it("renders nothing without a plan or a thread", () => {

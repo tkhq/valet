@@ -4,9 +4,39 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
 import { attrTruncate, withSpan } from "./tracing.js";
-import { recordToolExecution } from "./metrics.js";
+import { recordToolExecution, recordToolStopTimeout } from "./metrics.js";
 
 const warnedIntentTools = new Set<string>();
+
+/**
+ * How long a tool may keep running after its turn is stopped. Stop and steer
+ * wait for the agent loop to go idle, and the loop waits for the running
+ * tool. A tool that ignores its signal would hold the thread and its queue
+ * until it returns, which can be never. After this grace period the call
+ * fails, the turn settles, and the call keeps running detached. Each timeout
+ * counts in `valet.tool.stop_timeouts`, because the tool needs a fix.
+ */
+export const TOOL_STOP_GRACE_MS = 5_000;
+
+/** Resolve with `work`, or reject once `signal` has been aborted for `graceMs`. */
+export function settleWithinStopGrace<T>(work: Promise<T>, signal: AbortSignal, toolName: string, graceMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      timer = setTimeout(() => {
+        recordToolStopTimeout(toolName);
+        console.warn(`[engine] ${toolName} kept running ${graceMs}ms after its turn was stopped. The turn no longer waits for it.`);
+        reject(new Error(`${toolName} did not stop when the turn was stopped. It may still finish in the background.`));
+      }, graceMs);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    void work.then(resolve, reject).finally(() => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
 
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
@@ -26,6 +56,7 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     toolIntent?: string;
   }) => ToolContext,
   replay = false,
+  stopGraceMs = TOOL_STOP_GRACE_MS,
 ): AgentTool<TParams> {
   if (def.intent === undefined && IsObject(def.parameters) && Object.hasOwn(def.parameters.properties, "intent") && !warnedIntentTools.has(def.name)) {
     warnedIntentTools.add(def.name);
@@ -67,8 +98,9 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
       let validationError: Error | undefined;
       try { const parsed = stripToolIntent(def, original); clean = parsed.args; intent = parsed.intent; }
       catch (error) { validationError = error instanceof Error ? error : new Error("Add a valid intent and retry the tool."); clean = {}; }
+      const toolSignal = signal ?? new AbortController().signal;
       const ctx = buildContext({
-        signal: signal ?? new AbortController().signal,
+        signal: toolSignal,
         toolCallId,
         toolName: def.name,
         toolArgs: clean,
@@ -101,7 +133,7 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
         async (span) => {
           const startedAt = Date.now();
           try {
-            const result = await def.execute(clean as never, ctx);
+            const result = await settleWithinStopGrace(def.execute(clean as never, ctx), toolSignal, def.name, stopGraceMs);
             recordToolExecution(def.name, Date.now() - startedAt, true);
             span.setAttribute("valet.tool.result_chars", result.text?.length ?? 0);
             if (result.attachments?.length) {

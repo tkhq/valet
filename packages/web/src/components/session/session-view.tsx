@@ -3,11 +3,13 @@ import { QuickReplies } from "./quick-replies";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { ResolvedGateNotice, useResolvedGateNotice } from "./gate-outcome";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
   useForkThread,
+  TRANSCRIPT_FULL,
+  TRANSCRIPT_TAIL,
   useMessages,
   useSession,
   useThreads,
@@ -21,6 +23,7 @@ import {
   useQueueStateForThread,
   useThreadLiveStatus,
   useErrorForThread,
+  useRetryForThread,
   useCompactingForThread,
   type StreamMessage,
 } from "~/stores/stream";
@@ -33,9 +36,9 @@ import {
   type ComposerDropIntake,
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
-import { MessageList } from "~/components/session/message-list";
+import { MessageList, ThreadShell } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
-import { PinnedPlan } from "~/components/session/thread-plan";
+import { PinnedPlan, useCurrentStep } from "~/components/session/thread-plan";
 import { ProcessingStatus } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
@@ -53,7 +56,7 @@ import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-sessio
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
 import { ImageFallbackBanner } from "~/components/session/image-fallback-banner";
 import { useOrg } from "~/api/settings";
 import type { MessageReplyReference } from "@valet/api/wire";
@@ -211,7 +214,11 @@ export function SessionView({
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
   // this never wipes live state mid-session.
-  const messagesQ = useMessages(sessionId, effectiveThreadId);
+  // The newest page first; the whole recent history once the reader scrolls up.
+  const [fullHistoryFor, setFullHistoryFor] = useState<string>();
+  const fullHistory = fullHistoryFor !== undefined && fullHistoryFor === effectiveThreadId;
+  const messagesQ = useMessages(sessionId, effectiveThreadId, undefined, fullHistory ? TRANSCRIPT_FULL : TRANSCRIPT_TAIL);
+  const showEarlier = useCallback(() => setFullHistoryFor(effectiveThreadId), [effectiveThreadId]);
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
@@ -231,11 +238,11 @@ export function SessionView({
   const isOrgAdmin = useOrg().data?.callerRole === "admin";
   const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
 
-  async function branch(message: StreamMessage) {
+  async function branch(message: StreamMessage, destination?: "private") {
     if (!effectiveThreadId || !onOpenThread || forkThread.isPending) return;
     setBranchError(undefined);
     try {
-      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id });
+      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id, ...(destination ? { destination } : {}) });
       if (result.draft) useComposerDraftStore.getState().setText(draftKey(result.thread.sessionId, result.thread.id), result.draft);
       onOpenThread(result.thread.id);
     } catch (err) {
@@ -257,6 +264,7 @@ export function SessionView({
     ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
   // Quick replies are a phone affordance: tap an answer instead of typing it.
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
+  const threadRetry = useRetryForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
@@ -275,6 +283,7 @@ export function SessionView({
       .filter((message) => message !== undefined);
   }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
+  const currentStep = useCurrentStep(effectiveThreadId);
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
@@ -329,7 +338,7 @@ export function SessionView({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {panel && !hidePanelHeader && renderPanelHeader?.(null)}
-        <div className="flex flex-1 items-center justify-center"><LoadingRow label="Loading conversation…" /></div>
+        <ThreadShell header={!panel} />
       </div>
     );
   }
@@ -426,6 +435,9 @@ export function SessionView({
               header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
               messages={stream.messages}
               threadId={effectiveThreadId}
+              loading={messagesQ.isPending}
+              onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
+              loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
               onOpenChild={onOpenChild}
               agentBusy={agentBusy}
               pendingIds={threadQueueState?.pendingIds}
@@ -434,6 +446,7 @@ export function SessionView({
               {...edit.list}
               onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
               onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+              onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
               onOpenThread={onOpenThread}
               newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
               emptyState={emptyState}
@@ -483,7 +496,8 @@ export function SessionView({
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           {composerAccessory}
           <TypingLine viewers={viewers} />
-          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)} />
+          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
+            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

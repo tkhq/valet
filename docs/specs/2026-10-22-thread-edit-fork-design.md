@@ -104,7 +104,8 @@ uses (`threadAudience`). The fork records every Slack channel that gates the
 source, including those of the threads above it, before any history is
 copied. A thread private to one person, such as an Ask Valet or workflow
 editor thread, cannot keep that audience as a new team thread, so its fork
-is refused with the reason.
+into the team is refused with the reason. It can branch privately
+(decision 13).
 
 The fork keeps the source thread's model and reasoning level.
 
@@ -231,6 +232,46 @@ Call: an approval choice beyond the engine's one-time approval (for example
 "Always allow for me", "Approve for this session") outlives the branch it
 was made on. The note lists each one, from the left branch's decision-gate
 entries, so neither the person nor the model assumes the edit took it back.
+
+### 13. A team thread can branch privately
+
+Call: in a team thread, Branch offers "Branch for the team" and "Branch
+privately to me". A fork may make its audience smaller, never larger. The
+person read the whole source, so a copy that only they read shows nobody
+new content. The private fork opens in the person's own workspace, in its
+own execution and working directory, with the source's files. The
+destination decides credentials, grants, and memory: the fork runs as the
+person. Nothing live comes along: no Slack reply routing, approvals,
+wakeups, or child sessions. Every fork records its source in thread
+metadata (`forkOf`).
+
+### 14. Move is a fork of the whole thread plus an archive
+
+Call: the thread menu offers "Move to workspace". A move copies the whole
+conversation and its files into the destination as a fork does, archives the
+source, records the copy in the source's metadata (`movedTo`), and adds a
+note to the source.
+
+- A team thread moves only to the mover's private threads. Teammates lose
+  it, so only a person who wrote every message in it, or a team admin, can
+  move it. The note says where it went, with no link that teammates cannot
+  open.
+- A private thread moves only into a team the person is on. The team then
+  reads it, so the request must confirm. Slack channel gates come along.
+- Only a `web:` thread with no running turn, open approval, or background
+  work moves. A Slack, workflow, or Home thread keeps its connection.
+
+An in-place move (same thread id, ownership rewritten) is rejected: it
+would rewrite execution ownership, the memory scope, and live Slack bindings.
+
+### 15. Linked threads can message each other
+
+Call: `list_linked_threads` and `message_linked_thread`. Two threads that a
+fork links (the source and its forks) can send messages to each other. Only a
+turn a person wrote can send, and the person must read the target. When a
+reader of the target cannot read the sending thread, the person approves the
+exact text first (`sendWidens`). A private fork that reports to its team
+thread asks; a team thread that sends to a member's private fork does not.
 
 ### Later
 

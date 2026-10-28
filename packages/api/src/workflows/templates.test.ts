@@ -184,8 +184,8 @@ const notesTemplate: WorkflowTemplate = {
 
 /**
  * Scheduled AND parameterised — the combination the baking rule exists for.
- * A scheduled run applies no `dataSchema` defaults, so install has to
- * resolve every field before it writes: the declared default for one, and a
+ * A scheduled run fills a field only from the schedule's input or its
+ * `dataSchema` default, so install has to resolve every field before it writes: the declared default for one, and a
  * refusal for the required field nobody supplied.
  */
 const notesNightly: WorkflowTemplate = {

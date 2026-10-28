@@ -1669,10 +1669,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         if (lastDetail && OWNERSHIP_CONDITION_PATTERN.test(lastDetail)) {
           // Retry-shaped (spec 8.4): the controller heals this once garbage
           // collection finishes. Surface it fast and let the attachment back
-          // off; create()'s cleanup keeps the CR for kind "ownership".
+          // off; create()'s cleanup keeps the CR for kind "ownership", so the
+          // caller's next attempt after the window adopts it. The attachment is
+          // caller-driven and schedules nothing itself, so the message asks for
+          // a retry instead of promising one.
           throw new SandboxStartupError(
             name,
-            leading + "The controller is still waiting for the previous sandbox's pod and volume to be removed; this retries automatically.",
+            leading + "The controller is still waiting for the previous sandbox's pod and volume to be removed. Retry shortly; the next attempt reuses this sandbox once they are gone.",
             "ownership",
           );
         }

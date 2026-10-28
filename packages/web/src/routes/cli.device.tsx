@@ -12,7 +12,9 @@ import { Button, Callout, Input, Spinner } from "~/components/primitives";
  *
  * The person types the code their terminal shows. The page never reads the
  * code from its URL, so a link someone else sends cannot approve their CLI
- * with one click. Allow gives that CLI a token for this account.
+ * with one click. Allow gives that CLI a token for this account. For a
+ * `valet proxy setup` request (purpose `proxy-key`), Allow gives that CLI a
+ * proxy-only API key instead (`docs/specs/2026-10-27-cli-proxy-setup-design.md`).
  */
 export const Route = createFileRoute("/cli/device")({
   component: CliDevicePage,
@@ -48,11 +50,13 @@ export function CliDevicePage() {
       setDone(accept ? "allow" : "deny");
     } catch {
       setDeciding(null);
-      setError("Valet could not record your choice. Run `valet login` again in your terminal.");
+      setError(`Valet could not record your choice. Run \`${info.data.purpose === "proxy-key" ? "valet proxy setup" : "valet login"}\` again in your terminal.`);
     }
   }
 
   const signingIn = info.error instanceof ApiError && info.error.status === 401;
+  const proxyKey = info.data?.purpose === "proxy-key";
+  const command = proxyKey ? "valet proxy setup" : "valet login";
 
   return (
     <div className="grid min-h-screen place-items-center bg-[--bg] px-6 py-12">
@@ -61,18 +65,24 @@ export function CliDevicePage() {
           <span aria-hidden className="text-base leading-none text-moss">
             ◈
           </span>
-          <h1 className="font-display text-2xl text-ink">Sign in to the Valet CLI</h1>
+          <h1 className="font-display text-2xl text-ink">{proxyKey ? "Create a Valet proxy key" : "Sign in to the Valet CLI"}</h1>
         </div>
 
         {done ? (
           <p className="text-center text-sm text-ink">
             {done === "allow"
-              ? "Done. Your terminal finishes signing in within a few seconds. You can close this tab."
-              : "Sign-in canceled. You can close this tab."}
+              ? proxyKey
+                ? "Done. Your terminal receives the key within a few seconds. You can close this tab."
+                : "Done. Your terminal finishes signing in within a few seconds. You can close this tab."
+              : proxyKey
+                ? "Proxy key request canceled. You can close this tab."
+                : "Sign-in canceled. You can close this tab."}
           </p>
         ) : code === null || info.isError && !signingIn ? (
           <form className="space-y-4" onSubmit={lookUp}>
-            <p className="text-sm text-ink">Enter the code that <code>valet login</code> shows in your terminal.</p>
+            <p className="text-sm text-ink">
+              Enter the code that <code>valet login</code> or <code>valet proxy setup</code> shows in your terminal.
+            </p>
             <Input
               aria-label="Code"
               autoFocus
@@ -85,7 +95,8 @@ export function CliDevicePage() {
             />
             {info.isError && (
               <p className="text-sm text-danger-600">
-                No sign-in is waiting for this code. Check the code in your terminal, or run <code>valet login</code> again.
+                Nothing is waiting for this code. Check the code in your terminal, or run the command again. For{" "}
+                <code>valet proxy setup</code>, sign in here with the account your CLI uses.
               </p>
             )}
             <Button type="submit" className="w-full" disabled={!draft.trim()}>
@@ -98,16 +109,23 @@ export function CliDevicePage() {
           </div>
         ) : (
           <div className="space-y-5">
-            <p className="text-sm text-ink">
-              The Valet CLI on <strong>{info.data.device}</strong> wants to sign in as <strong>{info.data.account}</strong>.
-            </p>
+            {proxyKey ? (
+              <p className="text-sm text-ink">
+                The Valet CLI on <strong>{info.data.device}</strong> wants a proxy key named{" "}
+                <strong>{info.data.key_name}</strong> for <strong>{info.data.account}</strong>.
+              </p>
+            ) : (
+              <p className="text-sm text-ink">
+                The Valet CLI on <strong>{info.data.device}</strong> wants to sign in as <strong>{info.data.account}</strong>.
+              </p>
+            )}
 
             <Callout tone="warning" className="text-xs leading-relaxed">
-              Allow this only if you, or your agent, just ran <code>valet login</code> and it shows <strong>{info.data.user_code}</strong>.
+              Allow this only if you, or your agent, just ran <code>{command}</code> and it shows <strong>{info.data.user_code}</strong>.
             </Callout>
 
             <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-muted">If you allow it, the CLI can</p>
+              <p className="text-xs uppercase tracking-wide text-muted">{proxyKey ? "If you allow it, the key can" : "If you allow it, the CLI can"}</p>
               <ul className="list-disc space-y-1 pl-5 text-sm text-ink">
                 {info.data.access.map((line) => (
                   <li key={line}>{line}</li>

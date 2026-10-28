@@ -42,6 +42,14 @@ export function teamIdFromApiKeyMetadata(metadata: unknown): string | undefined 
   return typeof teamId === "string" && teamId.length > 0 ? teamId : undefined;
 }
 
+/** `metadata.scope` on a key `valet proxy setup` creates. The key works only
+ * at the LLM proxy gateway, never on the Valet API. */
+export const PROXY_KEY_SCOPE = "proxy";
+
+export function isProxyScopedKeyMetadata(metadata: unknown): boolean {
+  return coerceApiKeyMetadata(metadata)?.scope === PROXY_KEY_SCOPE;
+}
+
 export function parseApiKeyMetadata(raw: string | null | undefined): Record<string, unknown> | null {
   if (raw == null || raw === "") return null;
   try {

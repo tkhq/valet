@@ -365,7 +365,7 @@ describe("ChannelHost outbound delivery", () => {
     ]);
     const emit = async (event: BusEvent["event"]) => eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event }, randomUUID());
     await emit({ type: "message_end", threadId, messageId: "failed-attempt", reason: "error" });
-    await emit({ type: "error", threadId, code: "turn_provider_fallback", error: "Recovering", recoverable: true });
+    await emit({ type: "turn_retry", threadId, action: "fallback", provider: "primary", reason: "overloaded", toProvider: "backup" });
     await emit({ type: "turn_end", threadId, reason: "error" });
     await engineStore.appendEntries(session.id, threadId, [
       { type: "message", id: "recovered-attempt", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", queueItemId, content: "Recovered answer", stopReason: "end_turn" },

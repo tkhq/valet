@@ -11,7 +11,8 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, externalCalls } from "../schema/index.js";
+import { artifacts, oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, externalCalls } from "../schema/index.js";
+import { addArtifactComment } from "../services/artifacts.js";
 import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
@@ -237,6 +238,17 @@ describe("MCP workspace tools", () => {
     const limited = await tool(testApi.baseUrl, alice, "list_artifacts", { limit: 1 });
     expect(limited.data.artifacts).toHaveLength(1);
     expect(limited.data.more).toContain("2 more artifacts match");
+  });
+
+  it("lists the comments on an artifact by its link", async () => {
+    const { testApi, alice } = await boot();
+    const published = await tool(testApi.baseUrl, alice, "publish_artifact", { key: "pages/plan", title: "Plan", content: "# Plan" });
+    const [page] = await testApi.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/plan"));
+    await addArtifactComment(testApi.providers.db, { artifactId: page!.id, version: 1, vdid: "a1b2c3d4", anchorLabel: "Plan", body: "Add dates", authorUserId: "bob" });
+
+    const read = await tool(testApi.baseUrl, alice, "list_artifact_comments", { artifact: published.data.url });
+    expect(read.data).toMatchObject({ artifact_id: page!.id, title: "Plan" });
+    expect(read.data.threads).toEqual([expect.objectContaining({ author: "User bob", on: 'element "Plan"', status: "open", body: "Add dates", replies: [] })]);
   });
 
   it("unpublishes an artifact only for the person who can manage it", async () => {

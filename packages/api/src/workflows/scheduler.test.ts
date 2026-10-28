@@ -226,6 +226,29 @@ describe("WorkflowScheduler thread policy", () => {
     expect([row?.lastFiredSessionId, row?.lastFiredThreadId]).toEqual([null, null]);
   });
 
+  it("starts a workflow run with its schedule's input at the top of trigger.data and under input", async () => {
+    await db.insert(workflowDefinitions).values({
+      id: "wf-scan", orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Error scan",
+      definition: { version: "dag/v1", nodes: [{ id: "scan", type: "tool", service: "grafana", action: "query", params: { since: "now-{{trigger.data.lookback}}" } }], edges: [] },
+      createdAt: 100, updatedAt: 100,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched-scan", orgId: "org-1", ownerType: "user", ownerId: "user-1", targetKind: "workflow",
+      workflowId: "wf-scan", name: "Morning scan", cron: "0 * * * *", timezone: "UTC", enabled: true,
+      input: { lookback: "17h" }, nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+    });
+    const host = new RecordingRunHost();
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: host,
+      deliverToAssistant: async () => LANDED, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(host.started[0]?.params.input).toMatchObject({
+      type: "schedule",
+      data: { lookback: "17h", scheduleName: "Morning scan", cron: "0 * * * *", input: { lookback: "17h" } },
+    });
+  });
+
   it("keys a new-policy firing on its slot", async () => {
     await seedPromptSchedule("sched-new", { mode: "new" });
     const destinations: DeliveryDestination[] = [];

@@ -8,11 +8,12 @@ export const qkHome = {
 };
 
 /** The person's home conversation: one thread with Valet across every workspace. */
-export function useHomeConversation() {
+export function useHomeConversation(enabled = true) {
   return useQuery({
     queryKey: qkHome.conversation,
     queryFn: () => api.ensureHomeConversation(),
     staleTime: Infinity,
+    enabled,
   });
 }
 

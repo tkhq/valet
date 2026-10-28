@@ -364,7 +364,7 @@ describe("workflow rules", () => {
     expect(workflowRuleFailures(bracketed, check)).toEqual([]);
   });
 
-  it("requires schedule input reads under trigger.data.input", () => {
+  it("requires schedule input reads that a scheduled run fills", () => {
     const check: WorkflowDefinitionCheck = { ...CHECK, schedule_input: true };
     const scheduled = withNode(leadWorkflow(), "propose", { prompt: "Rates for {{trigger.data.input.symbols}}." });
     expect(workflowRuleFailures(scheduled, check)).toEqual([]);
@@ -372,10 +372,15 @@ describe("workflow rules", () => {
       prompt: "Rates for {{trigger.data.input.symbols}} from {{trigger.data.scheduleName}} ({{trigger.data.cron}}).",
     });
     expect(workflowRuleFailures(named, check)).toEqual([]);
-    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([
-      "no step reads the schedule input at trigger.data.input",
-      "steps read trigger.data.messageId; schedule input is at trigger.data.input",
-    ]);
+    // A scheduled run copies its input to the top level, so a manual-style read works.
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
+    // Unless the workflow also reads that field under trigger.data.input.
+    const mixed = withNode(leadWorkflow(), "propose", {
+      prompt: "Propose a lead update from message {{trigger.data.messageId}}. Scheduled id: {{trigger.data.input.messageId}}.",
+    });
+    expect(workflowRuleFailures(mixed, check)).toEqual(["steps read trigger.data.messageId, which a scheduled run leaves empty"]);
+    const none = withNode(leadWorkflow(), "propose", { prompt: "Propose a lead update for {{trigger.data.scheduleName}}." });
+    expect(workflowRuleFailures(none, check)).toEqual(["no step reads the schedule input from trigger.data"]);
   });
 
   it("requires trigger.timestamp and no literal date for the run date", () => {
@@ -408,6 +413,7 @@ describe("workflow case files", () => {
     expect(cases.map((c) => c.id).sort()).toEqual([
       "workflow-bot-alert-triage",
       "workflow-onboarding-linear",
+      "workflow-release-report",
       "workflow-sales-tracker",
       "workflow-scheduled-refresh",
     ]);

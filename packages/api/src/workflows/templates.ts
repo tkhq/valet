@@ -879,11 +879,12 @@ export type InstallTemplateResult =
  * the definition, and drops the field from the trigger's `dataSchema` once
  * nothing references it.
  *
- * This exists because of one runtime fact: a scheduled run puts
- * `{ scheduleName, cron, input }` in `trigger.data` and applies NO
- * `dataSchema` defaults (`scheduler.ts`). A scheduled workflow therefore
- * cannot read a per-install parameter from its trigger — `{{ trigger.data.
- * channelId }}` renders null every night, forever, and nothing reports it.
+ * This exists because of one runtime fact: a scheduled run fills
+ * `trigger.data` only from the schedule's input and `dataSchema` defaults
+ * (`scheduledTriggerData`), and an installed template's schedule sends no
+ * input. A scheduled workflow therefore cannot read a per-install parameter
+ * with no default from its trigger — `{{ trigger.data.channelId }}` renders
+ * null every night, forever, and nothing reports it.
  * Baking the value into the definition at install time is the only form
  * that works on every entry point.
  *

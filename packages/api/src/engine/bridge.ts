@@ -399,6 +399,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "status",
           threadId: e.threadId,
           status: e.status,
+          ...(e.turnStartedAt !== undefined ? { turnStartedAt: e.turnStartedAt } : {}),
         },
       ];
 
@@ -555,6 +556,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           threadId: e.threadId,
         },
       ];
+
+    case "turn_retry":
+      return [{ ...e }];
 
     case "branch_switched":
       return [{ type: "branch_switched", threadId: e.threadId, noteEntryId: e.noteEntryId }];

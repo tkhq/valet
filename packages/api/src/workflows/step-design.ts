@@ -4,9 +4,12 @@
  * step must not ask, and an action that policy holds for approval runs from
  * a tool step or is allowed once in Review permissions. A scheduled run
  * reads its schedule's input under `trigger.data.input`. A team run commits
- * under the generic git identity, which deploy checks can block.
+ * under the generic git identity, which deploy checks can block. A list that
+ * an agent builds with read actions, and a model pass that rewrites a draft
+ * before it is sent, make each run's output drift. Parallel foreach entries
+ * on their own threads share one working directory.
  */
-import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses, type ScheduledRunMiss } from "@valet/workflow";
+import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, sharedWorkingDirectoryWarning, type ScheduledRunMiss } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { DEFAULT_USER_EMAIL, DEFAULT_USER_NAME } from "../engine/workspace-prep.js";
@@ -69,7 +72,7 @@ function scheduleInputWarning({ field, sites }: ScheduledRunMiss, schedules: rea
   return (
     // The text names template paths, which start with the word.
     // copy-lint: allow trigger
-    `A scheduled run puts the schedule's input under trigger.data.input, so trigger.data.${field} is empty when ${named} starts this workflow. ` +
+    `This workflow reads trigger.data.input.${field} in another place, so a scheduled run keeps ${field} under trigger.data.input only, and trigger.data.${field} is empty when ${named} starts this workflow. ` +
     `To read it on every kind of run, write ${forms.join(", and ")}. ` +
     `The || operator skips a schedule value of false, 0, or an empty string. To keep such a value, read trigger.data.input.${field} alone. Only a scheduled run sets it.`
   );
@@ -113,7 +116,10 @@ export function stepDesignWarnings(
     if (typeof step.type !== "string") continue;
     add(node.id, approvalRequestWarning({ type: step.type, prompt: step.prompt }));
     if (pushesGitCommits({ type: step.type, prompt: step.prompt })) add(node.id, gitIdentityWarning(context.ownerType));
+    if (typeof node.type === "string") add(node.id, sharedWorkingDirectoryWarning({ type: node.type, concurrency: node.concurrency, body: node.body }));
   }
+  for (const [nodeId, warning] of listingAgentStepWarnings(definition)) add(nodeId, warning);
+  for (const [nodeId, warning] of rewriteStepWarnings(definition)) add(nodeId, warning);
   for (const row of permissions) {
     add(row.nodeId, heldActionWarning(row));
     add(row.nodeId, unknownRiskActionWarning(row));

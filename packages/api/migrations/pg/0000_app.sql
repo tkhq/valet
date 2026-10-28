@@ -472,6 +472,17 @@ CREATE TABLE "channel_bindings" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "channel_bindings_conversation" ON "channel_bindings" ("org_id","channel_type","conversation_key");
 --> statement-breakpoint
+CREATE TABLE "channel_conversation_bindings" (
+  "org_id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+);
+--> statement-breakpoint
 CREATE TABLE "user_identity_links" (
 	"id" text PRIMARY KEY NOT NULL,
 	"provider" text NOT NULL,
@@ -630,6 +641,7 @@ CREATE TABLE "artifact_comments" (
 	"artifact_id" text NOT NULL,
 	"version" bigint NOT NULL,
 	"vdid" text,
+	"anchor_label" text,
 	"parent_id" text,
 	"body" text NOT NULL,
 	"author_user_id" text NOT NULL,
@@ -2784,7 +2796,9 @@ CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, ses
 CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
-  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint,
+  "purpose" text NOT NULL DEFAULT 'login', "key_name" text,
+  "requested_by" text REFERENCES "user"("id") ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");

@@ -1,5 +1,6 @@
-import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Pencil, Reply } from "lucide-react";
+import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Lock, Pencil, Reply } from "lucide-react";
 import { memo, useMemo, useState } from "react";
+import { classifyProviderFailure, providerFailureSummary } from "@valet/shared";
 import type {
   MessagePart,
   MessageSkillInvocation,
@@ -18,7 +19,7 @@ import { cn } from "~/lib/cn";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
-import { Button, Tooltip } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Tooltip } from "~/components/primitives";
 
 /** Message actions show on hover, and always at phone width, where there is no hover. */
 const ROW_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100";
@@ -60,6 +61,7 @@ export const MessageItem = memo(function MessageItem({
   onReply,
   onEdit,
   onBranch,
+  onBranchPrivately,
   dimmed = false,
   ratings = true,
   readOnly = false,
@@ -82,6 +84,8 @@ export const MessageItem = memo(function MessageItem({
   onEdit?: (message: StreamMessage) => void;
   /** Copies the conversation up to this message into a new thread. */
   onBranch?: (message: StreamMessage) => void;
+  /** Copies it into the viewer's private threads instead. Set in a team thread only. */
+  onBranchPrivately?: (message: StreamMessage) => void;
   /** An edit in progress replaces this row. */
   dimmed?: boolean;
   /** The same assistant turn as the row above: no repeated author, time,
@@ -139,12 +143,27 @@ export const MessageItem = memo(function MessageItem({
         className="inline-flex items-center justify-center opacity-0 group-hover:opacity-100 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11"
       />
     )}
-    {onBranch && (
+    {onBranch && !onBranchPrivately && (
       <Tooltip content="Branch into a new thread">
         <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION} onClick={() => onBranch(message)}>
           <GitBranch className="h-3.5 w-3.5" aria-hidden />
         </Button>
       </Tooltip>
+    )}
+    {onBranch && onBranchPrivately && (
+      <DropdownMenu>
+        <Tooltip content="Branch into a new thread">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label="Branch into a new thread" className={ROW_ACTION}>
+              <GitBranch className="h-3.5 w-3.5" aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+        </Tooltip>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => onBranch(message)}><GitBranch aria-hidden />Branch for the team</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onBranchPrivately(message)}><Lock aria-hidden />Branch privately to me</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     )}
   </>;
   return (
@@ -209,10 +228,16 @@ export const MessageItem = memo(function MessageItem({
                   collapseStructured={collapseStructured}
                 />)}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (message.errorMessage?.trim()
-              ? <p role="alert" className="flex items-start gap-1.5 text-sm text-danger-600 dark:text-danger-500 [overflow-wrap:anywhere]">
-                <AlertCircle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{emptyReplyNotice(message)}</span>
-              </p>
+              ? <div role="alert" className="space-y-1 text-sm text-danger-600 dark:text-danger-500 [overflow-wrap:anywhere]">
+                <p className="flex items-start gap-1.5">
+                  <AlertCircle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{emptyReplyNotice(message)}</span>
+                </p>
+                <details className="pl-5 text-xs text-muted">
+                  <summary className="cursor-pointer select-none">Details</summary>
+                  <p className="mt-1 whitespace-pre-wrap">{message.errorMessage?.trim()}</p>
+                </details>
+              </div>
               : <p className="text-xs italic text-muted [overflow-wrap:anywhere]">{emptyReplyNotice(message)}</p>)}
             {workedForMs !== undefined && <p className="text-xs text-muted">Worked for {formatDuration(workedForMs)}</p>}
           </div>
@@ -272,15 +297,21 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
 }
 
 /**
- * The muted line for an empty assistant reply. A failed turn names the
- * provider's error, which REST keeps after a reload. Other empty replies
- * keep the generic text.
+ * The line for an empty assistant reply. A failed turn gets one sentence that
+ * names the cause and the next step. The provider's raw text, which REST
+ * keeps after a reload, stays under Details. Other empty replies keep the
+ * generic text.
  */
 function emptyReplyNotice(message: StreamMessage): string {
   const error = message.errorMessage?.trim();
   if (!error) return "No response. Try again or choose another model.";
-  const sentence = /[.!?…]$/.test(error) ? error : `${error}.`;
-  return `This turn failed: ${sentence} Try again or choose another model.`;
+  return providerFailureSummary(classifyProviderFailure(error), modelProvider(message.model));
+}
+
+/** "openai/gpt-5.6" or "openai:gpt-5.6" → "openai". A bare id names no provider. */
+function modelProvider(model: string | undefined): string | undefined {
+  const match = model ? /^([^/:]+)[/:]/.exec(model) : null;
+  return match?.[1];
 }
 
 /** "45s", "3m 12s", or "1h 4m": how long a turn ran. Exported for tests. */

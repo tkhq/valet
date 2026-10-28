@@ -63,6 +63,7 @@ const MCP_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "POST", pattern: /^\/api\/workflows\/runs\/[^/]+\/(cancel|retry)$/ },
   { method: "GET", pattern: /^\/api\/notifications\/decisions$/ },
   { method: "GET", pattern: /^\/api\/artifacts$/ },
+  { method: "GET", pattern: /^\/api\/artifacts\/[^/]+\/comment-threads$/ },
   { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
   { method: "DELETE", pattern: /^\/api\/artifacts\/[^/]+$/ },
 ];

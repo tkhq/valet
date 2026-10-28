@@ -1,7 +1,7 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -1933,8 +1933,19 @@ export type EngineEvent =
    * earlier version. `noteEntryId` is the branch note at the new leaf. */
   | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
-  | { type: "status"; threadId: string; status: EngineEventStatus }
+  /** `turnStartedAt` is when the running submission was claimed. A turn can
+   * end and go idle between model steps of one submission, and a replay
+   * delivers old frames at the replay time, so a client reads the start
+   * from here rather than from when a frame arrives. */
+  | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
+  /** A failed model call that this turn retries. It is progress, not an
+   * error: a client shows it on the working line and keeps the turn open.
+   * `retry` calls `provider` again after `waitMs` (attempt `attempt` of
+   * `maxAttempts`). `fallback` continues the turn on `toProvider`. The turn
+   * fails only when the retries run out, as a failed assistant message. */
+  | { type: "turn_retry"; threadId: string; action: "retry" | "fallback"; provider: string; reason: ProviderFailureKind;
+      attempt?: number; maxAttempts?: number; waitMs?: number; toProvider?: string }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }
   | { type: "decision_gate_expired"; threadId: string; gateId: string }
@@ -2378,6 +2389,9 @@ export interface SessionStore {
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
   listThreads(sessionId: string): Promise<ThreadData[]>;
+  /** The threads of every listed session, in one read. A workspace lists
+   * its history across one session per conversation. */
+  listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]>;
   getEntries(
     sessionId: string,
     threadId: string,
@@ -2903,6 +2917,9 @@ export interface CreateSessionOptions {
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
+  /** How long a tool may keep running after its turn is stopped, in ms
+   * (default `TOOL_STOP_GRACE_MS`). See `toAgentTool`. */
+  toolStopGraceMs?: number;
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
@@ -2917,7 +2934,9 @@ export interface CreateSessionOptions {
    */
   turnRetry?: {
     maxAttempts?: number;
-    /** Backoff before each retry, in ms; the last entry repeats. */
+    /** Backoff before each retry, in ms; the last entry repeats. Each wait
+     * moves by up to ±25% (`turnRetryWaitMs`), and `turn_retry.waitMs`
+     * carries the wait the engine actually uses. */
     backoffMs?: number[];
     /**
      * The longest provider-requested wait ("try again in 6s") a retry honors,

@@ -1,6 +1,6 @@
 import { attentionGatePending } from "../events/attention-delivery.js";
 import { webPresence } from "../services/web-presence.js";
-import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
+import { listNotificationPreferences, parseNotificationPreference, saveNotificationPreference } from "../services/notification-preferences.js";
 /**
  * Notifications — web delivery surface for the attention router (Phase 4
  * decision 19).
@@ -16,15 +16,15 @@ import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
  * else 404s, same existence-hiding treatment used elsewhere in this
  * package (teams.ts) for cross-tenant access.
  *
- * Preferences mirror `isWebEnabled`'s default in `orchestrator/attention.ts`:
- * a kind with no row reports `web: true` and `teamDm: false`.
+ * Preferences live in `services/notification-preferences.ts`, which the
+ * settings actions share.
  */
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { Hono } from "hono";
 import { and, desc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { agentSessions, workflowRuns, workflowDefinitions, pendingChannelDeliveries, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { agentSessions, workflowRuns, workflowDefinitions, pendingChannelDeliveries, notifications, type NotificationRow } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
 import type { WorkflowRunOrigin } from "@valet/workflow";
@@ -33,9 +33,7 @@ import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListNotificationDecisionsResponse,
-  NotificationKind,
   NotificationSummary,
-  SetNotificationPreferenceRequest,
 } from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
@@ -138,8 +136,6 @@ notificationsRouter.get("/decisions", async (c) => {
   return c.json({ items, nextCursor } satisfies ListNotificationDecisionsResponse);
 });
 
-const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review", "platform"];
-
 function rowToSummary(row: NotificationRow): NotificationSummary {
   return {
     id: row.id,
@@ -226,60 +222,19 @@ notificationsRouter.post("/read-all", async (c) => {
 });
 
 notificationsRouter.get("/preferences", async (c) => {
-  const { db } = c.var.providers;
-  const userId = c.var.user.id;
-
-  const rows = await db
-    .select()
-    .from(userNotificationPreferences)
-    .where(eq(userNotificationPreferences.userId, userId));
-  const byKind = new Map(rows.map((r) => [r.kind, r]));
-
-  const preferences = NOTIFICATION_KINDS.map((kind) => ({
-    kind,
-    web: byKind.get(kind)?.web ?? true,
-    teamDm: byKind.get(kind)?.teamDm ?? false,
-    channelGraceSeconds: byKind.get(kind)?.channelGraceSeconds ?? defaultChannelGraceSeconds(kind),
-  }));
-
-  const body: ListNotificationPreferencesResponse = { preferences };
+  const body: ListNotificationPreferencesResponse = { preferences: await listNotificationPreferences(c.var.providers.db, c.var.user.id) };
   return c.json(body);
 });
 
 notificationsRouter.put("/preferences", async (c) => {
-  const { db } = c.var.providers;
-  const userId = c.var.user.id;
-
-  let body: SetNotificationPreferenceRequest;
+  let body: unknown;
   try {
-    body = (await c.req.json()) as SetNotificationPreferenceRequest;
+    body = await c.req.json();
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body === null || typeof body !== "object") return c.json({ error: "body must be an object" }, 400);
-  if (!NOTIFICATION_KINDS.includes(body.kind)) {
-    return c.json({ error: `kind must be one of ${NOTIFICATION_KINDS.join(", ")}` }, 400);
-  }
-  if (typeof body.web !== "boolean") {
-    return c.json({ error: "web must be a boolean" }, 400);
-  }
-
-  if (body.teamDm !== undefined && typeof body.teamDm !== "boolean") {
-    return c.json({ error: "teamDm must be a boolean. Choose whether to receive team direct messages." }, 400);
-  }
-
-  if (body.channelGraceSeconds !== undefined && body.channelGraceSeconds !== null && (!Number.isInteger(body.channelGraceSeconds)
-    || body.channelGraceSeconds < 0 || body.channelGraceSeconds > 86_400)) {
-    return c.json({ error: "channelGraceSeconds must be an integer from 0 to 86400. Choose a delay of at most one day." }, 400);
-  }
-
-  await db
-    .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false, channelGraceSeconds: body.channelGraceSeconds })
-    .onConflictDoUpdate({
-      target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web, ...(body.channelGraceSeconds === undefined ? {} : { channelGraceSeconds: body.channelGraceSeconds }), ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
-    });
-
+  const pref = parseNotificationPreference(body);
+  if ("error" in pref) return c.json({ error: pref.error }, 400);
+  await saveNotificationPreference(c.var.providers.db, c.var.user.id, pref);
   return c.json({ ok: true });
 });

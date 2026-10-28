@@ -6,7 +6,7 @@
  * `queue.state` slice population, `submission.settled` message badges,
  * and gate replay idempotence.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import type { Message, WireEvent, WireQueueState } from "@valet/api/wire";
 import { queueBusy, type StreamMessage, useStreamStore } from "./stream";
 
@@ -1606,6 +1606,47 @@ describe("streaming tool calls", () => {
   });
 });
 
+describe("provider retries", () => {
+  beforeEach(reset);
+
+  const attemptError = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "error", threadId: THREAD,
+    code: "error", message: "overloaded_error: Overloaded", recoverable: false,
+  });
+  const retry = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "turn_retry", threadId: THREAD,
+    action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000,
+  });
+
+  it("does not flag the thread when an attempt fails and a retry follows", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 1));
+    ingest(SESSION, attemptError(2));
+    ingest(SESSION, retry(3));
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.errorByThread[THREAD]).toBeUndefined();
+    expect(slice.statusByThread[THREAD]?.status).toBe("thinking");
+    expect(slice.retryByThread[THREAD]).toMatchObject({ action: "retry", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+  });
+
+  it("clears the retry when the next attempt streams", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, retry(1));
+    ingest(SESSION, messageStart("m-2", 2));
+    expect(useStreamStore.getState().bySession[SESSION].retryByThread[THREAD]).toBeUndefined();
+  });
+
+  it("marks the thread failed when the turn settles failed after its retries", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "anthropic/claude"));
+    ingest(SESSION, retry(2));
+    ingest(SESSION, { seq: 3, ts: Date.now(), offset: offset(3), type: "submission.settled", sessionId: SESSION, threadId: THREAD, queueItemId: "q-1", outcome: "failed", error: "overloaded_error: Overloaded" });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.statusByThread[THREAD]?.status).toBe("error");
+    expect(slice.retryByThread[THREAD]).toBeUndefined();
+  });
+});
+
 describe("turn error visibility", () => {
   beforeEach(reset);
 
@@ -1705,7 +1746,17 @@ describe("turn error visibility", () => {
 });
 
 describe("turnStartedAt", () => {
-  beforeEach(reset);
+  // Browser and API clocks agree unless a test says otherwise.
+  const NOW = 50_000;
+  function connect(apiNow: number) {
+    useStreamStore.getState().ingest(SESSION, { seq: 0, ts: apiNow, type: "init", session: { id: SESSION } } as WireEvent);
+  }
+  beforeEach(() => {
+    reset();
+    vi.useFakeTimers({ now: NOW });
+    connect(NOW);
+  });
+  afterEach(() => { vi.useRealTimers(); });
 
   function threadStatus(threadId = THREAD) {
     return useStreamStore.getState().bySession[SESSION].statusByThread[threadId];
@@ -1737,6 +1788,43 @@ describe("turnStartedAt", () => {
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
     ingest(SESSION, statusEvent(THREAD, "queued", 3000));
     expect(threadStatus().turnStartedAt).toBe(3000);
+  });
+
+  it("keeps the turn start in browser time when the API clock runs ahead", () => {
+    const ahead = 120_000;
+    connect(NOW + ahead);
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", NOW + ahead), turnStartedAt: NOW + ahead - 60_000 } as WireEvent);
+    // One minute into the turn by the API, one minute by the browser.
+    expect(NOW - (threadStatus().turnStartedAt ?? 0)).toBe(60_000);
+    reset();
+    connect(NOW - ahead);
+    ingest(SESSION, statusEvent(THREAD, "queued", NOW - ahead));
+    expect(threadStatus().turnStartedAt).toBe(NOW);
+  });
+
+  it("uses the turn start a connect frame names, before or after a replayed frame", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    reset();
+    connect(NOW);
+    ingest(SESSION, statusEvent(THREAD, "thinking", 9000));
+    ingest(SESSION, { ...statusEvent(THREAD, "queued", 9100), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+  });
+
+  it("keeps the submission start across a replayed idle and a step boundary", () => {
+    const { ingest } = useStreamStore.getState();
+    // Connect seed, then a replay that starts before the previous turn ended.
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, statusEvent(THREAD, "idle", 9001));
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9002), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    // One submission can go idle between model steps.
+    ingest(SESSION, { ...statusEvent(THREAD, "idle", 9500), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9600), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
   });
 });
 
