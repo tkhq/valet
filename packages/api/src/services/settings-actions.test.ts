@@ -372,22 +372,27 @@ describe("settings actions", () => {
     const [after] = await api.providers.db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
     expect(after).toEqual({ name: "Local Dev", defaultTier: null });
   });
+  async function preferences(): Promise<unknown[]> {
+    const body: unknown = await fetch(`${api.baseUrl}/api/notifications/preferences`).then(r => r.json());
+    if (!body || typeof body !== "object" || !("preferences" in body) || !Array.isArray(body.preferences)) throw new Error("Missing preferences");
+    return body.preferences;
+  }
+
   it("changes one notification kind for the person typing and keeps fields it was not asked to change", async () => {
     await fetch(`${api.baseUrl}/api/notifications/preferences`, { method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind: "question", web: true, teamDm: true, channelGraceSeconds: 30 }) });
     const result = await action("update_notifications").execute({ kind: "question", web: false }, context());
     expect(result).toMatchObject({ success: true, data: { url: "/settings/notifications" } });
-    const body = await fetch(`${api.baseUrl}/api/notifications/preferences`).then(r => r.json());
-    expect(body.preferences).toContainEqual({ kind: "question", web: false, teamDm: true, channelGraceSeconds: 30 });
-    expect(body.preferences).toContainEqual({ kind: "approval", web: true, teamDm: false, channelGraceSeconds: 120 });
+    const saved = await preferences();
+    expect(saved).toContainEqual({ kind: "question", web: false, teamDm: true, channelGraceSeconds: 30 });
+    expect(saved).toContainEqual({ kind: "approval", web: true, teamDm: false, channelGraceSeconds: 120 });
     const other = await action("get_settings").execute({ scope: "notifications" }, context({ userId: "test-member", interactiveActor: { id: "test-member" }, owner: { type: "user", id: "test-member" } }));
     expect(other).toMatchObject({ success: true, data: { preferences: expect.arrayContaining([{ kind: "question", web: true, teamDm: false, channelGraceSeconds: 120 }]) } });
   });
 
   it("refuses notification changes outside an interactive conversation", async () => {
     expect((await action("update_notifications").execute({ kind: "approval", web: false }, context({ sessionPurpose: "workflow" }))).success).toBe(false);
-    const body = await fetch(`${api.baseUrl}/api/notifications/preferences`).then(r => r.json());
-    expect(body.preferences).toContainEqual(expect.objectContaining({ kind: "approval", web: true }));
+    expect(await preferences()).toContainEqual(expect.objectContaining({ kind: "approval", web: true }));
   });
 
   it("reads account settings by default and the current team when a team read names none", async () => {
