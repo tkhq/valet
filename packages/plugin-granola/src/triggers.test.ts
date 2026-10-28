@@ -92,9 +92,21 @@ describe("granola explainRejection", () => {
     const explain = def.explainRejection!;
     expect(await explain(makeReq({}, { key: Buffer.from("x") }), secrets)).toMatchObject({ reason: "bad_signature" });
     expect(await explain(makeReq(), {})).toMatchObject({ reason: "bad_signature" });
-    expect(await explain(makeReq({}, { ts: "1" }), secrets)).toMatchObject({ reason: "stale_delivery" });
+    expect(await explain(makeReq({}, { ts: "1" }), secrets)).toMatchObject({ reason: "stale_delivery", retry: true });
     expect(await explain(makeReq({ event_type: "note.deleted" }), secrets)).toMatchObject({ reason: "unsupported_event" });
     expect(await explain(makeReq({ note_id: undefined }), secrets)).toMatchObject({ reason: "malformed_callback" });
+  });
+
+  it("asks for a retry only after the signature verifies", async () => {
+    const explain = def.explainRejection!;
+    const staleSigned = await explain(makeReq({}, { ts: "1" }), secrets);
+    expect(staleSigned.retry).toBe(true);
+    const staleForged = await explain(makeReq({}, { ts: "1", key: Buffer.from("x") }), secrets);
+    expect(staleForged).toMatchObject({ reason: "bad_signature" });
+    expect(staleForged.retry).toBeUndefined();
+    for (const other of [{ event_type: "note.deleted" }, { note_id: undefined }]) {
+      expect((await explain(makeReq(other), secrets)).retry).toBeUndefined();
+    }
   });
 
   it("does not echo unverified body content", async () => {

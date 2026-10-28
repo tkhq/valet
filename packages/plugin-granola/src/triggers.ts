@@ -67,11 +67,14 @@ type Inspection =
   | { ok: true; eventType: GranolaEventType; deliveryId: string; payload: Record<string, unknown> }
   | { ok: false; rejection: TriggerRejection };
 
-const reject = (reason: TriggerRejection["reason"], detail: string): Inspection => ({ ok: false, rejection: { reason, detail } });
+const reject = (reason: TriggerRejection["reason"], detail: string, retry?: true): Inspection =>
+  ({ ok: false, rejection: { reason, detail, ...(retry ? { retry } : {}) } });
 
 /**
- * Checks one delivery: signature over the raw body first, then freshness,
- * then the JSON. Nothing from the body is read or logged before the
+ * Checks one delivery: signature over the raw body first, even when the
+ * timestamp is out of range, then freshness, then the JSON. Only a delivery
+ * with a valid signature can be rejected as stale, and only that rejection
+ * asks for a retry. Nothing from the body is read or logged before the
  * signature passes.
  */
 function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, secret: string | undefined): Inspection {
@@ -91,7 +94,7 @@ function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, 
   const seconds = /^\d{1,12}$/.test(timestamp) ? Number(timestamp) : Number.NaN;
   const ageSeconds = Math.floor(Date.now() / 1000) - seconds;
   if (!Number.isFinite(ageSeconds) || Math.abs(ageSeconds) > TIMESTAMP_TOLERANCE_SECONDS) {
-    return reject("stale_delivery", `A signed Granola delivery had a timestamp ${Number.isFinite(ageSeconds) ? `${ageSeconds}s from now` : "that is not a Unix time"}. Valet accepts deliveries within ${TIMESTAMP_TOLERANCE_SECONDS}s. If this repeats, check the server clock.`);
+    return reject("stale_delivery", `A signed Granola delivery had a timestamp ${Number.isFinite(ageSeconds) ? `${ageSeconds}s from now` : "that is not a Unix time"}. Valet accepts deliveries within ${TIMESTAMP_TOLERANCE_SECONDS}s. Valet answers 503 so Granola retries with a new timestamp. If this repeats, check the server clock.`, true);
   }
 
   const payload = parseObject(req.rawBody);

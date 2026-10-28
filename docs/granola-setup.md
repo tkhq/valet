@@ -64,14 +64,14 @@ Valet follows the Standard Webhooks scheme that Granola documents.
 1. Valet reads the raw body and the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers.
 2. Valet computes HMAC-SHA256 over `{webhook-id}.{webhook-timestamp}.{body}`. The key is the base64-decoded secret without the `whsec_` prefix.
 3. Valet compares the result with each `v1` signature in the header, in constant time.
-4. Valet rejects a timestamp more than 300 seconds from the server clock.
+4. Only after the signature passes, Valet rejects a timestamp more than 300 seconds from the server clock. Valet answers 503, so Granola retries with the timestamp of the new attempt. Valet does not ingest the stale delivery. A request with a wrong signature gets 403 whatever its timestamp.
 5. Valet parses the JSON only after the signature passes. The `webhook-id` must equal `event_id`.
 
 | Result | HTTP answer | Drop log reason |
 | --- | --- | --- |
 | Valid event | 200 | none |
 | Signature missing or wrong, or saved secret not a `whsec_` value | 403 | `bad_signature` |
-| Signed, but timestamp outside 300 seconds | 200 | `stale_delivery` |
+| Valid signature, but timestamp outside 300 seconds | 503 | `stale_delivery` |
 | Signed, but not a JSON object or a field is missing | 200 | `malformed_callback` |
 | Signed, but unsupported event type | 200 | `unsupported_event` |
 | No saved secret, or a saved secret Valet cannot read | 503 | `secret_unavailable` (only for an existing organization) |
@@ -83,5 +83,5 @@ Granola retries on 408, 429, 5xx, and timeouts. The 503 answer makes Granola ret
 - **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Without a saved secret, Valet answers 503 and Granola retries.
 - **`secret_unavailable` in the drop log.** Save the secret again with the command above.
 - **`bad_signature` in the drop log.** Save the signing secret again. If you have several Granola webhooks that send to this URL, delete the extra ones.
-- **`stale_delivery` in the drop log.** Check the clock on the Valet server.
+- **`stale_delivery` in the drop log.** Granola sent a validly signed delivery with an old or future timestamp, and Valet asked Granola to retry. If this repeats, check the clock on the Valet server.
 - **A subscription never fires.** Valet does not check that the secret exists when you create the subscription. Save the secret first.

@@ -108,6 +108,12 @@ export interface VerifiedEvent {
 export interface TriggerRejection {
   reason: "bad_signature" | "stale_delivery" | "unsupported_event" | "malformed_callback";
   detail: string;
+  /**
+   * Set only after the delivery's signature verified. The route answers 503
+   * instead of acknowledging, so a provider that retries 5xx sends the
+   * delivery again. Never set it for `bad_signature`.
+   */
+  retry?: true;
 }
 
 /** A provider webhook normalized into the generic event pipeline. */

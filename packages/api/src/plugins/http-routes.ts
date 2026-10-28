@@ -202,8 +202,10 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
           await writeDropLog(db, {
             orgId: installation.orgId, reason: verification.rejection.reason, detail: verification.rejection.detail,
           });
-          if (verification.rejection.reason !== 'bad_signature') return ack();
-          return c.json({ error: 'signature verification failed' }, 403);
+          if (verification.rejection.reason === 'bad_signature') return c.json({ error: 'signature verification failed' }, 403);
+          // Set by a trigger only after the signature verified, so this never answers an unauthenticated request.
+          if (verification.rejection.retry) return c.json({ error: 'delivery rejected, retry later' }, 503);
+          return ack();
         }
         for (const event of verification.events) {
           await ingestEvent({ db, plugins: c.var.providers.plugins, onIngest: eventDispatcher.nudge, waiters: waiterMatchDeps(c.var.providers, { nudge: (ids) => c.var.providers.wakeWatcher.nudge(ids) }) }, {

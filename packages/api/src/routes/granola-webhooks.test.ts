@@ -162,14 +162,39 @@ describe("POST /plugins/granola/http/events/:orgId", () => {
     expect(drops[0].detail).toContain("note.deleted");
   });
 
-  it("acknowledges a signed stale delivery without ingesting it", async () => {
+  it("answers 503 to a validly signed stale delivery so Granola retries, and does not ingest it", async () => {
     api = await bootTestApi({ plugins: [granolaPlugin] });
+    await api.providers.eventDispatcher.stop();
     await seedSecret(api);
+    await seedSubscription(api, ["granola.note.generated"]);
     const stale = String(Math.floor(Date.now() / 1000) - 3600);
-    expect((await post(api, delivery({}, { ts: stale }))).status).toBe(200);
+    const res = await post(api, delivery({}, { ts: stale }));
+    expect(res.status).toBe(503);
     expect(await api.providers.db.select().from(events)).toHaveLength(0);
     const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
     expect(drops.map((d) => d.reason)).toEqual(["stale_delivery"]);
+    // Granola's retry reuses event_id with a fresh attempt timestamp and is ingested once.
+    expect((await post(api, delivery())).status).toBe(200);
+    expect(await api.providers.db.select().from(events)).toHaveLength(1);
+  });
+
+  it("answers 503 to a validly signed delivery dated in the future", async () => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    await seedSecret(api);
+    const future = String(Math.floor(Date.now() / 1000) + 3600);
+    expect((await post(api, delivery({}, { ts: future }))).status).toBe(503);
+    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+  });
+
+  it("answers 403, never 503, when the signature is invalid and the timestamp is stale", async () => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    await seedSecret(api);
+    const stale = String(Math.floor(Date.now() / 1000) - 3600);
+    const res = await post(api, delivery({}, { ts: stale, key: Buffer.from("wrong-key") }));
+    expect(res.status).toBe(403);
+    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+    const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
+    expect(drops.map((d) => d.reason)).toEqual(["bad_signature"]);
   });
 
   it("rejects an unsigned request and an invalid JSON body", async () => {
