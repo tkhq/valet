@@ -443,6 +443,33 @@ describe("ChannelHost.handleUpdate", () => {
     return { slackHost, slack };
   }
 
+  it("reads only the running submission's entries while a Slack DM turn runs", async () => {
+    const { slackHost } = await startSlackHost();
+    try {
+      const key = "slack:T1:D1:500.1";
+      await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:read-1", conversationKey: key, text: "first question" }));
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
+      const thread = await session.threadByKey("slack:D1:500.1");
+      if (!thread) throw new Error("Expected the Slack DM thread");
+      // Every per-event and per-turn read must name a submission or a tail. A
+      // whole-thread read here parses the full transcript at tool-call rate.
+      const reads = vi.spyOn(engineStore, "getEntries");
+      await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:read-2", conversationKey: key, text: "second question" }));
+      await vi.waitFor(async () => {
+        const entries = await engineStore.getEntries(session.id, thread.id, { limit: 50 });
+        expect(entries.filter((e) => e.type === "message" && e.role === "assistant").length).toBeGreaterThanOrEqual(2);
+        expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
+      });
+      const wholeThread = reads.mock.calls.filter(([, threadId, opts]) =>
+        threadId === thread.id && opts?.queueItemId === undefined && opts?.limit === undefined);
+      reads.mockRestore();
+      expect(wholeThread).toEqual([]);
+    } finally {
+      await slackHost.stop();
+    }
+  });
+
   it("creates a native Slack DM thread without Home and records edits there without replying", async () => {
     const { slackHost } = await startSlackHost();
     try {
