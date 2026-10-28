@@ -42,6 +42,24 @@ function findAction(id: string): PluginAction {
   return action;
 }
 
+describe("github action abort signal", () => {
+  it("sends no request once the action is stopped", async () => {
+    // Every Octokit carries the action's signal, so an action that does not
+    // pass it per request still stops.
+    const server = useFixture();
+    const stop = new AbortController();
+    stop.abort();
+
+    const result = await findAction("github.get_repository").execute(
+      { owner: "acme", repo: "widgets" },
+      { ...fakeActionContext("test-token"), signal: stop.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(server.calls).toHaveLength(0);
+  });
+});
+
 describe("github action base URL", () => {
   it("sends requests to GITHUB_API_URL when it is set", async () => {
     const server = useFixture();
@@ -796,6 +814,59 @@ describe("github.read_repo_file", () => {
     expect(result.error).toContain("rate limit for this account is used up");
     expect(result.error).toContain(`resets at ${new Date(reset * 1000).toISOString().slice(11, 16)} UTC`);
     expect(result.error).not.toContain("permission");
+  });
+
+  function secondaryLimit(retryAfter: string): GithubFixtureResponse {
+    return {
+      status: 403,
+      body: JSON.stringify({ message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." }),
+      headers: { "content-type": "application/json", "retry-after": retryAfter },
+    };
+  }
+
+  it("waits out a short secondary rate limit and retries once", async () => {
+    // GitHub sends no reset time for a secondary limit and asks clients to
+    // wait. Failing every one at once broke unattended review runs.
+    let calls = 0;
+    const server = useFixture({
+      readFile: (_owner, _repo, path) => (++calls === 1
+        ? secondaryLimit("1")
+        : { body: { type: "file", encoding: "base64", path, size: 2, content: Buffer.from("ok").toString("base64") } }),
+    });
+
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(server.calls).toHaveLength(2);
+    expect(result.success).toBe(true);
+  });
+
+  it("ends a rate-limit wait when the action is stopped", async () => {
+    const server = useFixture({ readFile: () => secondaryLimit("30") });
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 100);
+
+    const started = Date.now();
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "README.md" },
+      { ...fakeActionContext("test-token"), signal: stop.signal },
+    );
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+  });
+
+  it("fails at once when the secondary limit asks for more than 60s", async () => {
+    const server = useFixture({ readFile: () => secondaryLimit("120") });
+
+    const started = Date.now();
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("in about 2 min");
   });
 
   it("reads a PDF through the shared extractor", async () => {

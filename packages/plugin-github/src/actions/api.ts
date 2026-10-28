@@ -15,23 +15,54 @@ export function resolveGithubApiUrl(): string {
 
 /**
  * The longest rate-limit wait one request sleeps through before it fails.
- * Octokit's default handlers sleep until the quota resets, up to an hour,
- * and that sleep does not watch the action's abort signal. A turn waiting
- * there could not be stopped. A longer wait fails at once, and
- * `rateLimitError` names the reset time.
+ * GitHub sends no reset time for a secondary rate limit and asks clients to
+ * wait at least 60s, so a shorter cap fails every secondary limit at once.
+ * A primary limit usually resets much later, up to an hour, so it fails at
+ * once and `rateLimitError` names the reset time.
  */
-export const MAX_RATE_LIMIT_WAIT_SECONDS = 10;
+export const MAX_RATE_LIMIT_WAIT_SECONDS = 60;
 
-function retryShortWait(retryAfter: number, options: { request: { retryCount: number } }): boolean {
-  return options.request.retryCount === 0 && retryAfter <= MAX_RATE_LIMIT_WAIT_SECONDS;
+/** Resolves true after `ms`, or false as soon as `signal` aborts. */
+function waitUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
-/** The one Octokit constructor for this package. */
-export function githubOctokit(token: string): Octokit {
+/**
+ * The throttle handler: retry once when the wait is short enough, and do
+ * the wait here so Stop can end it. Octokit's own retry delay is set to
+ * zero (`retryAfterBaseValue: 0`) because this handler already waited.
+ */
+function waitThenRetry(signal: AbortSignal | undefined) {
+  return (retryAfter: number, options: { request: { retryCount: number } }): Promise<boolean> | boolean => {
+    if (options.request.retryCount > 0 || retryAfter > MAX_RATE_LIMIT_WAIT_SECONDS) return false;
+    return waitUnlessAborted(retryAfter * 1000, signal);
+  };
+}
+
+/**
+ * The one Octokit constructor for this package. `signal` is the action's
+ * abort signal: every request and every rate-limit wait ends when it aborts.
+ * Octokit's default handlers slept until the quota reset and ignored the
+ * signal, so a turn waiting there could not be stopped.
+ */
+export function githubOctokit(token: string, signal?: AbortSignal): Octokit {
+  const onLimit = waitThenRetry(signal);
   return new Octokit({
     auth: token,
     baseUrl: resolveGithubApiUrl(),
-    throttle: { onRateLimit: retryShortWait, onSecondaryRateLimit: retryShortWait },
+    ...(signal ? { request: { signal } } : {}),
+    throttle: { onRateLimit: onLimit, onSecondaryRateLimit: onLimit, retryAfterBaseValue: 0 },
   });
 }
 

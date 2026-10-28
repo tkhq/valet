@@ -33,7 +33,7 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return githubOctokit(token);
+  return githubOctokit(token, ctx.signal);
 }
 
 /**
@@ -55,7 +55,7 @@ async function getInstallationOctokit(ctx: PluginActionContext): Promise<Octokit
   const cred = await ctx.credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE);
   const token = cred?.accessToken;
   if (!token) return null;
-  return githubOctokit(token);
+  return githubOctokit(token, ctx.signal);
 }
 
 const PERMISSION_HINTS: Record<string, string> = {
