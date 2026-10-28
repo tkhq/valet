@@ -2,6 +2,7 @@ import type { ActiveViewer } from "@valet/api/wire";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/primitives/avatar";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { StatusDot } from "~/components/primitives/status-dot";
+import { Tooltip } from "~/components/primitives/tooltip";
 import { cn } from "~/lib/cn";
 
 /** The people's faces a thread shows: up to three on a desktop, two on a phone. */
@@ -23,6 +24,11 @@ function viewerLabel(viewer: ActiveViewer): string {
   return `${viewer.name}, ${viewer.typing ? "typing" : "here now"}`;
 }
 
+/** One line per person for a hover tip: "Dana Sales, typing". */
+export function ViewerNames({ viewers }: { viewers: ActiveViewer[] }) {
+  return viewers.map((viewer) => <span key={viewer.userId} className="block">{viewerLabel(viewer)}</span>);
+}
+
 export function ViewerFace({ viewer, small = false, className }: { viewer: ActiveViewer; small?: boolean; className?: string }) {
   return (
     <span className={cn("relative inline-flex shrink-0", className)}>
@@ -37,25 +43,27 @@ export function ViewerFace({ viewer, small = false, className }: { viewer: Activ
   );
 }
 
-/** Faces of the other people in the open thread, beside its title. Tapping them lists who is here. */
+/** Faces of the other people in the open thread, beside its title. Hover or focus names them; tapping them lists who is here. */
 export function ViewerFaces({ viewers }: { viewers: ActiveViewer[] }) {
   if (viewers.length === 0) return null;
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={`In this thread: ${viewers.map(viewerLabel).join("; ")}`}
-          data-testid="thread-viewers"
-          className="flex shrink-0 items-center rounded-full p-0.5 max-sm:min-h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
-        >
-          {viewers.slice(0, DESKTOP_FACES).map((viewer, index) => (
-            <ViewerFace key={viewer.userId} viewer={viewer} className={cn(index > 0 && "-ml-1.5", index >= PHONE_FACES && "max-sm:hidden")} />
-          ))}
-          {viewers.length > PHONE_FACES && <span className="ml-1 text-[11px] text-muted sm:hidden">+{viewers.length - PHONE_FACES}</span>}
-          {viewers.length > DESKTOP_FACES && <span className="ml-1 text-[11px] text-muted max-sm:hidden">+{viewers.length - DESKTOP_FACES}</span>}
-        </button>
-      </PopoverTrigger>
+      <Tooltip content={<ViewerNames viewers={viewers} />}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            aria-label={`In this thread: ${viewers.map(viewerLabel).join("; ")}`}
+            data-testid="thread-viewers"
+            className="flex shrink-0 items-center rounded-full p-0.5 max-sm:min-h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
+          >
+            {viewers.slice(0, DESKTOP_FACES).map((viewer, index) => (
+              <ViewerFace key={viewer.userId} viewer={viewer} className={cn(index > 0 && "-ml-1.5", index >= PHONE_FACES && "max-sm:hidden")} />
+            ))}
+            {viewers.length > PHONE_FACES && <span className="ml-1 text-[11px] text-muted sm:hidden">+{viewers.length - PHONE_FACES}</span>}
+            {viewers.length > DESKTOP_FACES && <span className="ml-1 text-[11px] text-muted max-sm:hidden">+{viewers.length - DESKTOP_FACES}</span>}
+          </button>
+        </PopoverTrigger>
+      </Tooltip>
       <PopoverContent className="w-60 p-2">
         <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">In this thread</p>
         <ul className="space-y-1">
@@ -97,7 +105,7 @@ export function TypingLine({ viewers }: { viewers: ActiveViewer[] }) {
   );
 }
 
-/** Small faces on a thread row for the other people in that thread. */
+/** Small faces on a thread row for the other people in that thread. The row's tooltip names them. */
 export function RowFaces({ viewers }: { viewers: ActiveViewer[] }) {
   if (viewers.length === 0) return null;
   return (
