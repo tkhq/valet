@@ -3047,6 +3047,15 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
+  /** Every entry, payloads included. Compaction prunes, selects its cut point
+   * and rebuilds from all path entries, so it must not see stubs. */
+  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
   private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
     const store = this.session.providers.store;
     const snapshot = store.getTranscriptSnapshot
@@ -4988,7 +4997,8 @@ export class Thread {
     // Retire an injected contract before an unrelated submission runs.
     const taskSource = this.taskSourceFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
-      const snapshot = await this.transcriptSnapshot();
+      // Keep the task's covered prompt whole: the rebuild below restores it.
+      const snapshot = await this.transcriptSnapshot(taskSource);
       const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
       const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
       const checkpoint = findMostRecentCompaction(activeEntries);
@@ -5763,7 +5773,7 @@ export class Thread {
 
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.transcriptSnapshot();
+    const snapshot = await this.fullSnapshot();
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
@@ -6097,7 +6107,7 @@ export class Thread {
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.transcriptSnapshot();
+      const updatedSnapshot = await this.fullSnapshot();
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
