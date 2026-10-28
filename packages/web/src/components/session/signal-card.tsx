@@ -50,16 +50,24 @@ export function SignalCard({
   const signal = message.signal;
   if (!signal) return null;
 
-  // The row spans the list and the card sits in the message column, like a
-  // message (`message-item.tsx`): padding inside the centered column would
-  // shift it right of the messages on a wide screen.
+  return (
+    <MessageColumn>
+      {signal.signalType === "child.settled"
+        ? <ChildSettledCard message={message} signal={signal} onOpenChild={onOpenChild} />
+        : <EnvelopeCard message={message} signal={signal} />}
+    </MessageColumn>
+  );
+}
+
+/**
+ * The row spans the list and the card sits in the message column, like a
+ * message (`message-item.tsx`): padding inside the centered column would
+ * shift it right of the messages on a wide screen.
+ */
+function MessageColumn({ children }: { children: ReactNode }) {
   return (
     <div className="min-w-0 px-5 py-1.5 sm:px-8">
-      <div className="mx-auto w-full min-w-0 max-w-3xl">
-        {signal.signalType === "child.settled"
-          ? <ChildSettledCard message={message} signal={signal} onOpenChild={onOpenChild} />
-          : <EnvelopeCard message={message} signal={signal} />}
-      </div>
+      <div className="mx-auto w-full min-w-0 max-w-3xl">{children}</div>
     </div>
   );
 }
@@ -531,22 +539,24 @@ export function WatchEventsCard({ events }: { events: Message[] }) {
   const reason = latest.signal.attributes?.reason || "watch";
   const origin = originLabel(latest.signal);
   return (
-    <CardShell>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-ink">{reason}</span>
-        <Badge variant="neutral">watch.event</Badge>
-        <span className="text-xs text-muted">{events.length} events</span>
-        {origin && <span className="text-xs text-muted">{origin}</span>}
-      </div>
-      {open ? (
-        events.map((event) => event.content && <LogBody key={event.id} content={event.content} />)
-      ) : (
-        latest.content && <LogBody content={latest.content} />
-      )}
-      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
-        {open ? "Show latest only" : `Show all ${events.length} events`}
-      </button>
-    </CardShell>
+    <MessageColumn>
+      <CardShell>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-medium text-ink">{reason}</span>
+          <Badge variant="neutral">watch.event</Badge>
+          <span className="text-xs text-muted">{events.length} events</span>
+          {origin && <span className="text-xs text-muted">{origin}</span>}
+        </div>
+        {open ? (
+          events.map((event) => event.content && <LogBody key={event.id} content={event.content} />)
+        ) : (
+          latest.content && <LogBody content={latest.content} />
+        )}
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
+          {open ? "Show latest only" : `Show all ${events.length} events`}
+        </button>
+      </CardShell>
+    </MessageColumn>
   );
 }
 

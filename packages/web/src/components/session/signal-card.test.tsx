@@ -294,7 +294,9 @@ describe("wakeup signal origin and watch event grouping (fix wave 3, UX)", () =>
 
   it("renders a group as one card with the latest event, expandable to all", () => {
     const events = [1, 2, 3].map((n) => signalMessage(`e${n}`, "watch.event", { wakeupId: "wk_w", reason: "tail build" }, `event ${n}`));
-    render(<WatchEventsCard events={events} />);
+    const { container } = render(<WatchEventsCard events={events} />);
+    // It sits in the message column like every other signal card.
+    expect(container.querySelector(".max-w-3xl")).not.toBeNull();
     expect(screen.getByText("tail build")).toBeTruthy();
     expect(screen.getByText("3 events")).toBeTruthy();
     expect(screen.getByText("event 3")).toBeTruthy();
