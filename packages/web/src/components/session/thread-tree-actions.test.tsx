@@ -1010,6 +1010,21 @@ describe("ThreadTree: timer wait line", () => {
     expect(row?.contains(lines[0] ?? null)).toBe(true);
   });
 
+  it("keeps the line inside the open row's highlight", () => {
+    // With no `thread` search param, the only thread is the open one.
+    threads = [thread({ id: "thread-1", title: "Plan the launch" })];
+    const now = Date.now();
+    wakeups = {
+      wakeups: [{ id: "wk_1", threadId: "thread-1", kind: "timer", status: "pending", reason: "check CI", fireAt: now + 5 * 60_000, createdAt: now }],
+      leases: [],
+    };
+    renderTree();
+    // The selected tint and accent bar sit on one element that holds the
+    // title and the line, so the line does not hang below the row.
+    const highlighted = screen.getByText("Plan the launch").closest(".bg-moss-wash-strong");
+    expect(highlighted?.contains(screen.getByText("Waiting · next wakeup in 5m"))).toBe(true);
+  });
+
   it("shows no line without timers", () => {
     wakeups = { wakeups: [], leases: [] };
     renderTree();
