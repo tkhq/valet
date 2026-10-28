@@ -494,7 +494,7 @@ export interface MessageUsage {
 export interface ThreadContextUsage {
   /** Estimated tokens the next model request sends. */
   tokens: number;
-  /** Usable budget: the context window minus the output reserve. */
+  /** Compaction budget: the usable context (window minus output reserve), capped by `compaction.contextBudgetTokens`. */
   limit: number;
   /** The model's full context window. */
   contextWindow: number;
@@ -3135,6 +3135,12 @@ export interface CompactionConfig {
   enabled?: boolean;
   /** Subtract from contextWindow when computing usable space. Default: min(20_000, model.maxOutputTokens). */
   reserveTokens?: number;
+  /**
+   * Cap on the context a thread carries between turns. A finished turn above
+   * it compacts without a continuation, and the tail budget scales from it.
+   * Overflow still uses the usable space. Default: 200_000. `0` removes the cap.
+   */
+  contextBudgetTokens?: number;
   /** At most the last N turns are kept verbatim; the tail token budget decides how many fit. Default: 8. */
   tailTurns?: number;
   /** Floor for tail token budget. Default: 2_000. */

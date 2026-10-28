@@ -1076,7 +1076,7 @@ export interface ThreadContextResponse {
   context: {
     /** Estimated tokens the next model request sends. */
     tokens: number;
-    /** Usable budget: the context window minus the output reserve. */
+    /** Compaction budget: the usable context (window minus output reserve), capped by `compaction.contextBudgetTokens`. */
     limit: number;
     /** The model's full context window. */
     contextWindow: number;
