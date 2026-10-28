@@ -127,6 +127,8 @@ import {
   type SandboxPodsApi,
   type PodEventSummary,
   type SandboxPodStatusApi,
+  startupKindOf,
+  OWNERSHIP_CONDITION_PATTERN,
 } from "./lifecycle.js";
 import {
   buildSandboxManifest,
@@ -159,6 +161,11 @@ import {
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+/** Upper bound on waiting for a same-name pod and PVC to disappear, both
+ * after our own failed-create cleanup and before creating over an orphan
+ * left by an earlier delete (spec 8.2, 8.3). */
+export const RESOURCE_GONE_TIMEOUT_MS = 30_000;
+export const RESOURCE_GONE_POLL_MS = 500;
 
 function reportAdoptedWorkspacePvcError(args: {
   sandboxName: string;
@@ -1055,6 +1062,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
     const { cpu, memory, scratch } = opts.resources ?? {};
+    // Spec 8.3: a pod or PVC with our name whose Sandbox was deleted is
+    // being garbage-collected. Creating over it makes the controller reject
+    // the new CR ("is owned by Sandbox/... not by sandbox"). Only relevant
+    // when no CR exists; an existing CR is the adopt path and owns them.
+    // `previous` is this call's own GET of the CR above.
+    if (previous === null) {
+      await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
+    }
     let applyResult: Awaited<ReturnType<typeof applySandbox>>;
     try {
       applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
@@ -1256,7 +1271,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       });
     } catch (err) {
       const ownsPendingCreate = applied.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY] === neverReadyOwner;
-      if (err instanceof SandboxStartupError &&
+      if (err instanceof SandboxStartupError && err.kind !== "ownership" &&
         (!adopted || ownsPendingCreate)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
@@ -1271,9 +1286,20 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         // on a READY provision, so counting this cleanup would add a
         // destroy with no matching create and drive the created−destroyed
         // leak alarm negative during create-failure storms.
-        await this.destroy(name).catch((cleanupErr) => {
-          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
-        });
+        let destroyed = false;
+        await this.destroy(name).then(
+          () => { destroyed = true; },
+          (cleanupErr) => {
+            console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+          },
+        );
+        // Spec 8.2: do not hand control back while the pod and PVC we just
+        // orphaned are still terminating; the next create would race the
+        // controller's garbage collection.
+        // Skipped when destroy failed: the CR still exists, so the controller
+        // will not garbage-collect the pod or PVC and the wait would only
+        // burn the timeout.
+        if (destroyed) await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
       }
       throw err;
     }
@@ -1282,6 +1308,28 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
+  }
+
+  /** Polls until no pod named `name` and no PVC named `workspace-<name>`
+   * exist, or `timeoutMs` passes. Returns true when both are gone. The pod
+   * check uses the liveness API; the PVC check is skipped when no pvcApi is
+   * wired. Never throws: a read error counts as "still present" and the
+   * deadline bounds the wait. */
+  private async awaitSameNameResourcesGone(name: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    const pvcName = workspacePvcName(name);
+    for (;;) {
+      const podPresent = await this.deps.livenessApi.getPodUid(this.cfg.namespace, name).then((uid) => uid !== null, () => true);
+      const pvcPresent = this.deps.pvcApi
+        ? await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName).then((pvc) => pvc !== null, () => true)
+        : false;
+      if (!podPresent && !pvcPresent) return true;
+      if (Date.now() >= deadline) {
+        console.warn(`k8s sandbox ${name}: pod or PVC still present after ${timeoutMs}ms; continuing`);
+        return false;
+      }
+      await sleep(RESOURCE_GONE_POLL_MS);
+    }
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine
@@ -1559,10 +1607,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
+    let lastDetail: string | undefined;
     for (;;) {
       const pendingError = await this.pendingTerminalError(name, startedAtMs);
       if (pendingError !== null) throw pendingError;
       try {
+        const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+        lastDetail = cr?.status?.conditions?.find((c) => c.type === "Ready")?.message ?? lastDetail;
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
         lastState = status.state;
         if (this.deps.podStatusApi) {
@@ -1603,7 +1654,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           return;
         }
         if (status.state === "error") {
-          throw new SandboxStartupError(name, status.error ?? "unknown");
+          throw new SandboxStartupError(name, status.error ?? "unknown", startupKindOf(status.error ?? ""));
         }
         lastReadError = undefined;
       } catch (err) {
@@ -1612,10 +1663,23 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       if (Date.now() >= deadline) {
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
-        throw new Error(
-          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
-            "Check Kubernetes API access, the sandbox controller, and pod events, then retry.",
-        );
+        const conditionDetail = lastDetail ? ` Last condition: ${lastDetail}.` : "";
+        const leading = `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${conditionDetail}${readDetail} `;
+        const message = leading + "Check Kubernetes API access, the sandbox controller, and pod events, then retry.";
+        if (lastDetail && OWNERSHIP_CONDITION_PATTERN.test(lastDetail)) {
+          // Retry-shaped (spec 8.4): the controller heals this once garbage
+          // collection finishes. Surface it fast and let the attachment back
+          // off; create()'s cleanup keeps the CR for kind "ownership", so the
+          // caller's next attempt after the window adopts it. The attachment is
+          // caller-driven and schedules nothing itself, so the message asks for
+          // a retry instead of promising one.
+          throw new SandboxStartupError(
+            name,
+            leading + "The controller is still waiting for the previous sandbox's pod and volume to be removed. Retry shortly; the next attempt reuses this sandbox once they are gone.",
+            "ownership",
+          );
+        }
+        throw new Error(message);
       }
       await sleep(READY_POLL_INTERVAL_MS);
     }
@@ -1691,6 +1755,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
     const message = `pod has been Pending for ${Math.floor(pending.ageMs / 60_000)} minutes ` +
       `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
-    return new PendingTerminalStartupError(name, message);
+    return new PendingTerminalStartupError(name, message, "unschedulable");
   }
 }

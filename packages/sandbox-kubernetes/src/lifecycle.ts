@@ -102,7 +102,7 @@ import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import type { Sandbox, SandboxResourceField, SandboxStatus } from "@valet/engine";
+import type { Sandbox, SandboxResourceField, SandboxStartupKind, SandboxStatus } from "@valet/engine";
 import {
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
@@ -1127,6 +1127,10 @@ export interface PodContainerStatus {
   image?: string;
   waitingReason?: string;
   waitingMessage?: string;
+  /** `status.lastState.terminated`, present after at least one crash. With
+   * `terminationMessagePolicy: FallbackToLogsOnError` the kubelet fills
+   * `message` with the log tail, which is the line a human needs. */
+  lastTerminated?: { exitCode?: number; reason?: string; message?: string };
 }
 
 /** Standard Kubernetes pod condition shape (`type`/`status`/`reason`/
@@ -1229,6 +1233,13 @@ export function podStatusApiAdapter(
         image: images.get(cs.name) ?? cs.image,
         waitingReason: cs.state?.waiting?.reason,
         waitingMessage: cs.state?.waiting?.message,
+        ...(cs.lastState?.terminated
+          ? { lastTerminated: {
+              exitCode: cs.lastState.terminated.exitCode,
+              reason: cs.lastState.terminated.reason,
+              message: cs.lastState.terminated.message,
+            } }
+          : {}),
       }));
       const conditions: PodStatusCondition[] = (pod.status?.conditions ?? [])
         .filter(
@@ -1386,6 +1397,13 @@ export async function livePodDrift(
   return { differs: true, podName, liveImage, imageDrift, resourcesDrift, ...(browserDrift ? { browserDrift } : {}) };
 }
 
+/** The agent-sandbox controller refuses to adopt a pod or PVC whose owner
+ * UID belongs to a deleted Sandbox of the same name. Kubernetes garbage
+ * collection removes those dependents once the old owner is gone and the
+ * controller then creates fresh ones, so this condition heals on its own.
+ * It must read as provisioning, never as a terminal failure. */
+export const OWNERSHIP_CONDITION_PATTERN = /is owned by Sandbox\//;
+
 /**
  * Pure classification of a backing pod's status (plus, for the `PodFailed`
  * case, the Sandbox CR's own `Ready` condition) into a terminal-startup-
@@ -1423,12 +1441,19 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
   for (const cs of pod.containerStatuses ?? []) {
     if (cs.waitingReason === "CrashLoopBackOff") {
-      return "container crash-looping (CrashLoopBackOff)";
+      const base = "container crash-looping (CrashLoopBackOff)";
+      const last = cs.lastTerminated;
+      if (!last) return base;
+      const detail = (last.message?.trim().split("\n").filter(Boolean).pop() ?? last.reason ?? "").trim();
+      const exit = last.exitCode !== undefined ? `exit ${last.exitCode}` : "";
+      const parts = [exit, detail].filter(Boolean).join(": ");
+      return parts ? `${base}: ${parts}` : base;
     }
   }
 
   if (pod.phase === "Failed" || crReadyCondition?.reason === "PodFailed") {
     const detail = crReadyCondition?.message ?? crReadyCondition?.reason ?? "pod entered phase Failed";
+    if (OWNERSHIP_CONDITION_PATTERN.test(detail)) return null;
     return `pod failed: ${detail}`;
   }
 
@@ -1443,6 +1468,25 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
   }
 
   return null;
+}
+
+/** Bounded kind for the `valet.sandbox.startup_failed` counter, derived
+ * from the reason strings this module and the provider produce. Matched on
+ * stable prefixes so detail appended after a colon does not change the
+ * answer. */
+export function startupKindOf(reason: string): SandboxStartupKind {
+  if (reason.startsWith("container crash-looping")) return "crash_loop";
+  if (reason.startsWith("image pull failed")) return "image_pull";
+  if (reason.includes("is owned by Sandbox/")) return "ownership";
+  if (reason.startsWith("pod failed")) return "pod_failed";
+  if (
+    reason.startsWith("pod unschedulable") ||
+    reason.startsWith("unschedulable") ||
+    reason.includes("Unschedulable")
+  ) {
+    return "unschedulable";
+  }
+  return "other";
 }
 
 /**

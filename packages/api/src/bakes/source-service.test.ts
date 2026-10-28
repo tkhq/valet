@@ -335,10 +335,18 @@ describe("SourceService", () => {
   // When true, expose a second lockfile so the resolved recipe changes (used to
   // move a repo's identity without moving its head sha).
   let lockfilePresent = false;
+  // When true, serve pnpm-lock.yaml the way GitHub serves files over 1 MB:
+  // `encoding: "none"`, empty content, a blob sha to follow.
+  let lockfileOversized = false;
+  let oversizedSha = "blob-sha-1";
+  let oversizedHasSha = true;
   // Repo-declared .valet/prebuild.yaml served by the fixture (null = absent).
   let prebuildYaml: string | null = null;
 
   function contentsFor(path: string): GithubFixtureResponse {
+    if (lockfileOversized && path === "pnpm-lock.yaml") {
+      return { body: { type: "file", encoding: "none", content: "", size: 1_985_703, ...(oversizedHasSha ? { sha: oversizedSha } : {}) } };
+    }
     if (path === "package-lock.json") return { body: { content: b64("{}"), encoding: "base64" } };
     if (lockfilePresent && path === "yarn.lock") return { body: { content: b64("{}"), encoding: "base64" } };
     if (prebuildYaml !== null && path === ".valet/prebuild.yaml") {
@@ -446,10 +454,16 @@ describe("SourceService", () => {
     currentSha = "headsha1";
     idSeq = 0;
     lockfilePresent = false;
+    lockfileOversized = false;
+    oversizedHasSha = true;
     prebuildYaml = null;
     fixture = startGithubFixture({
       getCommit: () => ({ body: { sha: currentSha } }),
       getContents: (_owner, _repo, path) => contentsFor(path),
+      getBlob: (_owner, _repo, sha) =>
+        sha === oversizedSha
+          ? { body: { sha, encoding: "base64", content: b64("lockfileVersion: '9.0'\n") } }
+          : { status: 404, body: { message: "Not Found" } },
     });
     builder = new FakeImageBuilder();
     retentionCalls = [];
@@ -468,6 +482,42 @@ describe("SourceService", () => {
     await service.syncActiveBuilds();
     expect((await db.select().from(bakes).where(eq(bakes.id, row.id)))[0].status).toBe("pushed");
   }
+
+  describe("readGithubFile oversized lockfiles", () => {
+    it("falls back to the blobs API when the contents endpoint answers encoding none, and the scheduler bakes", async () => {
+      lockfileOversized = true;
+      const srcId = await seedRepoSource(db, { repoFullName: "acme/big-lock" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(1);
+      const paths = fixture.calls.map((c) => c.path);
+      expect(paths.some((p) => p.includes("/git/blobs/blob-sha-1"))).toBe(true);
+    });
+
+    it("still rejects a non-base64 contents response that is not encoding none", async () => {
+      fixture.close();
+      fixture = startGithubFixture({
+        getCommit: () => ({ body: { sha: currentSha } }),
+        getContents: (_o, _r, path) =>
+          path === "pnpm-lock.yaml"
+            ? { body: { type: "file", encoding: "utf-7", content: "???", sha: "x" } }
+            : contentsFor(path),
+      });
+      service = makeService();
+      await seedRepoSource(db, { repoFullName: "acme/odd-encoding" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(0);
+    });
+
+    it("throws the not-a-base64-file error when encoding none arrives without a sha (never calls blobs with undefined)", async () => {
+      lockfileOversized = true;
+      oversizedHasSha = false;
+      await seedRepoSource(db, { repoFullName: "acme/no-sha" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(0);
+      const paths = fixture.calls.map((c) => c.path);
+      expect(paths.some((p) => p.includes("/git/blobs/"))).toBe(false);
+    });
+  });
 
   // ── identity hashing + chain ──────────────────────────────────────────
 

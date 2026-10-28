@@ -392,15 +392,26 @@ async function readGithubFile(
     if (err instanceof GitHubApiError && err.status === 404) return null;
     throw err;
   }
-  if (
-    !isRecord(payload) ||
-    (payload.type !== undefined && payload.type !== "file") ||
-    typeof payload.content !== "string" ||
-    payload.encoding !== "base64"
-  ) {
+  if (!isRecord(payload) || (payload.type !== undefined && payload.type !== "file")) {
     throw new GitHubApiError(200, apiPath, "response was not a base64 file");
   }
-  const compact = payload.content.replace(/\s/g, "");
+  let content = payload.content;
+  let encoding = payload.encoding;
+  if (encoding === "none" && typeof payload.sha === "string" && payload.sha.length > 0) {
+    // Files over 1 MB: the contents endpoint omits the body. The blobs
+    // endpoint serves the same object base64-encoded.
+    const blobPath = `/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(payload.sha)}`;
+    const blob = await fetchGithubJson(deps, token, blobPath, signal);
+    if (!isRecord(blob) || typeof blob.content !== "string" || blob.encoding !== "base64") {
+      throw new GitHubApiError(200, blobPath, "blob response was not base64");
+    }
+    content = blob.content;
+    encoding = blob.encoding;
+  }
+  if (typeof content !== "string" || encoding !== "base64") {
+    throw new GitHubApiError(200, apiPath, "response was not a base64 file");
+  }
+  const compact = content.replace(/\s/g, "");
   const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
   if (compact.length % 4 !== 0 || !validBase64.test(compact)) {
     throw new GitHubApiError(200, apiPath, "file content was not valid base64");

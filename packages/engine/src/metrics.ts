@@ -17,6 +17,7 @@
  * rendered names.
  */
 import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
+import type { SandboxStartupKind } from "./errors.js";
 import type { LeaseOwnerKind, WakeupCause, WakeupKind } from "./wakeups/types.js";
 
 const METER_NAME = "@valet/engine";
@@ -73,6 +74,7 @@ interface Instruments {
   sandboxCreated: Counter;
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
+  sandboxStartupFailed: Counter;
   sandboxCapacityWait: Histogram;
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
@@ -158,6 +160,10 @@ function inst(): Instruments {
     sandboxFlagged: meter.createCounter("valet.sandbox.flagged", {
       description:
         "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
+    }),
+    sandboxStartupFailed: meter.createCounter("valet.sandbox.startup_failed", {
+      description:
+        "Terminal sandbox startup failures by bounded kind (crash_loop/image_pull/unschedulable/pod_failed/ownership/other). A failure here reached the attachment as a SandboxStartupError; retries are counted again.",
     }),
     sandboxCapacityWait: meter.createHistogram("valet.sandbox.capacity_wait", {
       unit: "ms",
@@ -387,6 +393,13 @@ export type WorkspaceGrowOutcome = "grown" | "refused" | "pending" | "error";
  * pre-read. */
 export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
   inst().sandboxWorkspaceGrow.add(1, { outcome });
+}
+
+/** A terminal startup failure. Called once per SandboxStartupError the
+ * attachment observes, so a crash-loop that is retried three times counts
+ * three. */
+export function recordSandboxStartupFailure(kind: SandboxStartupKind): void {
+  inst().sandboxStartupFailed.add(1, { kind });
 }
 
 /** A create's wait at the per-org capacity gate. Recorded only when the
