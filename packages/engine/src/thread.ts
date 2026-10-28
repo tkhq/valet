@@ -743,6 +743,10 @@ export class Thread {
   private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
+  /** When a turn, gate reconcile or compaction last loaded or used the agent transcript. */
+  private transcriptUsedAt = 0;
+  /** Background drives (resume drives, gate replays) in flight. */
+  private backgroundDrives = 0;
 
   constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
     this.transcriptPending = opts.restoreTranscript ?? false;
@@ -3068,6 +3072,24 @@ export class Thread {
       });
     }
     await this.transcriptLoad;
+    this.transcriptUsedAt = Date.now();
+  }
+
+  /**
+   * Drop the in-memory agent transcript of a thread that has not used it
+   * since `idleSince`, and return whether it did. The store keeps the
+   * history: the next turn, gate reconcile or compaction reloads it through
+   * `ensureTranscript`, as after a restart. Without this, a cached assistant
+   * session holds every transcript it loaded until the process exits.
+   */
+  releaseIdleTranscript(idleSince: number): boolean {
+    if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
+      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+    this.replaceAgentMessages([]);
+    this.transcriptPending = true;
+    // Mid-turn ids only matter while their turn runs.
+    this.midTurnAppended.clear();
+    return true;
   }
 
   /**
@@ -3615,6 +3637,7 @@ export class Thread {
     drive: () => Promise<void>,
   ): void {
     registerBackgroundDrive(itemId);
+    this.backgroundDrives += 1;
     const p = drive()
       .catch((err: unknown) => {
         this.emitError(errorCode, err instanceof Error ? err.message : String(err));
@@ -3624,6 +3647,7 @@ export class Thread {
         }
       })
       .finally(() => {
+        this.backgroundDrives -= 1;
         unregisterBackgroundDrive(itemId);
         this.session.notifyExecutionIdle();
       });
@@ -4813,6 +4837,7 @@ export class Thread {
           try {
             await this.runItemInner(item);
           } finally {
+            this.transcriptUsedAt = Date.now();
             this.turnSpan = undefined;
             this.llmSpan?.end();
             this.llmSpan = undefined;
