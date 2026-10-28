@@ -2931,7 +2931,9 @@ export interface CreateSessionOptions {
    */
   turnRetry?: {
     maxAttempts?: number;
-    /** Backoff before each retry, in ms; the last entry repeats. */
+    /** Backoff before each retry, in ms; the last entry repeats. Each wait
+     * moves by up to ±25% (`turnRetryWaitMs`), and `turn_retry.waitMs`
+     * carries the wait the engine actually uses. */
     backoffMs?: number[];
     /**
      * The longest provider-requested wait ("try again in 6s") a retry honors,

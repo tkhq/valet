@@ -277,10 +277,12 @@ const TURN_STREAM_TIMEOUT_MS = 600_000;
  */
 // A person's prompt gets four tries over about 30s, the order of what Claude
 // Code (10 tries) and Codex (4 request + 5 stream retries) allow, so a
-// passing outage does not cost a resend. An unattended turn waits longer.
-const UNATTENDED_TURN_RETRY_ATTEMPTS = 3;
-const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000];
-const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
+// passing outage does not cost a resend. An unattended turn has nobody
+// waiting on it, so it rides out a longer outage: six tries over about 13
+// minutes, each wait capped at 5 minutes.
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 6;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 240_000, 300_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 300_000;
 const INTERACTIVE_TURN_RETRY_ATTEMPTS = 4;
 const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000];
 const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 30_000;
@@ -420,6 +422,24 @@ export function parseProviderRetryHintMs(errorMessage: string | undefined): numb
     total += Number(part[1]) * scale;
   }
   return total > 0 ? Math.ceil(total) : undefined;
+}
+
+/**
+ * Each retry wait moves by up to this fraction either way. Threads that share
+ * one provider key fail together in an outage. Without jitter they all retry
+ * at the same moment and fail together again.
+ */
+const TURN_RETRY_JITTER = 0.25;
+
+/**
+ * The wait before one retry: the backoff, raised to the provider's hint, then
+ * moved by up to ±25%. The hint stays a floor, so jitter never retries
+ * sooner than the provider asked. Exported for tests.
+ */
+export function turnRetryWaitMs(backoffMs: number, hintMs: number | undefined, random: () => number = Math.random): number {
+  const base = Math.max(backoffMs, hintMs ?? 0);
+  const jittered = Math.round(base * (1 - TURN_RETRY_JITTER + 2 * TURN_RETRY_JITTER * random()));
+  return Math.max(jittered, hintMs ?? 0);
 }
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
@@ -5357,7 +5377,7 @@ export class Thread {
         const hintMs = parseProviderRetryHintMs(last.errorMessage);
         if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
+        const waitMs = turnRetryWaitMs(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs);
         this.emitTurnRetry({
           action: "retry", provider: this.agent.state.model.provider, reason: classifyProviderFailure(error),
           attempt: sameProviderAttempts, maxAttempts, waitMs,

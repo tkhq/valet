@@ -16,6 +16,7 @@ import {
   MESSAGE_TURN_ERROR_KEY,
   VirtualSandboxProvider,
   parseProviderRetryHintMs,
+  turnRetryWaitMs,
   type BusEvent,
   type MessageEntry,
   type PromptContent,
@@ -38,6 +39,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+describe("turnRetryWaitMs", () => {
+  it("moves the backoff by up to 25% either way", () => {
+    // Threads on one provider key fail together; equal waits would make
+    // them retry together and fail together again.
+    expect(turnRetryWaitMs(10_000, undefined, () => 0)).toBe(7_500);
+    expect(turnRetryWaitMs(10_000, undefined, () => 0.5)).toBe(10_000);
+    expect(turnRetryWaitMs(10_000, undefined, () => 1)).toBe(12_500);
+  });
+
+  it("never waits less than the provider's hint", () => {
+    expect(turnRetryWaitMs(2_000, 8_000, () => 0)).toBe(8_000);
+    expect(turnRetryWaitMs(2_000, 8_000, () => 1)).toBe(10_000);
+  });
+});
 
 // The classifier is pi-ai's, not ours — these tests document the
 // dependency behavior the retry relies on, so a pi-ai upgrade that shifts
