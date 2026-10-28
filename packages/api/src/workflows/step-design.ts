@@ -6,9 +6,10 @@
  * reads its schedule's input under `trigger.data.input`. A team run commits
  * under the generic git identity, which deploy checks can block. A list that
  * an agent builds with read actions, and a model pass that rewrites a draft
- * before it is sent, make each run's output drift.
+ * before it is sent, make each run's output drift. Parallel foreach entries
+ * on their own threads share one working directory.
  */
-import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, type ScheduledRunMiss } from "@valet/workflow";
+import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, sharedWorkingDirectoryWarning, type ScheduledRunMiss } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { DEFAULT_USER_EMAIL, DEFAULT_USER_NAME } from "../engine/workspace-prep.js";
@@ -115,6 +116,7 @@ export function stepDesignWarnings(
     if (typeof step.type !== "string") continue;
     add(node.id, approvalRequestWarning({ type: step.type, prompt: step.prompt }));
     if (pushesGitCommits({ type: step.type, prompt: step.prompt })) add(node.id, gitIdentityWarning(context.ownerType));
+    if (typeof node.type === "string") add(node.id, sharedWorkingDirectoryWarning({ type: node.type, concurrency: node.concurrency, body: node.body }));
   }
   for (const [nodeId, warning] of listingAgentStepWarnings(definition)) add(nodeId, warning);
   for (const [nodeId, warning] of rewriteStepWarnings(definition)) add(nodeId, warning);

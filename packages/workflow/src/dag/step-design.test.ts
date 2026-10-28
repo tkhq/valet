@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateExpression, parseExpression, renderTemplate } from './expression.js';
-import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, scheduledTriggerData } from './step-design.js';
+import { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, scheduledTriggerData, sharedWorkingDirectoryWarning } from './step-design.js';
 
 const session = (prompt: string) => ({ type: 'session', prompt });
 
@@ -19,6 +19,25 @@ describe('approvalRequestWarning', () => {
     expect(approvalRequestWarning(session('Never request approval; report what you need instead.'))).toBeUndefined();
     expect(approvalRequestWarning(session('Summarize the approved budget in three bullets.'))).toBeUndefined();
     expect(approvalRequestWarning({ type: 'llm', prompt: 'Ask for approval.' })).toBeUndefined();
+  });
+});
+
+describe('sharedWorkingDirectoryWarning', () => {
+  const loop = (concurrency: number | undefined, thread: 'run' | 'step' | undefined, type = 'orchestrator') =>
+    ({ type: 'foreach', concurrency, body: { id: 'body', type, prompt: 'Fix the repo.', thread } });
+
+  it('warns when foreach entries run in parallel on their own threads', () => {
+    expect(sharedWorkingDirectoryWarning(loop(3, 'step'))).toContain('Up to 3 entries');
+    expect(sharedWorkingDirectoryWarning(loop(3, 'step'))).toContain('own folder');
+  });
+
+  it('says nothing when entries run one at a time or share the run thread', () => {
+    expect(sharedWorkingDirectoryWarning(loop(undefined, 'step'))).toBeUndefined();
+    expect(sharedWorkingDirectoryWarning(loop(1, 'step'))).toBeUndefined();
+    expect(sharedWorkingDirectoryWarning(loop(3, undefined))).toBeUndefined();
+    expect(sharedWorkingDirectoryWarning(loop(3, 'run'))).toBeUndefined();
+    expect(sharedWorkingDirectoryWarning(loop(3, 'step', 'session'))).toBeUndefined();
+    expect(sharedWorkingDirectoryWarning({ type: 'orchestrator', concurrency: 3 })).toBeUndefined();
   });
 });
 

@@ -31,7 +31,7 @@ import type { EngineHost } from "../engine/host.js";
 import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "../orchestrator/attention.js";
 import { assistantExecutions, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { resolveWorkflowReportTarget } from "./report-target.js";
-import { workflowRunThreadKey } from "./engine-deps.js";
+import { workflowRunIdFromThreadKey } from "./run-conversations.js";
 import { endChildSubscriptions, selectWork } from "../engine/wakeups-admin.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
@@ -325,10 +325,11 @@ export interface RunThreadArchiveDeps {
  * Archives the assistant thread an unattended run reported on, at the
  * moment the run settles.
  *
- * Each run gets its own thread (`engine-deps.ts#workflowRunThreadKey`), so
- * a workflow that runs every hour would add one live thread to the
- * assistant sidebar every hour. This hook is the single owner of that
- * cleanup: a settled run's thread leaves the default thread list and stays
+ * Each run gets its own thread (`engine-deps.ts#workflowRunThreadKey`), and
+ * each `thread: "step"` step or foreach entry one more
+ * (`workflowStepThreadKey`), so a workflow that runs every hour would add
+ * live threads to the assistant sidebar every hour. This hook is the single
+ * owner of that cleanup: a settled run's thread leaves the default thread list and stays
  * readable under "Show archived". Nothing is deleted, and there is no
  * sweep or timer — a run that never settles keeps its thread, which is the
  * state the person needs to see.
@@ -356,7 +357,6 @@ export interface RunThreadArchiveDeps {
 export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled {
   return async (info) => {
     try {
-      const key = workflowRunThreadKey(info.runId);
       // Grouped by thread, not deduplicated to the first checkpoint: several
       // nodes can dispatch onto one per-run thread, and ONE unsettled
       // submission among them holds the whole thread in the list.
@@ -381,8 +381,9 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           );
           continue;
         }
-        // The run's thread: the plain key, or its channel's (`workflowRunThreadKey`).
-        if (thread.key !== key && !(thread.key?.startsWith("slack-events:") && thread.key.endsWith(`:workflow:${info.runId}`))) continue;
+        // The run's thread, or a step's own thread (`workflowStepThreadKey`),
+        // plain or under the event's channel.
+        if (!thread.key || workflowRunIdFromThreadKey(thread.key) !== info.runId) continue;
         const items = await Promise.all(
           dispatch.queueItemIds.map((itemId) => deps.engineStore.getQueueItem(dispatch.sessionId, itemId)),
         );
@@ -425,7 +426,7 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
         if (deps.engineHost) {
           const [execution] = await deps.db.select().from(assistantExecutions)
             .where(eq(assistantExecutions.sessionId, dispatch.sessionId)).limit(1);
-          if (execution?.conversationKey !== thread.key) continue;
+          if (!execution || workflowRunIdFromThreadKey(execution.conversationKey) !== info.runId) continue;
           if ((await deps.engineStore.listDecisionGates(dispatch.sessionId)).some(gate => gate.status === "pending")) continue;
           if ((await deps.engineStore.listUnsettledSubmissions(dispatch.sessionId)).length > 0) continue;
           const live = deps.engineHost.liveSession(dispatch.sessionId);

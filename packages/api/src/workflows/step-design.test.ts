@@ -28,6 +28,22 @@ describe("stepDesignWarnings", () => {
     expect(warnings.get("each")?.join(" ")).toContain("tool step");
   });
 
+  it("reports a foreach whose Thread entries run in parallel in one working directory", () => {
+    const body = { id: "fix", type: "orchestrator", prompt: "Fix the failing test.", thread: "step" };
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "parallel", type: "foreach", items: "{{trigger.data.repos}}", concurrency: 4, body },
+        { id: "serial", type: "foreach", items: "{{trigger.data.repos}}", body },
+      ],
+      edges: [],
+    };
+    const warnings = stepDesignWarnings(definition, []);
+    expect([...warnings.keys()]).toEqual(["parallel"]);
+    expect(warnings.get("parallel")?.join(" ")).toContain("share one working directory");
+  });
+
   it("says nothing for an allowed action, a tool step's own gate, or a step that does not ask", () => {
     expect(heldActionWarning({ ...held, mode: "allow" })).toBeUndefined();
     expect(heldActionWarning({ ...held, agentStep: undefined })).toBeUndefined();

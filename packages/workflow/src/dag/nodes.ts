@@ -138,7 +138,18 @@ export interface ThreadNode {
   wait?: {
     mode: 'none' | 'until_idle';
   };
+  /**
+   * Which assistant thread the step runs on. `run`, the default, queues it
+   * on the run's one thread, after the steps before it, with their
+   * transcript in context. `step` gives the step (each `foreach` entry, when
+   * it is a body) its own thread in the same runtime: a new conversation
+   * that runs alongside the run's other agent work and stops on its own.
+   */
+  thread?: ThreadPlacement;
 }
+
+/** See `ThreadNode.thread`. */
+export type ThreadPlacement = 'run' | 'step';
 
 /**
  * Which identity a `tool` node acts as:

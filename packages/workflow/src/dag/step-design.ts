@@ -13,6 +13,9 @@
  * an agent step that builds a foreach's list with read actions only, and a
  * model step that rewrites another model step's draft before a tool step
  * sends it.
+ *
+ * A foreach whose Thread entries run in parallel shares one working
+ * directory across them.
  */
 
 import { readToolScope } from '@valet/shared';
@@ -77,6 +80,22 @@ export function approvalRequestWarning(node: { type: string; prompt?: unknown })
  */
 export function pushesGitCommits(node: { type: string; prompt?: unknown }): boolean {
   return agentPromptSays(node, GIT_PUSH) && !agentPromptSays(node, OPENS_PULL_REQUEST);
+}
+
+/**
+ * Says when a foreach runs Thread entries in parallel on their own threads
+ * (`thread: "step"` with `concurrency` above 1). Step threads share the
+ * run's sandbox and its working directory, so parallel entries that edit
+ * the same checkout collide. With the default `concurrency` of 1, the
+ * entries run one at a time and the warning does not apply.
+ */
+export function sharedWorkingDirectoryWarning(node: { type: string; concurrency?: unknown; body?: unknown }): string | undefined {
+  if (node.type !== 'foreach' || typeof node.concurrency !== 'number' || node.concurrency <= 1) return undefined;
+  if (!isRecord(node.body) || node.body.type !== 'orchestrator' || node.body.thread !== 'step') return undefined;
+  return (
+    `Up to ${node.concurrency} entries of this loop run at the same time, each on its own thread. These threads share one working directory. ` +
+    'Tell each entry to write to its own path, or to clone the repository into its own folder, so parallel git commands and file writes do not collide.'
+  );
 }
 
 /**

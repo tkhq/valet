@@ -31,7 +31,7 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ba
         className="my-1 min-w-0 max-w-full sm:ml-auto"
         value={selected?.threadId} onChange={event => onSelect("conversation", event.target.value)}>
         {conversations.map((item, index) => <option key={`${item.sessionId}:${item.threadId}`} value={item.threadId}>
-          {item.title || item.nodeId || `Conversation ${index + 1}`}
+          {item.title || (item.nodeId && item.iteration !== undefined ? `${item.nodeId}, item ${item.iteration + 1}` : item.nodeId) || `Conversation ${index + 1}`}
         </option>)}
       </Select>}
     </div>
