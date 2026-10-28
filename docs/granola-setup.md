@@ -49,7 +49,13 @@ You can filter a subscription on `note_id`.
 
 Valet saves the secret only as a direct `api_key` at `org` scope, and the value must start with `whsec_`. Valet refuses a 1Password reference, a `bot_token`, or any other form with a 400 answer, because it must read the secret on every unsigned request.
 
-Each Valet organization uses one signing secret. Create one Granola webhook for the organization. Do not use the service name `granola` for this credential. That name is the personal Granola MCP connection.
+## Limitation: one webhook for each organization
+
+Valet supports one Granola webhook endpoint and one signing secret for each organization. Granola allows more endpoints, such as separate personal, public, workspace, and folder endpoints. Each Granola endpoint has its own signing secret.
+
+If you create a second Granola webhook that sends to the same Valet URL, only the webhook whose secret is saved in Valet works. Valet answers 403 `bad_signature` to the others and drops their events. Valet does not support more than one secret yet.
+
+To cover several sets of notes, create one Granola webhook and choose its scope and folders in Granola. Use a scope that includes every note you need. Do not use the service name `granola` for this credential. That name is the personal Granola MCP connection.
 
 ## How Valet checks a delivery
 

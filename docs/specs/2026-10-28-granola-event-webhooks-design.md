@@ -29,4 +29,4 @@ Workflows can trigger on GitHub, Slack, and Linear events but not on Granola. Gr
 - A web UI for the secret. The admin saves it through the credentials API.
 - Arm-time readiness checks like Linear's. A subscription made before the secret exists stays idle until the secret is saved.
 - Fetching note content. The event is a pointer. Workflows read the note with the Granola API or MCP tools.
-- More than one signing secret for an organization.
+- More than one signing secret for an organization. Decided 2026-10-28: one endpoint and one secret for each organization. A second Granola endpoint that uses the same URL fails with `bad_signature`.
