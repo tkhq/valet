@@ -1162,8 +1162,14 @@ export class SlackTransport implements ChannelTransport {
 
   /** The thread's messages strictly between two ts values, minus the bot's own
    *  posts — the follow-router's gap re-hydration. See `ChannelTransport`. */
-  async fetchThreadWindow(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId, afterTs, beforeTs });
+  async fetchThreadWindow(
+    channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+    opts?: { keepAppPostsExcept?: readonly string[] },
+  ): Promise<string | null> {
+    return fetchThreadTranscript(this.api, {
+      channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId, afterTs, beforeTs,
+      ...(opts?.keepAppPostsExcept ? { keepAppPostsExcept: opts.keepAppPostsExcept } : {}),
+    });
   }
 
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves

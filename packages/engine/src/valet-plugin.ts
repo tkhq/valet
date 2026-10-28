@@ -540,10 +540,16 @@ export interface ChannelTransport {
    * it to re-hydrate the gap between a follow's last delivered message and a
    * new one, so an overheard line after downtime carries the missed context.
    * The bot's own posts are excluded — the agent already has its own replies.
+   * `keepAppPostsExcept` keeps the bot's posts except the listed message ids:
+   * in a group DM each person's assistant posts as the same bot, so one
+   * assistant needs the others' replies but not its own.
    * `null` when the window is empty or the thread is unreadable. Optional:
    * providers without thread history omit it.
    */
-  fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
+  fetchThreadWindow?(
+    channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+    opts?: { keepAppPostsExcept?: readonly string[] },
+  ): Promise<string | null>;
   /**
    * Normalize an inbound message into what an agent should read: the sender's
    * display name (not a raw id) and the message text with the bot's own mention

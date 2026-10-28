@@ -91,6 +91,10 @@ export async function fetchThreadTranscript(
      * agent already holds its own replies as tool calls. */
     afterTs?: string;
     beforeTs?: string;
+    /** With a window: keep the bot's posts except these message ts values.
+     * In a group DM every person's assistant posts as the same bot, so an
+     * assistant reads the other assistants' replies but not its own. */
+    keepAppPostsExcept?: readonly string[];
   },
 ): Promise<string | null> {
   const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
@@ -118,7 +122,8 @@ export async function fetchThreadTranscript(
       const raw = m as RawReply;
       const ts = Number.parseFloat(str(raw.ts) ?? "");
       if (!Number.isFinite(ts) || ts <= after || ts >= before) return false;
-      return !isSelf(raw);
+      if (!isSelf(raw)) return true;
+      return opts.keepAppPostsExcept !== undefined && !opts.keepAppPostsExcept.includes(str(raw.ts) ?? "");
     });
     if (messages.length === 0) return null;
   }
@@ -146,9 +151,10 @@ export async function fetchThreadTranscript(
       const content = body && marker ? `${body} ${marker}` : body || marker;
       if (!content) return null; // a join notice carries neither words nor files.
       const userId = str(raw.user);
-      // The assistant's own earlier reply reads as "You", so it does not answer itself.
+      // The assistant's own earlier reply reads as "You", so it does not answer
+      // itself. A kept app post is another person's assistant answering them.
       const who = isSelf(raw)
-        ? "You"
+        ? opts.keepAppPostsExcept !== undefined ? "Valet (answering someone else)" : "You"
         : userId
           ? authors.get(userId) ?? `@${userId}`
           : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
