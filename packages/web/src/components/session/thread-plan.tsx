@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
-import { ChevronDown, CircleCheck, CircleDashed, LoaderCircle } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, CircleDashed, LoaderCircle } from "lucide-react";
 import type { ThreadPlanItem, ThreadPlanStatus, TurnProgress } from "@valet/shared";
 import { useThreadProgress } from "~/api/thread-progress";
 import { useThreadPlan } from "~/api/thread-plan";
@@ -92,6 +92,18 @@ const PROGRESS_TONE = {
   complete: "success", error: "danger", interrupted: "warning",
 } as const;
 
+/** The mascot while Valet works on it, a green check once it is done, and a
+ * dot for the states that ask for attention. Same mark as the working line.
+ * Done is green, not `moss`: a theme may make `moss` its brand color. */
+function ProgressMark({ status, small = false }: { status: TurnProgress["status"]; small?: boolean }) {
+  const size = small ? "h-4 w-4" : "h-5 w-5";
+  if (status === "in_progress") {
+    return <img src="/icons/valet-mascot.webp" alt={PROGRESS_LABEL[status]} width={20} height={20} className={cn(size, "shrink-0 object-contain motion-safe:animate-pulse")} />;
+  }
+  if (status === "complete") return <Check role="img" aria-label={PROGRESS_LABEL[status]} className={cn(size, "shrink-0 text-success-600 dark:text-success-500")} />;
+  return <span className={cn(size, "flex shrink-0 items-center justify-center")}><StatusDot tone={PROGRESS_TONE[status]} label={PROGRESS_LABEL[status]} /></span>;
+}
+
 function PinnedProgress({ progress }: { progress: TurnProgress }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
@@ -99,20 +111,22 @@ function PinnedProgress({ progress }: { progress: TurnProgress }) {
   return (
     <section aria-label="Task progress" className="mx-auto mt-2 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
       <div className={cardClass}>
+        {/* Two lines of text: the card grows with them instead of the
+            fixed lg height, which left no room above or below. */}
         <Button variant="ghost" size="lg" aria-expanded={open} aria-controls={open ? listId : undefined}
-          onClick={() => setOpen(!open)} className="w-full min-w-0 justify-start gap-2 whitespace-normal rounded-lg px-3 text-left font-normal">
-          <StatusDot tone={PROGRESS_TONE[progress.status]} label={PROGRESS_LABEL[progress.status]} />
+          onClick={() => setOpen(!open)} className="h-auto w-full min-w-0 justify-start gap-3 whitespace-normal rounded-lg px-4 py-3 text-left font-normal">
+          <ProgressMark status={progress.status} />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-ink">{progress.title}</span>
-            <span className="block text-xs text-muted">{PROGRESS_LABEL[progress.status]}{progress.tasks.length > 0 && ` · ${done} of ${progress.tasks.length + progress.omittedTasks} tasks`}</span>
+            <span className="block truncate leading-5 text-ink">{progress.title}</span>
+            <span className="mt-0.5 block text-xs leading-4 text-muted">{PROGRESS_LABEL[progress.status]}{progress.tasks.length > 0 && ` · ${done} of ${progress.tasks.length + progress.omittedTasks} tasks`}</span>
           </span>
           <ChevronDown aria-hidden className={cn("h-3.5 w-3.5 shrink-0 text-muted", open && "rotate-180")} />
         </Button>
-        {open && <div id={listId} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-3 py-2">
-          <ol className="space-y-2 text-[13px] leading-5">
+        {open && <div id={listId} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-4 py-3">
+          <ol className="space-y-3 text-[13px] leading-5">
             {progress.tasks.map(task => <li key={task.id} className="min-w-0 [overflow-wrap:anywhere]">
-              <div className="flex items-start gap-2">
-                <StatusDot tone={PROGRESS_TONE[task.status]} label={PROGRESS_LABEL[task.status]} className="mt-1.5" />
+              <div className="flex items-start gap-2.5">
+                <span className="mt-0.5"><ProgressMark status={task.status} small /></span>
                 <span className="min-w-0 flex-1">{task.title}<span className="block text-xs text-muted">{PROGRESS_LABEL[task.status]}</span></span>
               </div>
               {task.details && <p className="mt-1 text-muted">{task.details}</p>}

@@ -71,7 +71,8 @@ it("keeps execution status visible when there are no tasks yet", () => {
 it.each([
   { status: "error", label: "Failed", color: "bg-danger-500" },
   { status: "interrupted", label: "Interrupted", color: "bg-amber-500" },
-  { status: "complete", label: "Complete", color: "bg-moss" },
+  // Done reads as a check, not a dot.
+  { status: "complete", label: "Complete", color: "text-success-600" },
 ] as const)("colors the root and task $status state independently", ({ status, label, color }) => {
   const { show } = setup({ ...progress, status, tasks: [
     { id: "terminal", title: "Finished attempt", status },
@@ -84,4 +85,10 @@ it.each([
   expect(within(tasks[0]).getByRole("img", { name: label }).classList.contains(color)).toBe(true);
   expect(within(tasks[1]).getByRole("img", { name: "Not started" }).classList.contains("border-muted")).toBe(true);
   expect(screen.queryByRole("region", { name: "Plan" })).toBeNull();
+});
+
+it("shows the Valet mascot, not a dot, while a task is in progress", () => {
+  const { show } = setup({ ...progress, status: "in_progress", tasks: [{ id: "now", title: "Working on it", status: "in_progress" }] }); show();
+  const mark = within(screen.getByRole("button")).getByRole("img", { name: "In progress" });
+  expect(mark.getAttribute("src")).toBe("/icons/valet-mascot.webp");
 });
