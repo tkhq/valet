@@ -7,6 +7,8 @@ export interface ToolScope {
 export const TOOL_SCOPE_KEY = "toolScope";
 /** Last started task ceiling, retained after queue history is pruned. */
 export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
+/** Submission whose started turn supplied an autonomous continuation. Copied at claim, not settlement. */
+export const CONTINUATION_SOURCE_ITEM_KEY = "continuationSourceItemId";
 export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
 /** Marks a workflow task that nobody watches. The engine refuses its decision requests before a gate opens. */
 export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";

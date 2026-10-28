@@ -1,3 +1,4 @@
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono, type Context } from "hono";
@@ -7,7 +8,7 @@ import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { cancelAllWorkAsHuman, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork, type BackgroundWorkGate } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
@@ -1257,11 +1258,13 @@ sessionsRouter.patch("/:id", async (c) => {
     };
   }
 
+  if (nextOwner !== undefined) await endChildSubscriptions(engineStore, id, undefined, db);
+
   // Drop the cached session so the next build reads the new row: the
   // profile is frozen into the sandbox opts, and the owner binds the skills
   // provider and credential context.
   if (nextOwner !== undefined || nextProfile !== undefined) {
-    engineHost.evictCache(id);
+    await engineHost.invalidateSession(id);
   }
 
   // Sends the forced stop's signals into the session as it now is.
@@ -1281,7 +1284,7 @@ sessionsRouter.patch("/:id", async (c) => {
       const recheck = await engineStore.listUnsettledSubmissions(id);
       // The web's confirm dialog reads this sentence to mark the list stopped.
       const alreadyStopped = stopped ? " The background work already stopped." : "";
-      if (recheck.length > 0) {
+      if (recheck.length > 0 || rebuilt.isExecutionFenced) {
         await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("a turn started") + alreadyStopped }, 409);
       }
@@ -1644,6 +1647,8 @@ sessionsRouter.delete("/:id", async (c) => {
       .set({ status: "deleted", updatedAt: Date.now() })
       .where(eq(agentSessions.id, id));
   });
+
+  await cancelChildDelivery(db, c.var.providers.engineStore, id, "The child session was deleted.");
 
   // Clear any runtime that was reopened between teardown and the row update.
   try {

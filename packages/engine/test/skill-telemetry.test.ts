@@ -1,9 +1,10 @@
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { describe, expect, it } from "vitest";
 import {
   Engine,

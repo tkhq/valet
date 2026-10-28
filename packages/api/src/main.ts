@@ -1,4 +1,3 @@
-import { configureSlackIngress } from "./channels/slack-inbox.js";
 /**
  * Node server boot.
  *
@@ -10,6 +9,8 @@ import { configureSlackIngress } from "./channels/slack-inbox.js";
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
+import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -338,8 +339,9 @@ wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
 // work can settle in the boot chain, so this subscribes before it.
 wireDeliveryTurnFailures(providers.eventStream, providers.db);
-// A restored submission can settle during the first boot-chain step. Subscribe
-// before that work starts so automatic naming does not miss the completion.
+// Subscribe to outcome tagging before restored submissions can settle.
+wireSessionOutcomeTagging(providers.eventStream, providers.db);
+// Subscribe to automatic naming before restored submissions can settle.
 providers.autoTitleHost.start();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
@@ -435,7 +437,7 @@ const server = startListening({
 // follows it.
 //
 // The chain has two halves around the `bootReady` flip:
-//   1. Traffic-protecting steps — session restore, child-watch re-arm, the
+//   1. Traffic-protecting steps — session restore, the
 //      config reconcile (fail-fast `process.exit(1)`: a bad config dies
 //      while still NotReady and never takes traffic), team-sync report.
 //   2. Best-effort service starts — channel host, webhook sync, workflow
@@ -459,13 +461,8 @@ async function runBootChain(): Promise<void> {
 
   if (closed) return;
 
-  // Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
-  // restart-mid-child-run survival mechanism. Alongside
-  // restoreUnsettledSessions above; a failure here must likewise never block
-  // boot.
-  await providers.childWatcher.rearm().catch((err) => {
-    console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
-  });
+  // Recovery scans only delivery-active rows. It must not delay WakeWatcher or readiness.
+  providers.childWatcher.startRecovery();
 
   if (closed) return;
 
@@ -737,7 +734,7 @@ async function close(): Promise<void> {
     console.error("installationSweep.stop failed:", err);
   }
   try {
-    providers.childWatcher.stopRetentionSweep();
+    await providers.childWatcher.stopRetentionSweep();
   } catch (err) {
     console.error("childWatcher.stopRetentionSweep failed:", err);
   }

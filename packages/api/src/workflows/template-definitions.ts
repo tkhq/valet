@@ -36,8 +36,8 @@
  *
  * ── Why every template here is manual ──
  *
- * A scheduled run puts `{ scheduleName, cron, input }` in `trigger.data`
- * and applies NO `dataSchema` defaults (`scheduler.ts`). A schedule
+ * A scheduled run fills `trigger.data` only from the schedule's static
+ * input and `dataSchema` defaults (`scheduledTriggerData`). A schedule
  * therefore cannot deliver the per-run text these templates work on. Adding
  * a cron would make each one read null every night, forever, and nothing
  * would report it. They collect their inputs in the run form instead.

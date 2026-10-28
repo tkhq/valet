@@ -1,3 +1,4 @@
+import { CONTINUATION_SOURCE_ITEM_KEY, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY } from "@valet/shared";
 import { describe, it, expect, beforeEach } from "vitest";
 import { EVENT_DELIVERED_MAX_KEYS } from "../index.js";
 import type {
@@ -100,6 +101,15 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list.map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("clears only the destroyed sandbox handle without overwriting a replacement", async () => {
+      await store.saveSession(newSession({ sandboxId: "replacement" }));
+      expect(await store.clearSessionSandboxId("sess-1", "destroyed")).toBe(false);
+      expect((await store.getSession("sess-1"))?.sandboxId).toBe("replacement");
+      expect(await store.clearSessionSandboxId("sess-1", "replacement")).toBe(true);
+      expect((await store.getSession("sess-1"))?.sandboxId).toBeUndefined();
+      expect(await store.clearSessionSandboxId("missing", "destroyed")).toBe(false);
+    });
+
     it("saveSession round-trips the reasoning level", async () => {
       // The session-default reasoning level is a persisted column, not a
       // derived value: a restart must return the level the user chose.
@@ -136,6 +146,18 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       const threads = await store.listThreads("sess-1");
       expect(threads.length).toBe(2);
       expect(threads.map((t) => t.key).sort()).toEqual(["task:A", "task:B"]);
+    });
+
+    it("listThreadsForSessions reads the threads of several sessions at once", async () => {
+      await store.saveSession(newSession());
+      await store.saveSession({ ...newSession(), id: "sess-2" });
+      await store.saveSession({ ...newSession(), id: "sess-3" });
+      await store.saveThread("sess-1", newThread("sess-1", "task:A", "th-1"));
+      await store.saveThread("sess-2", newThread("sess-2", "task:B", "th-2"));
+      await store.saveThread("sess-3", newThread("sess-3", "task:C", "th-3"));
+      const threads = await store.listThreadsForSessions(["sess-1", "sess-2", "sess-1", "missing"]);
+      expect(threads.map((t) => `${t.sessionId}:${t.key}`).sort()).toEqual(["sess-1:task:A", "sess-2:task:B"]);
+      expect(await store.listThreadsForSessions([])).toEqual([]);
     });
 
     it("getThreadSnapshot keeps its active leaf in the returned entries", async () => {
@@ -509,6 +531,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         type: "approval",
         status: "pending",
         title: "x",
+        agentReason: "Check\u0000 the \ud800requested\udfff action 😀",
         actions: [],
         createdAt: 1,
         updatedAt: 1,
@@ -518,6 +541,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list).toHaveLength(1);
       const single = await store.getDecisionGate("sess-1", "g-1");
       expect(single?.title).toBe("x");
+      expect(single?.agentReason).toBe("Check the requested action 😀");
       await store.saveDecisionGate("sess-1", "th-1", { ...gate, id: "resolved-gate", status: "resolved" });
       expect((await store.listDecisionGates("sess-1", undefined, "pending")).map((g) => g.id)).toEqual(["g-1"]);
       expect(await store.listDecisionGates("sess-1", "other-thread", "pending")).toEqual([]);
@@ -796,8 +820,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
 
       it("transitionWakeup is a CAS: the second caller gets null", async () => {
         await store.createWakeup(wakeup());
-        const first = await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50 }, 50);
-        expect(first).toMatchObject({ status: "done", cause: "exit", exitCode: 0, endedAt: 50, updatedAt: 50 });
+        const first = await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50, terminalSignalExpected: true }, 50);
+        expect(first).toMatchObject({ status: "done", cause: "exit", exitCode: 0, endedAt: 50, updatedAt: 50, terminalSignalExpected: true });
+        expect((await store.getWakeup("wk_a"))?.terminalSignalExpected).toBe(true);
         const second = await store.transitionWakeup("wk_a", ["running"], "expired", { cause: "deadline" }, 60);
         expect(second).toBeNull();
         expect((await store.getWakeup("wk_a"))?.status).toBe("done");
@@ -885,6 +910,30 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.getWakeup("wk_ev")).toEqual(full);
       });
 
+      it("round-trips a child subscription without scanning idle or ended rows", async () => {
+        const child = eventWaiter({
+          subjects: ["valet:session:child-1"],
+          deadlineAt: undefined,
+          eventMatch: { childSessionId: "child-1", clauses: [{ key: "child.*" }], once: false, self: [] },
+        });
+        await store.createWakeup(child);
+        const restored = await store.getWakeup(child.id);
+        expect(restored?.eventMatch?.childSessionId).toBe("child-1");
+        expect(restored?.deadlineAt).toBeUndefined();
+        expect((await store.listDueWakeups(0, 10)).rows).toEqual([]);
+        expect(await store.appendEventMatch(child.id, digest({
+          key: "child.settled", summary: "x".repeat(16_000),
+          refs: { child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]" },
+        }), 1)).toBe(true);
+        expect((await store.getWakeup(child.id))?.eventBuffer?.[0]?.refs).toEqual({
+          child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]",
+        });
+        expect((await store.getWakeup(child.id))?.eventBuffer?.[0]?.summary).toHaveLength(16_000);
+        expect((await store.listDueWakeups(0, 10)).rows.map((w) => w.id)).toContain(child.id);
+        await store.transitionWakeup(child.id, ["running"], "done", {}, 2);
+        expect((await store.listDueWakeups(0, 10)).rows).toEqual([]);
+      });
+
       it("round-trips a match spec's primarySubject and finds the waiter by its repository subject", async () => {
         const indexed = eventWaiter({
           subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
@@ -911,6 +960,14 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.findEventWaiters([])).toEqual([]);
       });
 
+      it("does not end a child waiter after a concurrent append", async () => {
+        await store.createWakeup(eventWaiter());
+        await store.appendEventMatch("wk_ev", digest(), 20);
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", {}, 21, { eventBufferEmpty: true })).toBeNull();
+        await store.removeEventMatches("wk_ev", ["d-1"], 22, "source");
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", {}, 23, { eventBufferEmpty: true })).not.toBeNull();
+      });
+
       it("appendEventMatch appends once per dedupeKey and only while running", async () => {
         await store.createWakeup(eventWaiter());
         expect(await store.appendEventMatch("wk_ev", digest(), 20)).toBe(true);
@@ -920,6 +977,16 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "d-2" }), 23)).toBe(false);
         expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1"]);
         expect(await store.appendEventMatch("missing", digest(), 24)).toBe(false);
+      });
+
+      it("appendEventMatch sanitizes lone UTF-16 surrogates before JSONB and preserves whole astral characters", async () => {
+        await store.createWakeup(eventWaiter());
+        expect(await store.appendEventMatch("wk_ev", digest({ summary: "a\ud800b\udfff😀", refs: { "bad\udc00key": "ok\ud800😀" } }), 20)).toBe(true);
+        const event = (await store.getWakeup("wk_ev"))?.eventBuffer?.[0];
+        expect(event?.summary).toBe("ab😀");
+        expect(event?.refs).toEqual({ badkey: "ok😀" });
+        await store.removeEventMatches("wk_ev", [event!.dedupeKey], 21);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "after-invalid" }), 22)).toBe(true);
       });
 
       it("appendEventMatch cuts text to 4096 bytes", async () => {
@@ -1083,9 +1150,78 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
 
       const origin = { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" };
 
+      it("releases a hold with its terminal expectation in the same CAS and lists it after release", async () => {
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", ownerId: undefined }));
+        await store.createLease(lease({ id: "ls_other", sessionId: "sess-2" }));
+        expect((await store.listLeases("sess-1")).map(row => row.id)).toEqual(["ls_hold"]);
+        expect(await store.releaseLease("ls_hold", "deadline", 100, { terminalSignalExpected: true }))
+          .toMatchObject({ releasedAt: 100, releaseCause: "deadline", terminalSignalExpected: true });
+        expect(await store.listActiveLeases("sess-1")).toEqual([]);
+        expect(await store.listLeases("sess-1")).toEqual([expect.objectContaining({ id: "ls_hold", terminalSignalExpected: true, releasedAt: 100 })]);
+        expect(await store.releaseLease("ls_hold", "cancelled", 200)).toBeNull();
+        expect((await store.getLease("ls_hold"))?.terminalSignalExpected).toBe(true);
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", ownerId: undefined }));
+        await store.releaseLease("ls_silent", "cancelled", 200);
+        expect((await store.getLease("ls_silent"))?.terminalSignalExpected).not.toBe(true);
+      });
+
+      it("starts human terminal admission grace once, without changing terminal times or silent/foreign rows", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled", terminalSignalExpected: true }));
+        await store.createWakeup(wakeup({ id: "wk_silent", status: "cancelled", endedAt: 10 }));
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled" }));
+        for (const id of ["wk_a", "ls_hold", "wk_silent", "ls_silent"]) {
+          await store.startTerminalSignalAdmission("sess-2", id, 50);
+          const foreign = id.startsWith("wk_") ? await store.getWakeup(id) : await store.getLease(id);
+          expect(foreign?.terminalSignalStartedAt).toBeUndefined();
+          await store.startTerminalSignalAdmission("sess-1", id, 100);
+          await store.startTerminalSignalAdmission("sess-1", id, 200);
+        }
+        expect(await store.getWakeup("wk_a")).toMatchObject({ endedAt: 10, terminalSignalStartedAt: 100 });
+        expect(await store.getLease("ls_hold")).toMatchObject({ releasedAt: 10, terminalSignalStartedAt: 100 });
+        expect((await store.getWakeup("wk_silent"))?.terminalSignalStartedAt).toBeUndefined();
+        expect((await store.getLease("ls_silent"))?.terminalSignalStartedAt).toBeUndefined();
+        await store.transitionWakeup("wk_a", ["cancelled"], "running", {}, 300);
+        await store.transitionWakeup("wk_a", ["running"], "cancelled", { endedAt: 400, terminalSignalExpected: true }, 400);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 500);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 600);
+        expect(await store.getWakeup("wk_a")).toMatchObject({ endedAt: 400, terminalSignalStartedAt: 500 });
+      });
+
+      it("claims a terminal loss once across concurrent reporters and rejects silent, foreign, and stale claims", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        await store.createLease(lease({ id: "ls_hold", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled", terminalSignalExpected: true }));
+        await store.createWakeup(wakeup({ id: "wk_silent", status: "done", endedAt: 10 }));
+        await store.createLease(lease({ id: "ls_silent", ownerKind: "hold", releasedAt: 10, releaseCause: "cancelled" }));
+        for (const id of ["wk_a", "ls_hold"]) {
+          await store.startTerminalSignalAdmission("sess-1", id, 20);
+          expect(await store.claimTerminalSignalLoss("sess-2", id, 20)).toBe(false);
+          expect(await store.claimTerminalSignalLoss("sess-1", id, 10)).toBe(false);
+          const claims = await Promise.all(Array.from({ length: 8 }, () => store.claimTerminalSignalLoss("sess-1", id, 20)));
+          expect(claims.filter(Boolean)).toHaveLength(1);
+          const row = id.startsWith("wk_") ? await store.getWakeup(id) : await store.getLease(id);
+          expect(row?.terminalSignalLossReportedAt).toBe(10);
+        }
+        for (const id of ["wk_silent", "ls_silent", "wk_missing"]) expect(await store.claimTerminalSignalLoss("sess-1", id, 10)).toBe(false);
+        await store.transitionWakeup("wk_a", ["cancelled"], "running", {}, 30);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+        await store.transitionWakeup("wk_a", ["running"], "cancelled", { endedAt: 40, terminalSignalExpected: true }, 40);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 50);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 50)).toBe(true);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 50)).toBe(false);
+      });
+
+      it("does not report a cancellation twice when an admission-clock write is retried", async () => {
+        await store.createWakeup(wakeup({ status: "cancelled", endedAt: 10, terminalSignalExpected: true }));
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 10)).toBe(true);
+        await store.startTerminalSignalAdmission("sess-1", "wk_a", 20);
+        expect(await store.claimTerminalSignalLoss("sess-1", "wk_a", 20)).toBe(false);
+      });
+
       it("round-trips every wakeup and lease field, origin and rate window included", async () => {
-        const w = wakeup({ origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
-        const l = lease({ threadId: "th-1", origin });
+        const w = wakeup({ sourceQueueItemId: "creating-turn", origin, windowStartAt: 100, windowCount: 3, logTail: "tail ✓", eventCount: 3 });
+        const l = lease({ threadId: "th-1", sourceQueueItemId: "creating-turn", origin });
         await store.createWakeupWithLease(w, l);
         expect(await store.getWakeup("wk_a")).toEqual(w);
         expect(await store.listActiveLeases("sess-1")).toEqual([l]);
@@ -1118,8 +1254,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(lost).toBeNull();
         expect(await store.countActiveLeases("sess-1")).toBe(1);
 
-        const moved = await store.transitionWakeupAndReleaseLease("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50 }, 50, "owner_ended");
-        expect(moved).toMatchObject({ status: "done", cause: "exit", exitCode: 0 });
+        const moved = await store.transitionWakeupAndReleaseLease("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50, terminalSignalExpected: true }, 50, "owner_ended");
+        expect(moved).toMatchObject({ status: "done", cause: "exit", exitCode: 0, terminalSignalExpected: true });
+        expect((await store.getWakeup("wk_a"))?.terminalSignalExpected).toBe(true);
         expect(await store.countActiveLeases("sess-1")).toBe(0);
         // The release used the CAS time and cause; a second release finds nothing.
         expect(await store.releaseLease("ls_a", "deadline", 60)).toBeNull();
@@ -1266,6 +1403,119 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       await store.saveSession(newSession({ id: "without-ref" }));
       expect((await store.getSession("with-ref"))?.startRef).toEqual(startRef);
       expect((await store.getSession("without-ref"))?.startRef).toBeUndefined();
+    });
+
+    it.each(["interactive", "signal", "metadata", "delegation"] as const)("claims NUL-bearing %s work and advances the thread", async kind => {
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item: QueueItem = { ...queueItem("nul-head", 100, 100),
+        content: kind === "signal" ? { kind: "signal", signalType: "event.matched", body: "paste\u0000here" }
+          : kind === "interactive" ? "paste\u0000here" : "safe content",
+        ...(kind === "interactive" ? { author: { id: "user", interactive: true } } : {}),
+        metadata: { note: "meta\u0000data", ...(kind === "delegation" ? {
+          parentDelegation: { parentSessionId: "parent", parentThreadId: "parent-thread", note: "nested\u0000data" },
+        } : {}) },
+      };
+      await store.admitSubmission("sess-1", "th-1", item);
+      await store.admitSubmission("sess-1", "th-1", queueItem("after-nul", 200, 200));
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id,
+        attemptId: "nul-attempt", ownerId: "owner" });
+      expect(claimed).toMatchObject({ status: "running", content: item.content, metadata: item.metadata });
+      expect(claimed?.childResultDelivery).toBe(kind === "signal" || kind === "delegation" ? "pending" : undefined);
+      const fence = { itemId: item.id, attemptId: "nul-attempt" };
+      await store.reserveSettlement("sess-1", "th-1", item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", item.id, fence);
+      const next = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: "after-nul",
+        attemptId: "next-attempt", ownerId: "owner" });
+      expect(next).toMatchObject({ id: "after-nul", status: "running", attemptCount: 1 });
+      const nextFence = { itemId: "after-nul", attemptId: "next-attempt" };
+      await store.reserveSettlement("sess-1", "th-1", "after-nul", { outcome: "completed" }, nextFence);
+      await store.finalizeSettlement("sess-1", "th-1", "after-nul", nextFence);
+      expect(await store.listUnsettledSubmissions("sess-1")).toEqual([]);
+    });
+
+    it("marks child signal delivery pending at claim and resolves it without changing execution or activity", async () => {
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item = { ...queueItem("child-signal", Date.now(), Date.now()),
+        content: { kind: "signal" as const, signalType: "lease.released", body: "work ended" } };
+      await store.admitSubmission("sess-1", "th-1", item);
+      expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBeUndefined();
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id, attemptId: "att-1", ownerId: "owner" });
+      expect(claimed?.childResultDelivery).toBe("pending");
+      expect(await store.listPendingChildResultsBefore("sess-1", Date.now() + 1)).toEqual([]);
+      const fence = { itemId: item.id, attemptId: "att-1" };
+      await store.reserveSettlement("sess-1", "th-1", item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", item.id, fence);
+      const settled = await store.getQueueItem("sess-1", item.id);
+      expect(settled?.childResultDelivery).toBe("pending");
+      expect(await store.listPendingChildResultsBefore("sess-1", settled!.updatedAt)).toEqual([]);
+      expect(await store.listPendingChildResultsBefore("sess-1", settled!.updatedAt + 1)).toEqual([settled]);
+      expect(await store.listPendingChildResultsBefore("another-session", Date.now() + 1)).toEqual([]);
+      await store.resolveChildResultDelivery("other-session", item.id, "delivered");
+      expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBe("pending");
+      await store.resolveChildResultDelivery("sess-1", item.id, "denied");
+      await store.resolveChildResultDelivery("sess-1", item.id, "delivered");
+      expect(await store.getQueueItem("sess-1", item.id)).toEqual({ ...settled, childResultDelivery: "denied" });
+      expect(await store.listPendingChildResultsBefore("sess-1", Date.now() + 1)).toEqual([]);
+      await store.resolveChildResultDelivery("sess-1", "missing", "denied");
+    });
+
+    it.each([true, false])("tracks claimed child delegation results but not human work (delegated=%s)", async delegated => {
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item = { ...queueItem("child-prompt", Date.now(), Date.now()),
+        metadata: delegated ? { parentDelegation: { parentSessionId: "parent", parentThreadId: "parent-thread" } } : undefined };
+      await store.admitSubmission("sess-1", "th-1", item);
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id, attemptId: "att", ownerId: "owner" });
+      expect(claimed?.status).toBe("running");
+      expect(claimed?.childResultDelivery).toBe(delegated ? "pending" : undefined);
+    });
+
+    it("does not track team conversation signals just because their session has a parent", async () => {
+      await store.saveSession(newSession({ parentSessionId: "assistant:team", owner: { type: "team", id: "team" } }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("conversation-signal", 100, 100),
+        content: { kind: "signal", signalType: "event.matched", body: "Slack reply" } });
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: "conversation-signal", attemptId: "att", ownerId: "owner" });
+      expect(claimed?.status).toBe("running");
+      expect(claimed?.childResultDelivery).toBeUndefined();
+      expect((await store.getQueueItem("sess-1", "conversation-signal"))?.childResultDelivery).toBeUndefined();
+    });
+
+    it("does not mark non-child signals or ordinary prompts as pending child delivery", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("signal", 100, 100),
+        content: { kind: "signal", signalType: "lease.released", body: "work ended" } });
+      const claim = { sessionId: "sess-1", threadId: "th-1", itemId: "signal", attemptId: "att", ownerId: "owner" };
+      expect((await store.claimSubmission(claim))?.childResultDelivery).toBeUndefined();
+      await store.forceSettle("sess-1", "signal", "failed");
+      await store.saveSession(newSession({ parentSessionId: "parent", purpose: "child" }));
+      await store.admitSubmission("sess-1", "th-1", queueItem("prompt", 200, 200));
+      expect((await store.claimSubmission({ ...claim, itemId: "prompt" }))?.childResultDelivery).toBeUndefined();
+    });
+
+    it("snapshots a continuation's source and scope before a queued delegation can replace them", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const claim = (id: string) => ({ sessionId: "sess-1", threadId: "th-1", itemId: id, attemptId: `attempt-${id}`, ownerId: "test" });
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("send1", 100, 100), metadata: { toolScope: { tools: ["read"] } } });
+      expect((await store.claimSubmission(claim("send1")))?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY]).toBe("send1");
+      const thread = await store.getThread("sess-1", "th-1");
+      if (!thread) throw new Error("thread missing");
+      // The engine writes the started turn's scope to the durable continuation metadata.
+      await store.saveThread("sess-1", { ...thread, metadata: { ...thread.metadata, [CONTINUATION_TOOL_SCOPE_KEY]: { tools: ["read"] } } });
+      const fence = { itemId: "send1", attemptId: "attempt-send1" };
+      await store.reserveSettlement("sess-1", "th-1", "send1", { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", "send1", fence);
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("sig", 200, 200),
+        content: { kind: "signal", signalType: "lease.released", body: "done" }, metadata: { [INHERIT_TOOL_SCOPE_KEY]: true } });
+      const signal = await store.claimSubmission(claim("sig"));
+      expect(signal?.metadata).toMatchObject({ [CONTINUATION_SOURCE_ITEM_KEY]: "send1", toolScope: { tools: ["read"] } });
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("send2", 300, 300), metadata: { toolScope: { tools: ["read", "bash"] } } });
+      expect((await store.getQueueItem("sess-1", "sig"))?.metadata).toEqual(signal?.metadata);
+      expect((await store.getThread("sess-1", "th-1"))?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY]).toBe("send1");
     });
 
     it("finalizeSettlement(patchRef) lands the settle-patch record on the item", async () => {

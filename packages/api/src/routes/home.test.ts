@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { homeTasks, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
+import { homeTasks, sessionThreads, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
 import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
@@ -39,6 +39,59 @@ describe("home conversation", () => {
     expect(listed.threads.map((t) => t.id)).not.toContain(first.threadId);
     const selected = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=50&threadId=${first.threadId}`)).json() as ListThreadsResponse;
     expect(selected.threads.map(t => t.id)).toContain(first.threadId);
+  });
+
+  it("names the home thread Home in every thread response, over any stored title", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    // A title written before Home had one name, or by a client that renames threads.
+    await test.providers.db.update(sessionThreads).set({ title: "Valet Mobile Tap Bug Investigation" }).where(eq(sessionThreads.id, home.threadId));
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { title: string | null };
+    expect(detail.title).toBe("Home");
+    const fixed = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(home.sessionId)}/threads?fixedId=${home.threadId}&fixedOnly=1`)).json() as ListThreadsResponse;
+    expect(fixed.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
+    const all = await (await fetch(`${test.baseUrl}/api/sessions/${encodeURIComponent(home.sessionId)}/threads`)).json() as ListThreadsResponse;
+    expect(all.threads.find((t) => t.id === home.threadId)?.title).toBe("Home");
+  });
+
+  it("refuses to archive or share the home thread, and still clears either", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    const patch = (body: unknown) => fetch(`${test.baseUrl}/api/threads/${home.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const archived = await patch({ archived: true });
+    expect(archived.status).toBe(400);
+    expect(((await archived.json()) as { error: string }).error).toContain("cannot be archived");
+    for (const share of ["view", "reply"]) {
+      const shared = await patch({ share });
+      expect(shared.status).toBe(400);
+      expect(((await shared.json()) as { error: string }).error).toContain("cannot be shared");
+    }
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { archivedAt: number | null; share?: string };
+    expect(detail.archivedAt).toBeNull();
+    expect(detail.share).toBeUndefined();
+    // A guest link never opens: the home thread has no share to admit through.
+    expect((await fetch(`${test.baseUrl}/api/threads/${home.threadId}/messages`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+    // Clearing is harmless and stays allowed, so an older archived or shared row can be repaired.
+    expect((await patch({ archived: false })).status).toBe(200);
+    expect((await patch({ share: "off" })).status).toBe(200);
+  });
+
+  it("refuses to rename the home thread and keeps other settings editable", async () => {
+    const test = await boot();
+    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
+    const patch = (body: unknown) => fetch(`${test.baseUrl}/api/threads/${home.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const renamed = await patch({ title: "Incident triage" });
+    expect(renamed.status).toBe(400);
+    expect(((await renamed.json()) as { error: string }).error).toContain("Home keeps its name");
+    const detail = await (await fetch(`${test.baseUrl}/api/threads/${home.threadId}`)).json() as { title: string | null };
+    expect(detail.title).toBe("Home");
+    // Other settings are not the name: a model change still lands.
+    const model = await patch({ model: null });
+    expect(model.status).toBe(200);
   });
 
   it("creates the morning brief routine once, posting into home at 08:00", async () => {
@@ -78,7 +131,7 @@ describe("home tasks", () => {
   it("queues a task report without cancelling an open Home question", async () => {
     const test = await boot();
     faux?.setResponses([
-      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?", intent: "Ask which repository to use before starting the task." })], { stopReason: "toolUse" }),
       fauxAssistantMessage("Task done."), fauxAssistantMessage("Home done."), fauxAssistantMessage("Report done."),
     ]);
     const { session, thread } = await ensureHomeThread(test.providers, USER);

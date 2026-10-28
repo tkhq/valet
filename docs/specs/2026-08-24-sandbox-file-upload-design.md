@@ -187,10 +187,14 @@ mapped through `errorMessage`, which prefers the server's `corrective`.
 | 400 | Bad multipart, missing file/filename, bad `extract` value, invalid path, read error. |
 | 404 | Unknown session or non-owner. |
 | 408 | The client canceled while the route waited for the sandbox. |
-| 409 | Destination exists; readiness timed out (`wake:true`); or the sandbox was released or is unavailable. |
+| 409 | Destination exists; readiness timed out (`wake:true`); or the resolved sandbox was released or is unavailable. |
 | 413 | Content-Length or file above the cap. |
 | 415 | `extract=true` on a non-extractable file. |
 | 422 | Zip guard rejection or PDF extraction failure with `extract=true`. |
 | 500 | Session load, startup/preparation, missing ready handle, mkdir, write, or destination-verification failure. |
+
+A released cached session is evicted before resolution. Uploads rebuild its attachment and keep durable submissions.
+The `409` release response still applies if destruction starts after the upload resolves its session.
+Deleted sessions remain unavailable and return `404`; uploads do not recreate them.
 
 Every error body carries `error` and a `corrective` naming the next action.

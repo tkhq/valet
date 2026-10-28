@@ -1,5 +1,6 @@
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type Context } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type Context } from "@earendil-works/pi-ai/compat";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import {
   builtinTools,

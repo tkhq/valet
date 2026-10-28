@@ -1,8 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { useCreateThread, useThreads } from "~/api/queries";
+import { useCreateThread, usePrefetchSession, usePrefetchTranscript, useThreads, useThreadWorkspace } from "~/api/queries";
 import { useTeams } from "~/api/settings";
-import { Button, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
+import { ThreadShell } from "~/components/session/message-list";
 import { useSidebarControls } from "~/components/layout/app-shell";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
@@ -36,17 +37,29 @@ function ChatPage() {
   const team = teams.data?.teams.find(t => t.id === teamId);
   const navigate = useNavigate({ from: Route.fullPath });
   const openDrawer = sidebar?.present ? sidebar.openDrawer : undefined;
+  // The thread is in the URL: load its transcript beside the workspace and
+  // thread-list requests, not after them.
+  usePrefetchTranscript(thread);
   useEffect(() => {
     if (threadsParam !== "open" || !openDrawer) return;
     openDrawer();
     void navigate({ search: (prev) => ({ ...prev, threads: undefined }), replace: true });
   }, [threadsParam, openDrawer, navigate]);
   const runtimeId = conversation.data?.sessionId;
+  // Most threads live in the workspace runtime: load its detail beside the
+  // thread list rather than after it.
+  usePrefetchSession(runtimeId);
   const createThread = useCreateThread(runtimeId ?? "");
   // The notice follows the open thread: a helper thread is private, a Slack thread follows its channel.
   const threads = useThreads(runtimeId ?? "", undefined, thread);
   const list = threads.data?.threads ?? [];
   const active = list.find(t => t.id === (thread ?? threads.data?.defaultThreadId ?? defaultThreadId(list)));
+  // A thread from another workspace (a private branch, a moved thread, a
+  // branch note's source) opens in its own workspace.
+  const elsewhere = useThreadWorkspace(thread && threads.data && !active ? thread : undefined).data;
+  useEffect(() => {
+    if (elsewhere && elsewhere !== workspaceKey) void navigate({ search: (prev) => ({ ...prev, workspace: elsewhere }), replace: true });
+  }, [elsewhere, workspaceKey, navigate]);
   const sessionId = active?.sessionId ?? runtimeId;
   const activeKey = active?.key;
   usePageTitle(active?.title || "Chat");
@@ -54,7 +67,7 @@ function ChatPage() {
     Couldn’t open this workspace’s threads. {errorText(conversation.error)}
     <button className="ml-2 underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
-  if (!runtimeId || !sessionId || threads.isLoading) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening threads…" /></div>;
+  if (!runtimeId || !sessionId || threads.isLoading) return <ThreadShell />;
   if (threads.error) return <div role="alert" className="p-8 text-sm">
     Couldn’t load threads. {errorText(threads.error)}
     <Button variant="ghost" onClick={() => void threads.refetch()}>Retry</Button>
@@ -75,3 +88,4 @@ function ChatPage() {
     {child && <ChildPanel childId={child} onClose={() => void navigate({ search: prev => ({ ...prev, child: undefined }) })} />}
   </>;
 }
+

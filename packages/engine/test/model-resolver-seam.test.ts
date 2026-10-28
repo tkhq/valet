@@ -15,11 +15,12 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
   type FauxProvider,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
   InMemoryEventStream,

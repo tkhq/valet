@@ -18,10 +18,12 @@
  * credential store, so an expired or revoked token reads as connected while
  * `list_tools` hides the service. Health says otherwise.
  *
- * A connected dynamic (MCP) service is also listed live, TTL-cached, for its
- * `toolCount`. The same listing adds the probe's health fields: the server
- * refused the credential (`rejected`), or the grant lacks scopes some tools
- * need (`missingScopes`). See `plugins/service-probe.ts`.
+ * A connected dynamic (MCP) service is also listed live, TTL-cached. The
+ * listing's tools join the service's `actions` (both groupings) in the same
+ * wire shape as static ones, so the Policies combobox offers them, and sets
+ * its `toolCount`. The same listing adds the probe's health fields: the
+ * server refused the credential (`rejected`), or the grant lacks scopes some
+ * tools need (`missingScopes`). See `plugins/service-probe.ts`.
  */
 import { Hono } from "hono";
 import {
@@ -70,6 +72,19 @@ function toActionSummary(actionPlugin: ActionPlugin, action: PluginAction): Plug
       approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
       "require_approval",
   };
+}
+
+/**
+ * The actions a service can name right now: its static manifest plus, for a
+ * connected dynamic service, the tools its listing returned (the probe's
+ * cached tool schema). A listed tool that repeats a static id is dropped,
+ * so one id maps to one row.
+ */
+function knownActions(actionPlugin: ActionPlugin, probe: ServiceProbe | undefined): PluginAction[] {
+  const listed = probe?.actions;
+  if (!listed || listed.length === 0) return actionPlugin.actions;
+  const staticIds = new Set(actionPlugin.actions.map((action) => qualifiedActionId(actionPlugin.service, action)));
+  return [...actionPlugin.actions, ...listed.filter((action) => !staticIds.has(qualifiedActionId(actionPlugin.service, action)))];
 }
 
 /**
@@ -171,7 +186,7 @@ pluginsRouter.get("/", async (c) => {
     for (const actionPlugin of actionPlugins) {
       const key = actionPlugin.credentialService ?? actionPlugin.service;
       const unlocked = actionsByCredentialKey.get(key) ?? [];
-      for (const action of actionPlugin.actions) {
+      for (const action of knownActions(actionPlugin, probes.get(key))) {
         unlocked.push(toActionSummary(actionPlugin, action));
       }
       actionsByCredentialKey.set(key, unlocked);
@@ -232,7 +247,7 @@ pluginsRouter.get("/", async (c) => {
         connect,
         connectBlockedBy,
         missingEnv: missingEnv.length > 0 ? missingEnv : undefined,
-        toolCount: probes.get(service)?.toolCount,
+        toolCount: probes.get(service)?.actions?.length,
         // The slug is declared per plugin (`plugin.yaml`), so every service a
         // plugin declares shares its plugin's mark. A service that names
         // itself takes its own slug when one exists.
@@ -245,7 +260,9 @@ pluginsRouter.get("/", async (c) => {
     const actionServices: PluginActionServiceSummary[] = actionPlugins.map((actionPlugin) => ({
       service: actionPlugin.service,
       ...(actionPlugin.resolveActions !== undefined ? { dynamic: true as const } : {}),
-      actions: actionPlugin.actions.map((action) => toActionSummary(actionPlugin, action)),
+      actions: knownActions(actionPlugin, probes.get(actionPlugin.credentialService ?? actionPlugin.service)).map((action) =>
+        toActionSummary(actionPlugin, action),
+      ),
     }));
 
     return {

@@ -249,8 +249,8 @@ export interface WorkflowDefinitionCheck {
   order?: string[];
   /**
    * The workflow runs on a schedule: some step reads the schedule input,
-   * and every other `trigger.data` read is the scheduler's `scheduleName`
-   * or `cron`.
+   * and no `trigger.data` read is one that a scheduled run leaves empty
+   * (`scheduledRunMisses`, the scheduler's own rule).
    */
   schedule_input?: boolean;
   /** Some template reads `trigger.timestamp`, and no step holds a literal date. */

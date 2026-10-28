@@ -15,6 +15,9 @@ import { workflowDefinitions } from "../schema/index.js";
 /** The step-design heuristic `preview_workflow` warns with: an agent prompt that asks for approval. */
 export { approvalRequestWarning } from "@valet/workflow";
 
+/** The `trigger.data` reads that a scheduled run leaves empty, by the scheduler's own rule. */
+export { scheduledRunMisses } from "@valet/workflow";
+
 /** Every workflow definition in the database, oldest update first. */
 export async function listSavedWorkflows(
   db: AppDb,

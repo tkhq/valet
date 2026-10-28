@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { DecisionGate } from "@valet/engine";
 import { afterEach, expect, it, vi } from "vitest";
 import { agentSessions, childWatches } from "../schema/index.js";
-import { wireChildGateReports } from "../orchestrator/children.js";
+import { parentDelegationMetadata, wireChildGateReports } from "../orchestrator/children.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { bootTestApi, type TestApi } from "./_setup.js";
 
@@ -30,7 +30,10 @@ it("signals the parent thread once when its child opens a gate", async () => {
     toolScope: { tools: ["ask_question"], actions: ["workflows.get_run"] },
   });
   await child.pause();
-  const receipt = await child.prompt("Wait for a question", { metadata: { toolScope: { actions: [] } } });
+  const receipt = await child.prompt("Wait for a question", { metadata: {
+    ...parentDelegationMetadata(parent.id, parentThread.id, { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }),
+    toolScope: { actions: [] },
+  } });
   await p.db.insert(childWatches).values({
     childSessionId: childId, queueItemId: receipt.queueItemId, parentSessionId: parent.id, parentThreadId: parentThread.id,
     actorUserId: "local-user", orgId: "local-org", settled: false,
@@ -43,6 +46,7 @@ it("signals the parent thread once when its child opens a gate", async () => {
       resumeKey: "rk", ordinal: 0, type: "approval", title: "Push to main?",
       actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
     };
+    await p.engineStore.saveDecisionGate(childId, gate.threadId, gate);
     for (const attempt of ["first", "repeat"]) {
       await p.eventStream.append(
         { sessionId: childId, threadId: gate.threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId: gate.threadId, gate } },
@@ -52,6 +56,7 @@ it("signals the parent thread once when its child opens a gate", async () => {
     // The signal is a queued submission on the parent thread. Whether the
     // parent has run it yet depends on its model, so read the queue itself.
     await vi.waitFor(async () => {
+      await p.wakeWatcher.sweep();
       const items = [
         ...await p.engineStore.listUnsettledSubmissions(parent.id),
         ...await p.engineStore.listSettledSubmissionsBefore(parent.id, Date.now() + 1),

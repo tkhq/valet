@@ -2508,7 +2508,7 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     await db.insert(actionPolicies).values({ id: "team-block", orgId: ORG, principalType: "team", principalId: "team-a", service: "demo", mode: "deny", origin: "admin", createdAt: 1, updatedAt: 1 });
     const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
     const result = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "team-deny", approval: { resolvedBy: "u1" } }, { ...wfCtx, owner: { type: "team", id: "team-a" } });
-    expect(result).toEqual({ ok: false, error: "demo.deploy is blocked by team policy" });
+    expect(result).toEqual({ ok: false, error: "demo.deploy is blocked by team policy", errorCode: "policy_denied" });
     expect(fixture.calls()).toBe(0);
   });
 

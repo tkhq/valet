@@ -48,6 +48,13 @@ const EXTERNAL_SENDER = {
   error: "Only a teammate with a linked Valet account can manage events. Ask them, or link your Slack account in Valet.",
 };
 
+/** A team's unattended run (schedule, event, webhook) acts as the team's own
+ * principal id, `team:{id}`, not as a person (`actorUserIdFor` in
+ * workflows/engine-deps.ts). It may read what its team owns, never change it. */
+function isTeamRun(ctx: PluginActionContext, userId: string): boolean {
+  return ctx.owner?.type === "team" && userId === `team:${ctx.owner.id}`;
+}
+
 function transcriptIsShared(ctx: PluginActionContext): boolean {
   // A missing owner cannot prove that the transcript is private. A channel
   // origin also makes this turn member-visible, even in a user-owned session.
@@ -71,6 +78,7 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
 export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
   async function withSubscriptionScope(
     ctx: PluginActionContext,
+    access: "read" | "write",
     operation: (tx: AppQueryable, scope: { orgId: string; ownerType: "user" | "team"; ownerId: string }) => Promise<PluginActionResult>,
   ): Promise<PluginActionResult> {
     if (ctx.externalSender) return EXTERNAL_SENDER;
@@ -79,13 +87,19 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         (ctx.owner?.type === "user" && ctx.owner.id !== userId)) {
       return { success: false, error: "Open your personal or team assistant to manage its subscriptions." };
     }
-    const [membership] = await db.select({ userId: orgMembers.userId }).from(orgMembers)
-      .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
-    if (!membership) return { success: false, error: "Sign in as an organization member to manage subscriptions." };
+    const teamRun = isTeamRun(ctx, userId);
+    if (teamRun && access === "write") {
+      return { success: false, error: "A scheduled or event run can only read subscriptions. Ask a team member to make this change in Valet." };
+    }
+    if (!teamRun) {
+      const [membership] = await db.select({ userId: orgMembers.userId }).from(orgMembers)
+        .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
+      if (!membership) return { success: false, error: "Sign in as an organization member to manage subscriptions." };
+    }
     const ownerType = ctx.owner?.type === "team" ? "team" as const : "user" as const;
     const scope = { orgId: ctx.orgId, ownerType, ownerId: ownerType === "team" ? ctx.owner!.id : userId };
     const result = ownerType === "team"
-      ? await withAuthorizedTeamOwnership(db, { teamId: scope.ownerId, orgId: scope.orgId, userId, principalTeamId: scope.ownerId, requireMembership: true }, (tx) => operation(tx, scope))
+      ? await withAuthorizedTeamOwnership(db, { teamId: scope.ownerId, orgId: scope.orgId, userId, principalTeamId: scope.ownerId, requireMembership: !teamRun }, (tx) => operation(tx, scope))
       : await operation(db, scope);
     return result ?? { success: false, error: "Team is no longer available. Open a team you belong to and retry." };
   }
@@ -99,7 +113,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     name: "List workspace event subscriptions",
     description: "List event subscriptions owned by the current personal or team workspace, including IDs and each configured appearance (the reply name and avatar). Uses exact name matching. Defaults to 25 records; use nextOffset for the next page.",
     riskLevel: "low",
-    execute: async ({ name, limit, offset }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+    execute: async ({ name, limit, offset }, ctx) => withSubscriptionScope(ctx, "read", async (tx, scope) => {
       const pageLimit = limit ?? DEFAULT_LIMIT;
       const pageOffset = offset ?? 0;
       if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_LIMIT || !Number.isSafeInteger(pageOffset) || pageOffset < 0) {
@@ -123,7 +137,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     name: "Set event subscription presence",
     description: "Replace the reply display name and avatar (the appearance) for an existing subscription in the current personal or team workspace. Use null to clear the override. Does not enable the subscription or change its target, prompts, or matching rules.",
     riskLevel: "low",
-    execute: async ({ subscription_id, presence }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+    execute: async ({ subscription_id, presence }, ctx) => withSubscriptionScope(ctx, "write", async (tx, scope) => {
       if (presence !== null) {
         const error = validateAppearance(presence);
         if (error) return { success: false, error };
@@ -293,7 +307,9 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (since !== undefined && until !== undefined && since > until) {
         return { success: false, error: "since must be earlier than or equal to until." };
       }
-      const [membership] = await db.select({ role: orgMembers.role }).from(orgMembers)
+      // A team run reads as a member: its transcript is shared, so it never
+      // gets administrator metadata.
+      const [membership] = isTeamRun(ctx, userId) ? [{ role: "member" }] : await db.select({ role: orgMembers.role }).from(orgMembers)
         .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
       if (!membership) return { success: false, error: "You are not a member of this organization." };
       const canReadAdminMetadata = membership.role === "admin" && !transcriptIsShared(ctx);

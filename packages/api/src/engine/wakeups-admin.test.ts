@@ -89,6 +89,13 @@ describe("backgroundWorkRefusal", () => {
 });
 
 describe("selectWork", () => {
+  it("does not treat host child subscriptions as blocking work", () => {
+    const child = event("wk_child_events:child-1", "valet:session:child-1");
+    child.eventMatch = { childSessionId: "child-1", clauses: [{ key: "child.*" }], once: false, self: [] };
+    expect(selectWork({ wakeups: [child], leases: [] }, {})).toEqual([]);
+    expect(selectWork({ wakeups: [child], leases: [] }, { threadId: "th-1" })).toEqual([]);
+  });
+
   it("ships pending for a process that is still starting, and running for a hold", () => {
     const picked = selectWork(
       { wakeups: [process("wk_a", "pending"), process("wk_b", "running")], leases: [hold("ls_h", "th-1")] },
@@ -201,5 +208,44 @@ describe("cancelWorkAsHuman of an event waiter (spec 2026-10-15, F1)", () => {
     expect("body" in content && typeof content.body === "string" ? content.body : "").toContain(
       "A person stopped this event wait at ",
     );
+  });
+});
+
+describe("human cancellation admission expectations", () => {
+  it.each(["deliver", "defer", "suppress"] as const)("marks only a promised %s signal and starts grace at the send", async signal => {
+    const store = new InMemorySessionStore();
+    await store.createLease(hold("ls_human"));
+    let now = NOW;
+    const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => now }, "s-1", () => undefined);
+    const prompt = vi.fn(async (): Promise<unknown> => ({}));
+    const session: HumanCancelSession = { options: { wakeups: seam }, prompt, threadById: () => ({}) };
+    const result = await cancelWorkAsHuman(store, session, "s-1", "ls_human", { actorUserId: "u1", signal, now: () => now });
+    expect(result.kind).toBe("cancelled");
+    expect((await store.getLease("ls_human"))?.terminalSignalExpected === true).toBe(signal !== "suppress");
+    if (signal === "defer" && result.kind === "cancelled") {
+      expect(prompt).not.toHaveBeenCalled();
+      expect((await store.getLease("ls_human"))?.terminalSignalStartedAt).toBeUndefined();
+      now += 600_000;
+      await result.sendSignal?.();
+    }
+    expect((await store.getLease("ls_human"))?.terminalSignalStartedAt).toBe(signal === "suppress" ? undefined : now);
+    expect(prompt).toHaveBeenCalledTimes(signal === "suppress" ? 0 : 1);
+  });
+
+  it("counts a failed admission-clock write without rejecting a committed cancellation", async () => {
+    const store = new InMemorySessionStore();
+    await store.createLease(hold("ls_human"));
+    const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "s-1", () => undefined);
+    const prompt = vi.fn(async (): Promise<unknown> => ({}));
+    const session: HumanCancelSession = { options: { wakeups: seam }, prompt, threadById: () => ({}) };
+    const started = vi.spyOn(store, "startTerminalSignalAdmission").mockRejectedValue(new Error("database unavailable"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const lost = vi.fn();
+    try {
+      expect((await cancelWorkAsHuman(store, session, "s-1", "ls_human", { actorUserId: "u1", signal: "deliver", signalLost: lost })).kind).toBe("cancelled");
+      expect(lost).toHaveBeenCalledWith("hold");
+      expect(prompt).not.toHaveBeenCalled();
+      expect(await store.getLease("ls_human")).toMatchObject({ releaseCause: "cancelled", terminalSignalExpected: true });
+    } finally { started.mockRestore(); errors.mockRestore(); }
   });
 });

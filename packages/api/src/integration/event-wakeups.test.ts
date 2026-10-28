@@ -25,6 +25,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { eventSubscriptions } from "../schema/index.js";
 import {
@@ -72,6 +73,46 @@ afterEach(teardownUniverse);
 // ── The scenarios ───────────────────────────────────────────────────────
 
 describe("api integration: event wakeups acceptance scenarios", () => {
+  it("notifies the parent before a child's event wait fires and again after the later turn", async () => {
+    const u = await bootUniverse();
+    const p = u.api.providers;
+    const parent = await defaultAssistantSessionFor(p, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    u.sessionId = parent.id;
+    u.threadId = parent.thread().id;
+    u.agent.on(/STEP CHILD WAIT/, [{ name: "wait_for_event", args: {
+      subject: PR_URL, on: [{ key: "github.check_run.completed", status: ["failure"] }],
+      reason: "child CI result", max_hours: 6,
+    } }]);
+    u.agent.on(/STEP SPAWN CHILD/, [{ name: "task", args: { prompt: "STEP CHILD WAIT" } }]);
+    await prompt(u, "STEP SPAWN CHILD", 2);
+    const watches = rowsOf(await p.db.execute(sql`SELECT * FROM child_watches WHERE parent_session_id = ${u.sessionId}`));
+    const childId = asRecord(watches[0])?.child_session_id;
+    expect(typeof childId).toBe("string");
+    if (typeof childId !== "string") throw new Error("The task did not spawn a child.");
+    const childWait = (await p.engineStore.listWakeups(childId, ["running"]))[0];
+    expect(childWait).toMatchObject({ kind: "event", reason: "child CI result" });
+    await poll(async () => (await p.engineStore.getWakeup(`wk_child_events:${childId}`))?.eventBuffer?.length ?? 0,
+      (count) => count === 1, "the first child settlement on the event rail");
+    await u.watcher.sweep();
+    const [first] = await awaitSignals(u, "child.settled", 1);
+    expect(first?.content).toContain("child CI result");
+    expect(first?.signal?.attributes?.background_work).toContain(childWait?.id);
+    expect((await p.engineStore.getWakeup(childWait!.id))?.status).toBe("running");
+    expect((await p.engineStore.getWakeup(`wk_child_events:${childId}`))?.deadlineAt).toBeUndefined();
+
+    await postGithub(u, "check_run", "child-ci-failure", checkRunCompleted("test", "failure", 654));
+    await u.watcher.sweep();
+    await poll(async () => (await p.engineStore.getWakeup(`wk_child_events:${childId}`))?.eventBuffer?.length ?? 0,
+      (count) => count === 1, "the later child settlement on the event rail");
+    await u.watcher.sweep();
+    const updates = await awaitSignals(u, "child.settled", 2);
+    expect(updates[1]?.content).toBe("noted");
+    expect(updates[1]?.signal?.attributes?.background_work).toBe("[]");
+    await p.childWatcher.rearm();
+    await u.watcher.sweep();
+    await expectNoNewSignal(u, "child.settled", 2);
+  });
+
   it("Scenario A: CI on a pull request", async () => {
     const u = await bootUniverse();
     const p = u.api.providers;

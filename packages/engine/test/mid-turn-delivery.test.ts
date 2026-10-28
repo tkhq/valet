@@ -7,11 +7,12 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { TOOL_SCOPE_KEY } from "@valet/shared";
 import {
   canDeliverMidTurn,
@@ -121,6 +122,47 @@ describe("mid-turn delivery", () => {
     // Its settle event names that turn, so a live follower can wait on it.
     expect(h.events.map((e) => e.event).find((e) => e.type === "submission_settled" && e.queueItemId === second.queueItemId))
       .toMatchObject({ outcome: { outcome: "merged" }, mergedIntoItemId: first.queueItemId });
+    h.faux.unregister();
+  });
+
+  it("joins a child's result to a running turn on another child's result", async () => {
+    const { tool, entered, release } = blockingTool();
+    const h = await setup("mid-turn-child-results", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("read both results"),
+    ], [tool]);
+    const owner = { type: "user" as const, id: "u1" };
+    const first = await h.thread.submitPrompt({ kind: "signal", signalType: "child.settled", body: "first result" },
+      { dispatchId: "d1", internalSender: { sessionId: "child-a", owner }, queueMode: "inject" });
+    await entered;
+    const second = await h.thread.submitPrompt({ kind: "signal", signalType: "child.settled", body: "second result" },
+      { dispatchId: "d2", internalSender: { sessionId: "child-b", owner }, queueMode: "inject" });
+    release();
+    await waitFor(() => h.settled(first.queueItemId));
+
+    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(h.faux.state.callCount).toBe(2);
+    h.faux.unregister();
+  });
+
+  it("keeps a child's result out of a person's running turn", async () => {
+    const { tool, entered, release } = blockingTool();
+    const h = await setup("mid-turn-child-person", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done with your request"),
+      fauxAssistantMessage("read the result"),
+    ], [tool]);
+    const first = await h.thread.submitPrompt("run the long command", { author: PERSON });
+    await entered;
+    const result = await h.thread.submitPrompt({ kind: "signal", signalType: "child.settled", body: "a result" },
+      { dispatchId: "d1", internalSender: { sessionId: "child-a", owner: { type: "user", id: "u1" } }, queueMode: "inject" });
+    release();
+    await waitFor(() => h.settled(result.queueItemId));
+
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    // The result ran as its own turn after the person's turn.
+    expect(await h.outcome(result.queueItemId)).toBe("completed");
+    expect(h.faux.state.callCount).toBe(3);
     h.faux.unregister();
   });
 
@@ -411,5 +453,22 @@ describe("canDeliverMidTurn", () => {
     expect(canDeliverMidTurn(item({ channel: { channelType: "slack", channelId: "C1" } }), base, "u1")).toBe(false);
     expect(canDeliverMidTurn(item({ model: "big" }), base, "u1")).toBe(false);
     expect(canDeliverMidTurn(item({ role: "reviewer" }), base, "u1")).toBe(false);
+  });
+
+  it("joins another agent's signal only to a signal turn from the same owner", () => {
+    const stamp = (id: string) => ({ senderSessionId: `child-${id}`, senderOwner: { type: "user", id }, hopCount: 1 });
+    const result = (owner: string) => item({
+      author: undefined,
+      content: { kind: "signal", signalType: "child.settled", body: "result" },
+      metadata: { [MID_TURN_DELIVERY_KEY]: true, signalStamp: stamp(owner) },
+    });
+    const resultTurn = { ...base, author: undefined, content: { kind: "signal" as const, signalType: "child.settled", body: "first" }, metadata: { signalStamp: stamp("u1") } };
+    expect(canDeliverMidTurn(result("u1"), resultTurn, "u1")).toBe(true);
+    // Never a person's own turn: the result would act with their authority.
+    expect(canDeliverMidTurn(result("u1"), base, "u1")).toBe(false);
+    // Never a wake-up's turn, which has no sender stamp.
+    expect(canDeliverMidTurn(result("u1"), { ...resultTurn, metadata: {} }, "u1")).toBe(false);
+    // Never a result turn from another owner.
+    expect(canDeliverMidTurn(result("u2"), resultTurn, "u1")).toBe(false);
   });
 });

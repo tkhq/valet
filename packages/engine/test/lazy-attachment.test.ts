@@ -1,6 +1,7 @@
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import type { Context } from "@earendil-works/pi-ai/compat";
 import {
   Engine,

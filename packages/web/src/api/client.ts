@@ -1,6 +1,3 @@
-import type { GetLinearConnectionResponse, HomeConversationResponse, HomeTasksResponse } from "@valet/api/wire";
-import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
-import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -9,7 +6,17 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
+import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
+  HomeConversationResponse,
+  HomeTasksResponse,
+  SessionOutcomeUsage,
+  ExternalUsageResponse,
+  GetLinearConnectionResponse,
+  ListTeamDeletionRequestsParams,
+  ListTeamDeletionRequestsResponse,
+  ListTeamDeletionTargetsResponse,
+  SubmitTeamDeletionRequest,
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
@@ -56,6 +63,7 @@ import type {
   CreateThreadRequest,
   EditPreviewResponse,
   ForkThreadRequest,
+  MoveThreadRequest,
   ForkThreadResponse,
   ReturnToBranchRequest,
   ReturnToBranchResponse,
@@ -271,6 +279,7 @@ import type {
   ArtifactCommentWire,
   ListArtifactCommentsResponse,
   ListArtifactVersionsResponse,
+  ToolOutputResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -664,6 +673,9 @@ export const api = {
   /** The checklist the model keeps with `update_plan`. */
   getThreadProgress: (threadId: string) =>
     request<ThreadProgressResponse>("GET", `/threads/${encodeURIComponent(threadId)}/progress`),
+  /** One tool call's full result, when the transcript trimmed it. */
+  getToolOutput: (threadId: string, entryId: string, callId: string) =>
+    request<ToolOutputResponse>("GET", `/threads/${encodeURIComponent(threadId)}/tool-output?entryId=${encodeURIComponent(entryId)}&callId=${encodeURIComponent(callId)}`),
 
   getThreadPlan: (threadId: string) =>
     request<ThreadPlanResponse>("GET", `/threads/${encodeURIComponent(threadId)}/plan`),
@@ -1002,6 +1014,8 @@ export const api = {
     request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
   forkThread: (threadId: string, body: ForkThreadRequest) =>
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  moveThread: (threadId: string, body: MoveThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/move`, body),
   returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
     request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>
@@ -1279,6 +1293,22 @@ export const api = {
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
+  },
+  sessionOutcomeUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period); qs.set("scope", scope); if (teamId) qs.set("teamId", teamId);
+    return request<SessionOutcomeUsage>("GET", `/usage/session-outcomes?${qs}`, undefined, signal);
+  },
+  editTagKey: (dimension: string, key: string, change: { label: string; definition: string }) => request<{ ok: boolean }>("PATCH", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`, change),
+  mergeTagKey: (dimension: string, key: string, into: string) => request<{ ok: boolean }>("POST", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}/merge`, { into }),
+  externalUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: "hosted" | "mcp" | "cli", signal?: AbortSignal, key?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId) qs.set("teamId", teamId);
+    qs.set("q", search);
+    qs.set("offset", String(offset));
+    if (surface) qs.set("surface", surface);
+    if (key) qs.set("key", key);
+    return request<ExternalUsageResponse>("GET", `/usage/external?${qs}`, undefined, signal);
   },
   usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);

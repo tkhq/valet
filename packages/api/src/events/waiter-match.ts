@@ -208,6 +208,7 @@ export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDig
     occurredAt: event.occurredAt,
     dedupeKey: derive !== undefined ? `derive:${derive}:${event.dedupeKey}` : event.dedupeKey,
   };
+  if (event.key === "child.settled" || event.key === "child.gate_opened") digest.refs = event.refs;
   if (typeof event.refs.head_sha === "string") digest.head_sha = event.refs.head_sha;
   if (event.status !== undefined) digest.status = event.status;
   if (event.previousStatus !== undefined) digest.previousStatus = event.previousStatus;

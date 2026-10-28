@@ -18,13 +18,14 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   type FauxProviderRegistration,
   type FauxResponseFactory,
   type JsonObject,
   type JsonValue,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
@@ -427,6 +428,7 @@ export async function bootUniverse(): Promise<Universe> {
   // The WakeWatcher on a fake clock, with the production derive step.
   const clock = { now: Date.now() };
   const watcher = new WakeWatcher({
+    childEvents: { active: (row) => p.childWatcher.subscriptionActive(row), deliver: (row, digest) => p.childWatcher.deliverEvent(row, digest), close: (row) => p.childWatcher.closeSubscription(row), finish: (row, blocked) => p.childWatcher.finishDeliveryPass(row, blocked) },
     db: p.db,
     engineStore: p.engineStore,
     engineHost: p.engineHost,

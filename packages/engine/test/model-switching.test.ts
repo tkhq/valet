@@ -27,7 +27,7 @@ import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   getModel,
   registerBuiltInApiProviders,
   registerFauxProvider,
@@ -35,6 +35,7 @@ import {
   type FauxProvider,
   type Model,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   builtinTools,
   Engine,

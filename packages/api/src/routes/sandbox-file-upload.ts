@@ -39,6 +39,7 @@ import {
 } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { resolveUploadDest } from "../services/path-validation.js";
+import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
 import { extractZip } from "../services/archive-extract.js";
 import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
@@ -499,7 +500,7 @@ fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
   if (!row || !await canAccessSessionResources(c.var.providers, row, c.var.principal)) return c.json({ error: "session not found" }, 404);
   const { engineHost, db } = c.var.providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
-  await engineSession.ensureDefaultThread();
+  await ensureDefaultThreadWhereOwned(row.id, engineSession);
   const found = engineSession.threadById(c.req.param("threadId"));
   const thread = found && await threadsVisibleTo(c, row)(threadRef(found)) ? found : undefined;
   const path = c.req.query("path");

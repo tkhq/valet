@@ -9,6 +9,7 @@
  * This module is the bundle entry (see `build.mjs`). Importing it must not
  * have side effects beyond running `main()` at the bottom.
  */
+import { withCliInvocation } from "./cli/telemetry.js";
 import { loadConfig } from "./cli/config.js";
 import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";
@@ -46,10 +47,17 @@ const COMMANDS: Record<string, CommandImporter> = {
   tools: () => import("./cli/commands/tools.js"),
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
+  proxy: () => import("./cli/commands/proxy.js"),
 };
 
 /** Commands that never call an instance with the selected profile's credential. */
 const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset"]);
+
+/** Whether the command skips the device sign-in refresh. `valet proxy token`
+ * is a harness key helper: it must print the key fast, with no network call. */
+function skipsRefresh(command: string, rest: string[]): boolean {
+  return NO_INSTANCE_COMMANDS.has(command) || (command === "proxy" && rest[0] === "token");
+}
 
 const USAGE = `valet <command> [options]
 
@@ -71,6 +79,7 @@ Commands:
   tools       Search, describe, and call Valet-brokered tools
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
+  proxy       Point a local coding tool (claude-code) at the Valet LLM proxy
 
 Global options:
   --json          Machine-readable JSON output (where supported)
@@ -109,9 +118,9 @@ async function main(): Promise<number> {
 
   let config = loadConfig();
   // Commands that call an instance get a fresh device sign-in first.
-  if (!NO_INSTANCE_COMMANDS.has(first)) config = await refreshSelectedProfile(config, rest);
+  if (!skipsRefresh(first, rest)) config = await refreshSelectedProfile(config, rest);
   const mod = await importer();
-  return await mod.run(rest, { command: first, config });
+  return await withCliInvocation(first, rest, () => mod.run(rest, { command: first, config }));
 }
 
 main()

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ActionPlugin, Credential, CredentialProvider } from '@valet/engine';
 import { isMcpActionPlugin, mcpActionPlugin } from './action-plugin.js';
-import { parseBearerChallenge } from './probe.js';
+import { parseBearerChallenge, type McpProbeResult } from './probe.js';
 import type { McpTool } from './types.js';
 
 // ── fixtures ─────────────────────────────────────────────────────────
@@ -75,13 +75,48 @@ afterEach(() => {
 
 // ── probe ────────────────────────────────────────────────────────────
 
+/** A listed result with its actions reduced to their ids, so an expectation
+ * reads the listing without comparing `execute` closures. */
+function listing(result: McpProbeResult): { kind: 'listed'; actionIds: string[]; missingScopes: string[]; blockedTools: number } {
+  if (result.kind !== 'listed') throw new Error(`expected a listing, got ${result.kind}`);
+  return {
+    kind: 'listed',
+    actionIds: result.actions.map((action) => action.id),
+    missingScopes: result.missingScopes,
+    blockedTools: result.blockedTools,
+  };
+}
+
+const METABASE_IDS = ['metabase.search', 'metabase.browse_data', 'metabase.execute_query'];
+
 describe('McpActionPlugin.probe on a listed server', () => {
+  it('returns the listed tools as actions with service-qualified ids and their schema', async () => {
+    const tools: McpTool[] = [
+      {
+        name: 'query_sql',
+        description: 'Run a SQL query',
+        inputSchema: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] },
+        annotations: { readOnlyHint: true },
+      },
+    ];
+    vi.stubGlobal('fetch', fakeServer({ tools }));
+    const result = await metabase().probe({ credentials: provider({ accessToken: 't' }) });
+    if (result.kind !== 'listed') throw new Error(`expected a listing, got ${result.kind}`);
+    expect(result.actions).toHaveLength(1);
+    const [action] = result.actions;
+    expect(action.id).toBe('metabase.query_sql');
+    expect(action.name).toBe('query_sql');
+    expect(action.description).toBe('Run a SQL query');
+    expect(action.riskLevel).toBe('low');
+    expect(action.parameters).toEqual(tools[0].inputSchema);
+  });
+
   it('names the scope the grant lacks and counts the tools it blocks', async () => {
     vi.stubGlobal('fetch', fakeServer({ tools: metabaseTools }));
     const result = await metabase().probe({
       credentials: provider({ accessToken: 't', scopes: ['agent:query:run', 'agent:sql:run'] }),
     });
-    expect(result).toEqual({ kind: 'listed', toolCount: 3, missingScopes: ['agent:content:read'], blockedTools: 2 });
+    expect(listing(result)).toEqual({ kind: 'listed', actionIds: METABASE_IDS, missingScopes: ['agent:content:read'], blockedTools: 2 });
   });
 
   it('reports nothing missing when the grant holds every declared scope', async () => {
@@ -89,7 +124,7 @@ describe('McpActionPlugin.probe on a listed server', () => {
     const result = await metabase().probe({
       credentials: provider({ accessToken: 't', scopes: ['agent:content:read', 'agent:query:run'] }),
     });
-    expect(result).toEqual({ kind: 'listed', toolCount: 3, missingScopes: [], blockedTools: 0 });
+    expect(listing(result)).toEqual({ kind: 'listed', actionIds: METABASE_IDS, missingScopes: [], blockedTools: 0 });
   });
 
   it('treats a noauth scheme, or any one satisfied alternative, as callable', async () => {
@@ -106,21 +141,26 @@ describe('McpActionPlugin.probe on a listed server', () => {
     ];
     vi.stubGlobal('fetch', fakeServer({ tools }));
     const result = await metabase().probe({ credentials: provider({ accessToken: 't', scopes: ['x:read'] }) });
-    expect(result).toEqual({ kind: 'listed', toolCount: 3, missingScopes: [], blockedTools: 0 });
+    expect(listing(result)).toEqual({
+      kind: 'listed',
+      actionIds: ['metabase.public', 'metabase.either', 'metabase.plain'],
+      missingScopes: [],
+      blockedTools: 0,
+    });
   });
 
   it('skips the scope check when the credential stores no grant', async () => {
     vi.stubGlobal('fetch', fakeServer({ tools: metabaseTools }));
     const result = await metabase().probe({ credentials: provider({ accessToken: 'pasted' }) });
-    expect(result).toEqual({ kind: 'listed', toolCount: 3, missingScopes: [], blockedTools: 0 });
+    expect(listing(result)).toEqual({ kind: 'listed', actionIds: METABASE_IDS, missingScopes: [], blockedTools: 0 });
   });
 
   it('treats an empty grant as known: every scoped tool is blocked', async () => {
     vi.stubGlobal('fetch', fakeServer({ tools: metabaseTools }));
     const result = await metabase().probe({ credentials: provider({ accessToken: 't', scopes: [] }) });
-    expect(result).toEqual({
+    expect(listing(result)).toEqual({
       kind: 'listed',
-      toolCount: 3,
+      actionIds: METABASE_IDS,
       missingScopes: ['agent:content:read', 'agent:query:run'],
       blockedTools: 3,
     });
@@ -195,7 +235,7 @@ describe('McpActionPlugin.probe credential choice', () => {
       }),
     });
     expect(bearers).toEqual(['Bearer app-token']);
-    expect(result).toEqual({ kind: 'listed', toolCount: 3, missingScopes: [], blockedTools: 0 });
+    expect(listing(result)).toEqual({ kind: 'listed', actionIds: METABASE_IDS, missingScopes: [], blockedTools: 0 });
   });
 });
 

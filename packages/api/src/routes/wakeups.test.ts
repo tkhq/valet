@@ -21,7 +21,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
+import { childWatches, eventDropLog, agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
 import type {
   BackgroundWorkConflict,
   CancelSessionWakeupResponse,
@@ -638,6 +638,29 @@ describe("profile change honors leases (fix wave 3, M3)", () => {
   });
 });
 
+describe("host child subscriptions", () => {
+  it.each(["archive", "move"])("does not require force for %s", async (action) => {
+    api = await bootTestApi();
+    await seedSession(api, "host-child-parent");
+    await seedTeam(api, "host-child-team", [{ userId: "local-user", role: "admin" }]);
+    const session = await warmSession(api, "host-child-parent");
+    const thread = await session.ensureDefaultThread();
+    const now = Date.now();
+    await api.providers.engineStore.createWakeup({ id: "wk_child_events:child-1", sessionId: session.id, threadId: thread.id,
+      kind: "event", status: "running", reason: "Child updates: child-1", subjects: ["valet:session:child-1"],
+      eventMatch: { childSessionId: "child-1", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    await api.providers.db.insert(childWatches).values({ childSessionId: "child-1", queueItemId: "owed-child-result",
+      parentSessionId: session.id, parentThreadId: thread.id, actorUserId: "local-user", orgId: "local-org", createdAt: now });
+    const url = action === "archive" ? `/api/sessions/${session.id}/threads/${thread.id}` : `/api/sessions/${session.id}`;
+    const res = await fetch(api.baseUrl + url, { method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "archive" ? { archived: true } : { teamId: "host-child-team" }) });
+    expect(res.status).toBe(200);
+    expect((await api.providers.engineStore.getWakeup("wk_child_events:child-1"))?.status).toBe("cancelled");
+    expect(await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "child_delivery_cancelled"))).toHaveLength(1);
+  });
+});
+
 describe("thread archive refuses while the thread has background work (fix wave 3, H1)", () => {
   it("409s naming the work, then force stops it and tells the agent on the main thread", async () => {
     const provider = new LeaseTestProvider();
@@ -724,7 +747,9 @@ describe("owner move stops background work only on force (H11, fix wave 3 H2)", 
     expect(moved.cancelledWorkCount).toBe(2);
     expect(moved.cancelledWork?.sort()).toEqual(["ls_hold1", "wk_timer1"]);
 
-    expect(await store.getWakeup("wk_timer1")).toMatchObject({ status: "cancelled" });
+    expect(await store.getWakeup("wk_timer1")).toMatchObject({ status: "cancelled", terminalSignalExpected: true,
+      terminalSignalStartedAt: expect.any(Number) });
+    expect(await store.getLease("ls_hold1")).toMatchObject({ terminalSignalExpected: true, terminalSignalStartedAt: expect.any(Number) });
     expect(await store.countActiveLeases("wk-move")).toBe(0);
     // The agent learns a person stopped the work, attributed to the mover.
     const item = await store.getQueueItemByDispatchId("wk-move", "wakeup:wk_timer1:terminal");

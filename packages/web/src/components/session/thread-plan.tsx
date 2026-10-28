@@ -1,7 +1,6 @@
 import { useId, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
-import { planProgress, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
-import type { TurnProgress } from "@valet/shared";
+import { ChevronDown, CircleCheck, CircleDashed, LoaderCircle } from "lucide-react";
+import type { ThreadPlanItem, ThreadPlanStatus, TurnProgress } from "@valet/shared";
 import { useThreadProgress } from "~/api/thread-progress";
 import { useThreadPlan } from "~/api/thread-plan";
 import { Button, cardClass, StatusDot } from "~/components/primitives";
@@ -20,22 +19,29 @@ export function PlanProgress({ done, total, label, className }: { done: number; 
   );
 }
 
-// Done items recede (muted dot, struck text). Blue marks the live item, as it marks a running thread.
-const ITEM: Record<ThreadPlanStatus, { tone: "neutral" | "info" | "outline"; label: string; text: string }> = {
-  done: { tone: "neutral", label: "Done", text: "text-muted line-through" },
-  in_progress: { tone: "info", label: "In progress", text: "font-medium text-ink" },
-  pending: { tone: "outline", label: "Not started", text: "text-ink" },
+const STEP: Record<ThreadPlanStatus, { label: string; text: string }> = {
+  done: { label: "Done", text: "text-muted" },
+  in_progress: { label: "In progress", text: "font-medium text-ink" },
+  pending: { label: "Not started", text: "text-ink" },
 };
 
-/** The plan's items in order: done items struck through, the current item in bold. */
+/** A check once done, a spinner while running, an empty circle until then. */
+function StepMark({ status }: { status: ThreadPlanStatus }) {
+  const props = { role: "img", "aria-label": STEP[status].label } as const;
+  if (status === "done") return <CircleCheck {...props} className="mt-0.5 h-4 w-4 shrink-0 text-success-600 dark:text-success-500" />;
+  if (status === "in_progress") return <LoaderCircle {...props} className="mt-0.5 h-4 w-4 shrink-0 text-ink motion-safe:animate-spin" />;
+  return <CircleDashed {...props} className="mt-0.5 h-4 w-4 shrink-0 text-muted" />;
+}
+
+/** The plan's items in order, as Claude Code shows its to-do list. */
 export function PlanChecklist({ items, id, className }: { items: ThreadPlanItem[]; id?: string; className?: string }) {
   return (
-    <ol id={id} className={cn("space-y-1 text-[13px] leading-5", className)}>
+    <ol id={id} className={cn("space-y-1.5 text-[13px] leading-5", className)}>
       {items.map((item, index) => (
         // Items hold no state, so an index key cannot hand state to the wrong item.
         <li key={index} className="flex min-w-0 items-start gap-2">
-          <StatusDot tone={ITEM[item.status].tone} label={ITEM[item.status].label} className="mt-1.5" />
-          <span className={cn("min-w-0 flex-1 [overflow-wrap:anywhere]", ITEM[item.status].text)}>{item.text}</span>
+          <StepMark status={item.status} />
+          <span className={cn("min-w-0 flex-1 [overflow-wrap:anywhere]", STEP[item.status].text)}>{item.text}</span>
         </li>
       ))}
     </ol>
@@ -50,7 +56,8 @@ export function PinnedPlan({ threadId }: { threadId?: string }) {
   const progress = useThreadProgress(threadId);
   if (!threadId) return null;
   if (progress.isError) return <ProgressNotice>Progress unavailable. Refresh to retry.</ProgressNotice>;
-  if (progress.isPending) return <ProgressNotice>Loading progress…</ProgressNotice>;
+  // Most threads have neither progress nor a plan, so nothing shows while it loads.
+  if (progress.isPending) return null;
   if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} />;
   return <LegacyPinnedPlan threadId={threadId} />;
 }
@@ -59,36 +66,18 @@ function ProgressNotice({ children }: { children: ReactNode }) {
   return <div role="status" className="mx-auto mt-2 w-full max-w-[52rem] px-5 text-xs text-muted sm:px-8">{children}</div>;
 }
 
+/**
+ * The thread's plan, every step at once. It shows while the plan has steps
+ * left; a finished plan leaves, as Claude Code's to-do list does.
+ */
 function LegacyPinnedPlan({ threadId }: { threadId: string }) {
-  const { data, isError } = useThreadPlan(threadId);
-  // Keyed by thread, so a thread switch shows the next plan collapsed.
-  const [openFor, setOpenFor] = useState<string>();
-  const listId = useId();
+  const { data } = useThreadPlan(threadId);
   const plan = data?.plan;
-  if (!plan || isError) return null;
-  const open = openFor === threadId;
-  const { done, total, current } = planProgress(plan);
-  const finished = done === total;
+  if (!plan?.items.some(item => item.status !== "done")) return null;
   return (
     <section aria-label="Plan" className="mx-auto mt-2 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
-      <div className={cardClass}>
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-expanded={open}
-          aria-controls={open ? listId : undefined}
-          onClick={() => setOpenFor(open ? undefined : threadId)}
-          className={cn("w-full min-w-0 justify-start rounded-lg px-3 font-normal", open && "rounded-b-none")}
-        >
-          <PlanProgress done={done} total={total} label={finished ? "Plan done" : "Plan"} className="text-muted" />
-          {!finished && current !== undefined && <span className="min-w-0 flex-1 truncate text-left text-ink">{current}</span>}
-          {open
-            ? <ChevronUp className="ml-auto h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-            : <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
-        </Button>
-        {/* A long plan scrolls inside the card, so the composer stays on screen. */}
-        {open && <PlanChecklist id={listId} items={plan.items} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-3 py-2" />}
-      </div>
+      {/* A long plan scrolls inside the card, so the composer stays on screen. */}
+      <PlanChecklist items={plan.items} className={cn(cardClass, "max-h-64 overflow-y-auto overscroll-contain px-4 py-3")} />
     </section>
   );
 }
@@ -137,4 +126,9 @@ function PinnedProgress({ progress }: { progress: TurnProgress }) {
       </div>
     </section>
   );
+}
+
+/** The step Valet is on, for the working line. */
+export function useCurrentStep(threadId?: string): string | undefined {
+  return useThreadPlan(threadId).data?.plan?.items.find(item => item.status === "in_progress")?.text;
 }

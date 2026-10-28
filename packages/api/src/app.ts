@@ -1,4 +1,3 @@
-import { threadsRouter } from "./routes/threads.js";
 /**
  * Hono app factory. Wiring lives here; main.ts only handles boot + listen.
  *
@@ -6,6 +5,8 @@ import { threadsRouter } from "./routes/threads.js";
  * test app with stub providers, no node-server). It also keeps boot-time
  * I/O (open sqlite, build providers) out of the hot test path.
  */
+import { cliUsage } from "./middleware/cli-usage.js";
+import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
 import { productAnnouncementsRouter } from "./routes/product-announcements.js";
 import { Hono } from "hono";
@@ -173,6 +174,7 @@ export function createApp(
     }),
   );
   app.use("*", providersMiddleware(providers));
+  app.use("/api/*", cliUsage());
 
   // LLM recording proxy — /proxy/anthropic/* and /proxy/openai/*. Uses its
   // own vlt_ key auth (resolveProxyPrincipal); intentionally outside /api/*
@@ -280,7 +282,7 @@ export function createApp(
     app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));
     app.use("/api/cli/device/token", bodyLimit({ maxSize: 16 * 1024 }));
     app.use("/api/cli/token/*", bodyLimit({ maxSize: 16 * 1024 }));
-    app.route("/api/cli", cliDevicePublicRouter(providers.db));
+    app.route("/api/cli", cliDevicePublicRouter(providers.db, auth));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);

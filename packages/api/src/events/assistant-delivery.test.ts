@@ -1,5 +1,6 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
-import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
@@ -138,7 +139,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     await testDb.appDb.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, owner.id));
     // A team runtime must not inherit the member who delivered the event.
     await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
 
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: owner, actorUserId: USER,
@@ -213,6 +214,16 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(retry).toEqual({ ...first, recovered: true });
     const rows = await testDb.appDb.execute(sql`SELECT session_id FROM engine_queue_items WHERE dispatch_id = 'schedule:sched-1:100'`) as { rows: Array<{ session_id: string }> };
     expect(rows.rows).toEqual([{ session_id: first.sessionId }]);
+  });
+
+  it("recovers an event admitted before the sender flag existed when it is retried after the deploy", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const signal = (attributes: Record<string, string>) => ({ kind: "signal" as const, signalType: "github.issue_comment", body: "New comment", attributes });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, dispatchId: "event:pre-deploy",
+      destination: { kind: "key" as const, key: "events:pre-deploy", title: "Events" }, mismatchReason: "test", unattended: true };
+    const first = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1" }) });
+    const retry = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1", senderBot: "false" }) });
+    expect(retry).toEqual({ ...first, recovered: true });
   });
 
   it("recovers a routine slot retried after its prompt was edited (INV-D4)", async () => {

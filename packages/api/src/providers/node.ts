@@ -1,5 +1,8 @@
+import { externalUsageRetention } from "../services/external-usage.js";
+import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { buildHomeTools } from "../home/tools.js";
+import { buildThreadLinkTools } from "../home/thread-link-tools.js";
 import type { HomeDeps } from "../home/service.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
@@ -45,6 +48,7 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
+import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -419,6 +423,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing received event diagnostics.",
     actions: [eventsActionPlugin(db, () => plugins)],
   };
+  const diagnosticsActions: ValetPlugin = {
+    name: "diagnostics-actions",
+    version: "0.1.0",
+    description: "Agent-facing tool failure and request latency diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }))],
+  };
 
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
@@ -448,7 +458,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions, avatarActions, settingsActions],
+        [workflowsActions, skillsActions, eventsActions, diagnosticsActions, avatarActions, settingsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
@@ -475,6 +485,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // token; this layer mints a replacement before it expires.
   const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   const engineCredentials = new TeamCredentialStore(linearAppCredentials);
+  // One cache of dynamic (MCP) tool listings, shared by `/api/plugins`, the
+  // policy routes, and the engine host's policy resolver.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
@@ -522,6 +535,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     pluginLoadFailures,
     actionPluginByService,
+    serviceProbes,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -545,6 +559,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     },
     homeTools: () => buildHomeTools(() => {
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
+      return homeDepsRef;
+    }),
+    threadLinkTools: () => buildThreadLinkTools(() => {
+      if (!homeDepsRef) throw new Error("thread link tools invoked before provider wiring completed");
       return homeDepsRef;
     }),
   });
@@ -575,8 +593,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    idleGraceMs: resolveIdleMinutes(process.env) * 60_000,
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
     scratchCaps,
+    nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
@@ -621,6 +641,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // expires hold leases, and keeps leased pods out of autoscaler eviction
   // (spec 2026-10-08, B5, C5). `start()`/`stop()` are called from `main.ts`.
   const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
     db,
     engineStore,
     engineHost,
@@ -836,6 +857,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
@@ -938,7 +961,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     configMcpServers: opts.instanceConfig?.mcpServers ?? [],
     actionPluginByService,
-    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
     scratchCaps,
   };

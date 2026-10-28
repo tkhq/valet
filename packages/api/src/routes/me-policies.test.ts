@@ -362,6 +362,128 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
   });
 });
 
+// ── Dynamic (MCP) tools in the policy catalog ────────────────────────────
+//
+// A dynamic service declares no static actions, so its tools used to be
+// unverifiable: the bounds check refused every `allow` override on one, and
+// the tool-permissions read listed none. The service's tool listing for the
+// caller's own credential (`ServiceProbes`, the cached tool schema) now puts
+// them in the catalog once the caller is connected.
+
+describe("PUT /api/me/policy-overrides and GET /api/me/tool-permissions for a dynamic service", () => {
+  function dynamicPlugin(): ValetPlugin {
+    const grafana: ActionPlugin = {
+      service: "grafana",
+      actions: [],
+      resolveActions: async () => [testCatalogAction("grafana.query_sql", "medium"), testCatalogAction("grafana.list_dashboards", "low")],
+    };
+    return {
+      name: "dynamic-policy-plugin",
+      version: "0.0.1",
+      actions: [grafana],
+      credentials: [{ service: "grafana", type: "api_key", configKeys: ["apiKey"] }],
+    };
+  }
+
+  async function putAllow(actionId: string): Promise<Response> {
+    return fetch(`${api!.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId, mode: "allow" }),
+    });
+  }
+
+  async function putOrgPolicy(target: Record<string, unknown>): Promise<Response> {
+    return fetch(`${api!.baseUrl}/api/org/policies`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify(target),
+    });
+  }
+
+  async function connect(): Promise<void> {
+    const res = await fetch(`${api!.baseUrl}/api/credentials/grafana`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  it("refuses an allow override on a dynamic tool while the caller is not connected, and names the fix", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    const res = await putAllow("grafana.query_sql");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not in the plugin catalog");
+    expect(body.error).toContain("connect the service");
+  });
+
+  it("accepts an allow override on a dynamic tool the caller's listing names, and still refuses one it does not", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    await connect();
+
+    const ok = await putAllow("grafana.query_sql");
+    expect(ok.status).toBe(200);
+    const row = (await ok.json()) as PutPolicyOverrideResponse;
+    expect(row).toMatchObject({ actionId: "grafana.query_sql", mode: "allow" });
+
+    const unknown = await putAllow("grafana.drop_everything");
+    expect(unknown.status).toBe(400);
+  });
+
+  it("bounds a dynamic tool against org policy by its listed service and risk level", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    await connect();
+    const orgRes = await putOrgPolicy({ riskLevel: "medium", mode: "require_approval" });
+    expect(orgRes.status).toBe(201);
+
+    // query_sql is medium: the org rule applies, so the member may not self-allow it.
+    const blocked = await putAllow("grafana.query_sql");
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { error: string }).error).toContain("org policy");
+    // list_dashboards is low: no org rule reaches it.
+    expect((await putAllow("grafana.list_dashboards")).status).toBe(200);
+  });
+
+  it("lists a connected dynamic service's tools in tool-permissions, and none while disconnected", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    const read = async (): Promise<ListToolPermissionsResponse> => {
+      const res = await fetch(`${api!.baseUrl}/api/me/tool-permissions?service=grafana`, { headers: HEADERS });
+      expect(res.status).toBe(200);
+      return (await res.json()) as ListToolPermissionsResponse;
+    };
+    expect((await read()).tools).toEqual([]);
+
+    await connect();
+    const { tools } = await read();
+    expect(tools.map((tool) => tool.actionId)).toEqual(["grafana.query_sql", "grafana.list_dashboards"]);
+    // Medium risk resolves to the engine's risk default (allow) with no rule in the way.
+    expect(tools[0]).toMatchObject({ service: "grafana", riskLevel: "medium", mode: "allow", source: "default" });
+    expect(tools[0]?.settable).toEqual(["allow", "require_approval", "deny"]);
+  });
+
+  it("proves a service override disjoint from an org rule on a dynamic tool only once the listing names it", async () => {
+    api = await bootTestApi({ plugins: [...PLUGINS, dynamicPlugin()] });
+    const orgRes = await putOrgPolicy({ actionId: "grafana.query_sql", mode: "require_approval" });
+    expect(orgRes.status).toBe(201);
+    const putServiceAllow = () => fetch(`${api!.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ service: "slack", mode: "allow" }),
+    });
+
+    // Disconnected: the org rule's action is unknown, so it may belong to any service. Blocked.
+    const blocked = await putServiceAllow();
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { error: string }).error).toContain("conflicts with org policy");
+
+    // Connected: the listing proves the rule names a grafana tool, so slack is disjoint.
+    await connect();
+    expect((await putServiceAllow()).status).toBe(200);
+  });
+});
+
 // ── PUT /api/me/policy-overrides — matcher-blind bounds (finding C1) ─────
 //
 // `validateActionIdOverrideBounds` resolves the org-side decision with

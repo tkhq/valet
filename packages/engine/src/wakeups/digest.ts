@@ -29,8 +29,14 @@ export function cutUtf8(text: string, maxBytes: number): string {
   return text.slice(0, end);
 }
 
-function stripNul(value: string): string {
-  return value.replaceAll("\u0000", "");
+/** Copy JSON with Postgres-invalid NUL and lone surrogates removed from every string, including keys. */
+export function stripNul<T>(value: T): T {
+  if (typeof value === "string") return value.replace(/[\u0000\uD800-\uDFFF]/gu, "") as T;
+  if (Array.isArray(value)) return value.map(entry => stripNul(entry)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [stripNul(key), stripNul(entry)])) as T;
+  }
+  return value;
 }
 
 /**
@@ -51,6 +57,7 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
     const value = digest[field];
     if (value !== undefined) out[field] = stripNul(value);
   }
+  if (digest.refs !== undefined) out.refs = Object.fromEntries(Object.entries(digest.refs).map(([key, value]) => [stripNul(key), stripNul(value)]));
   if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
   return out;
 }

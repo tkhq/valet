@@ -42,10 +42,13 @@ import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
+import type { ListedAction } from "../plugins/action-id.js";
 import type { WorkflowStepGrant } from "../workflows/step-grants.js";
 import { canAdministerTeam, isTeamMember } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
-import { listPolicies, upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
+import { threadApprovalBypass } from "../services/thread-approval-bypass.js";
+import { listPolicies, upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds, type PolicyCatalog } from "./admin.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
@@ -256,14 +259,50 @@ async function writeOwnerAlwaysAllow(
       const admin = await lockTeamDeletionAccess(tx, { orgId: input.orgId, userId: resolvedBy }, teamId);
       const adminOnly = admin ? undefined : memberRefusal(await listPolicies(tx, teamScope), action, now);
       if (adminOnly) throw new Error(adminOnly);
-      const bounds = await validateOverrideBounds(tx, input.orgId, target, "allow", now, deps.actionPluginByService);
+      const bounds = await validateOverrideBounds(tx, input.orgId, target, "allow", now, invocationCatalog(deps, { type: "team", id: teamId }, input));
       if (!bounds.ok) throw new Error(bounds.error);
       await upsertSimpleTeamPolicy(tx, teamScope, { ...target, mode: "allow", managedBy: resolvedBy, now });
     });
     return;
   }
-  const result = await upsertOverride(deps.db, input.orgId, resolvedBy, { ...target, mode: "allow", now }, deps.actionPluginByService);
+  const result = await upsertOverride(deps.db, input.orgId, resolvedBy, { ...target, mode: "allow", now }, invocationCatalog(deps, { type: "user", id: resolvedBy }, input));
   if (!result.ok) throw new Error(result.error);
+}
+
+/**
+ * The actions a policy write for `owner` may name: the static manifest,
+ * plus each dynamic (MCP) service's tool listing for that owner's account
+ * when the host wires `serviceProbes`. Without it, or with no owner, a
+ * dynamic tool stays unverifiable and keeps the static-only behaviour.
+ */
+function policyCatalog(deps: PolicyResolverDeps, owner: { type: "user" | "team"; id: string } | undefined): PolicyCatalog {
+  return {
+    actionPluginByService: deps.actionPluginByService,
+    ...(deps.serviceProbes && owner ? { dynamicActions: deps.serviceProbes.listedActionsFor(owner) } : {}),
+  };
+}
+
+/**
+ * `policyCatalog` for a write made from a live call. The engine resolved
+ * the called tool for this very call, so its facts (`service`, `riskLevel`)
+ * answer for that one id without a listing: fresher than any cache, and no
+ * network wait before a gate opens. Every other id reads the owner's
+ * listing as usual. Without a `riskLevel` the call carries no fact to
+ * answer with, and the listing alone decides.
+ */
+function invocationCatalog(
+  deps: PolicyResolverDeps,
+  owner: { type: "user" | "team"; id: string } | undefined,
+  call: { service: string; actionId: string; riskLevel?: RiskLevel },
+): PolicyCatalog {
+  const listed = policyCatalog(deps, owner);
+  if (!call.riskLevel) return listed;
+  const known: ListedAction = { id: call.actionId, name: call.actionId, description: "", riskLevel: call.riskLevel };
+  return {
+    ...listed,
+    dynamicActions: async (service, actionPlugin) =>
+      service === call.service ? [known] : ((await listed.dynamicActions?.(service, actionPlugin)) ?? []),
+  };
 }
 
 export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
@@ -762,9 +801,31 @@ export function gatedAuditId(
 
 // ── Engine PolicyResolver ──────────────────────────────────────────
 
+/**
+ * Whether "Run without asking" covers this call. On a personal thread it
+ * covers only the turns of the person who turned it on, so a member who
+ * replies in a shared thread never borrows it. On a team thread it covers the
+ * team's members and the team's own unattended turns.
+ */
+async function threadBypassCovers(
+  db: AppDb,
+  input: { sessionId: string; threadId: string; userId?: string },
+  owner: { userId?: string; teamId?: string },
+): Promise<boolean> {
+  if (!input.userId) return false;
+  const bypass = await threadApprovalBypass(db, { sessionId: input.sessionId, threadId: input.threadId });
+  if (!bypass) return false;
+  if (!owner.teamId) return input.userId === bypass.enabledBy && owner.userId === bypass.enabledBy;
+  return input.userId === `team:${owner.teamId}` || await isTeamMember(db, owner.teamId, input.userId);
+}
+
 export interface PolicyResolverDeps {
   db: AppDb;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** The cached tool listings of dynamic (MCP) services, so the owner's
+   * "always allow" on one of their tools passes the bounds check that the
+   * static manifest alone would refuse. Absent: static catalog only. */
+  serviceProbes?: ServiceProbes;
   clock?: () => number;
   /** The team accounts an action could use, read to tell when it would use
    * another member's shared account (`services/credential-borrow.ts`).
@@ -886,8 +947,13 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       const owner = await policyOwner(deps.db, { ...input, orgId: input.orgId });
       const now = clock();
       const rows = await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId });
+      const ownerCatalog = invocationCatalog(
+        deps,
+        owner.teamId ? { type: "team", id: owner.teamId } : owner.userId ? { type: "user", id: owner.userId } : undefined,
+        input,
+      );
       const ownerMayAllow = !input.externalSender && (owner.teamId ?? owner.userId) !== undefined
-        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, deps.actionPluginByService)).ok
+        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, ownerCatalog)).ok
         && ownerAllowTakesEffect(
           rows,
           owner,
@@ -902,6 +968,11 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // names. A member who is refused the allow still has a lasting choice.
       const anyoneMayAllow = ownerMayAllow && input.riskLevel !== "critical"
         && !(owner.teamId && teamRuleNamesAction(rows.policies.filter((rule) => rule.principalType === "team"), input, now));
+      // "Run without asking" approves exactly what the person could stop
+      // asking for themselves: the same rule as the buttons above.
+      if (anyoneMayAllow && await threadBypassCovers(deps.db, input, owner)) {
+        return { mode: "allow", provenance: { ...decision.provenance, source: "thread_bypass" } };
+      }
       return {
         ...decision,
         extraGateActions: [

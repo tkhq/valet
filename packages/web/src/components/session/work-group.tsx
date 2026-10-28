@@ -159,6 +159,13 @@ function ServiceGlyph({ service, fallback }: { service: string; fallback: ReactN
 }
 
 /** Pure-ish: the line a call shows, from its name, its args, and the children of this thread. */
+/** Pure: the call needed approval and ran without a card because its
+ * thread runs without asking (`details.approval` from the engine). */
+export function approvedAutomatically(part: ToolCallPart): boolean {
+  const result = record(part.result);
+  return record(result?.details)?.approval === "automatic";
+}
+
 export function stepView(part: ToolCallPart, childTitles: ReadonlyMap<string, string>): StepView {
   const renderer = pickRenderer(part.toolName, part.args);
   const status = stepStatus(part);
@@ -178,7 +185,7 @@ export function stepView(part: ToolCallPart, childTitles: ReadonlyMap<string, st
     return {
       icon: <ServiceGlyph service={action.service} fallback={<Icon />} />,
       title: purpose ?? `${running ? present : past} ${name} · ${action.action.replace(/[_-]+/g, " ")}`,
-      detail: detail ?? (purpose ? name : undefined),
+      detail: [detail ?? (purpose ? name : undefined), approvedAutomatically(part) ? "Approved automatically" : undefined].filter(Boolean).join(" · ") || undefined,
       status,
     };
   }
@@ -309,11 +316,13 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
 
   const running = calls.find(call => call.status === "running" || call.status === "streaming");
   const failed = calls.filter(call => call.status === "error").length;
+  const automatic = calls.filter(approvedAutomatically).length;
   const status: TraceStatus = running ? "running" : "done";
   const title = running ? `${stepView(running, childTitles).title}…` : workSummary(parts);
   const expanded = getToolCardDefault() === "always-expanded";
   return <TraceLine icon={running ? <Brain /> : <CheckCheck />} title={title} status={status}
-    detail={failed > 0 ? <span className="text-danger-600 dark:text-danger-500">{failed} failed</span> : calls.length === 1 ? "1 step" : `${calls.length} steps`}
+    detail={failed > 0 ? <span className="text-danger-600 dark:text-danger-500">{failed} failed</span>
+      : [calls.length === 1 ? "1 step" : `${calls.length} steps`, automatic > 0 ? `${automatic} approved automatically` : undefined].filter(Boolean).join(" · ")}
     keepDetail={failed > 0}
     defaultOpen={expanded}>
     <TraceList>

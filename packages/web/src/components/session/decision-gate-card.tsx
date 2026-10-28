@@ -234,6 +234,12 @@ function DecisionGateResponse({
           </div>
         )}
 
+        {gate.agentReason && <div className={cn(inset, "pb-3 text-sm text-muted whitespace-pre-wrap break-words")}>
+          <p className="font-medium">Agent's stated reason</p>
+          <p className="text-xs">Model-authored text. Verify it before you approve.</p>
+          <blockquote>{gate.agentReason}</blockquote>
+        </div>}
+
         {gate.provenance && provenanceLine(gate.provenance) && (
           <div className={cn(inset, "pb-2 text-xs text-muted")} data-testid="gate-provenance">
             {provenanceLine(gate.provenance)}

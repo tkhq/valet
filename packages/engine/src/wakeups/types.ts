@@ -34,6 +34,8 @@ export interface EventClause {
 
 /** What an event waiter matches, stored as `match_json`. */
 export interface EventMatchSpec {
+  /** Host-created child subscription. It ends with the child or an explicit cancel. */
+  childSessionId?: string;
   clauses: EventClause[];
   /** True: the first match ends the waiter. False: stream mode. */
   once: boolean;
@@ -68,6 +70,8 @@ export const EVENT_SOURCE_SEEN_MAX_KEYS = 256;
 /** The bounded record of one matched event that an event waiter holds until delivery. */
 export interface EventMatchDigest {
   key: string;
+  /** Internal producer refs. Child delivery resolves authority from durable session state. */
+  refs?: Record<string, string>;
   /** The commit evaluated by a derived completion. */
   head_sha?: string;
   status?: string;
@@ -121,6 +125,14 @@ export interface Wakeup {
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
+  /** Set by the terminal CAS only when its decision emits a terminal signal. */
+  terminalSignalExpected?: boolean;
+  /** First human terminal-signal admission attempt; deferred provisioning precedes this clock. */
+  terminalSignalStartedAt?: number;
+  /** Terminal timestamp of the expectation whose loss was already counted. */
+  terminalSignalLossReportedAt?: number;
+  /** The submission that created this work, captured before its first asynchronous side effect. */
+  sourceQueueItemId?: string;
   /** The channel origin of the turn that created it. Signals carry it with `reply: "manual"`. */
   origin?: ChannelOrigin;
   /** `watch`: start of the current rate window (ms). */
@@ -160,6 +172,8 @@ export interface Lease {
   ownerId?: string;
   /** The thread that created it. `lease.expired` goes there. */
   threadId?: string;
+  /** The submission that created this work, captured before its first asynchronous side effect. */
+  sourceQueueItemId?: string;
   /** The channel origin of the turn that created it. */
   origin?: ChannelOrigin;
   reason: string;
@@ -167,6 +181,12 @@ export interface Lease {
   deadlineAt: number;
   releasedAt?: number;
   releaseCause?: LeaseReleaseCause;
+  /** Set atomically with hold release only when a terminal signal will be emitted. */
+  terminalSignalExpected?: boolean;
+  /** First human terminal-signal admission attempt; deferred provisioning precedes this clock. */
+  terminalSignalStartedAt?: number;
+  /** Terminal timestamp of the expectation whose loss was already counted. */
+  terminalSignalLossReportedAt?: number;
 }
 
 /** Keyset position for paging `listDueWakeups` in (createdAt, id) order. */
@@ -186,6 +206,7 @@ export type WakeupPatch = Partial<
     | "watchBuffer"
     | "lastEmitAt"
     | "eventBuffer"
+    | "terminalSignalExpected"
   >
 >;
 
@@ -230,6 +251,8 @@ export type WakeupCreateInput = (
   | { kind: "timer"; prompt: string; fireAt: number }
   | { kind: "event"; subjects: string[]; match: EventMatchSpec; reason: string; maxHours: number }
 ) & {
+  /** Stable creator from ToolContext, not the session's currently running submission. */
+  sourceQueueItemId?: string;
   /** The calling turn's channel origin (`ToolContext.origin`). */
   origin?: ChannelOrigin;
 };
@@ -239,6 +262,7 @@ export interface HoldInput {
   reason: string;
   /** The thread that asked. `lease.expired` goes there. */
   threadId?: string;
+  sourceQueueItemId?: string;
   origin?: ChannelOrigin;
 }
 
@@ -278,7 +302,7 @@ export interface WakeupsSeam {
   /** The background work of `threadId`, plus a count for the session's other threads. */
   list(threadId: string): Promise<WakeupsListing>;
   /** Null for an unknown, ended, or foreign id. `refused` carries the text the tool returns. */
-  cancel(id: string): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
+  cancel(id: string, opts?: { terminalSignalExpected: true }): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
   /**
    * `tail` reads the last `bytes` of the log instead of reading forward from
    * `offset`. `capped` is true when the provider dropped output at its log
@@ -301,5 +325,6 @@ export interface WakeupsSeam {
     req: ArmEventRequest,
     origin?: ChannelOrigin,
     credentials?: CredentialProvider,
+    sourceQueueItemId?: string,
   ): Promise<ArmEventResult>;
 }

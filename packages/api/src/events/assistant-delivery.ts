@@ -334,9 +334,18 @@ function admittedContentMatches(stored: unknown, signal: SignalContent): boolean
   const body = content.body === signal.body ? content.body
     : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${signal.body}`)
       ? signal.body : content.body;
-  const expected: unknown = JSON.parse(JSON.stringify({ ...signal, tagName: signal.tagName ?? "signal" }));
+  const expected: unknown = JSON.parse(JSON.stringify(withoutSenderBot({ ...signal, tagName: signal.tagName ?? "signal" })));
   const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
-  return isDeepStrictEqual({ ...content, body, tagName }, expected);
+  return isDeepStrictEqual(withoutSenderBot({ ...content, body, tagName }), expected);
+}
+
+/** Rows admitted before the dispatcher set `senderBot` lack it, and a retry
+ * of the same event after the deploy carries it. The flag is derived from the
+ * event, so it does not tell two events apart. */
+function withoutSenderBot<T extends object>(value: T): T {
+  if (!("attributes" in value) || typeof value.attributes !== "object" || value.attributes === null) return value;
+  const { senderBot: _senderBot, ...attributes } = value.attributes as Record<string, unknown>;
+  return { ...value, attributes };
 }
 
 /**

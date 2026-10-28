@@ -2,10 +2,10 @@
 import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
-import type { ListThreadsResponse } from "@valet/api/wire";
+import type { ListMessagesResponse, ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { qk, useMarkThreadsRead, useSendPrompt, useSetThreadModel } from "./queries";
+import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useSendPrompt, useSession, useSetThreadModel } from "./queries";
 
 const sessionId = "session-1";
 
@@ -248,4 +248,169 @@ it("does not resurrect an archived thread from a pending activity read", async (
   await act(async () => { complete({ threads: [row] }); await pending; });
   expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toEqual(["recent"]);
   unmount(); client.clear(); vi.restoreAllMocks();
+});
+
+
+describe("thread transcript", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const page = (id: string): ListMessagesResponse => ({ messages: [{ id, sessionId, threadId: "t1", role: "user", content: id, parts: [], createdAt: 1 }], hasMore: true });
+
+  it("joins a prefetch still in flight instead of asking twice, newest page first", async () => {
+    let finish: (value: ListMessagesResponse) => void = () => {};
+    const list = vi.spyOn(api, "listMessages").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    prefetchTranscript(client, "t1");
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useMessages(sessionId, "t1"), { wrapper });
+    act(() => finish(page("m1")));
+    await waitFor(() => expect(result.current.data?.messages[0]?.id).toBe("m1"));
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith("", { limit: TRANSCRIPT_TAIL, threadId: "t1" });
+  });
+
+  it("lets the thread view share a session prefetch still in flight", async () => {
+    let finish: (value: Awaited<ReturnType<typeof api.getSession>>) => void = () => {};
+    const get = vi.spyOn(api, "getSession").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    prefetchSession(client, sessionId);
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useSession(sessionId), { wrapper });
+    act(() => finish({ id: sessionId } as Awaited<ReturnType<typeof api.getSession>>));
+    await waitFor(() => expect(result.current.data?.id).toBe(sessionId));
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a finished prefetch at once, and keeps it while the full history loads", async () => {
+    const list = vi.spyOn(api, "listMessages").mockResolvedValueOnce(page("newest")).mockImplementation(() => new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000 } } });
+    prefetchTranscript(client, "t1");
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result, rerender } = renderHook(({ limit }) => useMessages(sessionId, "t1", undefined, limit), { wrapper, initialProps: { limit: TRANSCRIPT_TAIL } });
+    expect(result.current.data?.messages[0]?.id).toBe("newest");
+    rerender({ limit: TRANSCRIPT_FULL });
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.data?.messages[0]?.id).toBe("newest");
+    expect(list).toHaveBeenLastCalledWith("", { limit: TRANSCRIPT_FULL, threadId: "t1" });
+  });
+});
+
+describe("optimistic thread actions", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const options = { sort: "last-user-activity", origin: "all", fixedIds: [] };
+  const rows = [{ id: "a", sessionId, createdAt: 2, lastUserActivityAt: 2, title: "Alpha" }, { id: "b", sessionId, createdAt: 1, lastUserActivityAt: 1, title: "Beta" }];
+  type Patch = Awaited<ReturnType<typeof api.patchThread>>;
+  function setup() {
+    const archived: string[] = [];
+    // Offline: the reads that would correct the lists fail too.
+    const network = { offline: false };
+    const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => network.offline ? Promise.reject(new Error("Offline.")) : opts?.archived
+      ? { threads: rows.filter(row => archived.includes(row.id)) }
+      : { threads: rows.filter(row => !archived.includes(row.id)) });
+    const saves: Array<{ resolve: (value: Patch) => void; reject: (error: Error) => void }> = [];
+    vi.spyOn(api, "patchThread").mockImplementation(() => new Promise<Patch>((resolve, reject) => { saves.push({ resolve, reject }); }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    return { archived, list, saves, client, wrapper, network };
+  }
+
+  it("moves an archived row at once and moves it back when a running turn refuses it", async () => {
+    const { useSidebarThreads, useArchivedThreads, useSetThreadArchived } = await import("./queries");
+    const { ApiError } = await import("./client");
+    const { saves, client, wrapper } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), archivedList: useArchivedThreads(sessionId), archive: useSetThreadArchived(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    await waitFor(() => expect(result.current.archivedList.data).toBeDefined());
+    let done: Promise<unknown> | undefined;
+    act(() => { done = result.current.archive.mutateAsync({ threadId: "a", archived: true }).catch(() => undefined); });
+    // The row moves before the server answers.
+    await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toEqual(["b"]));
+    expect(result.current.archivedList.data?.threads.map(thread => thread.id)).toEqual(["a"]);
+    expect(saves).toHaveLength(1);
+    await act(async () => { saves[0]!.reject(new ApiError(409, "PATCH → 409", { error: "A turn is running in this thread. Wait for it to finish, then archive." })); await done; });
+    await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toContain("a"));
+    expect(result.current.archivedList.data?.threads ?? []).toEqual([]);
+    unmount(); client.clear();
+  });
+
+  it("reads the lists once, after the last of several quick archives", async () => {
+    const { useSidebarThreads, useSetThreadArchived } = await import("./queries");
+    const { archived, list, saves, client, wrapper } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), archive: useSetThreadArchived(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    const reads = list.mock.calls.length;
+    let first: Promise<unknown> | undefined;
+    let second: Promise<unknown> | undefined;
+    act(() => {
+      first = result.current.archive.mutateAsync({ threadId: "a", archived: true });
+      second = result.current.archive.mutateAsync({ threadId: "b", archived: true });
+    });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(result.current.sidebar.data?.threads).toEqual([]);
+    archived.push("a");
+    await act(async () => { saves[0]!.resolve({ ...rows[0]!, archivedAt: 3 }); await first; });
+    // A read now would show b again, because its save still runs.
+    expect(list.mock.calls.length).toBe(reads);
+    expect(result.current.sidebar.data?.threads).toEqual([]);
+    archived.push("b");
+    await act(async () => { saves[1]!.resolve({ ...rows[1]!, archivedAt: 4 }); await second; });
+    await waitFor(() => expect(list.mock.calls.length).toBeGreaterThan(reads));
+    expect(result.current.sidebar.data?.threads).toEqual([]);
+    unmount(); client.clear();
+  });
+
+  it("ends in the server's state when an archive and a quick restore both fail", async () => {
+    const { useSidebarThreads, useArchivedThreads, useSetThreadArchived } = await import("./queries");
+    const { saves, client, wrapper, network } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), archivedList: useArchivedThreads(sessionId), archive: useSetThreadArchived(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    await waitFor(() => expect(result.current.archivedList.data).toBeDefined());
+    network.offline = true;
+    let archiving: Promise<unknown> | undefined;
+    let restoring: Promise<unknown> | undefined;
+    act(() => { archiving = result.current.archive.mutateAsync({ threadId: "a", archived: true }).catch(() => undefined); });
+    await waitFor(() => expect(result.current.archivedList.data?.threads.map(thread => thread.id)).toEqual(["a"]));
+    act(() => { restoring = result.current.archive.mutateAsync({ threadId: "a", archived: false }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    // The archive's failure arrives first, then the restore's.
+    await act(async () => { saves[0]!.reject(new Error("Offline. Reconnect and retry.")); await archiving; });
+    await act(async () => { saves[1]!.reject(new Error("Offline. Reconnect and retry.")); await restoring; });
+    // The server never archived it, and no read can say so (observers update on the next tick).
+    await waitFor(() => expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toContain("a"));
+    await waitFor(() => expect(result.current.archivedList.data?.threads ?? []).toEqual([]));
+    unmount(); client.clear();
+  });
+
+  it("keeps the server's title when two quick renames both fail out of order", async () => {
+    const { useSidebarThreads, useRenameThread } = await import("./queries");
+    const { saves, client, wrapper, network } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), rename: useRenameThread(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    network.offline = true;
+    let first: Promise<unknown> | undefined;
+    let second: Promise<unknown> | undefined;
+    act(() => { first = result.current.rename.mutateAsync({ threadId: "a", title: "One" }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(1));
+    act(() => { second = result.current.rename.mutateAsync({ threadId: "a", title: "Two" }).catch(() => undefined); });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    await act(async () => { saves[0]!.reject(new Error("Offline.")); await first; });
+    await act(async () => { saves[1]!.reject(new Error("Offline.")); await second; });
+    await waitFor(() => expect(result.current.sidebar.data?.threads.find(thread => thread.id === "a")?.title).toBe("Alpha"));
+    unmount(); client.clear();
+  });
+
+  it("shows a new title at once and restores the old one when the save fails", async () => {
+    const { useSidebarThreads, useRenameThread } = await import("./queries");
+    const { saves, client, wrapper } = setup();
+    const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, options), rename: useRenameThread(sessionId) }), { wrapper });
+    await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+    let done: Promise<unknown> | undefined;
+    act(() => { done = result.current.rename.mutateAsync({ threadId: "a", title: "Renamed" }).catch(() => undefined); });
+    await waitFor(() => expect(result.current.sidebar.data?.threads.find(thread => thread.id === "a")?.title).toBe("Renamed"));
+    expect(saves).toHaveLength(1);
+    await act(async () => { saves[0]!.reject(new Error("Offline. Reconnect and retry.")); await done; });
+    await waitFor(() => expect(result.current.sidebar.data?.threads.find(thread => thread.id === "a")?.title).toBe("Alpha"));
+    unmount(); client.clear();
+  });
 });

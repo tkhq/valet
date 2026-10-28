@@ -32,12 +32,12 @@ it("does not show a stale plan on a progress error", () => {
   expect(screen.getByRole("status").textContent).toBe("Progress unavailable. Refresh to retry.");
   expect(screen.queryByRole("region")).toBeNull();
 });
-it("shows loading without a stale plan", () => {
+it("shows nothing while loading, not a stale plan", () => {
   const { client, show } = setup(null);
   client.removeQueries({ queryKey: ["thread-progress", "t"] });
   const spy = vi.spyOn(api, "getThreadProgress").mockImplementation(() => new Promise(() => {}));
   show();
-  expect(screen.getByRole("status").textContent).toBe("Loading progress…");
+  expect(screen.queryByRole("status")).toBeNull();
   expect(screen.queryByRole("region")).toBeNull();
   spy.mockRestore();
 });
