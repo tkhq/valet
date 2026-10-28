@@ -104,7 +104,8 @@ export async function assembleMemorySnapshot(
   const indexContent = indexResult.kind === "directory" ? indexResult.rendered : "";
 
   // The principle index reads the whole read-union: a team's principles
-  // guide its members too. It is never dropped for the budget.
+  // guide its members too. It is never dropped for the budget, so
+  // `renderPrinciplesSection` caps it.
   const principles = renderPrinciplesSection(summaries);
 
   const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (the date the snapshot was built, not the current date)\n`;

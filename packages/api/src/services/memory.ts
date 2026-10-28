@@ -51,6 +51,49 @@ const DIRECTORY_DEFAULT_TYPE: Record<string, string> = {
   principles: "principle",
 };
 
+// ─── Principles (docs/specs/2026-10-27-brain-principles-playbooks-design.md) ──
+
+/** The memory directory that holds principles. */
+export const PRINCIPLES_DIR = "principles/";
+
+/** True for a stored (own-scope, normalized) path at or under `principles/`. */
+export function isPrinciplePath(path: string): boolean {
+  return path === PRINCIPLES_DIR.slice(0, -1) || path.startsWith(PRINCIPLES_DIR);
+}
+
+/**
+ * A team principle reaches every member's assistant at its next wake, so a
+ * write under a team's `principles/` takes the authority `copyFileToTeam`
+ * takes: a team admin or an admin of the team's organization. Membership,
+ * which the internal `?teamId=` branch checks, is not enough.
+ */
+async function assertTeamPrincipleWriter(db: AppDb, scope: MemoryScope, paths: string[]): Promise<void> {
+  if (scope.owner.type !== "team" || !paths.some(isPrinciplePath)) return;
+  if (await canAdministerTeam(db, scope.owner.id, scope.actorUserId)) return;
+  throw new ValidationError(
+    "Only a team admin or an admin of this team's organization can change team principles. Ask a team admin to add the rule, or save it as a personal principle.",
+  );
+}
+
+/** Where an agent write came from. The route fills it from host headers,
+ * never from model arguments. */
+export interface WriteSource {
+  sessionId: string;
+  threadId?: string;
+}
+
+/** Provenance frontmatter for a principle an agent writes: the person the
+ * agent acted for, and the session and thread of the write. It is stored in
+ * `extras`, so it renders as frontmatter with no schema change. */
+function principleProvenance(existingExtras: string, scope: MemoryScope, source: WriteSource): string {
+  const extras: Record<string, string> = { ...safeParseRecord(existingExtras) };
+  extras["source-actor"] = scope.actorUserId;
+  extras["source-session"] = source.sessionId;
+  if (source.threadId) extras["source-thread"] = source.threadId;
+  else delete extras["source-thread"];
+  return JSON.stringify(extras);
+}
+
 function defaultTypeForPath(path: string): string {
   const first = path.split("/")[0];
   return DIRECTORY_DEFAULT_TYPE[first] ?? "note";
@@ -188,6 +231,9 @@ export interface WriteFileParams {
    * unchanged. */
   expires?: number | null;
   pinned?: boolean;
+  /** The agent session that made the write. Set only by the route, from
+   * host headers. A principle write records it as provenance. */
+  source?: WriteSource;
 }
 
 export interface WriteFileResult {
@@ -201,6 +247,7 @@ export interface WriteFileResult {
 export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFileParams): Promise<WriteFileResult> {
   assertWritablePath(params.path);
   const path = normalizePath(params.path);
+  await assertTeamPrincipleWriter(db, scope, [path]);
 
   if (params.content === "") {
     throw new ValidationError("to clear a file use removeFile; to update metadata only, omit content");
@@ -250,7 +297,9 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     description: params.description !== undefined ? params.description : (existing?.description ?? ""),
     tags: JSON.stringify(params.tags ?? (existing ? safeParseArray(existing.tags) : [])),
     resource: params.resource !== undefined ? params.resource : (existing?.resource ?? ""),
-    extras: existing?.extras ?? "{}",
+    extras: params.source && isPrinciplePath(path)
+      ? principleProvenance(existing?.extras ?? "{}", scope, params.source)
+      : existing?.extras ?? "{}",
     sensitivity: params.sensitivity ?? existing?.sensitivity ?? "private",
     origin: params.origin !== undefined ? params.origin : (existing?.origin ?? ""),
     expires: params.expires !== undefined ? params.expires : (existing?.expires ?? null),
@@ -290,6 +339,8 @@ export interface PatchFileParams {
   path: string;
   oldString: string;
   newString: string;
+  /** Passed through to `writeFile`. */
+  source?: WriteSource;
 }
 
 /** Exact-replace patch on the body. Patch-created files are allowed
@@ -309,7 +360,7 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
     if (params.oldString !== "") {
       throw new NotFoundError("memory file", path);
     }
-    return writeFile(db, scope, { path, content: params.newString });
+    return writeFile(db, scope, { path, content: params.newString, source: params.source });
   }
 
   const idx = existing.content.indexOf(params.oldString);
@@ -324,7 +375,7 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   const newContent =
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
-  return writeFile(db, scope, { path, content: newContent });
+  return writeFile(db, scope, { path, content: newContent, source: params.source });
 }
 
 // ─── removeFile ────────────────────────────────────────────────────────
@@ -337,6 +388,7 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
   // removed in between.
   assertWritablePath(path);
   const normalized = normalizePath(path);
+  await assertTeamPrincipleWriter(db, scope, [normalized]);
   const existingRows = await db
     .select({ path: memoryFiles.path })
     .from(memoryFiles)
@@ -393,6 +445,7 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
   if (from === to) {
     throw new ValidationError("from and to are the same path — nothing to move");
   }
+  await assertTeamPrincipleWriter(db, scope, [from, to]);
 
   const rows = await db
     .select()
@@ -1208,6 +1261,16 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
       continue;
     }
     claimedBy.set(finalPath, rawPath);
+
+    if (isPrinciplePath(finalPath)) {
+      try {
+        await assertTeamPrincipleWriter(db, scope, [finalPath]);
+      } catch (err) {
+        if (!(err instanceof ValidationError)) throw err;
+        skipped.push({ path: rawPath, reason: err.message });
+        continue;
+      }
+    }
 
     const parsed = parseConcept(content);
     if (parsed.droppedValetKeys.length > 0) {

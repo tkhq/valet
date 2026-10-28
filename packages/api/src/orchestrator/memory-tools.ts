@@ -200,7 +200,7 @@ export const memWriteTool = defineTool({
     teamId: Type.Optional(
       Type.String({
         description:
-          "Write into this team's shared memory instead of your own. Omit it to write your own scope. That is the default, and the right choice for anything about one person. Take the id from the `team:{id}/` paths mem_read and mem_search return. The write is refused unless the person you are acting for is a current member of that team. Team memory is shared with every member and the team assistant loads it as context, so send only what the user asked to put there, and mem_read the destination first: writing a path that already holds a team file replaces that file's body.",
+          "Write into this team's shared memory instead of your own. Omit it to write your own scope. That is the default, and the right choice for anything about one person. Take the id from the `team:{id}/` paths mem_read and mem_search return. The write is refused unless the person you are acting for is a current member of that team. Team memory is shared with every member and the team assistant loads it as context, so send only what the user asked to put there, and mem_read the destination first: writing a path that already holds a team file replaces that file's body. A team principle (a path under `principles/`) needs more: write one only when the person asked in this conversation to add that rule to the team, and only a team admin or an admin of the team's organization can write it.",
       }),
     ),
   }),
