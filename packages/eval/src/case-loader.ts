@@ -184,6 +184,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       };
     }
     case "max_tokens":
+    case "min_compactions":
     case "max_cost":
     case "max_duration":
       return { type, value: requireNumber("value") };
@@ -340,6 +341,15 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
       "`drive: product` requires `session_type: orchestrator` (the production agent surface)",
     );
   }
+  const contextBudgetTokens = optionalNumber(raw, "context_budget_tokens", source);
+  if (contextBudgetTokens !== undefined) {
+    if (!Number.isInteger(contextBudgetTokens) || contextBudgetTokens < 1) {
+      throw new CaseValidationError(source, "`context_budget_tokens` must be a positive integer");
+    }
+    if (drive === "product") {
+      throw new CaseValidationError(source, "`context_budget_tokens` needs `drive: engine` (it sets the in-process session's compaction budget)");
+    }
+  }
   const allowedActions = optionalStringArray(raw, "allowed_actions", source);
   if (allowedActions !== undefined) {
     for (const id of allowedActions) {
@@ -411,6 +421,7 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (reasoning !== undefined) evalCase.reasoning = reasoning as EvalCase["reasoning"];
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
+  if (contextBudgetTokens !== undefined) evalCase.context_budget_tokens = contextBudgetTokens;
   if (drive !== undefined) evalCase.drive = drive;
   if (allowedActions !== undefined) evalCase.allowed_actions = allowedActions;
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];

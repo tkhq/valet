@@ -108,6 +108,19 @@ describe("extractTrajectory", () => {
     });
   });
 
+  it("counts compaction checkpoints", () => {
+    const checkpoint: SessionEntry = {
+      id: "cp", sessionId: "s", threadId: "t", parentId: null, type: "compaction",
+      summary: "## Goal", coveredEntryIds: [], tokenCountBefore: 10, tokenCountAfter: 2, createdAt: 3,
+    };
+    const t = extractTrajectory({
+      caseId: "c", prompt: "hi", model: "m", durationMs: 1,
+      entries: [userEntry("hi"), assistantEntry({ content: "hello" }), checkpoint],
+    });
+    expect(t.compactions).toBe(1);
+    expect(t.finalOutput).toBe("hello");
+  });
+
   it("omits cost when no turn is priced and keeps zero usage totals", () => {
     const entries: SessionEntry[] = [userEntry("hi"), assistantEntry({ content: "hello" })];
     const t = extractTrajectory({

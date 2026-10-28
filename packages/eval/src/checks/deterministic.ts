@@ -232,6 +232,17 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       return pass(check);
     }
 
+    case "min_compactions": {
+      const n = trajectory.compactions ?? 0;
+      if (n < check.value) {
+        return fail(
+          check,
+          `expected at least ${check.value} compaction(s), got ${n}. Lower \`context_budget_tokens\` or lengthen the turns.`,
+        );
+      }
+      return pass(check, `${n} compaction(s)`);
+    }
+
     case "max_cost": {
       const totals = aggregateUsage(trajectory);
       if (totals.cost === undefined) {

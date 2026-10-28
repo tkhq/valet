@@ -83,9 +83,15 @@ Rules that keep cases trustworthy:
 Check types: `tool_called`, `tool_not_called`, `tool_result_matches`,
 `tool_result_not_matches`, `tool_args_match`, `output_contains`,
 `output_not_contains`, `all_terminal`, `no_errors`, `max_turns`,
-`max_tokens`, `max_cost`, `max_duration`, `verify_command`,
-`workflow_definition`, `judge_output`, `judge_trajectory`,
-`judge_equivalence`. Field details: `src/types.ts`.
+`max_tokens`, `min_compactions`, `max_cost`, `max_duration`,
+`verify_command`, `workflow_definition`, `judge_output`,
+`judge_trajectory`, `judge_equivalence`. Field details: `src/types.ts`.
+
+Compaction recall cases live in `evals/cases/compaction/`. Each one sets
+a small `context_budget_tokens`, so the thread compacts between turns.
+Each case also checks `min_compactions`, so a run that never compacts
+fails. Run them with
+`make eval EVAL_ARGS="--cases evals/cases/compaction"`.
 
 `drive: product` cases can list action services in `connected:`. The
 harness gives each one a placeholder credential, so the assistant's
