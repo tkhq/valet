@@ -12,6 +12,7 @@
  * Kept in a dedicated module so the route handler stays HTTP-only and the
  * naming logic is unit-testable without spinning up Hono.
  */
+import { HOME_THREAD_KEY } from "../home/context.js";
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import type { AppDb } from "../lib/drizzle.js";
@@ -41,7 +42,12 @@ export interface AutoTitleInput {
 
 export type AutoTitleResult =
   | { ok: true; sessionTitle: string | null; threadTitle: string | null }
-  | { ok: false; reason: "session_not_found" | "already_titled" | "no_messages" };
+  | { ok: false; reason: "session_not_found" | "already_titled" | "no_messages" | "home_thread" };
+
+/** Home keeps its one name. A thread with the home key is never auto-titled. */
+export function skipsAutoTitle(thread: { key?: string } | null | undefined): boolean {
+  return thread?.key === HOME_THREAD_KEY;
+}
 
 /**
  * Truncate + strip common decorations LLMs sneak in even when told not to.

@@ -688,6 +688,8 @@ The reply needs the same right as a button click: the person may resolve the ses
 It supports an exact name filter and bounded pagination (default 25, maximum 100).
 `events.set_subscription_presence` replaces the selected subscription's presence; null clears it.
 Both tools require organization membership. Team access also requires current team membership.
+A team's unattended run (a schedule, event, or webhook) acts as the team's own principal id, `team:{id}`, not as a person.
+That run can list its own team's subscriptions but cannot change them.
 Unlinked channel senders cannot use either tool. Organization-owned subscriptions remain outside these tools.
 The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
 It preserves concurrent target edits, matching rules, ownership, and enabled state.

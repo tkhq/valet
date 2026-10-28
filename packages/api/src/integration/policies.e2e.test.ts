@@ -58,7 +58,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration, type JsonObject } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration, type JsonObject } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import type {

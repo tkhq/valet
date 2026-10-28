@@ -1,5 +1,6 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
-import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
@@ -138,7 +139,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     await testDb.appDb.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, owner.id));
     // A team runtime must not inherit the member who delivered the event.
     await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
 
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: owner, actorUserId: USER,

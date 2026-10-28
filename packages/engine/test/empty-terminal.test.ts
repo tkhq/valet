@@ -3,7 +3,7 @@ import {
   createAssistantMessageEventStream,
   fauxAssistantMessage,
   fauxThinking,
-  fauxToolCall,
+
   registerApiProvider,
   registerFauxProvider,
   Type,
@@ -13,6 +13,7 @@ import {
   type TranscriptContext,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   completedSubmissionOutcome,
   Engine,

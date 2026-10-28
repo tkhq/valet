@@ -1,4 +1,4 @@
-import { actionInScope, scopeRefusal } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, scopeRefusal } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -354,12 +354,12 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
  * (`ToolResult` text vs. a `command_result` markdown output).
  */
 export type InvokeActionResult =
-  | { kind: "ok"; result: PluginActionResult }
+  | { kind: "ok"; result: PluginActionResult; automatic?: true }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   /** `shared_account`: the action needs a teammate's shared account, and
    * the policy resolver refused to ask that teammate for this caller. */
-  | { kind: "denied-policy"; scope?: "team" | "shared_account" }
+  | { kind: "denied-policy"; scope?: "team" | "shared_account" | "tool" }
   /** The action needs approval and the turn came from a channel sender with
    * no Valet account (`ToolContext.externalSender`). No gate opens, so a
    * newcomer can never send a teammate an approval request. */
@@ -480,7 +480,8 @@ function approvalGateRequest(
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `tool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    agentReason: summary,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
@@ -640,7 +641,8 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
-  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "error", message: scopeRefusal(actionId) };
+  actionId = canonicalActionId(catalog, actionId);
+  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "denied-policy", scope: "tool" };
   if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
     return { kind: "unknown", toolId: actionId };
   }
@@ -859,7 +861,7 @@ export async function invokeAction(
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `Valet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -958,7 +960,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  const executed = await executeAction(entry, actionId, args, summary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -967,6 +969,7 @@ export async function invokeAction(
       gateOrdinal,
     },
   });
+  return executed.kind === "ok" && decision.provenance.source === "thread_bypass" ? { ...executed, automatic: true } : executed;
 
 }
 
@@ -1463,6 +1466,7 @@ function resolveFailurePrefix(message: string): string {
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    intent: "summary",
     policyChecked: true,
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
@@ -1477,8 +1481,9 @@ function makeCallTool(catalog: Catalog): ToolDef {
         }),
       ),
       summary: Type.String({
+        ...TOOL_INTENT_SCHEMA,
         description:
-          "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.",
+          "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.",
       }),
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -1488,7 +1493,13 @@ function makeCallTool(catalog: Catalog): ToolDef {
         summary: string;
       };
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
-      return renderInvokeOutcome(outcome, a.tool_id);
+      const toolId = canonicalActionId(catalog, a.tool_id);
+      const entry = catalog.byId.get(toolId);
+      const result = renderInvokeOutcome(outcome, toolId, similarActionIds(catalog, a.tool_id));
+      // A tool from a connected MCP server is resolved at call time and is
+      // not in the static catalog; an id the model made up is not in either.
+      // Record the requested id for both, so usage names the failing tool.
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : toolId.slice(0, 200) } };
     },
   };
 }
@@ -1499,19 +1510,29 @@ function makeCallTool(catalog: Catalog): ToolDef {
  * denial, validation and credential wording cannot drift apart between the
  * two routes.
  */
-function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
+function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
+  const result = renderInvokeResult(outcome, toolId, similar);
+  const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
+    : outcome.kind === "pending-approval" ? "pending-approval" : (outcome.kind.startsWith("denied") || outcome.kind === "expired-approval") ? "denied" : "error";
+  return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind === "denied-policy" ? "policy_denied"
+    : outcome.kind === "pending-approval" ? "approval_required" : outcome.kind === "ok" || outcome.kind === "error" ? "action_failed"
+    : outcome.kind.replaceAll("-", "_") } };
+}
+
+function renderInvokeResult(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
   switch (outcome.kind) {
     case "ok":
-      return actionResultToToolResult(outcome.result, toolId);
+      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
     case "unknown":
       return {
-        text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,
+        text: `unknown tool_id: "${toolId}".${similar.length ? ` Did you mean ${similar.map((id) => `"${id}"`).join(" or ")}?` : ""} Use list_tools to find available actions.`,
       };
     case "resolve-failed":
       return {
         text: `error resolving ${outcome.service} tools: ${resolveFailurePrefix(outcome.message)}${outcome.message}`,
       };
     case "denied-policy":
+      if (outcome.scope === "tool") return { text: scopeRefusal(toolId) };
       if (outcome.scope === "shared_account") {
         return {
           text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user to ask a team member to run it, or to ask a team admin to connect a team account on the team's Integrations page.`,
@@ -1660,12 +1681,12 @@ const PINNED_SUMMARY_ARG = "summary";
 
 /** Published on the added argument. Matches `call_tool`'s wording. */
 const PINNED_SUMMARY_DESCRIPTION =
-  "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.";
+  "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.";
 
 /**
  * Publishes the action's schema with a `summary` argument added.
  *
- * WHY. The summary is the first line of an approval gate body and the
+ * WHY. The summary is the labelled model-authored reason on an approval gate and the
  * `summary` field of every audit record. `call_tool` takes it from the
  * model. A pinned tool that derived a constant instead would ask a person
  * to approve an action with no statement of intent, and would write the
@@ -1673,7 +1694,7 @@ const PINNED_SUMMARY_DESCRIPTION =
  * `require_approval` at any time through an org policy, so a pinned tool
  * must carry the model's own sentence.
  *
- * The added argument is optional and it is stripped before validation, so
+ * The added argument is required and it is stripped before validation, so
  * the two routes still agree about what the ACTION accepts. `carriesSummary`
  * is false in two cases, and the caller then falls back to a derived
  * constant: the schema is not an object, or the action already declares its
@@ -1688,9 +1709,7 @@ function withSummaryArg(schema: TSchema): { schema: TSchema; carriesSummary: boo
   const published = Type.Object(
     {
       ...schema.properties,
-      [PINNED_SUMMARY_ARG]: Type.Optional(
-        Type.String({ description: PINNED_SUMMARY_DESCRIPTION }),
-      ),
+      [PINNED_SUMMARY_ARG]: Type.String({ ...TOOL_INTENT_SCHEMA, description: PINNED_SUMMARY_DESCRIPTION }),
     },
     // Keeps `description`, `additionalProperties` and every other keyword
     // the action set on its own object schema. `ObjectOptions` discards the
@@ -1746,6 +1765,7 @@ function makePinnedTool(
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
     scopeAction: actionId,
+    intent: published.carriesSummary ? "summary" : "passthrough",
     policyChecked: true,
     name,
     description: parts.join(" "),
@@ -1862,7 +1882,9 @@ async function executeAction(
     // present, no cred) or "credential <service> not available (no store)"
     // (no store at all). Both mean the same thing to the user — surface a
     // missing-credential outcome so callers can name the corrective action.
-    if (/credential .* not (connected|available)/.test(message)) {
+    // An MCP server plugin says "<service>: no credential connected"
+    // (`@valet/sdk` resolveToken).
+    if (/credential .* not (connected|available)|^\S+: no credential connected$/.test(message)) {
       return { kind: "missing-credential", service: credentialService };
     }
     return { kind: "error", message };
@@ -1926,6 +1948,37 @@ function approvalModeFor(entry: CatalogEntry): ApprovalMode {
 
 function qualifiedId(entry: CatalogEntry): string {
   return entry.action.id.includes(".") ? entry.action.id : `${entry.service}.${entry.action.id}`;
+}
+
+const serviceKey = (service: string) => service.toLowerCase().replaceAll("-", "_");
+
+/**
+ * The catalog id for a tool id written with the service name that
+ * `list_tools` reports. Some services name their tools under another
+ * prefix (`google_calendar` has `calendar.list_events`, `google_workspace`
+ * has `drive.search_files`, `slack-user` has `slack_user.set_status`), and
+ * agents write `google_calendar.list_events` or
+ * `google_workspace.drive.search_files`. Those name one tool, so they run
+ * as it, and every scope and policy check sees the catalog id. An id that
+ * fits no tool, or more than one, is returned unchanged.
+ */
+function canonicalActionId(catalog: Catalog, actionId: string): string {
+  if (catalog.byId.has(actionId)) return actionId;
+  const dot = actionId.indexOf(".");
+  if (dot <= 0) return actionId;
+  const service = serviceKey(actionId.slice(0, dot));
+  const rest = actionId.slice(dot + 1);
+  const entries = catalog.entries.filter((entry) => serviceKey(entry.service) === service);
+  const exact = entries.find((entry) => qualifiedId(entry) === rest);
+  if (exact) return qualifiedId(exact);
+  const named = entries.filter((entry) => qualifiedId(entry).endsWith(`.${rest}`));
+  return named.length === 1 ? qualifiedId(named[0]!) : actionId;
+}
+
+/** Catalog tools with the same action name as an unknown id, for the error's "Did you mean". */
+function similarActionIds(catalog: Catalog, actionId: string): string[] {
+  const name = actionId.slice(actionId.lastIndexOf(".") + 1);
+  return catalog.entries.map(qualifiedId).filter((id) => id.slice(id.lastIndexOf(".") + 1) === name).slice(0, 3);
 }
 
 /**

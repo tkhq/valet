@@ -5,13 +5,17 @@
  * Integrations page, so a provider-side change shows there before a run
  * fails on it.
  */
+import type { PluginAction } from '@valet/engine';
 import { McpHttpError } from './client.js';
 import type { McpTool } from './types.js';
 
 export type McpProbeResult =
-  /** The server listed its tools. `missingScopes` are the scopes the grant
-   * lacks for the `blockedTools` tools that declare `securitySchemes`. */
-  | { kind: 'listed'; toolCount: number; missingScopes: string[]; blockedTools: number }
+  /** The server listed its tools. `actions` is that listing mapped the way
+   * `resolveActions` maps it (service-qualified ids, risk from annotations,
+   * the input schema as `parameters`), so a caller can cache the tool schema
+   * from one call. `missingScopes` are the scopes the grant lacks for the
+   * `blockedTools` tools that declare `securitySchemes`. */
+  | { kind: 'listed'; actions: PluginAction[]; missingScopes: string[]; blockedTools: number }
   /** The server refused the listing with `insufficient_scope` and named at
    * least one scope the grant lacks. */
   | { kind: 'insufficient_scope'; missingScopes: string[] }

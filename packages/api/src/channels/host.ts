@@ -1,6 +1,7 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
+import { bindConversation, findConversationBinding, findPriorConversationThread } from "./conversation-bindings.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -41,6 +42,7 @@ import {
   type SessionStore,
   type SignalContent,
   type StoredCredential,
+  type Thread,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
@@ -60,7 +62,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import type { AttentionChannelDeliverer, AttentionDeliveryRef, AttentionEvent } from "../orchestrator/attention.js";
-import { activeChildWatch } from "../orchestrator/children.js";
+import { childGateOrigin } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
@@ -1157,12 +1159,7 @@ export class ChannelHost {
    * through `conversationKeyFromThreadKey`. Without this hop every outbound
    * call for such a transport is handed a key it did not mint.
    */
-  /** The channel conversation that spawned an unsettled child session. */
-  /**
-   * The channel conversation a home-thread submission came from. Home holds
-   * the person's Slack DM and web messages in one thread, so the thread key
-   * cannot say where a turn started; the submission's origin can.
-   */
+  /** The channel conversation a Home submission came from, since Home combines web and channel messages. */
   private async homeOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
     const item = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     const content = item?.content;
@@ -1170,9 +1167,10 @@ export class ChannelHost {
     return origin ? this.channelThreadFor(origin.threadKey) : null;
   }
 
-  private async childOriginConversation(sessionId: string): Promise<{ channelType: string; conversationKey: string } | null> {
-    const watch = await activeChildWatch(this.deps.db, sessionId);
-    return watch?.origin ? this.channelThreadFor(watch.origin.threadKey) : null;
+  /** The channel audience of a child's gate, including later signal turns. */
+  private async childOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
+    const origin = await childGateOrigin(this.deps.db, this.deps.engineStore, sessionId, queueItemId);
+    return origin ? this.channelThreadFor(origin.threadKey) : null;
   }
 
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
@@ -1292,7 +1290,7 @@ export class ChannelHost {
     // answer it (TKAI-564). The callback still resolves the child's gate.
     const direct = this.channelThreadFor(thread.key)
       ?? (thread.key === HOME_THREAD_KEY ? await this.homeOriginConversation(sessionId, gate.queueItemId) : null);
-    const mapped = direct ?? await this.childOriginConversation(sessionId);
+    const mapped = direct ?? await this.childOriginConversation(sessionId, gate.queueItemId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
@@ -1675,6 +1673,38 @@ export class ChannelHost {
     });
   }
 
+  /** Recover old destinations once; later deliveries use the saved binding. */
+  private async directMessageThread(
+    session: Session,
+    channelType: string,
+    conversationKey: string,
+    threadKey: string,
+    userId: string,
+    orgId: string,
+    create: boolean,
+  ): Promise<Thread | null> {
+    if (channelType !== "slack") {
+      return create
+        ? this.deps.engineHost.ensureFreshThread(session, threadKey, { userId, orgId, workspace: session.options.workspace })
+        : session.threadByKey(threadKey);
+    }
+    const scope = { orgId, userId, sessionId: session.id, channelType, conversationKey };
+    let threadId = await findConversationBinding(this.deps.db, scope);
+    if (!threadId) {
+      let candidateId = await findPriorConversationThread(this.deps.db, scope, threadKey);
+      if (!candidateId && create) {
+        candidateId = (await this.deps.engineHost.ensureFreshThread(session, threadKey, { userId, orgId, workspace: session.options.workspace })).id;
+      }
+      if (!candidateId) return null;
+      threadId = await bindConversation(this.deps.db, scope, candidateId);
+    }
+    const data = await this.deps.engineStore.getThread(session.id, threadId);
+    if (!data) throw new ConflictError("This Slack conversation's saved chat is unavailable. Start a new Slack thread.");
+    const thread = await session.loadThread(data.id);
+    if (!thread) throw new ConflictError("This Slack conversation's saved chat is unavailable. Start a new Slack thread.");
+    return thread;
+  }
+
   /**
    * A person changed a message that already reached their assistant thread.
    * The change is recorded for the model with no reply (`slackEditSignal`).
@@ -1694,14 +1724,13 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await session.threadByKey(threadKey) ??
-      (channelType === "slack" ? await session.threadByKey(HOME_THREAD_KEY) : null);
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, false);
     if (!thread) {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;
     }
     await thread.recordSignal(
-      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType } }),
+      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType }, origin: { channelType, threadKey } }),
       { dispatchId: event.dispatchId, author: { id: userId } },
     );
   }
@@ -1742,18 +1771,8 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    // A Slack DM with Valet is the person's home conversation, the same one
-    // the web app opens first. The reply still goes back to the DM thread:
-    // the origin below keeps the Slack thread key. A reply in a DM thread
-    // that already has its own Valet thread (one started before home
-    // existed) stays in that thread.
-    const ownThread = channelType === "slack" ? await session.threadByKey(threadKey) : null;
-    const thread = await this.deps.engineHost.ensureFreshThread(session, channelType === "slack" && !ownThread ? HOME_THREAD_KEY : threadKey, {
-      userId,
-      orgId,
-      workspace: session.options.workspace,
-    });
-    if (thread.key === HOME_THREAD_KEY) await thread.setMode("followup");
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, true);
+    if (!thread) throw new Error("A new direct message must resolve to a chat.");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {

@@ -119,6 +119,12 @@ export interface SessionStreamState {
    * other thread in the session. A thread with no entry is idle.
    */
   statusByThread: Record<string, ThreadLiveStatus>;
+  /**
+   * Browser clock minus API clock, measured when the socket's `init`
+   * arrives. Wire timestamps are API time; a turn's start is kept in
+   * browser time so a skewed clock cannot freeze or inflate the timer.
+   */
+  serverClockOffset?: number;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -326,6 +332,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.sessionError = undefined;
       next.statusByThread = {};
       next.activeModelByThread = {};
+      next.serverClockOffset = Date.now() - ev.ts;
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
       // — without this reset the "Compacting context…" strip would survive
@@ -533,8 +540,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "status": {
       const prev = slice.statusByThread[ev.threadId];
       const wasIdle = prev === undefined || prev.status === "idle";
+      // A frame seeded at connect names the turn's real start; otherwise
+      // the first non-idle frame starts the clock. Both are API time, so
+      // they move to browser time before the timer subtracts them from it.
+      const offset = slice.serverClockOffset ?? Date.now() - ev.ts;
       const turnStartedAt =
-        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+        ev.status === "idle" ? undefined
+          : ev.turnStartedAt !== undefined ? ev.turnStartedAt + offset
+          : wasIdle ? ev.ts + offset : prev.turnStartedAt;
       // Duplicate frames are routine (the engine re-emits tool_calling per
       // tool; the handshake seed and durable replay overlap) — skip them so
       // the entry keeps its identity and subscribers do not re-render. An

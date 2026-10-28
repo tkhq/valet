@@ -121,7 +121,7 @@ describe("EngineHost default model", () => {
     await session.setModel("claude-sonnet-4-5");
     expect(session.options.model.id).toBe("claude-sonnet-4-5");
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
 
     await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
@@ -210,7 +210,7 @@ describe("EngineHost default model", () => {
     await thread.setModel("claude-sonnet-4-5");
     const resolver = vi.spyOn(engineHost, "resolveFreshThreadSettings").mockRejectedValue(new Error("default unavailable"));
     expect(await engineHost.ensureFreshThread(session, "slack:existing", meta)).toBe(thread);
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     const restored = await wake();
     const existing = await engineHost.ensureFreshThread(restored, "slack:existing", meta);
     expect(existing.modelId()).toBe("claude-sonnet-4-5");

@@ -1589,7 +1589,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       ),
       input: Type.Optional(
         Type.Record(Type.String(), Type.Unknown(), {
-          description: "Workflow target only: static payload delivered as {{trigger.data.input...}}.",
+          description: "Workflow target only: static input. Each field arrives at {{trigger.data.<field>}}, as on a manual run.",
         }),
       ),
     }),

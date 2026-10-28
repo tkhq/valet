@@ -10,7 +10,7 @@ import { createElement, type PropsWithChildren } from "react";
 import type { ListThreadsResponse } from "@valet/api/wire";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "./client";
+import { api, ApiError } from "./client";
 import { useSidebarThreads } from "./queries";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useSessionWebSocket } from "./ws";
@@ -42,6 +42,8 @@ class FakeWebSocket {
 beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
+  // A socket that closes before it opens asks whether the tab is signed in.
+  vi.spyOn(api, "getMe").mockClear().mockResolvedValue({} as Awaited<ReturnType<typeof api.getMe>>);
   useStreamStore.setState({ bySession: {} });
 });
 
@@ -332,6 +334,30 @@ describe("useSessionWebSocket", () => {
     expect(useStreamStore.getState().bySession.missing?.conn).toBe("error");
     act(() => vi.advanceTimersByTime(8_000));
     expect(FakeWebSocket.instances).toHaveLength(1);
+    unmount();
+  });
+
+  it("stops reconnecting when a refused upgrade comes from a signed-out tab", async () => {
+    const getMe = vi.spyOn(api, "getMe").mockRejectedValue(new ApiError(401, "GET /me → 401", { error: "unauthorized" }));
+    vi.useFakeTimers();
+    const { unmount } = renderSocketHook("s1");
+    // The upgrade is refused: the socket closes without opening.
+    await act(async () => { FakeWebSocket.instances[0]?.onclose?.({ code: 1006 }); });
+    expect(getMe).toHaveBeenCalledTimes(1);
+    expect(useStreamStore.getState().bySession.s1?.conn).toBe("error");
+    act(() => vi.advanceTimersByTime(8_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    unmount();
+  });
+
+  it("keeps reconnecting after a refused upgrade when the tab is still signed in", async () => {
+    const getMe = vi.spyOn(api, "getMe");
+    vi.useFakeTimers();
+    const { unmount } = renderSocketHook("s1");
+    await act(async () => { FakeWebSocket.instances[0]?.onclose?.({ code: 1006 }); });
+    expect(getMe).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(500));
+    expect(FakeWebSocket.instances).toHaveLength(2);
     unmount();
   });
 

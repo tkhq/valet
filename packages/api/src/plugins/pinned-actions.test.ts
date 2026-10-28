@@ -75,7 +75,7 @@ describe("pluginSessionExtras with pins", () => {
     expect(copy?.description).toContain("original and its triggers unchanged");
     expect(copy?.description).toContain("explicitly asks");
     expect(copy?.parameters).toMatchObject({
-      required: ["workflow_id", "team_id", "name"],
+      required: ["workflow_id", "team_id", "name", "summary"],
       properties: {
         workflow_id: { description: expect.stringContaining("personal workflow ID") },
         team_id: { description: expect.stringContaining("destination team ID") },

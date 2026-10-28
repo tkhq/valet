@@ -756,9 +756,203 @@ An event waiter follows the rule for timers:
   as a timer.
 - Owner move and thread archive stop it through the 409 and `force`
   contract, with the human-cancel signal: neither filters by lease.
-- In a child session, an event waiter whose deadline falls within the child
-  timer bound keeps the child unsettled.
+- A child publishes `child.settled` after each completed turn.
+  The event lists outstanding leases, timers, and event waiters created no later than that result's settlement boundary.
+  Durable `sourceQueueItemId` provenance identifies the creating turn, including across recovery and retry.
+  Tools pass the stable creator ID from `ToolContext`, rather than looking up the current running item after asynchronous checks.
+  Work from later turns is excluded, even if the next claim races publication.
+  A different creator must have settled strictly before the result, or merged into its turn.
+  Legacy work has no creator, so same-millisecond boundary ties are excluded.
+  Channel-facing work reasons are redacted when their creator used private input or its provenance is unknown.
+  Gate signals do not include a session-wide background-work list.
+  A later signal turn publishes another event when it ends.
+  Parent notification does not wait for background work.
+- Sandbox retention checks background work separately from parent notification.
+  A child with an active lease, pending timer, or running event waiter keeps its sandbox.
+  The reclaim sweep also runs when warm retention is off.
+  It reclaims after cancelled background work stops owing turns.
+  An ended wakeup or released hold owes work until its deterministic terminal dispatch ID exists.
+  This guard survives a restart between the terminal transition and signal admission.
+  The guard is bounded: four WakeWatcher ticks from `endedAt` or the hold's `releasedAt`.
+  Human cancel commits `terminalSignalExpected` with cancellation or hold release, unless signal delivery is suppressed.
+  Cancelled wakeups use `wakeup:<id>:terminal`. Cancelled holds use `lease:<id>:released`; expired holds use `lease:<id>:expired`.
+  Before human admission, `startTerminalSignalAdmission` persists `terminalSignalStartedAt` once per cancellation. This timestamp starts the human signal's grace.
+  Deferred replacement, profile-change, and owner-move signals receive a full grace after provisioning, regardless of provisioning duration.
+  A provisioning attachment also blocks reclaim. Silent agent cancellation sets no expectation or admission timestamp.
+  Lease snapshots include both active and released rows. Historical expectations outside grace do not trigger dispatch reads.
+  Before reporting an observed gap after grace, the sweep checks its dispatch ID again.
+  Successful admission clears the gap, even when no sweep ran inside grace.
+  Loss reporters share `claimTerminalSignalLoss`, scoped to the session, work ID, and terminal admission clock.
+  The durable `terminalSignalLossReportedAt` marker stores the terminal timestamp and permits one reporter for each expectation.
+  A later admission-clock write cannot reopen the same transition's loss claim.
+  WakeWatcher and human cancellation claim known failures before counting them.
+  The sweep counts only unreported gaps, with reason `child_terminal_grace` on `valet.wakeups.signals_lost`.
+  Historical rows unseen within grace do not produce that diagnostic.
+  The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal.
+  Failed or refused starts, bad rows, and silent cancellation never set it and never count.
+  Existing rows without this flag do not promise a terminal signal.
+  With warm retention off, recent human activity gets the platform idle timeout as grace.
+  The grace is `VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes, so one 15-minute sweep cadence cannot skip it.
+  Queued work always blocks reclaim.
+  Reclaim stamps follow successful sandbox-token revocation.
+  A failed revoke leaves the row eligible for retry.
+  Under cleanup, the engine session sets a reclaim fence before destruction and rechecks durable submissions and active execution.
+  A running turn or an in-flight claim aborts reclaim. The claim reservation spans the store await and local ownership installation.
+  All thread admissions remain durable while fenced. They cannot inject into a retiring turn or claim its attachment.
+  After destroy returns, the caller evicts the terminal session without deleting submissions. A pending-release failure keeps its cached owner.
+  The old reference stays fenced. Admissions on it schedule recovery after cleanup, without awaiting that recovery inside the barrier.
+  Recovery builds one fresh session and kicks its durable queue. No admission caller needs its own reclaim protocol.
+  Reclaim eviction refuses active execution. Session builders replace idle released entries; `liveSession()` reads cached or draining ownership.
+  The durable handle remains owned until a provider destroy succeeds and provider status confirms `released`.
+  A retry uses that handle directly, never the released attachment's no-op destroy.
+  Both the parked handle and the session handle are cleared after confirmation, before revoke.
+  Handle clearing uses a compare-and-set against the destroyed ID.
+  Final cleanup checks the attachment identity, durable handle, watched item, and settlement timestamp.
+  It skips cache eviction, session-token revocation, and the reclaim stamp when a replacement or newer cycle exists.
+  Eager and retention reclaim acquire the child delivery lock before the per-session cleanup barrier.
+  Both locks cover provider destruction, status confirmation, and final cleanup. Session resolution waits for cleanup before using the cache.
+  Senders update subscriptions before taking the cleanup barrier. They resolve outside it, then validate cached identity inside it before admission and watch repoint.
+  If reclaim replaced the resolved session, the sender resolves again. Cleanup owners never acquire the delivery lock.
+  The sender does not hold delivery through admission, so in-flight parent result admission cannot block new child work.
+  A retry calls provider destroy again but does not recount a resource already confirmed absent.
 - Event waiters on hidden threads are counted and never named.
+
+### F3. Internal child events (TKAI-657)
+
+Valet is an internal event producer with service `valet`.
+The child subject is `valet:session:<child session id>`.
+The normalized keys are `child.settled` and `child.gate_opened`.
+
+Spawning a child creates an engine event waiter on the parent's spawning thread.
+The waiter has no deadline.
+`wakeup_list` shows it as `Child updates: <child session id>`.
+Host-created subscriptions do not consume the agent background-work quota.
+They do not block archive, owner move, busy checks, or workflow run archive.
+Archiving the parent thread or moving its session cancels these subscriptions.
+Workflow run archive also cancels them.
+These operations cancel idle `done` subscriptions as well as `running` subscriptions.
+Only an explicit `child_send` can restore a cancelled subscription.
+Cancellation removes buffered events and outbox rows.
+It advances the recovery boundary so a later send does not replay cancelled history.
+A drop-log row records owed results that cancellation discards.
+Unadmitted automatic replies receive a failure record.
+Deleted children lose their pending delivery state on the next delivery or recovery pass.
+
+`wakeup_cancel` stops notifications without stopping the child.
+`child_send` restores delivery after cancellation or archive.
+A notified child with no remaining work ends its subscription.
+Later signal turns and pending gates can reopen an ended subscription.
+They do not reopen a cancelled subscription.
+Pending gates reach the parent even when the watch is already settled.
+The retention sweep ends idle subscriptions after background work stops without another turn.
+Publication, admission, cancellation, and idle close share a per-child host lock.
+After gate lookup, admission checks that the waiter is running and still buffers the same digest under that lock.
+A completed cancellation prevents in-flight delivery, including after explicit reactivation clears the old buffer.
+An explicit send to a running subscription changes no delivery state and does not wait behind parent admission.
+An idle close checks the outbox under that lock.
+Its store transition also requires an empty buffer.
+A publication after the close restores the ended waiter before ingestion.
+Gate Slack cards resolve the stored origin even after settlement notification.
+Private input and reply-route restrictions still apply.
+The privacy check includes the gate submission itself, not only earlier transcript entries.
+It follows merged constituents and scans through the turn's last transcript entry.
+For a running turn, it scans all current entries, including injected input before its merge write completes.
+Queued followups without transcript entries do not contaminate an earlier turn.
+Settlement routing applies the same inclusive check before it permits an automatic channel reply.
+Parent gate signals use the same origin resolver as gate cards.
+If the saved channel route cannot see the gate, the parent signal omits the origin and gate title.
+
+Child events use `ingestEvent`, subject matching, `appendEventMatch`, and WakeWatcher delivery.
+Internal events do not create org event receipts or match user subscriptions.
+Ingestion nudges the matched waiter for immediate delivery.
+The digest keeps the bounded result and internal string refs.
+Published events retain their delegation generation and reply route.
+A later `child_send` does not discard an earlier truthful result or its automatic reply.
+Only the reported generation can mark its watch settled.
+A claimed parent delegation keeps its own generation after a queued send moves the watch.
+Its durable pending-result state supports recovery without the live watcher.
+Its result uses its own tool scope, not the later queued send's scope.
+At claim, a signal captures the delegation source from its thread's last started turn.
+The claim also persists the inherited tool scope.
+A queued `child_send` cannot replace that source or widen that scope.
+Unknown legacy provenance cannot acknowledge a newer queued delegation.
+
+The internal `child_event_outbox` stores each event before ingestion.
+Publication uses the engine digest's NUL-stripping helper on all event strings, including nested payload values and keys.
+Background-work lists are stripped before encoding them as JSON text in refs.
+The same sanitized event reaches ingestion and digest construction; NUL cannot block outbox retries.
+Its child index supports replay after a buffer drain or restart.
+Publication drains older pending results before newer results.
+Creation timestamps increase per child to preserve result order.
+Gates retain delivery priority.
+An ingestion failure starts retries even when the buffer is empty.
+The buffer holds at most 200 digests.
+Child results leave ten slots for gates.
+Overflow stays in the outbox until delivery succeeds or a permanent denial ends delivery.
+No result is coalesced or abandoned at the buffer limit.
+Gate delivery runs before result delivery.
+One retryable result does not block another digest.
+Pending-cap diagnostics use one durable row per blocking incident.
+A successful delivery pass clears the incident marker.
+
+WakeWatcher admits each child signal before removing its digest.
+`admitSignal` enforces edge authorization and the engine hop budget at delivery.
+The dispatch id uses `namespaceInternalDispatchId(child, settled:<child>:<turn>)`.
+A retry returns the same parent submission.
+Transient delivery errors keep the event for the next pass.
+Permanent denials write the existing drop-log reasons.
+`engine_queue_items.child_result_delivery` records `pending`, `delivered`, or `denied` for child signal results.
+The claim writes `pending` before a signal or parent-delegated turn starts.
+Queue content and metadata remain JSON-encoded text, including escaped NUL characters.
+The claim reads provenance in JavaScript and writes `pending` inside the claim transaction, without casting user JSON to `jsonb`.
+Only sessions with the durable `purpose: child` task marker receive this state.
+A parent link alone does not identify a task child.
+Team assistant conversations do not receive pending child-result markers.
+Startup repair clears unwatched pending markers from earlier claims.
+The repair is safe to run again and preserves watched and resolved results.
+Delivery resolution does not change the turn's execution outcome or activity clock.
+The first resolution wins.
+Recovery treats delivered and denied results as resolved.
+The turn observer and watcher resolve merged and superseded signal results without a restart.
+Deletion and cancellation deny pending results before clearing delivery state.
+Recovery denies results for archived, deleted, or missing children without rebuilding their sessions.
+A consumed source also removes a stale outbox entry without blocking later results.
+
+Internal subscriptions use bounded source history instead of the external output budget.
+The parent's durable dispatch ids provide replay protection.
+Due-row scans exclude idle and ended subscriptions.
+A partial buffer index supports ready event rows.
+Boot recovery restores subscriptions that still owe work.
+The indexed `child_watches.delivery_active` marker identifies subscriptions that can still owe delivery.
+Recovery pages unsettled rows, delivery-active rows, and children with outbox entries.
+An indexed pending-result marker also selects child turns that started after an idle close.
+A crash before publication cannot hide those turns from recovery.
+The periodic outbox retry sweep also queries indexed, settled `pending` results after a 30-second grace.
+It publishes missing results without `rearm` or a restart, including when the settlement-event append failed before observer delivery.
+Delivered history is excluded from this selector. Existing privacy and activity checks retain their own transcript reads.
+The `valet.child.results_recovered` counter records results restored to the outbox or admitted during runtime recovery.
+Idle close refuses while such a result remains pending.
+Fully-done historical rows require no engine-store reads.
+Each recovery row has its own error handler.
+Recovery runs in the background without delaying WakeWatcher or readiness.
+Shutdown drains recovery and delivery retry work before closing the stores.
+`child_watches.events_started_at` separates pipeline turns from legacy history.
+Legacy rows start this boundary at their first pipeline boot.
+Boot recovery never republishes older signal turns.
+The old per-item dispatch id still acknowledges a watched legacy submission.
+Boot acknowledgement does not reset settled retention or reclaim stamps.
+
+The delivered types stay `child.settled` and `child.gate_opened`.
+Private transcript input permanently downgrades an automatic reply route.
+Gate updates use manual replies.
+Config-change eviction does not discard an active owner's invalidation.
+It fences old claims and persists a token, then rebuilds without waiting for unrelated active threads.
+The rebuilt owner shares compute but cannot claim a predecessor's active thread until that run ends.
+A parked durable gate transfers to the rebuilt owner. Reclaim and teardown count all owners of the attachment.
+Reclaim still refuses active execution. Shutdown fences and evicts all cached owners without deleting durable work.
+
+Delivery intersects the child session, result submission, and delegation submission tool scopes.
+Gate delivery also intersects the gate thread's scope.
 
 ## Part G: Subscriptions
 

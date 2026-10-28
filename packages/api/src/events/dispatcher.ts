@@ -1,4 +1,3 @@
-import type { Appearance } from "@valet/shared";
 /**
  * Event-delivery dispatcher: drains `event_deliveries` rows into their
  * subscription targets (workflow run start / assistant signal prompt /
@@ -25,6 +24,7 @@ import type { Appearance } from "@valet/shared";
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
+import type { Appearance } from "@valet/shared";
 import { slackEventChannel } from "../services/thread-access.js";
 import type { EventHead } from "../services/event-columns.js";
 import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
@@ -111,8 +111,12 @@ export interface AssistantDeliverFn {
 }
 
 export interface EventDispatcherDeps {
+  /** Clear expired intent text without blocking event delivery. */
+  retainExternalUsage?: () => Promise<void>;
   /** Drain the durable personal attention outbox on the existing event rail. */
   drainAttention?: () => Promise<void>;
+  /** Bounded classification on the existing durable retry rail. */
+  drainTagging?: () => Promise<void>;
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
@@ -359,6 +363,10 @@ export class EventDispatcher {
         // The outbox serializes each transport independently across ticks.
         void this.deps.drainAttention()
           .catch(err => console.error("attention outbox drain failed:", err));
+      }
+      void this.deps.retainExternalUsage?.().catch(() => console.warn("Intent retention failed. Check database availability."));
+      if (this.deps.drainTagging) {
+        void this.deps.drainTagging().catch(() => console.warn("Tagging batch failed. Check the model provider and queued tagging attempts."));
       }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving

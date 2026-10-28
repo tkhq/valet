@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { namespaceInternalDispatchId } from "@valet/engine";
+import { canDeliverMidTurn, MID_TURN_DELIVERY_KEY, namespaceInternalDispatchId } from "@valet/engine";
 import type {
   ChannelOrigin,
   ChannelTransport,
@@ -24,7 +24,7 @@ import type {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, childReplyDeliveries, childWatches } from "../schema/index.js";
 import { submitSessionPrompt } from "../routes/messages.js";
-import { buildChildSender, childSendPromptOptions, ChildWatcher, parentDelegationMetadata, type ChildrenDeps } from "./children.js";
+import { buildChildSender, childGateOrigin, childSendPromptOptions, ChildWatcher, parentDelegationMetadata, type ChildrenDeps } from "./children.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -76,10 +76,12 @@ function delegatedItem(id: string, threadId: string, parent: { sessionId: string
 /** Every `child.settled` submission on a session, oldest first, settled or not. */
 async function childSettledSignals(sessionId: string): Promise<Array<QueueItem & { content: SignalContent }>> {
   const { engineStore } = api!.providers;
-  const items = [
+  // A parent turn can settle between these reads. Count each durable item once.
+  const byId = new Map([
     ...(await engineStore.listUnsettledSubmissions(sessionId)),
     ...(await engineStore.listSettledSubmissionsBefore(sessionId, Number.MAX_SAFE_INTEGER)),
-  ].sort((a, b) => a.createdAt - b.createdAt);
+  ].map(item => [item.id, item]));
+  const items = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
   return items.filter(
     (item): item is QueueItem & { content: SignalContent } =>
       typeof item.content === "object" && item.content !== null && "kind" in item.content &&
@@ -152,6 +154,9 @@ async function parentUpdateSettled(
 ): Promise<void> {
   const replyId = namespaceInternalDispatchId(childId, `settled:${childId}:${childItemId}`);
   const parentItemId = await vi.waitFor(async () => {
+    await api!.providers.wakeWatcher.sweep();
+    // WakeWatcher delivers the buffered `child.settled` event on its sweep.
+    await api!.providers.wakeWatcher.sweep();
     const [intent] = await api!.providers.db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
     if (!intent?.queueItemId) throw new Error(`The parent update for ${childItemId} is not admitted yet`);
     return intent.queueItemId;
@@ -176,6 +181,66 @@ describe("delegated child completion over a channel", () => {
     // Delivery is once: further dispatcher passes do not post again.
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
+  });
+
+  it.each(["gate", "settlement"] as const)("bot merged-input repro: private mid-turn input protects the delegated %s", async event => {
+    const childId = `child-mid-turn-${event}`;
+    const run = await bootDelegation(childId);
+    const { db, engineStore: store } = api!.providers;
+    await store.settleUnclaimed(childId, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, childId, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    const before = run.transport.sent.length;
+    const resumed = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: childId, message: "delegated D2" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
+    );
+    if (!resumed) throw new Error("the second delegation was not admitted");
+    const d2 = resumed.queueItemId;
+    await store.claimSubmission({ sessionId: childId, threadId: run.childThreadId, itemId: d2, attemptId: "D2", ownerId: "test" });
+    const now = Date.now();
+    await store.appendEntries(childId, run.childThreadId, [{ type: "message", id: "D2-first", sessionId: childId,
+      threadId: run.childThreadId, parentId: null, createdAt: now, role: "user", content: "delegated D2", queueItemId: d2 }]);
+    const privateId = "private-merged-input";
+    await store.admitSubmission(childId, run.childThreadId, { ...delegatedItem(privateId, run.childThreadId,
+      { sessionId: run.parentId, threadId: run.parentThread.id }), metadata: { [MID_TURN_DELIVERY_KEY]: true }, author: { id: USER_ID }, content: "SECRET acquisition numbers" });
+    const injected = await store.getQueueItem(childId, privateId);
+    const running = await store.getQueueItem(childId, d2);
+    if (!injected || !running) throw new Error("the running turn or injected input is missing");
+    expect(canDeliverMidTurn(injected, running, USER_ID)).toBe(true);
+    await store.appendEntries(childId, run.childThreadId, [{ type: "message", id: "private-injected", sessionId: childId,
+      threadId: run.childThreadId, parentId: null, createdAt: now + 1, role: "user", content: "SECRET acquisition numbers", queueItemId: privateId }]);
+    await store.settleUnclaimed(childId, run.childThreadId, privateId, { outcome: "merged" }, { mergedIntoItemId: d2 });
+    if (event === "gate") {
+      const gate = { id: "mid-turn-private-gate", sessionId: childId, threadId: run.childThreadId, queueItemId: d2,
+        resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "SECRET acquisition approval", actions: [], status: "pending" as const,
+        createdAt: now + 2, updatedAt: now + 2 };
+      await store.saveDecisionGate(childId, run.childThreadId, gate);
+      await run.watcher.reportGateOpened(childId, gate);
+      await vi.waitFor(async () => {
+        await api!.providers.wakeWatcher.sweep();
+        expect(await store.getQueueItemByDispatchId(run.parentId, `${childId}:gate-opened:${childId}:${gate.id}`)).not.toBeNull();
+      });
+      const item = await store.getQueueItemByDispatchId(run.parentId, `${childId}:gate-opened:${childId}:${gate.id}`);
+      expect(await childGateOrigin(db, store, childId, d2)).toBeUndefined();
+      expect(item?.content).not.toHaveProperty("origin");
+      expect(JSON.stringify(item?.content)).not.toContain(gate.title);
+    } else {
+      const fence = { itemId: d2, attemptId: "D2" };
+      await store.reserveSettlement(childId, run.childThreadId, d2, { outcome: "completed" }, fence);
+      await store.finalizeSettlement(childId, run.childThreadId, d2, fence);
+      await run.watcher.observeTurn(childId, d2);
+      const signals = await vi.waitFor(async () => {
+        await api!.providers.wakeWatcher.sweep();
+        const found = await childSettledSignals(run.parentId);
+        expect(found).toHaveLength(2);
+        return found;
+      });
+      await run.parentThread.awaitResult(signals[1]!.id);
+      await api!.providers.channelHost.retryChildReplies();
+      expect(signals.at(-1)?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+      expect(run.transport.sent).toHaveLength(before);
+    }
   });
 
   it("keeps the origin thread when the delegating parent thread resumes a settled child", async () => {
@@ -222,6 +287,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume-web", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
       return found;
@@ -253,6 +319,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume-elsewhere", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
       return found;
@@ -325,6 +392,7 @@ describe("delegated child completion over a channel", () => {
 
     await engineStore.settleUnclaimed("child-crash-elsewhere", run.childThreadId, steer.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 1) throw new Error("the settlement is not admitted yet");
       return found;
@@ -376,6 +444,7 @@ describe("delegated child completion over a channel", () => {
     await engineStore.settleUnclaimed("child-promote-update", run.childThreadId, run.queueItemId, { outcome: "completed" });
     const replyId = namespaceInternalDispatchId("child-promote-update", `settled:child-promote-update:${run.queueItemId}`);
     const queued = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const [intent] = await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
       if (!intent?.queueItemId) throw new Error("the parent update is not admitted yet");
       return intent.queueItemId;
@@ -406,6 +475,7 @@ describe("delegated child completion over a channel", () => {
 
     await engineStore.settleUnclaimed("child-legacy", run.childThreadId, run.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 1) throw new Error("the settlement is not admitted yet");
       return found;
@@ -435,7 +505,10 @@ describe("delegated child completion over a channel", () => {
     if (!takeoverId) throw new Error("human steer was not admitted");
     await vi.waitFor(async () => expect((await watchRow())?.queueItemId).toBe(takeoverId), { timeout: 30_000, interval: 20 });
     await engineStore.settleUnclaimed("child-retake", run.childThreadId, takeoverId, { outcome: "completed" });
-    await vi.waitFor(async () => expect((await watchRow())?.settled).toBe(true), { timeout: 30_000, interval: 20 });
+    await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
+      expect((await watchRow())?.settled).toBe(true);
+    }, { timeout: 30_000, interval: 20 });
 
     // The delegating thread sends new work. The person's context is in the
     // child's transcript, so the route comes back as manual, not automatic.
@@ -447,6 +520,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-retake", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
       return found;
@@ -504,6 +578,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed(childId, run.childThreadId, resumed.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
       return found;
@@ -546,6 +621,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-private-ran", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
       return found;
@@ -597,6 +673,7 @@ describe("delegated child completion over a channel", () => {
     await engineStore.settleUnclaimed("child-promote-twice", run.childThreadId, delegated, { outcome: "completed" });
 
     const signals = await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const found = await childSettledSignals(run.parentId);
       if (found.length < 1) throw new Error("the settlement is not admitted yet");
       return found;
@@ -656,6 +733,48 @@ describe("delegated child completion over a channel", () => {
     expect(watch?.replyRoute).toBe("origin");
   });
 
+  it("restores gates, results, and automatic replies after cancellation and child_send", async () => {
+    const run = await bootDelegation("child-cancel-resume");
+    const { engineStore } = api!.providers;
+    await run.watcher.ensureSubscription({ childSessionId: run.child.id, parentSessionId: run.parentId, parentThreadId: run.parentThread.id });
+    await engineStore.transitionWakeup(`wk_child_events:${run.child.id}`, ["running"], "cancelled", {}, Date.now());
+    const next = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: run.child.id, message: "resume with approval" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN });
+    const gate = { id: "resumed-gate", sessionId: run.child.id, threadId: run.childThreadId, queueItemId: next!.queueItemId,
+      resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Continue?", actions: [], status: "pending" as const,
+      createdAt: Date.now(), updatedAt: Date.now() };
+    await engineStore.saveDecisionGate(run.child.id, run.childThreadId, gate);
+    await run.watcher.reportGateOpened(run.child.id, gate);
+    await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
+      expect(await engineStore.getQueueItemByDispatchId(run.parentId, `${run.child.id}:gate-opened:${run.child.id}:${gate.id}`)).not.toBeNull();
+    });
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, next!.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, run.child.id, next!.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+  });
+
+  it("posts a buffered completion after child_send moves the watch", async () => {
+    const run = await bootDelegation("child-buffered-reply");
+    const { engineStore } = api!.providers;
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await vi.waitFor(async () => expect((await engineStore.getWakeup(`wk_child_events:${run.child.id}`))?.eventBuffer).toHaveLength(1));
+    const next = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: run.child.id, message: "more work" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID });
+    await parentUpdateSettled(run, run.child.id, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect((await api!.providers.db.select().from(childWatches))[0]).toMatchObject({ queueItemId: next!.queueItemId, settled: false });
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, next!.queueItemId, { outcome: "completed" });
+    await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
+      expect((await api!.providers.db.select().from(childWatches))[0]?.settled).toBe(true);
+    });
+  });
+
   it("posts a completion whose admission was still in flight when the parent sent more work", async () => {
     const run = await bootDelegation("child-admit-race");
     const { db, engineStore } = api!.providers;
@@ -670,7 +789,11 @@ describe("delegated child completion over a channel", () => {
     try {
       await engineStore.settleUnclaimed("child-admit-race", run.childThreadId, run.queueItemId, { outcome: "completed" });
       const intent = async () => (await db.select().from(childReplyDeliveries))[0];
-      await vi.waitFor(async () => expect(await intent()).toBeDefined(), { timeout: 30_000, interval: 20 });
+      // The sweep stays unawaited: the held admission blocks its delivery.
+      await vi.waitFor(async () => {
+        void api!.providers.wakeWatcher.sweep();
+        expect(await intent()).toBeDefined();
+      }, { timeout: 30_000, interval: 20 });
 
       // The parent sends more work while the completion is being admitted.
       const sender = buildChildSender(run.deps, run.watcher);
@@ -679,9 +802,11 @@ describe("delegated child completion over a channel", () => {
         { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
       );
       if (!resumed) throw new Error("child_send did not admit the follow-up");
-      // A dispatcher pass while the admission is in flight must not end the reply.
+      // An in-flight admission keeps its reply intent open.
+      // No reply can post before the admission returns its receipt.
       await api!.providers.channelHost.retryChildReplies();
-      expect(await intent()).toMatchObject({ completedAt: null, failedAt: null });
+      expect(await intent()).toMatchObject({ queueItemId: null, completedAt: null, failedAt: null });
+      expect(run.transport.sent).toHaveLength(0);
     } finally {
       release();
     }
@@ -718,6 +843,7 @@ describe("delegated child completion over a channel", () => {
     await engineStore.settleUnclaimed("child-takeover", run.childThreadId, successor, { outcome: "completed" });
 
     await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
       const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-takeover"));
       expect(watch?.settled).toBe(true);
     }, { timeout: 30_000, interval: 50 });

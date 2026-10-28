@@ -355,6 +355,19 @@ describe("Ask Valet conversations", () => {
     expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(working.threadId);
   });
 
+  it("does not keep a conversation busy for a host child subscription", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const chat = await open({ fresh: true });
+    await use(chat);
+    await api.providers.engineStore.createWakeup({ id: "wk_child_events:idle-child", sessionId: chat.sessionId, threadId: chat.threadId,
+      kind: "event", status: "running", reason: "Child updates", subjects: ["valet:session:idle-child"],
+      eventMatch: { childSessionId: "idle-child", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[chat.threadId, false]]);
+    expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(chat.threadId);
+  });
+
   it("reopens a conversation while background work it started is still open", async () => {
     api = await bootTestApi();
     const { open, list } = conversations("user");

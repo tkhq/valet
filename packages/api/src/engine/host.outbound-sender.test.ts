@@ -6,7 +6,8 @@ import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 

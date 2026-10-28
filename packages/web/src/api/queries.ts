@@ -4,6 +4,7 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { useEffect } from "react";
 import { threadOriginBucket } from "~/lib/thread-origin";
 import { isAppAssistantThread } from "~/lib/thread-default";
 import {
@@ -25,6 +26,7 @@ import type {
   CreateThreadResponse,
   EditPreviewResponse,
   ForkThreadResponse,
+  MoveThreadRequest,
   ReturnToBranchResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
@@ -100,6 +102,17 @@ export function threadListFilters(sessionId: string) {
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────
+
+/** Starts loading a session's detail, which the thread view needs before it can show the thread. */
+export function prefetchSession(qc: QueryClient, id: string) {
+  void qc.prefetchQuery({ queryKey: qk.session(id), queryFn: () => api.getSession(id), staleTime: 15_000 });
+}
+
+/** Starts a session's detail as soon as its id is known. */
+export function usePrefetchSession(id: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (id) prefetchSession(qc, id); }, [qc, id]);
+}
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
@@ -203,14 +216,49 @@ export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<Li
   });
 }
 
+/** A thread opens with its newest entries; older ones load when the reader scrolls up. */
+export const TRANSCRIPT_TAIL = 50;
+export const TRANSCRIPT_FULL = 200;
+
+/** Keyed by thread alone, so a request can start before the thread's
+ * session is known: from the chat route's URL, or from a sidebar hover. */
+const qkTranscript = (threadId: string, limit: number) => ["thread-transcript", threadId, limit] as const;
+const transcriptQuery = (threadId: string, limit: number) => ({
+  queryKey: qkTranscript(threadId, limit),
+  queryFn: () => api.listMessages("", { limit, threadId }),
+});
+
+/** Starts loading a thread's newest page; a later `useMessages` shares the request or its answer. */
+export function prefetchTranscript(qc: QueryClient, threadId: string) {
+  void qc.prefetchQuery({ ...transcriptQuery(threadId, TRANSCRIPT_TAIL), staleTime: 15_000 });
+}
+
+/** Starts a thread's transcript as soon as its id is known, such as from the URL. */
+export function usePrefetchTranscript(threadId: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (threadId) prefetchTranscript(qc, threadId); }, [qc, threadId]);
+}
+
 export function useMessages(
   id: string,
   threadId?: string,
   opts?: Partial<UseQueryOptions<ListMessagesResponse>>,
+  limit: number = TRANSCRIPT_TAIL,
 ) {
+  const qc = useQueryClient();
+  // A workflow step's transcript has no thread route, so it has no early request.
+  const early = threadId && !id.startsWith("wf:") ? transcriptQuery(threadId, limit) : undefined;
   return useQuery<ListMessagesResponse>({
-    queryKey: qk.messages(id, threadId),
-    queryFn: () => api.listMessages(id, { limit: 200, threadId }),
+    queryKey: [...qk.messages(id, threadId), limit],
+    // Joins a prefetch still in flight; every later fetch reads the server.
+    queryFn: () => early ? qc.fetchQuery({ ...early, staleTime: 0 }) : api.listMessages(id, { limit, threadId }),
+    // A finished prefetch shows at once, with its own age.
+    initialData: early ? () => qc.getQueryData<ListMessagesResponse>(early.queryKey) : undefined,
+    initialDataUpdatedAt: early ? () => qc.getQueryState(early.queryKey)?.dataUpdatedAt : undefined,
+    // The newest page stays on screen while the full history loads. Another
+    // thread's data never stands in for this one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === id && previousQuery?.queryKey[3] === threadId ? previous : undefined,
     enabled: !!id,
     // Background refetches (window focus, network reconnect) would call
     // setThreadMessages and risk wiping in-flight optimistic / live state.
@@ -485,33 +533,174 @@ export function useMarkThreadsRead(sessionId: string) {
   });
 }
 
+type ThreadListData = ListThreadsResponse | InfiniteData<ListThreadsResponse>;
+
+function threadsIn(data: ThreadListData | undefined): ThreadSummary[] {
+  return !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads;
+}
+
+/** Moves one row between the default and archived lists in the cache. A
+ * row goes to the top of the first page; the next read puts it in order. */
+function moveArchivedRow(qc: QueryClient, sessionId: string, thread: ThreadSummary, archived: boolean) {
+  const { archivedAt: _previous, ...rest } = thread;
+  const row: ThreadSummary = archived ? { ...rest, archivedAt: Date.now() } : rest;
+  for (const [key, data] of qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))) {
+    if (!data) continue;
+    const archivedList = key[1] === sessionId && key[3] === "archived";
+    const without = (threads: ThreadSummary[]) => threads.filter(item => item.id !== thread.id);
+    // Only the paged default list and the archived list take a new row:
+    // search and fixed lists hold rows that match their own reads.
+    const takesRow = archivedList === archived && (archivedList || (key[1] === sessionId && key[3] === "pages"));
+    if (archivedList !== archived) {
+      qc.setQueryData<ThreadListData>(key, "pages" in data
+        ? { ...data, pages: data.pages.map(page => ({ ...page, threads: without(page.threads) })) }
+        : { ...data, threads: without(data.threads) });
+    } else if (takesRow && !threadsIn(data).some(item => item.id === thread.id)) {
+      qc.setQueryData<ThreadListData>(key, "pages" in data
+        ? { ...data, pages: data.pages.map((page, index) => index === 0 ? { ...page, threads: [row, ...page.threads] } : page) }
+        : { ...data, threads: [row, ...data.threads] });
+    }
+  }
+}
+
+const threadArchiveKey = (sessionId: string) => ["thread-archive", sessionId] as const;
+
+/** Archive or restore a thread. The row moves at once; a refused save, such
+ * as a thread with background work, moves it back. */
+/**
+ * Each thread's last state the server confirmed, while optimistic changes
+ * to it are pending. When the last pending change settles, the row shows
+ * that state: saves can fail in any order, and each one's own snapshot may
+ * be another pending change's guess.
+ */
+type ConfirmedThread = { archived: boolean; title: string | undefined; pending: number };
+/** Per query client: the records describe that client's cache. */
+const confirmedByClient = new WeakMap<QueryClient, Map<string, ConfirmedThread>>();
+function confirmedThreadsFor(qc: QueryClient): Map<string, ConfirmedThread> {
+  let map = confirmedByClient.get(qc);
+  if (!map) confirmedByClient.set(qc, map = new Map());
+  return map;
+}
+function beginThreadChange(qc: QueryClient, sessionId: string, threadId: string, current: { archived: boolean; title: string | undefined }): string {
+  const confirmedThreads = confirmedThreadsFor(qc);
+  const key = `${sessionId} ${threadId}`;
+  const record = confirmedThreads.get(key) ?? { ...current, pending: 0 };
+  record.pending += 1;
+  confirmedThreads.set(key, record);
+  return key;
+}
+/** Shows a thread's confirmed list and title. */
+function showConfirmedThread(qc: QueryClient, sessionId: string, thread: ThreadSummary, confirmed: { archived: boolean; title: string | undefined }) {
+  moveArchivedRow(qc, sessionId, thread, confirmed.archived);
+  qc.setQueriesData<ThreadListData>(threadListFilters(sessionId), (current) => mapThreadData(current, item => {
+    if (item.id !== thread.id) return item;
+    const { title: _previous, ...rest } = item;
+    return confirmed.title === undefined ? rest : { ...rest, title: confirmed.title };
+  }));
+}
+
+/** The confirmed state once no change is pending, else undefined. */
+function settleThreadChange(qc: QueryClient, key: string): { archived: boolean; title: string | undefined } | undefined {
+  const confirmedThreads = confirmedThreadsFor(qc);
+  const record = confirmedThreads.get(key);
+  if (!record) return undefined;
+  record.pending -= 1;
+  if (record.pending > 0) return undefined;
+  confirmedThreads.delete(key);
+  return record;
+}
+
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean } & ForceOption>({
+  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean } & ForceOption, { thread: ThreadSummary | undefined; change: string }>({
+    mutationKey: threadArchiveKey(sessionId),
     mutationFn: ({ threadId, archived, force }) =>
       api.patchThread(threadId, { archived, ...(force ? { force: true } : {}) }),
-    onSuccess: async (saved, { threadId }) => {
+    onMutate: async ({ threadId, archived }) => {
+      // An older read must not put the row back while the save runs.
+      await qc.cancelQueries(threadListFilters(sessionId));
+      const thread = qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))
+        .flatMap(([, data]) => threadsIn(data)).find(item => item.id === threadId);
+      // The row's list before this change, unless an earlier one is pending.
+      const change = beginThreadChange(qc, sessionId, threadId, { archived: thread?.archivedAt !== undefined, title: thread?.title });
+      if (thread) moveArchivedRow(qc, sessionId, thread, archived);
+      return { thread, change };
+    },
+    onSuccess: async (saved, { threadId, archived }, context) => {
+      const record = context && confirmedThreadsFor(qc).get(context.change);
+      if (record) record.archived = archived;
       // A forced archive stopped the thread's background work.
       if (saved.cancelledWork) qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
       // An older supplemental activity read must not reinsert the archived row.
       await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
         && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });
-      qc.invalidateQueries(threadListFilters(sessionId));
-      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+    },
+    onSettled: (_data, _error, _variables, context) => {
+      const confirmed = context && settleThreadChange(qc, context.change);
+      if (confirmed && context.thread) showConfirmedThread(qc, sessionId, context.thread, confirmed);
+      // Read the lists once, after the last of several quick archives: an
+      // earlier read would show rows whose saves are still running. A read
+      // already on its way stays: cancelling it would put back the data it
+      // started from, over the confirmed state above.
+      if (qc.isMutating({ mutationKey: threadArchiveKey(sessionId) }) > 1) return;
+      qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
     },
   });
 }
 
-/** Rename a thread. Use `null` to clear its stored title. */
+/** Rename a thread. Use `null` to clear its stored title. The list shows the
+ * new title at once and restores the old one if the save fails. */
 export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({
+  const retitle = (threadId: string, title: string | undefined) => qc.setQueriesData<ThreadListData>(threadListFilters(sessionId),
+    (current) => mapThreadData(current, thread => {
+      if (thread.id !== threadId) return thread;
+      const { title: _previous, ...rest } = thread;
+      return title === undefined ? rest : { ...rest, title };
+    }));
+  return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }, { change: string; thread: ThreadSummary | undefined }>({
     mutationFn: ({ threadId, title }) =>
       api.patchThread(threadId, { title }),
-    onSuccess: () => {
-      qc.invalidateQueries(threadListFilters(sessionId));
-      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+    onMutate: async ({ threadId, title }) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      const thread = qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))
+        .flatMap(([, data]) => threadsIn(data)).find(item => item.id === threadId);
+      const change = beginThreadChange(qc, sessionId, threadId, { archived: thread?.archivedAt !== undefined, title: thread?.title });
+      retitle(threadId, title ?? undefined);
+      return { change, thread };
     },
+    onSuccess: (_saved, { title }, context) => {
+      const record = context && confirmedThreadsFor(qc).get(context.change);
+      if (record) record.title = title ?? undefined;
+    },
+    onSettled: (_data, _error, _variables, context) => {
+      const confirmed = context && settleThreadChange(qc, context.change);
+      if (confirmed && context.thread) showConfirmedThread(qc, sessionId, context.thread, confirmed);
+      qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
+    },
+  });
+}
+
+/** PATCH /threads/:id with `approvalBypass`: turn "Run without asking" on or
+ * off. The header shows the change at once and restores it if the save fails. */
+export function useSetThreadApprovalBypass(sessionId: string) {
+  const qc = useQueryClient();
+  const mark = (threadId: string, on: boolean) => qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+    threadListFilters(sessionId),
+    (current) => mapThreadData(current, thread => {
+      if (thread.id !== threadId) return thread;
+      const { approvalBypass: _previous, ...rest } = thread;
+      return on ? { ...rest, approvalBypass: true as const } : rest;
+    }),
+  );
+  return useMutation<PatchThreadResponse, Error, { threadId: string; on: boolean }>({
+    mutationFn: ({ threadId, on }) => api.patchThread(threadId, { approvalBypass: on }),
+    onMutate: async ({ threadId, on }) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      mark(threadId, on);
+    },
+    onError: (_error, { threadId, on }) => mark(threadId, !on),
+    onSettled: () => qc.invalidateQueries(threadListFilters(sessionId)),
   });
 }
 
@@ -682,12 +871,34 @@ export function useCancelQueuedItem() {
  * the thread list; the caller opens it. */
 export function useForkThread(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string }>({
-    mutationFn: ({ threadId, entryId }) => api.forkThread(threadId, { entryId }),
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string; destination?: "here" | "private" }>({
+    mutationFn: ({ threadId, entryId, destination }) => api.forkThread(threadId, { entryId, ...(destination ? { destination } : {}) }),
     onSuccess: (result) => {
       void qc.invalidateQueries(threadListFilters(sessionId));
       if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
     },
+  });
+}
+
+/** Moves a thread into another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * The source is archived; the caller opens the copy. */
+export function useMoveThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string } & MoveThreadRequest>({
+    mutationFn: ({ threadId, ...body }) => api.moveThread(threadId, body),
+    // The copy joins another workspace's list, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Which workspace holds a thread, for a link to a thread outside the open one. */
+export function useThreadWorkspace(threadId: string | undefined) {
+  return useQuery({
+    queryKey: ["thread-address", threadId],
+    queryFn: () => api.getThreadAddress(threadId!),
+    enabled: !!threadId,
+    staleTime: 60_000,
+    select: (address) => address.workspace,
   });
 }
 

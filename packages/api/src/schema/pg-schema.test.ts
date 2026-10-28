@@ -58,6 +58,7 @@ const APP_TABLES = [
   "team_members",
   "assistants",
   "child_watches",
+  "session_config_invalidations",
   "notifications",
   "user_notification_preferences",
   "event_drop_log",
@@ -978,6 +979,16 @@ describe("pg app schema + migrations", () => {
         );
       await mirrored("wf_c");
       await expect(mirrored("wf_d")).rejects.toThrow();
+    });
+
+    it("repairs durable session config invalidations on an already-migrated database", async () => {
+      await db.query('DROP TABLE "session_config_invalidations"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("durable session config invalidations");
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO session_config_invalidations (session_id, token) VALUES ($1, $2)", ["stale-session", "token"]);
+      await applyAppMigrations(db);
+      expect((await db.query("SELECT token FROM session_config_invalidations WHERE session_id = $1", ["stale-session"])).rows).toEqual([{ token: "token" }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {

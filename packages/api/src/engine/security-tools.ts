@@ -638,6 +638,7 @@ export const secHandoffTool = defineTool({
 
 export const secFsReadTool = defineTool({
   name: "sec_fs_read",
+  intent: "exempt",
   description:
     "Read one engagement-tree path (latest revision by default). /protocol.md and /plan.yml are read-only mounts; " +
     "cells' state docs live at /cells/<dir>/state.yml.",
@@ -663,6 +664,7 @@ export const secFsReadTool = defineTool({
 
 export const secFsListTool = defineTool({
   name: "sec_fs_list",
+  intent: "exempt",
   description: "List engagement-tree paths under a prefix, with each path's latest revision number and size.",
   parameters: Type.Object({
     prefix: Type.Optional(Type.String({ description: "Path prefix, e.g. '/cells/'. Omit for the whole tree." })),
@@ -763,6 +765,7 @@ export const secFindingsListTool = defineTool({
 
 export const secFsWriteTool = defineTool({
   name: "sec_fs_write",
+  intent: "exempt",
   description:
     "Write one file into YOUR cell directory (/cells/<your dir>/...) in the engagement tree. Writes append " +
     "revisions — nothing updates in place. state.yml writes are validated against the protocol. " +

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider,
   entriesToAgentMessages, type BusEvent, type MessageEntry, type ToolDef,

@@ -22,10 +22,11 @@ import { appendFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { PgSessionStore, applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import {
   Engine,

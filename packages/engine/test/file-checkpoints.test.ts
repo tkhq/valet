@@ -3,12 +3,13 @@
  * checkpoints"): per-turn git snapshots in the sandbox, undone with an edit
  * and brought back with a return. Runs real git in a temporary directory.
  */
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   FILE_CHECKPOINT_KEY,

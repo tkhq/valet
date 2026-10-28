@@ -1933,7 +1933,7 @@ describe("update actions", () => {
       version: "dag/v1",
       nodes: [
         { id: "start", type: "trigger" },
-        { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
+        { id: "refresh", type: "session", mode: "start", prompt: "Scheduled push: {{trigger.data.input.push}}. If {{trigger.data.push}} is true, save the report." },
       ],
       edges: [{ from: "start", to: "refresh" }],
     };

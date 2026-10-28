@@ -32,6 +32,7 @@ import type {
   ProductAnnouncementsResponse,
   TeamOnePasswordStatusResponse,
   ThreadPlanResponse,
+  SessionOutcomeUsage,
   UsageBreakdownResponse,
   UsageDrillResponse,
   UsageOutcomesResponse,
@@ -64,7 +65,7 @@ import {
 } from "./fixtures/integrations";
 import { stressNotifications } from "./fixtures/notifications";
 import {
-  USAGE_PERIOD, USAGE_TEAM_ID, USAGE_USE_CASES, stressUsageBreakdown, stressUsageItems, stressUsageOutcomes, stressUsageToolEfficiency,
+  USAGE_PERIOD, USAGE_TEAM_ID, USAGE_USE_CASES, stressSessionOutcomes, stressUsageBreakdown, stressUsageItems, stressUsageOutcomes, stressUsageToolEfficiency,
 } from "./fixtures/usage";
 import {
   SIDEBAR_SESSION_ID, stressSidebarWakeups, fixedSidebarThreads, searchSidebarThreads, sidebarThreadPage, stressArchivedThreads,
@@ -112,6 +113,7 @@ function seedWorkflowRun(client: QueryClient): void {
 }
 
 function seedUsage(client: QueryClient): void {
+  client.setQueryData<SessionOutcomeUsage>(qkUsage.sessionOutcomes(USAGE_PERIOD, "team", USAGE_TEAM_ID), stressSessionOutcomes);
   client.setQueryData<UsageBreakdownResponse>(qkUsage.breakdown(USAGE_PERIOD, "team", USAGE_TEAM_ID), stressUsageBreakdown);
   client.setQueryData<UsageToolEfficiencyResponse>(qkUsage.toolEfficiency(USAGE_PERIOD, "team", USAGE_TEAM_ID), stressUsageToolEfficiency);
   client.setQueryData<UsageOutcomesResponse>(qkUsage.outcomes(USAGE_PERIOD, "team", USAGE_TEAM_ID), stressUsageOutcomes);

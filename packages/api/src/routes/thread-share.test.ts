@@ -5,7 +5,8 @@
  * running as its owner, and nothing else of the owner's workspace opens.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { WebSocket } from "ws";
 import { loadSessionMeta } from "../engine/session-meta.js";

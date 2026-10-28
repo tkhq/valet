@@ -477,8 +477,10 @@ async function fetchPullRequestFiles(
   limit: number,
 ): Promise<PullRequestFile[]> {
   const files: PullRequestFile[] = [];
+  // One page size for every page: a smaller last page would make GitHub
+  // count pages in that size and return files this loop already has.
+  const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit);
   for (let page = 1; files.length < limit; page++) {
-    const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit - files.length);
     const { data } = await octokit.request(
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
       { owner, repo, pull_number: pullNumber, per_page: perPage, page },
@@ -494,7 +496,7 @@ async function fetchPullRequestFiles(
     }
     if (data.length < perPage) break;
   }
-  return files;
+  return files.slice(0, limit);
 }
 
 /** Cuts a patch at the last whole line that fits in `budgetBytes`. Cutting on a
@@ -621,7 +623,7 @@ const inspectPullRequest = action(Type.Object({
   id: "github.inspect_pull_request",
   name: "Inspect Pull Request",
   description:
-    "Get detailed PR info including files changed, review comments, check status, and who is " +
+    "Get detailed PR info including merge time and merger, labels, files changed, review comments, check status, and who is " +
     "already requested to review or assigned. " +
     "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
     "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
@@ -719,6 +721,12 @@ const inspectPullRequest = action(Type.Object({
           title: pr.title,
           state: pr.state,
           merged: pr.merged,
+          /** Merge facts a report needs, so it does not call `get_issue` for each PR. */
+          merged_at: pr.merged_at,
+          merged_by: pr.merged_by?.login ?? null,
+          merge_commit_sha: pr.merge_commit_sha,
+          closed_at: pr.closed_at,
+          labels: (pr.labels ?? []).map((label) => label.name),
           draft: pr.draft,
           user: pr.user?.login,
           url: pr.html_url,
@@ -1662,6 +1670,66 @@ const searchCode = action(Type.Object({
   },
 });
 
+/** `@now` or `@today`, with an optional offset back in time: `@now-7d`, `@today-2w`. */
+const RELATIVE_DATE = /@(now|today)(?:-(\d{1,4})([hdw]))?(?![\w-])/g;
+const OFFSET_MS: Record<string, number> = { h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+
+/**
+ * Replaces relative dates in a search query with the ISO dates GitHub
+ * accepts. GitHub's REST search rejects `@today`, and a workflow template
+ * has no date arithmetic, so a tool step could not ask for "the last 7
+ * days" without this. `@now` is a UTC time to the second; `@today` is a
+ * UTC date.
+ */
+export function expandRelativeDates(q: string, now: Date): string {
+  return q.replace(RELATIVE_DATE, (_match, base: string, count: string | undefined, unit: string | undefined) => {
+    const offset = count !== undefined && unit !== undefined ? Number(count) * OFFSET_MS[unit] : 0;
+    const iso = new Date(now.getTime() - offset).toISOString();
+    return base === "today" ? iso.slice(0, 10) : `${iso.slice(0, 19)}Z`;
+  });
+}
+
+/** GitHub search returns at most 1000 results for one query, however it is paged. */
+const GITHUB_SEARCH_MAX_RESULTS = 1000;
+
+/** The `owner/repo` of a search result, from its `repository_url`. */
+function repoFullName(repositoryUrl: string | undefined): string | null {
+  return repositoryUrl?.split("/repos/")[1] ?? null;
+}
+
+/**
+ * Reads up to `limit` search results, in pages of at most 100. One request
+ * returned at most 100, so a week with more merged PRs needed an agent to
+ * split the date range, and the list it built could drop or repeat PRs.
+ */
+async function searchIssuePages(
+  octokit: Octokit,
+  args: { q: string; sort?: "created" | "updated" | "comments"; order?: "asc" | "desc" },
+  limit: number,
+) {
+  type SearchItem = Awaited<ReturnType<typeof octokit.rest.search.issuesAndPullRequests>>["data"]["items"][number];
+  const items: SearchItem[] = [];
+  let totalCount = 0;
+  let incomplete = false;
+  // One page size for every page: a smaller last page would make GitHub
+  // count pages in that size and return results this loop already has.
+  const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit);
+  for (let page = 1; items.length < limit; page++) {
+    const { data } = await octokit.request("GET /search/issues", {
+      q: args.q,
+      per_page: perPage,
+      page,
+      sort: args.sort,
+      order: args.order,
+    });
+    totalCount = data.total_count;
+    incomplete ||= data.incomplete_results;
+    items.push(...data.items);
+    if (data.items.length < perPage || items.length >= totalCount) break;
+  }
+  return { totalCount, incomplete, items: items.slice(0, limit) };
+}
+
 const searchIssues = action(Type.Object({
     q: Type.String({
       description:
@@ -1679,39 +1747,49 @@ const searchIssues = action(Type.Object({
       }),
     ),
     limit: Type.Optional(
-      Type.Integer({ minimum: 1, maximum: 100, description: "Max results (default: 30)" }),
+      Type.Integer({
+        minimum: 1,
+        maximum: GITHUB_SEARCH_MAX_RESULTS,
+        description: "Max results (default: 30, max 1000). Results above 100 are read in pages.",
+      }),
     ),
   }))({
   id: "github.search_issues",
   name: "Search Issues",
-  description: "Search issues and pull requests across GitHub",
+  description:
+    "Search issues and pull requests across GitHub. One call returns up to 1000 results, so a workflow " +
+    "tool step can list a week of merged PRs: `is:pr is:merged merged:>=@now-7d`. " +
+    "In a date qualifier, `@now` and `@today` are the time and UTC date when the call runs; add `-<n>h`, " +
+    "`-<n>d` or `-<n>w` to go back. `query` in the result shows the dates sent to GitHub. " +
+    "`truncated` is true when more results match than the call returned.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
-    const limit = Math.min(Math.max(args.limit ?? 30, 1), 100);
+    const limit = Math.min(Math.max(args.limit ?? 30, 1), GITHUB_SEARCH_MAX_RESULTS);
     try {
-      const { data } = await octokit.request("GET /search/issues", {
-        q: args.q,
-        per_page: limit,
-        sort: args.sort,
-        order: args.order,
-      });
+      const q = expandRelativeDates(args.q, new Date());
+      const { totalCount, incomplete, items } = await searchIssuePages(octokit, { ...args, q }, limit);
       return {
         success: true,
         data: {
-          total_count: data.total_count,
-          items: data.items.map((item) => ({
+          query: q,
+          total_count: totalCount,
+          /** GitHub stopped the search early (a timeout), so a match can be missing. */
+          incomplete_results: incomplete,
+          truncated: incomplete || totalCount > items.length,
+          items: items.map((item) => ({
             number: item.number,
             title: item.title,
             state: item.state,
             user: item.user?.login,
             url: item.html_url,
+            repo: repoFullName(item.repository_url),
             is_pr: !!item.pull_request,
-            labels: (item.labels as Array<unknown>)?.map((l) =>
-              typeof l === "string" ? l : (l as { name: string }).name,
-            ),
+            labels: (item.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)),
             created_at: item.created_at,
             updated_at: item.updated_at,
+            closed_at: item.closed_at,
+            merged_at: item.pull_request?.merged_at ?? null,
           })),
         },
       };

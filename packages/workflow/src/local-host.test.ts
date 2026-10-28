@@ -8,6 +8,7 @@ import { createDefaultNodeExecutors, executeStop, type NodeExecuteResult, type N
 import type { RunParams } from './store.js';
 import type { SessionNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
+import { scheduledTriggerData } from './dag/step-design.js';
 
 // ─── Test helpers (crashAt test only — the shared suite covers everything else) ─
 
@@ -140,6 +141,34 @@ describe('LocalRunHost crashAt "terminalizing"', () => {
       expect(run?.outcome).toBe('completed');
     } finally {
       await freshHost.stopHost();
+    }
+  });
+});
+
+// ─── A scheduled run's input reaches its steps ────────────────────────────────
+
+describe('LocalRunHost scheduled run input', () => {
+  it('gives a step the dataSchema default of a field the schedule leaves out', async () => {
+    const store = new InMemoryWorkflowStore();
+    const host = new LocalRunHost({ store, engine: makeRunHostFixtureEngine(), pollMs: 10, sweepMs: 20 });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger', dataSchema: { cluster: { type: 'string', default: '.+' }, lookback: { type: 'string', default: '7h' } } },
+        { id: 'read', type: 'set', values: { query: '{cluster=~"{{trigger.data.cluster}}"} since now-{{trigger.data.lookback}}' } },
+        { id: 'e', type: 'stop' },
+      ],
+      edges: [{ from: 't', to: 'read' }, { from: 'read', to: 'e' }],
+    };
+    const data = scheduledTriggerData(definition, { scheduleName: 'Morning scan', cron: '0 8 * * *', input: { lookback: '17h' } });
+    host.startHost();
+    try {
+      await host.start('run-scheduled', runParams({ input: { type: 'schedule', timestamp: '2026-01-01T08:00:00Z', data, metadata: {} } }), definition);
+      await waitFor(async () => (await store.getRun('run-scheduled'))?.status === 'settled');
+      const read = (await store.getCheckpoints('run-scheduled')).find((cp) => cp.nodeId === 'read');
+      expect(read?.result).toEqual({ query: '{cluster=~".+"} since now-17h' });
+    } finally {
+      await host.stopHost();
     }
   });
 });

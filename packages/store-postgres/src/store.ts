@@ -5,6 +5,7 @@ import {
   queuedOriginInputs,
   carryInputMetadata,
   withoutCarriedInputs,
+  stripNul,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
   EVENT_DELIVERED_MAX_KEYS,
@@ -19,7 +20,7 @@ import {
   ValidationError,
   withSpan,
 } from "@valet/engine";
-import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -55,6 +56,7 @@ import { isPgUniqueViolation } from "./db.js";
 import type { PgDb, PgQueryable } from "./db.js";
 import {
   asString,
+  asStringOrNull,
   entryToRow,
   jsonOrNull,
   parseJson,
@@ -96,6 +98,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     role: row.role ?? undefined,
     metadata: parseJson(row.metadata),
     status: row.status as QueueItem["status"],
+    childResultDelivery: row.childResultDelivery,
     outcome: row.outcome
       ? { outcome: row.outcome as SubmissionOutcome["outcome"], error: row.error ?? undefined }
       : undefined,
@@ -198,9 +201,10 @@ const STEER_CANDIDATES_SQL = `
 // time spent queued does not count against timeout_at. Succeeds
 // only when itemId IS the thread's runnable head (oldest 'queued',
 // not-superseded item) — the subquery re-derives the head so a concurrent
-// claim of a different item (or of a non-head item) loses (rowCount=0). No
-// transaction/row-lock needed: this is one atomic UPDATE statement, and
-// Postgres's own MVCC serializes concurrent UPDATEs against the same rows.
+// claim of a different item (or of a non-head item) loses (rowCount=0).
+// claimSubmission locks the thread row first, runs this CAS, then captures
+// continuation provenance before execution starts. Steer admission uses the
+// same thread-then-item lock order, so the two writers cannot form a cycle.
 const CLAIM_SQL = `
   UPDATE engine_queue_items
   SET status = 'running', attempt_id = $1, owner_id = $2,
@@ -575,12 +579,13 @@ export class PgSessionStore implements SessionStore {
       `INSERT INTO engine_decision_gates (
          id, session_id, thread_id, queue_item_id, resume_key, ordinal, type,
          status, title, body, actions, origin, context, resolution, expires_at,
-         created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         created_at, updated_at, agent_reason
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
          title = EXCLUDED.title,
          body = EXCLUDED.body,
+         agent_reason = EXCLUDED.agent_reason,
          actions = EXCLUDED.actions,
          context = EXCLUDED.context,
          resolution = EXCLUDED.resolution,
@@ -603,6 +608,7 @@ export class PgSessionStore implements SessionStore {
         gate.expiresAt ?? null,
         gate.createdAt,
         gate.updatedAt,
+        gate.agentReason === undefined ? null : stripNul(gate.agentReason),
       ],
     );
   }
@@ -708,6 +714,11 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean> {
+    const cleared = await this.db.query("UPDATE engine_sessions SET sandbox_id = NULL WHERE id = $1 AND sandbox_id = $2 RETURNING id", [sessionId, sandboxId]);
+    return cleared.rows.length > 0;
+  }
+
   async getSession(id: string): Promise<SessionData | null> {
     const result = await this.db.query("SELECT * FROM engine_sessions WHERE id = $1", [id]);
     const raw = result.rows[0];
@@ -756,6 +767,12 @@ export class PgSessionStore implements SessionStore {
 
   async listThreads(sessionId: string): Promise<ThreadData[]> {
     const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = $1", [sessionId]);
+    return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
+  }
+
+  async listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]> {
+    if (sessionIds.length === 0) return [];
+    const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = ANY($1::text[])", [[...new Set(sessionIds)]]);
     return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
   }
 
@@ -1106,6 +1123,8 @@ export class PgSessionStore implements SessionStore {
   async claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null> {
     const now = Date.now();
     return this.db.transaction(async (tx) => {
+      // Same lock root as steer admission: the thread first, then its items.
+      await tx.query("SELECT id FROM engine_threads WHERE id = $1 FOR UPDATE", [claim.threadId]);
       const result = await tx.query(`${CLAIM_SQL} RETURNING *`, [
         claim.attemptId, claim.ownerId, now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS), now,
         claim.itemId, claim.sessionId, claim.threadId, SUBMISSION_TIMEOUT_MS,
@@ -1113,14 +1132,42 @@ export class PgSessionStore implements SessionStore {
       const row = result.rows[0];
       if (!row) return null;
       const item = queueItemRowToItem(rawToQueueItemRow(row));
+      const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+      const delegation = item.metadata?.parentDelegation;
+      const delegated = delegation !== null && typeof delegation === "object" && !Array.isArray(delegation);
+      // Queue JSON is stored as text so user NUL characters survive. Inspect it in JS, never through a jsonb cast.
+      if (item.childResultDelivery === undefined && (signal || delegated)) {
+        const pending = await tx.query(`UPDATE engine_queue_items SET child_result_delivery = 'pending'
+          WHERE session_id = $1 AND id = $2 AND child_result_delivery IS NULL
+            AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $1 AND purpose = 'child')
+          RETURNING id`, [claim.sessionId, claim.itemId]);
+        if (pending.rows.length) item.childResultDelivery = "pending";
+      }
       if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
         const threads = await tx.query("SELECT * FROM engine_threads WHERE session_id = $1", [claim.sessionId]);
         const scope = continuationToolScope(item.metadata, threads.rows.map((thread) => rowToThread(rawToThreadRow(thread))));
         item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
         await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
       }
+      if (item.attemptCount === 1) {
+        const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2", [claim.sessionId, claim.threadId]);
+        const metadata = parseJson<Record<string, unknown>>(asStringOrNull(thread.rows[0]?.metadata, "thread.metadata")) ?? {};
+        if (signal) {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: metadata[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
+        } else {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+          await tx.query("UPDATE engine_threads SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull({ ...metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id }), claim.sessionId, claim.threadId]);
+        }
+        await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
+      }
       return item;
     });
+  }
+
+  async resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void> {
+    await this.db.query(`UPDATE engine_queue_items SET child_result_delivery = $3
+      WHERE session_id = $1 AND id = $2 AND (child_result_delivery IS NULL OR child_result_delivery = 'pending')`,
+      [sessionId, itemId, outcome]);
   }
 
   async replaceSubmissionAttempt(
@@ -1210,6 +1257,12 @@ export class PgSessionStore implements SessionStore {
       [sessionId, cutoff],
     );
     return result.rows.map((r) => queueItemRowToItem(rawToQueueItemRow(r)));
+  }
+
+  async listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const result = await this.db.query(`SELECT * FROM engine_queue_items
+      WHERE session_id = $1 AND child_result_delivery = 'pending' AND status = 'settled' AND updated_at < $2 ORDER BY updated_at, id`, [sessionId, cutoff]);
+    return result.rows.map(row => queueItemRowToItem(rawToQueueItemRow(row)));
   }
 
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
@@ -1564,7 +1617,7 @@ export class PgSessionStore implements SessionStore {
     // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
     const r = await this.db.query(
       `WITH t AS (${TRANSITION_SQL} RETURNING *),
-       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $18
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $19
              WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
        SELECT * FROM t`,
       [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
@@ -1630,8 +1683,9 @@ export class PgSessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null> {
-    const r = await this.db.query(`${TRANSITION_SQL} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
+    const r = await this.db.query(`${TRANSITION_SQL}${condition?.eventBufferEmpty ? " AND COALESCE(event_buffer, '[]') = '[]'" : ""} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
   }
 
@@ -1662,7 +1716,8 @@ export class PgSessionStore implements SessionStore {
             SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
-            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) <
+                CASE WHEN match_json::jsonb ? 'childSessionId' AND $2::jsonb->>'key' = 'child.settled' THEN $4 - 10 ELSE $4 END
             AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
@@ -1723,10 +1778,39 @@ export class PgSessionStore implements SessionStore {
     await insertLease(this.db, lease);
   }
 
-  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+  async claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean> {
+    const sql = id.startsWith("wk_")
+      ? `UPDATE engine_wakeups SET terminal_signal_loss_reported_at = ended_at
+        WHERE session_id = $1 AND id = $2 AND terminal_signal_expected
+          AND status IN ('done', 'expired', 'lost', 'cancelled') AND ended_at IS NOT NULL
+          AND GREATEST(terminal_signal_started_at, ended_at) = $3
+          AND terminal_signal_loss_reported_at IS DISTINCT FROM ended_at RETURNING id`
+      : id.startsWith("ls_")
+        ? `UPDATE engine_leases SET terminal_signal_loss_reported_at = released_at
+          WHERE session_id = $1 AND id = $2 AND owner_kind = 'hold' AND terminal_signal_expected AND released_at IS NOT NULL
+            AND GREATEST(terminal_signal_started_at, released_at) = $3
+            AND terminal_signal_loss_reported_at IS DISTINCT FROM released_at RETURNING id`
+        : undefined;
+    if (!sql) return false;
+    return (await this.db.query(sql, [sessionId, id, admissionAt])).rows.length > 0;
+  }
+
+  async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
+    if (id.startsWith("wk_")) {
+      await this.db.query(`UPDATE engine_wakeups SET terminal_signal_started_at = $3
+        WHERE session_id = $1 AND id = $2 AND status = 'cancelled' AND terminal_signal_expected
+          AND (terminal_signal_started_at IS NULL OR terminal_signal_started_at < ended_at)`, [sessionId, id, startedAt]);
+    } else if (id.startsWith("ls_")) {
+      await this.db.query(`UPDATE engine_leases SET terminal_signal_started_at = $3
+        WHERE session_id = $1 AND id = $2 AND released_at IS NOT NULL AND release_cause = 'cancelled'
+          AND terminal_signal_expected AND terminal_signal_started_at IS NULL`, [sessionId, id, startedAt]);
+    }
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
     const r = await this.db.query(
-      `UPDATE engine_leases SET released_at = $2, release_cause = $3 WHERE id = $1 AND released_at IS NULL RETURNING *`,
-      [id, releasedAt, cause],
+      `UPDATE engine_leases SET released_at = $2, release_cause = $3, terminal_signal_expected = $4 WHERE id = $1 AND released_at IS NULL RETURNING *`,
+      [id, releasedAt, cause, opts?.terminalSignalExpected ?? false],
     );
     return r.rows[0] ? rowToLease(rawToLeaseRow(r.rows[0])) : null;
   }
@@ -1743,6 +1827,11 @@ export class PgSessionStore implements SessionStore {
     if (rows.leaseId !== undefined) {
       await this.db.query("DELETE FROM engine_leases WHERE session_id = $1 AND id = $2", [sessionId, rows.leaseId]);
     }
+  }
+
+  async listLeases(sessionId: string): Promise<Lease[]> {
+    const r = await this.db.query("SELECT * FROM engine_leases WHERE session_id = $1 ORDER BY created_at, id", [sessionId]);
+    return mapGoodRows(r.rows, "engine_leases", raw => rowToLease(rawToLeaseRow(raw)));
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
@@ -1823,7 +1912,8 @@ const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
          exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
          window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count),
          watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at),
-         event_buffer = COALESCE($17, event_buffer)
+         event_buffer = COALESCE($17, event_buffer),
+         terminal_signal_expected = COALESCE($18, terminal_signal_expected)
        WHERE id = $1 AND status = ANY($2::text[])`;
 
 function transitionParams(
@@ -1851,6 +1941,7 @@ function transitionParams(
     patch.watchBuffer ?? null,
     patch.lastEmitAt ?? null,
     jsonOrNull(patch.eventBuffer),
+    patch.terminalSignalExpected ?? null,
   ];
 }
 
@@ -1859,8 +1950,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
        origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
-       event_seen, event_source_seen)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
+       event_seen, event_source_seen, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at, source_queue_item_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)`,
     [
       w.id,
       w.sessionId,
@@ -1892,6 +1983,10 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       jsonOrNull(w.eventBuffer),
       jsonOrNull(w.eventSeen),
       jsonOrNull(w.eventSourceSeen),
+      w.terminalSignalExpected ?? false,
+      w.terminalSignalStartedAt ?? null,
+      w.terminalSignalLossReportedAt ?? null,
+      w.sourceQueueItemId ?? null,
     ],
   );
 }
@@ -1899,8 +1994,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
 async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
   await db.query(
     `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at,
-       released_at, release_cause, thread_id, origin_json)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+       released_at, release_cause, thread_id, origin_json, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at, source_queue_item_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
     [
       lease.id,
       lease.sessionId,
@@ -1914,6 +2009,10 @@ async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
       lease.releaseCause ?? null,
       lease.threadId ?? null,
       jsonOrNull(lease.origin),
+      lease.terminalSignalExpected ?? false,
+      lease.terminalSignalStartedAt ?? null,
+      lease.terminalSignalLossReportedAt ?? null,
+      lease.sourceQueueItemId ?? null,
     ],
   );
 }

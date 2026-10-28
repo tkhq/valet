@@ -3,7 +3,7 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -27,6 +27,7 @@ import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   DecisionGateExpiredError,
+  DecisionGateHandoffError,
   DecisionGateWithdrawnError,
   findStickyTerminalGate,
   fromRequest,
@@ -479,6 +480,8 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  private gateHandedOff = false;
+  private rearmedGate = false;
   /**
    * The most recent `status` event this instance emitted. In-memory only —
    * feeds `currentAgentStatus` so a client that connects mid-turn can seed
@@ -558,6 +561,41 @@ export class Thread {
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private thinkingTiming = new ThinkingTiming();
+  private usageToolDef(name: string): ToolDef | undefined {
+    return [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].find(tool => tool.name === name);
+  }
+
+  private startToolUsage(callId: string, name: string, args: Record<string, unknown>): void {
+    const def = this.usageToolDef(name);
+    if (!def || def.intent === "exempt") return;
+    let intent: string | null = null;
+    try { intent = stripToolIntent(def, args).intent; } catch { /* Invalid calls still count. */ }
+    const actionId = def.scopeAction ?? (name === "call_tool" ? "unknown" : name);
+    this.toolUsageStarts.set(callId, { createdAt: Date.now(), waitMs: 0, intent, name: actionId.slice(0, 200) });
+  }
+
+  private finishToolUsage(callId: string, details: unknown, isError: boolean): void {
+    const usage = this.toolUsageStarts.get(callId);
+    this.toolUsageStarts.delete(callId);
+    if (!usage) return;
+    const { waitMs, ...base } = usage;
+    if (details && typeof details === "object" && "usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object" && "name" in details.usageOutcome && typeof details.usageOutcome.name === "string") {
+      base.name = details.usageOutcome.name.slice(0, 200);
+    }
+    const owner = this.session.owner;
+    const actor = this.runningItem?.author?.id ?? this.defaultActorId();
+    const fact: ToolUsageFact = {
+      ...base, ...readToolUsageOutcome(details, isError), id: `${this.session.id}:${callId}`,
+      orgId: this.session.options.orgId, userId: actor.startsWith("team:") ? null : actor,
+      sessionId: this.session.id, threadId: this.id,
+      ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
+      durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
+    };
+    try { this.session.options.recordToolUsage?.(fact); }
+    catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+  }
+
+  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -813,7 +851,8 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const requestedMode = opts.queueMode ?? this.mode;
+    // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
+    const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -830,7 +869,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect") {
+    if (effectiveMode === "collect" && !this.session.isThreadExecutionFenced(this.id)) {
       return this.submitCollect(content, opts);
     }
 
@@ -868,7 +907,9 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), ...(opts.steerScope === "active-origin" ? { maxPending: cap } : {}) } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id)
+        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), ...(opts.steerScope === "active-origin" ? { maxPending: cap } : {}) }
+        : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -1130,6 +1171,7 @@ export class Thread {
       item,
     );
     await this.emitQueueState();
+    this.session.notifyReclaimAdmission();
     if (wasAdmitted) {
       this.armCollectTimer(
         typeof admittedItem.metadata?.collectDeadline === "number"
@@ -1530,6 +1572,7 @@ export class Thread {
 
   async abort(): Promise<void> {
     this.aborted = true;
+    this.toolUsageStarts.clear();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -1608,6 +1651,7 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
+    this.rearmedGate = false;
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -1625,14 +1669,15 @@ export class Thread {
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.
     const priorActive = this.runningItem;
+    const original = await this.session.providers.store.getQueueItem(this.session.id, suspended.queueItemId);
     this.runningItem = {
       id: suspended.queueItemId,
-      metadata: priorActive?.metadata,
-      author: priorActive?.author,
-      channel: priorActive?.channel,
-      replyTarget: priorActive?.replyTarget,
+      metadata: original?.metadata,
+      author: original?.author,
+      channel: original?.channel,
+      replyTarget: original?.replyTarget,
       threadId: this.id,
-      content: priorActive?.content ?? "",
+      content: original?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1642,6 +1687,7 @@ export class Thread {
     };
     const fakeAbort = new AbortController();
     let toolResult;
+    this.startToolUsage(suspended.toolCallId, suspended.toolName, suspended.toolArgs);
     try {
       await this.persistContinuationToolScope();
       toolResult = await tool.execute(
@@ -1650,6 +1696,7 @@ export class Thread {
         fakeAbort.signal,
       );
     } catch (err) {
+      this.finishToolUsage(suspended.toolCallId, undefined, true);
       this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
@@ -1657,6 +1704,7 @@ export class Thread {
       );
       return;
     }
+    this.finishToolUsage(suspended.toolCallId, toolResult.details, false);
     this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
@@ -1799,12 +1847,27 @@ export class Thread {
     }
   }
 
+  /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
+  handoffParkedGate(): void {
+    if (!this.blockedGateId || !this.gates.isPending(this.blockedGateId)) return;
+    this.gateHandedOff = true;
+    this.agent.abort();
+    this.gates.handoff(this.blockedGateId);
+    if (this.rearmedGate) {
+      this.runningItem = null;
+      this.fence = undefined;
+      this.blockedGateId = undefined;
+      this.session.notifyExecutionIdle();
+    }
+  }
+
   /**
    * Re-arm the GateManager for a still-pending gate after restart, so a
    * future resolveDecision triggers replay.
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
+    this.rearmedGate = true;
     this.gates
       .register(gate, () => {
         // Terminalization is driven off the promise rejection below (which the
@@ -1816,6 +1879,7 @@ export class Thread {
         );
       })
       .catch((err) => {
+        if (err instanceof DecisionGateHandoffError) return;
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
         // state as the live path: persist the gate's terminal status, flip the
         // durable block back to running, clear the suspended checkpoint, and
@@ -1837,6 +1901,7 @@ export class Thread {
           err instanceof Error ? err.message : String(err),
         );
       });
+    if (this.session.isExecutionFenced) this.handoffParkedGate();
   }
 
   /**
@@ -2117,11 +2182,7 @@ export class Thread {
       }
       this.lastEmittedStatus = "blocked_on_decision_gate";
       await this.fencedEmit(
-        {
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        },
+        this.statusEvent("blocked_on_decision_gate"),
         { queueItemId: runningItemId },
       );
       await session.emit(
@@ -2137,7 +2198,7 @@ export class Thread {
     }
 
     try {
-      const rawResolution = await this.gates.register(gate, async (gateId) => {
+      const waiting = this.gates.register(gate, async (gateId) => {
         await session.providers.store.updateDecisionGateEntry(
           session.id,
           this.id,
@@ -2149,6 +2210,8 @@ export class Thread {
           { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
         );
       });
+      if (this.session.isExecutionFenced) this.handoffParkedGate();
+      const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
       // call_tool's policy audit) needs this to distinguish a
@@ -2177,6 +2240,7 @@ export class Thread {
       );
       return { ...resolution, gateContext: gate.context ?? {} };
     } catch (err) {
+      if (err instanceof DecisionGateHandoffError) throw err;
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
       await persistTerminalGate(
@@ -2421,7 +2485,9 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, steerScope: "active" },
+      this.session.isThreadExecutionFenced(this.id)
+        ? { maxPending: this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD }
+        : { steer: true, steerScope: "active" },
     );
     // The stopped turn can take a while to wind down (a tool waiting on the
     // sandbox), and the person who sent the edit must not wait for it. The
@@ -2502,6 +2568,16 @@ export class Thread {
    * leaves, so the person can return again.
    */
   async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    const result = await this.session.claimExecution(() => this.returnToBranchInner(noteEntryId, actor, choices), this.id);
+    if (!result) throw new ValidationError("The session configuration or sandbox is changing. Reload the thread and try again.");
+    return result;
+  }
+
+  private async returnToBranchInner(
     noteEntryId: string,
     actor: { id: string },
     choices: { restoreFiles?: boolean } = {},
@@ -3505,6 +3581,16 @@ export class Thread {
     return this.lastEmittedStatus;
   }
 
+  /** When the running turn started, for a subscriber that connects mid-turn. */
+  get currentTurnStartedAt(): number | undefined {
+    return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
+  private statusEvent(status: EngineEventStatus): EngineEvent {
+    const turnStartedAt = this.currentTurnStartedAt;
+    return { type: "status", threadId: this.id, status, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
+  }
+
   /**
    * The claim loop. Drives the thread's durable queue: repeatedly claim the
    * thread's runnable head from the store, run the turn under a write fence,
@@ -3544,11 +3630,13 @@ export class Thread {
       })
       .finally(() => {
         unregisterBackgroundDrive(itemId);
+        this.session.notifyExecutionIdle();
       });
     this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
   }
 
   async kick(): Promise<void> {
+    if (this.session.isExecutionFenced) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -3559,6 +3647,7 @@ export class Thread {
       })
       .finally(() => {
         this.kicking = false;
+        this.session.notifyExecutionIdle();
       });
     return this.kickTail;
   }
@@ -3567,7 +3656,7 @@ export class Thread {
     if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused) return;
+      if (this.paused || this.session.isExecutionFenced) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -3593,17 +3682,17 @@ export class Thread {
       }
 
       const attemptId = uid("att");
-      const claimed = await store.claimSubmission({
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: head.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      });
-      if (!claimed) return; // lost the race or head is not actually claimable
-
-      await store.insertAttemptMarker(claimed.id, attemptId);
-      this.runningItem = claimed;
+      const claimed = await this.session.claimExecution(async () => {
+        const item = await store.claimSubmission({
+          sessionId: this.session.id, threadId: this.id, itemId: head.id,
+          attemptId, ownerId: this.session.ownerId,
+        });
+        if (!item) return null;
+        await store.insertAttemptMarker(item.id, attemptId);
+        this.runningItem = item;
+        return item;
+      }, this.id);
+      if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
       // no repair path can leak one turn's escalation into the next.
@@ -3908,6 +3997,7 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    if (this.gateHandedOff) return;
     return this.inSubmissionContext(() =>
       withSpan(
         "submission.settle",
@@ -4219,22 +4309,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -4245,6 +4339,7 @@ export class Thread {
       // Gate vanished between the decision and here — nothing to re-arm.
       this.runningItem = null;
       this.fence = undefined;
+      this.session.notifyExecutionIdle();
       return;
     }
 
@@ -4260,6 +4355,7 @@ export class Thread {
         this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
         this.runningItem = null;
         this.fence = undefined;
+        this.session.notifyExecutionIdle();
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
@@ -4294,22 +4390,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -6543,16 +6643,18 @@ export class Thread {
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
-      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
-        this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
+      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
+        this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
       ),
     );
   }
 
   private async persistContinuationToolScope(): Promise<void> {
     const scope = this.toolScopeCeiling();
-    if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
-    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+    const source = this.runningItem?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY];
+    if (!scope && source === undefined && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {},
+      ...(source !== undefined ? { [CONTINUATION_SOURCE_ITEM_KEY]: source } : {}) }), "after-save");
   }
 
   /**
@@ -6641,6 +6743,11 @@ export class Thread {
     return added;
   }
 
+  /** Set `metadata[key]` to a JSON value and persist it, such as the thread a fork came from. */
+  async setMetadataValue(key: string, value: unknown): Promise<void> {
+    await this.patchThreadMetadata((current) => ({ ...current, [key]: value }), "before-save");
+  }
+
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
   async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
     const plan: ThreadPlan = { items, updatedAt: Date.now() };
@@ -6660,8 +6767,9 @@ export class Thread {
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
+    toolIntent?: string;
   }): ToolContext {
-    const { signal, toolCallId, toolName, toolArgs } = args;
+    const { signal, toolCallId, toolName, toolArgs, toolIntent } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
     const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
@@ -6727,6 +6835,7 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (toolIntent && req.type === "approval" && toolName !== "ask_question" && toolName !== "ask_approval") req = { ...req, agentReason: toolIntent };
         // A channel sender with no Valet account may not put an approval or a
         // question in front of a teammate: the request is refused here, before
         // any gate opens, so a newcomer cannot flood the team with requests.
@@ -6778,6 +6887,7 @@ export class Thread {
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the
         // durable blocked toggle (TKAI-238).
+        const waitStarted = Date.now();
         const prevCycle = this.gateCycleTail;
         let releaseCycle!: () => void;
         this.gateCycleTail = new Promise<void>((r) => {
@@ -6785,9 +6895,12 @@ export class Thread {
         });
         await prevCycle;
         try {
-          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName,
+            toolArgs: toolIntent && toolName !== "call_tool" && !this.usageToolDef(toolName)?.scopeAction ? { ...toolArgs, intent: toolIntent } : toolArgs });
         } finally {
           releaseCycle();
+          const usage = this.toolUsageStarts.get(toolCallId);
+          if (usage) usage.waitMs += Date.now() - waitStarted;
         }
       },
       // The same lookup slash commands use: a key, or a thread id (a pasted
@@ -6825,7 +6938,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "thinking" },
+          this.statusEvent("thinking"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7048,6 +7161,7 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
+        this.startToolUsage(event.toolCallId, event.toolName, event.args ?? {});
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
@@ -7062,11 +7176,12 @@ export class Thread {
         );
         this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "tool_calling" },
+          this.statusEvent("tool_calling"),
           { queueItemId: this.runningItem?.id },
         );
         break;
       case "tool_execution_end": {
+        this.finishToolUsage(event.toolCallId, event.result?.details, event.isError);
         const part = this.currentToolCalls.get(event.toolCallId);
         const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
@@ -7117,6 +7232,7 @@ export class Thread {
         break;
       }
       case "turn_end": {
+        this.toolUsageStarts.clear();
         const stopReason =
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
@@ -7259,7 +7375,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "idle";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "idle" },
+          this.statusEvent("idle"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7873,6 +7989,14 @@ export function userContentBlocks(
  */
 export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
   if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  // Another agent's signal, such as a child's result, joins only a turn that
+  // runs another signal from the same owner. It never joins a person's own
+  // turn, where its text would act with that person's authority.
+  const stamp = readSignalStamp(item.metadata);
+  if (stamp) {
+    const runningStamp = readSignalStamp(running.metadata);
+    if (!runningStamp || runningStamp.senderOwner.type !== stamp.senderOwner.type || runningStamp.senderOwner.id !== stamp.senderOwner.id) return false;
+  }
   if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
   if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
   if (item.author?.externalSender || running.author?.externalSender) return false;
@@ -8231,4 +8355,17 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
 function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
   const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
   return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
+}
+
+function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsageFact, "outcome" | "errorCode"> {
+  if (details && typeof details === "object") {
+    if ("usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object") {
+      const status = details.usageOutcome;
+      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied" || status.outcome === "pending-approval")) {
+        return { outcome: status.outcome, errorCode: "errorCode" in status && typeof status.errorCode === "string" ? status.errorCode : null };
+      }
+    }
+    if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
+  }
+  return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
 }

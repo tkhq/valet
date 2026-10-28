@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";

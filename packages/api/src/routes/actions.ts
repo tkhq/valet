@@ -260,7 +260,7 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   if (!result) return c.json(inProgress(toolId));
   if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
   if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result));
-  return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
+  return c.json({ tool_id: toolId, status: "failed", error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) } satisfies ActionInvokeResponse);
 });
 
 type InvokeResult = Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>;

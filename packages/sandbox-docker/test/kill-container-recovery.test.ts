@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import {
   Engine,
   InMemoryEventStream,

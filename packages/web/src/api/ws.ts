@@ -15,6 +15,7 @@ import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
 import { qkThreadPlan } from "./thread-plan";
+import { api, ApiError } from "./client";
 
 const MAX_RETRY_MS = 8_000;
 /** `WebSocket.OPEN`. */
@@ -239,11 +240,36 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
   let retryDelay = INITIAL_RETRY_MS;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /**
+   * The browser hides why a socket upgrade failed. A signed-out tab is
+   * refused before the upgrade, so it would retry for as long as it stays
+   * open. A REST read gets the 401, which opens sign-in (`client.ts`), and
+   * the retries stop. Any other failure keeps the backoff.
+   */
+  let checkingRefusal = false;
+  async function checkRefusedUpgrade(): Promise<void> {
+    if (checkingRefusal) return;
+    checkingRefusal = true;
+    try {
+      await api.getMe();
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 401 || cancelled) return;
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close();
+      setConnection(sessionId, "error");
+    } finally {
+      checkingRefusal = false;
+    }
+  }
+
   function open() {
     if (cancelled) return;
     const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
+    let opened = false;
     socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
     socket.onopen = () => {
+      opened = true;
       setConnection(sessionId, "open");
       onOpen();
     };
@@ -272,7 +298,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         // A finished turn can add an unread reply or a pull request to any thread
         // in the session. The list query carries both, so refresh it.
         if (wire.type === "turn_end") {
-          void qc.invalidateQueries(threadListFilters(sessionId));
+          void qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
           for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
         }
         // The context meter's reading moves when a turn ends, a compaction
@@ -286,7 +312,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched" || wire.type === "branch_switched") {
           void qc.invalidateQueries({
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
-          });
+          }, { cancelRefetch: false });
         }
         if (wire.type === "thread.viewers") {
           useActiveViewersStore.getState().set(sessionId, wire.threadId, wire.viewers);
@@ -328,6 +354,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         return;
       }
       setConnection(sessionId, "closed");
+      if (!opened) void checkRefusedUpgrade();
       retryTimer = setTimeout(open, retryDelay);
       retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
     };
