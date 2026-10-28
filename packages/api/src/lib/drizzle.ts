@@ -1258,6 +1258,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       "artifact_id" text NOT NULL,
       "version" bigint NOT NULL,
       "vdid" text,
+      "anchor_label" text,
       "parent_id" text,
       "body" text NOT NULL,
       "author_user_id" text NOT NULL,
@@ -1272,6 +1273,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "index", index: "artifact_comments_artifact" },
     sql: 'CREATE INDEX IF NOT EXISTS "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")',
   },
+  { describe: "artifact_comments.anchor_label column", probe: { kind: "column", table: "artifact_comments", column: "anchor_label" }, sql: 'ALTER TABLE "artifact_comments" ADD COLUMN IF NOT EXISTS "anchor_label" text' },
   {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
     // the model catalog to the bundled compile-time list, so a deployment

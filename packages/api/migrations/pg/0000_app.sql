@@ -640,6 +640,7 @@ CREATE TABLE "artifact_comments" (
 	"artifact_id" text NOT NULL,
 	"version" bigint NOT NULL,
 	"vdid" text,
+	"anchor_label" text,
 	"parent_id" text,
 	"body" text NOT NULL,
 	"author_user_id" text NOT NULL,

@@ -1043,8 +1043,10 @@ export const artifactVersions = pgTable(
 
 // Element-anchored comments on a published page (artifact-pages design).
 // `vdid` is the content-hashed element id the viewer's comment runtime
-// computes (null = a page-level comment); `version` records what the
-// commenter was looking at. `parent_id` threads replies one level under a
+// computes (null = a page-level comment); `anchor_label` is that element's
+// leading text as the viewer showed it, so an agent reading the comment knows
+// what it points at; `version` records what the commenter was looking at.
+// `parent_id` threads replies one level under a
 // root. `sent_to_session` records delivery of the comment into the source
 // session's prompt queue — allowed only when the commenter passes
 // `canViewSession` there, so sending grants nothing that typing into the
@@ -1056,6 +1058,7 @@ export const artifactComments = pgTable(
     artifactId: text("artifact_id").notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
     vdid: text("vdid"),
+    anchorLabel: text("anchor_label"),
     parentId: text("parent_id"),
     body: text("body").notNull(),
     authorUserId: text("author_user_id").notNull(),

@@ -89,7 +89,7 @@ describe("MCP agent tools", () => {
     const names = ((result?.tools as Array<{ name: string }>) ?? []).map((t) => t.name).sort();
     expect(names).toEqual([
       "call_tool", "cancel_workflow_run", "delete_memory", "describe_tool", "get_skill", "get_thread",
-      "get_workflow_run", "list_artifacts", "list_decisions", "list_inbox", "list_sessions", "list_skills",
+      "get_workflow_run", "list_artifact_comments", "list_artifacts", "list_decisions", "list_inbox", "list_sessions", "list_skills",
       "list_threads", "list_workflows", "list_workspaces", "move_memory", "patch_memory", "publish_artifact",
       "read_memory", "resolve_decision", "retry_workflow_run", "run_workflow", "search_memory", "search_tools",
       "send_message", "start_thread", "stop_thread", "unpublish_artifact", "whoami", "write_memory",
