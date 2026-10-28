@@ -2,7 +2,7 @@ import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
-import type { CompactionConfig, SessionEntry } from "./types.js";
+import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
 
 /**
  * Compaction primitives — all pure functions. Orchestration that calls an
@@ -220,6 +220,28 @@ export function compactionBudget(model: Model<any>, cfg?: CompactionConfig): num
   const usable = usableTokens(model, cfg);
   const cap = cfg?.contextBudgetTokens ?? DEFAULTS.contextBudgetCap;
   return cap > 0 ? Math.min(usable, cap) : usable;
+}
+
+/** Idle delays that beat each prompt-cache retention to its expiry (1h and 5m). */
+const IDLE_COMPACTION_LONG_MS = 55 * 60_000;
+const IDLE_COMPACTION_SHORT_MS = 4 * 60_000;
+
+/**
+ * How long an interactive thread over its compaction budget waits idle
+ * before it compacts. `cfg.idleCompactionMs` overrides it, and `0` means
+ * "compact at turn end". By default the delay ends shortly before the
+ * thread's prompt cache expires, so the person keeps a warm cache while
+ * they work and the next reply after a break re-writes only the compacted
+ * context. A session without a prompt cache compacts at turn end.
+ */
+export function idleCompactionDelayMs(
+  options: Pick<CreateSessionOptions, "compaction" | "cacheRetention" | "purpose">,
+): number {
+  const configured = options.compaction?.idleCompactionMs;
+  if (configured !== undefined) return Math.max(0, configured);
+  const retention = options.cacheRetention ?? (options.purpose === "orchestrator" ? "long" : "short");
+  if (retention === "none") return 0;
+  return retention === "long" ? IDLE_COMPACTION_LONG_MS : IDLE_COMPACTION_SHORT_MS;
 }
 
 /** Fraction of usable context above which one inbound message spills to a file. */

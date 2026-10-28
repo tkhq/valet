@@ -113,24 +113,45 @@ cut-point selection, and the post-compaction transcript rebuild.
 
 Added 2026-10-28: the compaction budget. `compactionBudget` is the usable
 context capped at `compaction.contextBudgetTokens` (default 200k; `0`
-removes the cap). The proactive trigger has two levels. "overflow" means
-the next request does not fit the usable context, and the pass behaves as
-before. "budget" means the request fits but exceeds the budget. A budget
-pass runs after the turn, never continues the turn, and a budget pass that
-finds nothing to reclaim does not count toward the circuit breaker. The
-tail budget (25%) scales from the compaction budget, so a 1M-token model
+removes the cap). An org admin sets the cap in Settings, Models, Context
+(`orgs.compaction_window_tokens`, `PATCH /api/org/settings`
+`compactionWindowTokens`). The host hands each session a config whose
+`contextBudgetTokens` reads the org value live, so a change reaches loaded
+sessions in that process without a rebuild.
+
+The proactive trigger has two levels. "overflow" means the next request does
+not fit the usable context, and the pass behaves as before. "budget" means
+the request fits but exceeds the budget. A budget pass never continues the
+turn, and a budget pass that finds nothing to reclaim does not count toward
+the circuit breaker. When it runs depends on who watches the thread:
+
+- An unattended turn (workflow work, a delivery nobody watches) or a channel
+  turn (Slack, Telegram) runs it at turn end. It skips the pass when another
+  message waits; that message's turn end checks again. A submission stopped
+  at its model call limit still runs it.
+- An interactive turn arms an idle timer instead
+  (`compaction.idleCompactionMs`). The default ends shortly before the
+  thread's prompt cache expires: 55 minutes with the long cache, 4 minutes
+  with the short one, 0 with no cache. The pass holds the drive lock, so no
+  turn claims while it runs, and kicks the queue after. A new turn cancels
+  the timer. `0` compacts every thread at turn end.
+- The first turn after a reload stands in for a timer the restart lost: it
+  runs a budget pass first only when the newest message is older than the
+  idle delay.
+
+The tail budget (25%) scales from the compaction budget, so a 1M-token model
 keeps about 50k tokens verbatim, not about 245k. The reactive and
 pre-request overflow paths still use the usable context, so a long turn is
-never compacted in the middle at the budget.
+never compacted in the middle at the budget. The context meter reports the
+budget as its limit.
 
-Reason: a 1M-token model compacted only near 980k. In production, one
-Slack thread on such a model grew to 833k tokens. Each reply after the
-1h prompt cache expired re-wrote the whole context, at $4 to $7 per reply.
-A replay of one week of usage at a 200k turn-end budget cut the input cost
-of long single-thread sessions by about 15%. The value sits between the
-Anthropic API compaction default (150k) and the Codex trigger on 272k
-models (90%, about 245k). The compaction recall evals in
-`evals/cases/compaction/` guard recall after a compaction.
+Reason: a 1M-token model compacted only near 980k. In production, one Slack
+thread on such a model grew to 833k tokens. Each reply after the 1h prompt
+cache expired re-wrote the whole context, at $4 to $7 per reply. Claude Code
+compacts an idle conversation over 200k before its cache expires, and Codex
+can compact after a turn when no input waits; this design follows both. The
+compaction recall evals in `evals/cases/compaction/` guard recall after a
+compaction.
 
 ### 5. The proactive trigger rehydrates from the DAG
 
@@ -189,7 +210,8 @@ summarizer prompt.
   button. `Thread.contextUsage` measures like the proactive trigger: the
   usage-anchored estimate (`estimateLiveContextTokens`) against
   `compactionBudget` of the thread's model, so a full meter means the
-  thread compacts at the end of the next turn. A thread that has not loaded its transcript is read from
+  thread compacts when it goes idle or after its next unattended or channel
+  turn. A thread that has not loaded its transcript is read from
   the store with `entriesToAgentMessages` and stays unloaded, so the read
   never wakes a sandbox. Outside a turn, the budget model comes from the
   host resolver for the thread's spec on every read, also when the spec is

@@ -141,6 +141,7 @@ import {
   summarize,
   SummarizeOverflowError,
   compactionBudget,
+  idleCompactionDelayMs,
   usableTokens,
   walkTranscriptDag,
   renderBranchNote,
@@ -522,6 +523,8 @@ export class Thread {
   private backgroundDriveTail: Promise<void> = Promise.resolve();
   /** In-process collect-window flush timer; armed by the first item of a window. */
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Idle compaction for an interactive thread over the compaction budget (`armIdleCompaction`). */
+  private idleCompactionTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
@@ -1577,6 +1580,7 @@ export class Thread {
   async abort(): Promise<void> {
     this.aborted = true;
     this.toolUsageStarts.clear();
+    this.clearIdleCompaction();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -4800,6 +4804,7 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    this.clearIdleCompaction();
     await this.persistContinuationToolScope();
     await this.ensureTranscript();
     return this.inSubmissionContext(() =>
@@ -4956,7 +4961,10 @@ export class Thread {
     if (this.rehydratedCheckPending) {
       this.rehydratedCheckPending = false;
       const trigger = this.proactiveCompactionTrigger();
-      if (trigger) {
+      // A budget pass here stands in for an idle pass the restart lost: run
+      // it only when the thread has been idle past the idle delay, so its
+      // prompt cache has expired anyway.
+      if (trigger === "overflow" || (trigger === "budget" && this.idleLongerThan(idleCompactionDelayMs(this.session.options)))) {
         await this.runProactiveCompaction(trigger, false);
       }
     }
@@ -5053,7 +5061,13 @@ export class Thread {
       // A submission stopped at its model call limit gets no continuation,
       // so it runs only a budget pass, which never continues the turn.
       const proactive = this.proactiveCompactionTrigger();
-      const trigger = this.modelCallLimitReached === undefined || proactive === "budget" ? proactive : undefined;
+      let trigger = this.modelCallLimitReached === undefined || proactive === "budget" ? proactive : undefined;
+      // A budget pass at turn end runs only for a turn nobody watches live
+      // (unattended work, a channel such as Slack) and only when no message
+      // waits: a waiting message reruns this check when its turn ends. An
+      // interactive thread compacts when it goes idle instead, so a person
+      // working in it keeps the full context and a warm prompt cache.
+      if (trigger === "budget" && !(await this.budgetPassAtTurnEnd())) trigger = undefined;
       if (trigger && await this.canRunCurrentSubmission()) {
         await this.runProactiveCompaction(trigger);
       }
@@ -5596,6 +5610,78 @@ export class Thread {
     if (estimated >= usable) return "overflow";
     if (estimated >= compactionBudget(this.agent.state.model, cfg)) return "budget";
     return undefined;
+  }
+
+  /**
+   * Decide the turn-end budget pass. Unattended and channel turns run it
+   * now unless another message waits. An interactive turn arms the idle
+   * timer instead, unless the idle delay is 0, which means "at turn end".
+   */
+  private async budgetPassAtTurnEnd(): Promise<boolean> {
+    const delay = idleCompactionDelayMs(this.session.options);
+    const channelType = this.runningItem?.channel?.channelType;
+    const unwatched = delay === 0 || this.isUnattendedTurn() || (channelType !== undefined && channelType !== "web");
+    if (!unwatched) {
+      this.armIdleCompaction(delay);
+      return false;
+    }
+    const running = this.runningItem?.id;
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return !items.some((i) => i.threadId === this.id && i.id !== running && i.status === "queued");
+  }
+
+  /** True when the newest message in the live transcript is older than `ms`. */
+  private idleLongerThan(ms: number): boolean {
+    const messages = this.agent.state.messages;
+    const last = messages[messages.length - 1];
+    const at = last && "timestamp" in last && typeof last.timestamp === "number" ? last.timestamp : undefined;
+    return at === undefined || Date.now() - at >= ms;
+  }
+
+  private armIdleCompaction(delay: number): void {
+    this.clearIdleCompaction();
+    const timer = setTimeout(() => {
+      this.idleCompactionTimer = null;
+      void this.runIdleCompaction();
+    }, delay);
+    timer.unref?.();
+    this.idleCompactionTimer = timer;
+  }
+
+  private clearIdleCompaction(): void {
+    if (this.idleCompactionTimer) {
+      clearTimeout(this.idleCompactionTimer);
+      this.idleCompactionTimer = null;
+    }
+  }
+
+  /**
+   * Compact an idle interactive thread over its compaction budget, before
+   * its prompt cache expires. It holds the drive lock (`kicking`) so no turn
+   * claims while it runs, and kicks afterwards so a message that arrived
+   * meanwhile runs on the compacted context.
+   */
+  private runIdleCompaction(): Promise<void> {
+    if (this.kicking || this.runningItem || this.aborted || this.paused) return Promise.resolve();
+    if (!this.session.timersActive || this.session.isExecutionFenced || this.session.options.readOnlyReason) {
+      return Promise.resolve();
+    }
+    this.kicking = true;
+    this.kickTail = (async () => {
+      if (await this.unsettledHead()) return;
+      if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) return;
+      const usage = await this.contextUsage();
+      if (!usage?.autoCompact || usage.tokens < usage.limit) return;
+      await this.runProactiveCompaction("budget", false);
+    })()
+      .catch((err: unknown) => {
+        this.emitError("compaction_failed", err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        this.kicking = false;
+        void this.kick();
+      });
+    return this.kickTail;
   }
 
   /**

@@ -397,8 +397,9 @@ export interface EvalCase {
   session_type?: "default" | "orchestrator";
   /**
    * Compaction budget for the case session (`compaction.contextBudgetTokens`).
-   * A small value makes a short case compact between turns, so a recall
-   * check scores what survives a compaction. Engine drive only.
+   * A small value makes a short case compact at each turn end (the runner
+   * sets the idle delay to 0), so a recall check scores what survives a
+   * compaction. Engine drive only.
    */
   context_budget_tokens?: number;
   /**

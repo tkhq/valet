@@ -356,6 +356,9 @@ export class Session {
   get isReclaiming(): boolean { return this.reclaiming; }
   get isExecutionFenced(): boolean { return this.reclaiming || this.retiring; }
 
+  /** False once the session is destroyed or its timers are stopped for good. */
+  get timersActive(): boolean { return !this.destroyed && !this.timersStopped; }
+
   /** Config invalidation fences new claims immediately but lets already-reserved execution finish. */
   retireExecution(recover: () => Promise<void>): void {
     this.retiring = true;
