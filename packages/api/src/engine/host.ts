@@ -95,6 +95,7 @@ import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { repoBakeCompatibility, type ImageFallbackEvent } from "../prebuilds/resolve.js";
 import { recordImageFallback } from "../observability/image-fallback-metrics.js";
+import { recordTranscriptsReleased } from "../observability/transcript-metrics.js";
 import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
   applySandboxResourceOverrides,
@@ -971,6 +972,10 @@ export class EngineHost {
     const now = Date.now();
     for (const [sessionId, entry] of this.cache) {
       try {
+        // Assistant sessions stay cached while idle (only executions are
+        // evicted below), so drop their idle threads' transcripts. The next
+        // turn reloads one from the store.
+        recordTranscriptsReleased(entry.session.releaseIdleTranscripts(now - idleMs));
         await this.maybeSuspendIdleSession(sessionId, entry.session, now, idleMs);
       } catch (err) {
         console.error(`EngineHost: idle sweep failed for session ${sessionId}:`, err);

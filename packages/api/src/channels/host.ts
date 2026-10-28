@@ -185,6 +185,9 @@ function turnOrigin(entries: SessionEntry[], queueItemId: string) {
   return undefined;
 }
 
+/** Tail read that finds the message that just ended when its submission is not known. */
+const TRIGGER_TAIL_ENTRIES = 20;
+
 const DONE: ChildReplyOutcome = { kind: "done" };
 const WAITING: ChildReplyOutcome = { kind: "waiting" };
 const undeliverable = (reason: string): ChildReplyOutcome => ({ kind: "undeliverable", reason });
@@ -904,7 +907,8 @@ export class ChannelHost {
   private async deliverSubmissionFailure(sessionId: string, threadId: string, queueItemId: string): Promise<void> {
     const dedupeKey = `${sessionId}:failure:${queueItemId}`;
     if (this.delivered.has(dedupeKey)) return;
-    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    // The checks below read only this submission's entries.
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId, { queueItemId });
     const origin = turnOrigin(entries, queueItemId);
     if (!origin || origin.reply === "manual") return;
     if (originReplyState(entries, queueItemId) === "succeeded") return;
@@ -944,8 +948,13 @@ export class ChannelHost {
       ? undefined
       : await this.deps.engineStore.getQueueItem(sessionId, durableItemId);
     if (durableItem?.status === "queued" || durableItem?.status === "collecting") return WAITING;
-    const entries = await this.deps.engineStore.getEntries(
-      sessionId, threadId, durableItemId === undefined ? undefined : { queueItemId: durableItemId },
+    // Every check below reads only this submission's entries, so read only
+    // those. This runs on every message_end and tool_end of every session; a
+    // whole-thread read here parsed multi-MB transcripts at tool-call rate.
+    // Without a known submission, the message that just ended is at the tail.
+    const knownItemId = durableItemId ?? trigger.queueItemId;
+    let entries = await this.deps.engineStore.getEntries(
+      sessionId, threadId, knownItemId !== undefined ? { queueItemId: knownItemId } : { limit: TRIGGER_TAIL_ENTRIES },
     );
     const triggerEntry = trigger.messageId === undefined
       ? undefined
@@ -953,8 +962,9 @@ export class ChannelHost {
           (entry): entry is Extract<SessionEntry, { type: "message" }> =>
             entry.type === "message" && entry.role === "assistant" && entry.id === trigger.messageId,
         );
-    const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
+    const queueItemId = knownItemId ?? triggerEntry?.queueItemId;
     if (!queueItemId) return DONE;
+    if (knownItemId === undefined) entries = await this.deps.engineStore.getEntries(sessionId, threadId, { queueItemId });
     // The durable intent owns automatic child replies, including the
     // admission-to-receipt crash window. Manual settlements stay on the live
     // path so they keep the dropped-reply reminder.
@@ -1302,7 +1312,8 @@ export class ChannelHost {
     // A child's prompt from its parent agent is not a web prompt, and the
     // stored origin proves the work started in this conversation. A person
     // can still prompt the child in the web app; that gate stays in the web.
-    const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
+    // `submissionIsWebPrompt` reads only the gate's submission.
+    const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId, { queueItemId: gate.queueItemId });
     if (submissionIsWebPrompt(entries, gate.queueItemId, !direct)) {
       console.debug(
         `[channels] web-origin gate stays off ${mapped.channelType} (session=${sessionId} gate=${gate.id})`,
