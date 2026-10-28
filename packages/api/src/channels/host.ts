@@ -20,6 +20,7 @@ import { assistantSessionSender } from "../services/workspace-sender.js";
 import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   ConflictError,
+  isSlackStopRequest,
   parseAssistantSessionId,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
@@ -78,6 +79,7 @@ import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { ChannelProgressPublisher } from "./channel-progress.js";
 import { ChannelProcessingStatus } from "./processing-status.js";
 import { restoreProcessingStatus, trackProcessingItem } from "./processing-status-recovery.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
@@ -434,6 +436,7 @@ export class ChannelHost {
    * whole start/append/stop triple ever reach it. */
   private readonly streamBridge: ChannelStreamBridge;
   private readonly processingStatus: ChannelProcessingStatus;
+  private readonly progressPublisher: ChannelProgressPublisher;
   private readonly childReplies: ChildReplyDispatcher;
 
   constructor(private readonly deps: ChannelHostDeps) {
@@ -450,6 +453,19 @@ export class ChannelHost {
       },
     });
     this.processingStatus = new ChannelProcessingStatus(deps.eventStream, channelType => this.transportFor(channelType));
+    this.progressPublisher = new ChannelProgressPublisher({
+      db: deps.db, engineStore: deps.engineStore, eventStream: deps.eventStream,
+      resolveOrgId: async () => this.orgId ?? await deps.resolveOrgId(),
+      transportFor: (channelType) => {
+        const transport = this.transportFor(channelType);
+        if (!transport?.publishProgress) return undefined;
+        return {
+          publishProgress: transport.publishProgress.bind(transport),
+          conversationKeyFromThreadKey: transport.conversationKeyFromThreadKey?.bind(transport),
+          threadKeyFromConversationKey: transport.threadKeyFromConversationKey?.bind(transport),
+        };
+      },
+    });
     this.streamBridge = new ChannelStreamBridge({
       eventStream: deps.eventStream,
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
@@ -757,6 +773,7 @@ export class ChannelHost {
     // Before the transports go away: a stream closed here is one the next
     // boot does not have to apologise for.
     await this.processingStatus.stop();
+    await this.progressPublisher.stop();
     await this.streamBridge.stop();
     this.stopOutbound();
     await this.childReplies.drain();
@@ -799,6 +816,7 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.processingStatus.start();
+    this.progressPublisher.start();
     this.childReplies.start();
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
@@ -844,6 +862,7 @@ export class ChannelHost {
 
   stopOutbound(): void {
     void this.processingStatus.stop();
+    void this.progressPublisher.stop().catch(error => console.error("[channels] could not stop progress publishing", error));
     this.childReplies.stop();
     this.outboundUnsub?.();
     this.outboundUnsub = null;
@@ -1818,7 +1837,7 @@ export class ChannelHost {
         kind: "signal",
         signalType: `${channelType}.message`,
         body: text === "" ? "(media message)" : text,
-        origin: { channelType, threadKey },
+        origin: { channelType, threadKey, reply: "auto" },
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
       };
@@ -1826,6 +1845,15 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
+          // A reply waits for a running turn. A stop phrase, or any reply
+          // while the turn waits on a decision, takes the turn's place, so a
+          // person who moves on does not leave the turn stuck on an approval.
+          // The store interrupts only a turn from the same sender.
+          ...(channelType === "slack"
+            ? isSlackStopRequest(content) || thread.pendingDecisionGates().length > 0
+              ? { queueMode: "steer" as const, steerScope: "active-origin" as const }
+              : { queueMode: "inject" as const }
+            : {}),
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
           // Stamp the surface this prompt came from. A channel thread keeps its
           // binding for its whole life, so the thread key alone cannot say

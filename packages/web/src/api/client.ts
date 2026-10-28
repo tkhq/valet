@@ -27,6 +27,7 @@ import type {
   ThreadContextResponse,
   ActiveViewersResponse,
   ThreadPlanResponse,
+  ThreadProgressResponse,
   ThreadRecapResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -670,6 +671,8 @@ export const api = {
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
   /** The checklist the model keeps with `update_plan`. */
+  getThreadProgress: (threadId: string) =>
+    request<ThreadProgressResponse>("GET", `/threads/${encodeURIComponent(threadId)}/progress`),
   /** One tool call's full result, when the transcript trimmed it. */
   getToolOutput: (threadId: string, entryId: string, callId: string) =>
     request<ToolOutputResponse>("GET", `/threads/${encodeURIComponent(threadId)}/tool-output?entryId=${encodeURIComponent(entryId)}&callId=${encodeURIComponent(callId)}`),

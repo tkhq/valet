@@ -1,3 +1,4 @@
+import type { QueueItem } from "@valet/engine";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -68,6 +69,37 @@ describe("PgSessionStore (PGlite)", () => {
 
   runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
+
+  it("rolls back carry admission on commit failure and recovers receipts from a fresh store", async () => {
+    const store = await factory();
+    const sessionId = "carry-session";
+    const threadId = "carry-thread";
+    await store.saveSession({ id: sessionId, owner: { type: "user", id: "u1" }, purpose: "interactive", userId: "u1", orgId: "o1", workspace: "/", status: "running", createdAt: 1, updatedAt: 1 });
+    await store.saveThread(sessionId, { id: threadId, sessionId, key: "web:default", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    const item = (id: string, body: string): QueueItem => ({ id, threadId, dispatchId: id,
+      content: { kind: "signal", signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" } },
+      author: { id: "sender" }, status: "queued", attemptCount: 0, maxAttempts: 3, timeoutAt: 1_000_000, createdAt: 1, updatedAt: 1 });
+    const older = item("older", "deploy");
+    const correction = item("correction", "stop");
+    await store.admitSubmission(sessionId, threadId, older);
+    const failingDb: PgDb = {
+      query: (text, params) => db.query(text, params), close: async () => {},
+      transaction: fn => db.transaction(async tx => { await fn(tx); throw new Error("commit interrupted"); }),
+    };
+    const opts = { steer: true, steerScope: "active-origin" as const };
+    await expect(new PgSessionStore(failingDb).admitSubmission(sessionId, threadId, correction, opts)).rejects.toThrow("commit interrupted");
+    const recovered = new PgSessionStore(db);
+    expect(await recovered.getQueueItem(sessionId, correction.id)).toBeNull();
+    expect(await recovered.getQueueItem(sessionId, older.id)).toMatchObject({ status: "queued" });
+    expect((await recovered.getQueueItem(sessionId, older.id))?.supersededByItemId).toBeUndefined();
+    await recovered.admitSubmission(sessionId, threadId, correction, opts);
+    const restarted = new PgSessionStore(db);
+    expect(await restarted.getQueueItem(sessionId, older.id)).toMatchObject({ status: "settled", outcome: { outcome: "superseded" }, supersededByItemId: correction.id });
+    const replay = await restarted.admitSubmission(sessionId, threadId, correction, opts);
+    expect(replay.admitted).toBe(false);
+    expect(replay.item.metadata?.carriedInputIds).toEqual([older.id]);
+    expect(replay.item.content).toEqual(correction.content);
+  });
 
   it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
     const store = await factory();

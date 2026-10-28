@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveQueueState,
+  isSlackStopRequest,
   originFromEntries,
   renderSignalEnvelope,
   resolvePartialSubmissionText,
@@ -297,5 +298,27 @@ describe("originFromEntries (pure)", () => {
       assistantEntry({ content: "ack", queueItemId: "q-1", stopReason: "end_turn" }),
     ];
     expect(originFromEntries(entries, "q-1")).toBeUndefined();
+  });
+});
+
+describe("isSlackStopRequest", () => {
+  const reply = (body: string, extra: Record<string, unknown> = {}) => ({
+    kind: "signal" as const, signalType: "slack.message", body,
+    origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const }, ...extra,
+  });
+
+  it.each(["stop", "Stop!", " CANCEL. ", "wait", "Hold on...", "nevermind", "never mind"])("treats %j as a stop request", (body) => {
+    expect(isSlackStopRequest(reply(body))).toBe(true);
+  });
+
+  it.each(["thanks", "how's it going?", "stop the deploy", "wait, also check logs", ""])("lets %j wait for the turn", (body) => {
+    expect(isSlackStopRequest(reply(body))).toBe(false);
+  });
+
+  it("ignores a stop phrase that is not an addressed human reply", () => {
+    expect(isSlackStopRequest("stop")).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "manual" } }))).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { attributes: { senderBot: "true" } }))).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { attachments: [{ type: "image", mimeType: "image/png", url: "data:image/png;base64,AA==" }] }))).toBe(false);
   });
 });

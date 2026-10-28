@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
-export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ThreadPlan, TurnProgress } from "@valet/shared";
+export type { TurnProgress, ProgressTask, Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -1065,6 +1065,11 @@ export interface ThreadRecapResponse {
  * `update_plan`. `plan` is null when the thread has no plan. */
 export interface ThreadPlanResponse {
   plan: ThreadPlan | null;
+}
+
+/** Latest durable execution progress, or null for threads without an execution. */
+export interface ThreadProgressResponse {
+  progress: TurnProgress | null;
 }
 
 /** `GET /api/threads/:threadId/context` — how full the thread's model

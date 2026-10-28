@@ -3,7 +3,7 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -54,6 +54,12 @@ import {
   namespaceInternalDispatchId,
   overheardCoalesceKey,
   renderSignalEnvelope,
+  carriedInputIds,
+  carriedInputBridgeIds,
+  MAX_CARRIED_INPUTS,
+  isInteractiveSlackInput,
+  sameSubmissionOrigin,
+  sameSubmissionAuthor,
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
@@ -892,20 +898,18 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
-    // Steer admissions are exempt from the pending cap: the same atomic
-    // `admitSubmission({ steer: true })` call supersedes every prior
-    // unsettled item on the thread in the same transaction, so the count
-    // they'd leave behind is always ~0-1 regardless of how many were pending
-    // beforehand. For every other mode, the cap is enforced by the store
-    // INSIDE the admission transaction (opts.maxPending) rather than via a
-    // separate pre-check, so concurrent admissions can't race past it.
+    // Unscoped steering replaces all pending work. Conversation steering
+    // preserves queued work, so the store checks the cap after excluding
+    // the active turn it will replace. Admission and the check are atomic.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id)
+        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), ...(opts.steerScope === "active-origin" ? { maxPending: cap } : {}) }
+        : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
@@ -1124,7 +1128,7 @@ export class Thread {
       this.agent.abort();
     }
     for (const g of this.pendingDecisionGates()) {
-      this.withdrawDecision(g.id, "steer");
+      if (supersededItemIds.includes(g.queueItemId)) this.withdrawDecision(g.id, "steer");
     }
     for (const id of supersededItemIds) {
       await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
@@ -4566,6 +4570,42 @@ export class Thread {
     );
   }
 
+  /** Validate durable carry links before exposing original content or attachments. */
+  private async carriedInputs(item: QueueItem): Promise<QueueItem[]> {
+    const ids = carriedInputIds(item);
+    const bridgeIds = carriedInputBridgeIds(item);
+    const allIds = [...ids, ...bridgeIds];
+    if (!allIds.length) return [];
+    if (!isInteractiveSlackInput(item) || allIds.length > MAX_CARRIED_INPUTS || new Set(allIds).size !== allIds.length) {
+      throw new ValidationError("Invalid carried Slack inputs. Restore the original submission, then retry.");
+    }
+    const originals = new Map<string, QueueItem>();
+    for (const id of allIds) {
+      const original = await this.session.providers.store.getQueueItem(this.session.id, id);
+      const bridge = bridgeIds.includes(id);
+      const superseded = original?.status === "settled" && original.outcome?.outcome === "superseded";
+      if (!original || original.threadId !== this.id || !isInteractiveSlackInput(original) ||
+          !sameSubmissionOrigin(original.content, item.content) || !sameSubmissionAuthor(original, item) ||
+          (!superseded && !(bridge && original.status === "queued" && original.supersededByItemId))) {
+        throw new ValidationError("Carried input is unavailable. Restore the original submission, then retry.");
+      }
+      originals.set(id, original);
+    }
+    // Every reference must reach this correction. Bridges retain promotion provenance without repeating its body.
+    for (const id of allIds) {
+      let next: string | undefined = id;
+      const visited = new Set<string>();
+      while (next !== item.id) {
+        if (!next || visited.has(next)) {
+          throw new ValidationError("Invalid carried input relationship. Restore the original submission, then retry.");
+        }
+        visited.add(next);
+        next = originals.get(next)?.supersededByItemId;
+      }
+    }
+    return [...originals.values()].filter(original => ids.includes(original.id));
+  }
+
   /**
    * Build and persist the turn's user MessageEntry (signal envelope handling
    * included) under the current fence, and return the text the model actually
@@ -4585,29 +4625,38 @@ export class Thread {
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
     // function, two call sites).
+    const originals = await this.carriedInputs(item);
     let signalMeta: MessageEntry["signal"];
     let text: string;
     let entryContent: string;
     if (isSignalContent(item.content)) {
       signalMeta = buildSignalMeta(item.content, item.metadata);
-      text = renderSignalEnvelope(signalMeta, item.content.body);
       entryContent = item.content.body;
+      if (originals.length) {
+        const quote = (value: string) => value.split(/\r?\n/).map(line => `> ${line}`).join("\n");
+        const blocks = [...originals, item].map(input => {
+          const author = input.author;
+          const label = [author?.name, author?.id].filter(Boolean).join(" · ") || "Unknown sender";
+          return quote(label) + "\n" + quote(isSignalContent(input.content) ? input.content.body : promptText(input.content));
+        });
+        entryContent = "Messages received while you worked, in order:\n\n" + blocks.join("\n\n");
+      }
+      text = renderSignalEnvelope(signalMeta, entryContent);
     } else {
       text = promptText(item.content);
       entryContent = text;
     }
 
-    // Extract attachments if the prompt content has them.
+    // Preserve carried images and files through the normal model attachment path.
+    const contentInputs = [...originals, item].map(input => input.content);
+    const inputAttachments = contentInputs.flatMap(content =>
+      typeof content === "object" && content !== null && "attachments" in content && Array.isArray(content.attachments)
+        ? content.attachments : []);
     let attachments: MessageEntry["attachments"];
-    if (
-      typeof item.content === "object" &&
-      item.content !== null &&
-      "attachments" in item.content &&
-      Array.isArray(item.content.attachments)
-    ) {
+    if (inputAttachments.length) {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
-      for (const att of item.content.attachments) {
+      for (const att of inputAttachments) {
         if (typeof att !== "object" || att === null) continue;
         if (att.type === "file") {
           // Sandbox file (upload subsystem): persist path/size/hash so the
@@ -6700,9 +6749,25 @@ export class Thread {
   }
 
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
-  async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
-    const plan: ThreadPlan = { items, updatedAt: Date.now() };
-    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_PLAN_KEY]: plan }), "after-save");
+  async setPlan(items: ThreadPlanItem[], title?: string): Promise<ThreadPlan> {
+    const turnId = this.runningItem?.id;
+    const safeTitle = title?.trim().slice(0, 200);
+    let plan: ThreadPlan = { items: [], updatedAt: Date.now(), ...(turnId ? { turnId } : {}), ...(safeTitle ? { title: safeTitle } : {}) };
+    await this.patchThreadMetadata((current) => {
+      if (plan.items.length === 0) {
+        const previous = readThreadPlan(current);
+        const retainedTitle = !safeTitle && turnId && previous?.turnId === turnId ? previous.title : undefined;
+        const available = [...(previous?.items ?? [])];
+        plan = { ...plan, ...(retainedTitle ? { title: retainedTitle } : {}), items: items.map((item) => {
+          const index = available.findIndex((step) => step.text === item.text);
+          const match = index >= 0 ? available.splice(index, 1)[0] : undefined;
+          return { text: item.text, status: item.status, id: match?.id ?? uid("plan") };
+        }) };
+      }
+      const history = readTurnPlans(current).filter((entry) => entry.turnId !== turnId);
+      if (turnId) history.push(plan);
+      return { ...current, [THREAD_PLAN_KEY]: plan, [TURN_PLAN_HISTORY_KEY]: history.slice(-TURN_PLAN_HISTORY_LIMIT) };
+    }, "after-save");
     return plan;
   }
 
@@ -6735,7 +6800,7 @@ export class Thread {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
-      setThreadPlan: (items) => this.setPlan(items),
+      setThreadPlan: (items, title) => this.setPlan(items, title),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.

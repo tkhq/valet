@@ -492,6 +492,13 @@ export class EventDispatcher {
         // it, so the channel's privacy gates reads of that thread.
         const slackChannel = slackEventChannel(event);
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
+        // Ingest preserves the normalizer's bot flag. Payload fields cover older event rows.
+        if (event.service === "slack") {
+          const actorBot = event.actor !== null && typeof event.actor === "object" && "bot" in event.actor && event.actor.bot === true;
+          attributes.senderBot = String(actorBot || event.eventKey === "slack.bot_message" ||
+            !!resolvePath(event.payload, "bot_id") || !!resolvePath(event.payload, "bot_profile.id") ||
+            resolvePath(event.payload, "subtype") === "bot_message");
+        }
         let body: string;
         let channelBody = "";
         if (origin) {

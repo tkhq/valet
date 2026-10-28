@@ -50,6 +50,7 @@ import { onePasswordKeys } from "~/api/onepassword";
 import { qkPolicies } from "~/api/policies";
 import { qk } from "~/api/queries";
 import { qkSettings } from "~/api/settings";
+import { qkThreadProgress } from "~/api/thread-progress";
 import { qkThreadPlan } from "~/api/thread-plan";
 import { qkUsage } from "~/api/usage";
 import { qkWorkflows } from "~/api/workflows";
@@ -104,6 +105,7 @@ function seedApprovals(client: QueryClient): void {
 
 /** The thread view's pinned plan. */
 function seedThreadView(client: QueryClient): void {
+  client.setQueryData(qkThreadProgress(THREAD_ID), { progress: null });
   client.setQueryData<ThreadPlanResponse>(qkThreadPlan(THREAD_ID), { plan: stressThreadPlan });
 }
 

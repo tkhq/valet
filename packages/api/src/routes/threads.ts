@@ -1,10 +1,11 @@
+import { readLatestTurnProgress } from "@valet/engine";
 import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
-import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ToolOutputResponse } from "../wire/types.js";
+import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ThreadProgressResponse, ToolOutputResponse } from "../wire/types.js";
 import { threadOwner } from "../services/thread-links.js";
 import { readStoredThreadPlan } from "../services/thread-plan.js";
 import { activeViewers } from "../services/active-viewers.js";
@@ -177,6 +178,10 @@ threadsRouter.get("/:threadId/context", c => inThread(c, getThreadContext));
 threadsRouter.get("/:threadId/recap", c => inThread(c, getThreadRecap, "content", "read"));
 threadsRouter.get("/:threadId/plan", c => inThread(c, async (c, sessionId, threadId) => {
   const body: ThreadPlanResponse = { plan: await readStoredThreadPlan(c.var.providers.engineStore, sessionId, threadId) ?? null };
+  return c.json(body);
+}, "content", "read"));
+threadsRouter.get("/:threadId/progress", c => inThread(c, async (c, sessionId, threadId) => {
+  const body: ThreadProgressResponse = { progress: await readLatestTurnProgress(c.var.providers.engineStore, sessionId, threadId) };
   return c.json(body);
 }, "content", "read"));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));

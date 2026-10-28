@@ -425,6 +425,162 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       }))?.id).toBe(edit.id);
     });
 
+    it.each(["same", "different-thread", "different-channel", "different-author", "no-origin", "not-entered"])("origin steering isolates %s conversations and keeps queued work", async (variant) => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100, content: {
+        kind: "signal", signalType: "slack.message", body: "working", origin: { channelType: "slack", threadKey: "slack:D1:1", reply: "auto" },
+      } });
+      const queued = makeItem({ createdAt: 200, updatedAt: 200, content: "queued" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "origin-active", ownerId: "o" });
+      if (variant !== "not-entered") await store.appendEntries(SESSION_ID, THREAD_ID, [{
+        id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
+        type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
+      }], { itemId: active.id, attemptId: "origin-active" });
+      const incoming = makeItem({ createdAt: 300, updatedAt: 300, ...(variant === "different-author" ? { author: { id: "someone-else" } } : {}), content: variant === "no-origin" ? "web message" : {
+        kind: "signal", signalType: "slack.message", body: "reply", origin: {
+          channelType: variant === "different-channel" ? "telegram" : "slack",
+          threadKey: variant === "different-thread" ? "slack:D1:2" : "slack:D1:1", reply: "auto",
+        },
+      } });
+      const receipt = await store.admitSubmission(SESSION_ID, THREAD_ID, incoming, { steer: true, steerScope: "active-origin" });
+      expect(receipt.supersededItemIds).toEqual(variant === "same" ? [active.id] : []);
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.supersededByItemId).toBeUndefined();
+      expect(receipt.item.createdAt < queued.createdAt).toBe(variant === "same");
+    });
+
+    it.each([true, false])("origin correction carries queued requests atomically with matching active=%s", async (matchingActive) => {
+      const content = (body: string, threadKey = "slack:C1:1") => ({
+        kind: "signal" as const, signalType: "slack.message", body,
+        origin: { channelType: "slack", threadKey, reply: "auto" as const },
+      });
+      const sender = { id: "sender" };
+      const active = makeItem({ content: content("working", matchingActive ? "slack:C1:1" : "slack:C2:1"), createdAt: 100, author: sender });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "carry-active", ownerId: "o" });
+      await store.appendEntries(SESSION_ID, THREAD_ID, [{ id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
+        type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
+      }], { itemId: active.id, attemptId: "carry-active" });
+      const deploy = makeItem({ content: content("deploy"), createdAt: 200, dispatchId: "carry-deploy", author: sender, metadata: { [TOOL_SCOPE_KEY]: { actions: ["deploy"] } } });
+      const unrelated = makeItem({ content: content("other work", "slack:C3:1"), createdAt: 210, author: sender });
+      const otherSender = makeItem({ content: content("other request"), createdAt: 220, author: { id: "other" } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, deploy);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, unrelated);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, otherSender);
+      const stop = makeItem({ content: content("stop"), createdAt: 300, dispatchId: "carry-stop", author: sender });
+      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 4 };
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
+      expect(result.item.metadata?.carriedInputIds).toEqual([deploy.id]);
+      expect(result.item.author).toEqual(sender);
+      expect(result.item.metadata?.[TOOL_SCOPE_KEY]).toBeUndefined();
+      expect(await store.getQueueItem(SESSION_ID, deploy.id)).toMatchObject({ status: "settled", outcome: { outcome: "superseded" }, supersededByItemId: stop.id, author: sender });
+      expect((await store.getQueueItem(SESSION_ID, unrelated.id))?.supersededByItemId).toBeUndefined();
+      expect(await store.getQueueItem(SESSION_ID, otherSender.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, otherSender.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, active.id))?.supersededByItemId).toBe(matchingActive ? stop.id : undefined);
+      expect(await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: deploy.id, attemptId: "unsafe-deploy", ownerId: "o" })).toBeNull();
+      const replay = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
+      expect(replay.admitted).toBe(false);
+      expect(replay.item.metadata?.carriedInputIds).toEqual([deploy.id]);
+      const newest = makeItem({ content: content("keep stopped"), createdAt: 400, author: sender });
+      const next = await store.admitSubmission(SESSION_ID, THREAD_ID, newest, { steer: true, steerScope: "active-origin" });
+      expect(next.item.metadata?.carriedInputIds).toEqual([deploy.id, stop.id]);
+      expect(next.item.content).toEqual(newest.content);
+    });
+
+    it("enforces the cap after origin steering and dedups replays at capacity", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "work", origin: { channelType: "slack", threadKey: "slack:D1:1", reply: "auto" as const } };
+      const active = makeItem({ content });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "origin-cap", ownerId: "o" });
+      await store.appendEntries(SESSION_ID, THREAD_ID, [{ id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null, type: "message", role: "user", content: "work", createdAt: 100, queueItemId: active.id }], { itemId: active.id, attemptId: "origin-cap" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem());
+      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 2 };
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), opts)).rejects.toBeInstanceOf(PendingCapError);
+      const reply = makeItem({ content, dispatchId: "origin-cap-reply" });
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, reply, opts)).supersededItemIds).toEqual([active.id]);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, reply, { ...opts, maxPending: 0 })).admitted).toBe(false);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ content }), opts)).item.metadata?.carriedInputIds).toEqual([reply.id]);
+    });
+
+    it.each(["manual", "unspecified", "bot", "unattended", "record-only", "other-thread", "other-session", "other-author"])("origin carry preserves %s queued inputs", async (variant) => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "older",
+        origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const incoming = makeItem({ content: { ...content, body: "correction" } });
+      const older = makeItem({ content: variant === "manual" ? { ...content, origin: { ...content.origin, reply: "manual" } } :
+        variant === "unspecified" ? { ...content, origin: { channelType: "slack", threadKey: "slack:C1:1" } } :
+        variant === "bot" ? { ...content, attributes: { senderBot: "true" } } : content,
+        metadata: variant === "unattended" ? { unattendedDelivery: true } : variant === "record-only" ? { recordOnly: true } : undefined,
+        ...(variant === "other-author" ? { author: { id: "other" } } : {}) });
+      let sessionId = SESSION_ID;
+      let threadId = THREAD_ID;
+      if (variant === "other-session") { sessionId = "other-session"; await store.saveSession(newSession({ id: sessionId })); }
+      if (variant === "other-thread" || variant === "other-session") {
+        threadId = "other-thread";
+        await store.saveThread(sessionId, { ...newThread(threadId, threadId), sessionId });
+      }
+      older.threadId = threadId;
+      await store.admitSubmission(sessionId, threadId, older);
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, incoming, { steer: true, steerScope: "active-origin" });
+      expect(result.item.metadata?.carriedInputIds).toBeUndefined();
+      expect(await store.getQueueItem(sessionId, older.id)).toMatchObject({ status: "queued" });
+      expect(result.supersededItemIds).toEqual([]);
+    });
+
+    it("strips caller carry references before they can become transitive", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const older = makeItem({ content, dispatchId: "forged-carry-replay", metadata: { carriedInputIds: ["forged-private-input"] } });
+      const first = await store.admitSubmission(SESSION_ID, THREAD_ID, older);
+      expect(first.item.metadata?.carriedInputIds).toBeUndefined();
+      const correction = makeItem({ content: { ...content, body: "correction" }, metadata: { carriedInputIds: ["forged-other-input"] } });
+      const next = await store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" });
+      expect(next.item.metadata?.carriedInputIds).toEqual([older.id]);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, older)).item.outcome?.outcome).toBe("superseded");
+    });
+
+    it("rejects a carry overflow without changing receipts or admitting the correction", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const opts = { steer: true, steerScope: "active-origin" as const };
+      let previous = makeItem({ content });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, previous);
+      for (let i = 0; i < 128; i++) {
+        const next = makeItem({ content: { ...content, body: `correction ${i}` } });
+        await store.admitSubmission(SESSION_ID, THREAD_ID, next, opts);
+        previous = next;
+      }
+      const overflow = makeItem({ content: { ...content, body: "overflow" } });
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, overflow, opts)).rejects.toThrow("Too many queued Slack inputs");
+      expect(await store.getQueueItem(SESSION_ID, overflow.id)).toBeNull();
+      expect(await store.getQueueItem(SESSION_ID, previous.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, previous.id))?.supersededByItemId).toBeUndefined();
+    });
+
+    it("refuses an unsupported carried attachment without changing either receipt", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const original = makeItem({ content: { ...content, attachments: [{ type: "image", mimeType: "image/png", name: "missing-image" }] } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, original);
+      const correction = makeItem({ content: { ...content, body: "correction" } });
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" })).rejects.toThrow("attachment cannot be carried");
+      expect(await store.getQueueItem(SESSION_ID, correction.id)).toBeNull();
+      expect(await store.getQueueItem(SESSION_ID, original.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, original.id))?.supersededByItemId).toBeUndefined();
+    });
+
+    it("reconstructs promotion carry references from the locked source instead of caller metadata", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "image", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const image = makeItem({ content: { ...content, attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, image);
+      const correction = makeItem({ content: { ...content, body: "stop" } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" });
+      const promoted = makeItem({ content: correction.content, metadata: { carriedInputIds: ["forged"], carriedInputBridgeIds: ["forged-source"] } });
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, promoted, { steer: true, steerScope: "active-and-source", promoteFromItemId: correction.id });
+      expect(result.item.metadata?.carriedInputIds).toEqual([image.id]);
+      expect(result.item.metadata?.carriedInputBridgeIds).toEqual([correction.id]);
+      expect((await store.getQueueItem(SESSION_ID, image.id))?.supersededByItemId).toBe(correction.id);
+      expect((await store.getQueueItem(SESSION_ID, correction.id))?.supersededByItemId).toBe(promoted.id);
+      expect((await store.getQueueItem(SESSION_ID, image.id))?.content).toEqual(image.content);
+    });
+
     it("active steer on an idle thread keeps its admission time", async () => {
       const edit = makeItem({ createdAt: 400, updatedAt: 400 });
       const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, edit, { steer: true, steerScope: "active" });

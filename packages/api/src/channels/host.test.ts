@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import {
+  MID_TURN_DELIVERY_KEY,
   VirtualSandboxProvider,
   type ChannelTransport,
   type FetchedChannelMedia,
@@ -378,6 +379,24 @@ describe("ChannelHost.handleUpdate", () => {
     expect((await session.threadByKey("fake:99"))?.id).toBe(threads[0]?.id);
   });
 
+  it("publishes a planned turn's progress through a capable non-Slack transport", async () => {
+    // Only a turn with a plan gets a progress card. The question keeps the
+    // turn open: a turn that settles before the first post gets no card.
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("update_plan", { items: [{ text: "Check the change", status: "in_progress" }], intent: "Plan the check." }),
+        fauxToolCall("ask_question", { question: "Which change?", intent: "Ask the person a question before continuing." })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Checked."),
+    ]);
+    const publish = vi.fn(async () => ({ messageId: "progress-1" }));
+    Object.assign(keyedTransport, { publishProgress: publish });
+    await linkIdentity(testDb.appDb, { provider: "keyed", externalId: "77", userId: USER_ID });
+    await host.handleUpdate("keyed", inbound({ conversationKey: "keyed:R1:99", text: "Check the change" }));
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(
+      "keyed:R1:99", expect.objectContaining({ turnId: expect.any(String), revision: expect.any(String), planned: true, tasks: [expect.objectContaining({ title: "Check the change" })] }),
+      expect.objectContaining({ idempotencyKey: expect.any(String), threadTs: "99" }),
+    ), { timeout: 5000 });
+  });
+
   it("preserves origin, sender, and attachments on direct-message ingress", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     fakeTransport.fetchedMedia = {
@@ -446,7 +465,10 @@ describe("ChannelHost.handleUpdate", () => {
   it("creates a native Slack DM thread without Home and records edits there without replying", async () => {
     const { slackHost } = await startSlackHost();
     try {
+      const admission = vi.spyOn(engineStore, "admitSubmission");
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:new", conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      // A reply waits for the running turn. It never cancels it.
+      expect(admission.mock.calls[0][3]?.steer).toBeUndefined();
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
       expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
       const thread = await session.threadByKey("slack:D1:111.1");
@@ -471,6 +493,10 @@ describe("ChannelHost.handleUpdate", () => {
       });
       const after = await engineStore.getEntries(session.id, thread.id);
       expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+      // Only a whole-message stop phrase asks to interrupt the sender's turn.
+      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "Stop.", dispatchId: "slack:new-stop" }));
+      expect(admission.mock.calls.at(-1)?.[3]).toMatchObject({ steer: true, steerScope: "active-origin" });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
       expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
     } finally {
       await slackHost.stop();

@@ -3123,6 +3123,33 @@ export const homeTasks = pgTable("home_tasks", {
   reportedAt: bigint("reported_at", { mode: "number" }),
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+
+/** Durable progress intent; create_started survives an uncertain provider outcome. */
+export const channelProgressDeliveries = pgTable("channel_progress_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  turnId: text("turn_id").notNull(),
+  channelType: text("channel_type").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  threadTs: text("thread_ts"),
+  messageId: text("message_id"),
+  lastRevision: text("last_revision"),
+  createStarted: boolean("create_started").notNull().default(false),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull().default(0),
+  leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  failedAt: bigint("failed_at", { mode: "number" }),
+  lastError: text("last_error"),
+}, t => [
+  uniqueIndex("channel_progress_scope").on(t.orgId, t.sessionId, t.threadId, t.turnId, t.channelType, t.conversationKey),
+  index("channel_progress_pending_due").on(t.orgId, t.nextAttemptAt)
+    .where(sql`${t.completedAt} IS NULL AND ${t.failedAt} IS NULL`),
+]);
+export type ChannelProgressDeliveryRow = typeof channelProgressDeliveries.$inferSelect;
 // Hosted, MCP, and CLI usage facts. Never add arguments or results.
 export const externalCalls = pgTable("external_calls", {
   id: text("id").primaryKey(),

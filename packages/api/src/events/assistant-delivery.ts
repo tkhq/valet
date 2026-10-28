@@ -13,6 +13,7 @@ import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
  * The workspace owner determines the assistant.
  */
 import { isDeepStrictEqual } from "node:util";
+import { isSlackStopRequest } from "@valet/engine";
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -333,9 +334,18 @@ function admittedContentMatches(stored: unknown, signal: SignalContent): boolean
   const body = content.body === signal.body ? content.body
     : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${signal.body}`)
       ? signal.body : content.body;
-  const expected: unknown = JSON.parse(JSON.stringify({ ...signal, tagName: signal.tagName ?? "signal" }));
+  const expected: unknown = JSON.parse(JSON.stringify(withoutSenderBot({ ...signal, tagName: signal.tagName ?? "signal" })));
   const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
-  return isDeepStrictEqual({ ...content, body, tagName }, expected);
+  return isDeepStrictEqual(withoutSenderBot({ ...content, body, tagName }), expected);
+}
+
+/** Rows admitted before the dispatcher set `senderBot` lack it, and a retry
+ * of the same event after the deploy carries it. The flag is derived from the
+ * event, so it does not tell two events apart. */
+function withoutSenderBot<T extends object>(value: T): T {
+  if (!("attributes" in value) || typeof value.attributes !== "object" || value.attributes === null) return value;
+  const { senderBot: _senderBot, ...attributes } = value.attributes as Record<string, unknown>;
+  return { ...value, attributes };
 }
 
 /**
@@ -465,15 +475,17 @@ async function deliverToAssistantThreadInner(
     }
     return { sessionId: session.id, threadId: thread.id };
   }
-  // `inject`, not the thread default: a personal assistant thread defaults
-  // to `steer`, which would abort the person's running turn and drop the
-  // items queued behind it. The engine admits the delivery into the running
-  // turn only when it adds no authority; otherwise it waits as a followup.
+  // Every delivery waits for the running turn. Only a stop phrase in a
+  // mention can interrupt, and the store checks it came from the turn's own
+  // sender. A channel subscription delivers every message with reply "auto",
+  // so a plain channel message never interrupts.
+  const interrupts = !args.unattended && signal.signalType !== "slack.message" && isSlackStopRequest(signal);
   const receipt = args.recordOnly
     ? await thread.recordSignal(signal, { dispatchId: args.dispatchId, author: args.author ?? { id: args.actorUserId } })
     : await thread.submitPrompt(signal, {
       dispatchId: args.dispatchId,
-      queueMode: "inject",
+      queueMode: interrupts ? "steer" : "inject",
+      ...(interrupts ? { steerScope: "active-origin" as const } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {}),
       author: args.author ?? { id: args.actorUserId },
     });

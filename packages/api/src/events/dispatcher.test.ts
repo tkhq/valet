@@ -527,6 +527,17 @@ describe("EventDispatcher", () => {
     expect(row.status).toBe("delivered");
   });
 
+  it.each(["actor", "bot_id", "bot_profile", "subtype", "human"])("forwards verified Slack sender identity from %s", async (kind) => {
+    await seedDelivery({ target: { kind: "assistant" }, service: "slack", eventKey: "slack.message", eventKeys: ["slack.message"],
+      actor: { externalId: "U1", bot: kind === "actor" }, payload: { type: "message", channel: "C1", user: "U1", ts: "1.2", text: "hello",
+        ...(kind === "bot_id" ? { bot_id: "B1" } : kind === "bot_profile" ? { bot_profile: { id: "B1" } } : kind === "subtype" ? { subtype: "bot_message" } : {}) } });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToAssistant: deliver, resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) });
+    await dispatcher.pollOnce();
+    expect(deliver.mock.calls[0][0].signal.attributes?.senderBot).toBe(String(kind !== "human"));
+  });
+
   it("delivers a person's plain channel message as attended, so its turn can ask", async () => {
     // The approvals and event-subscriptions skills tell assistants that a
     // person's Slack message, not only a mention, can open a card.
