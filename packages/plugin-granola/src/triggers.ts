@@ -63,7 +63,7 @@ function isEventType(v: unknown): v is GranolaEventType {
   return (GRANOLA_EVENT_TYPES as readonly unknown[]).includes(v);
 }
 
-type Inspection =
+export type Inspection =
   | { ok: true; eventType: GranolaEventType; deliveryId: string; payload: Record<string, unknown> }
   | { ok: false; rejection: TriggerRejection };
 
@@ -77,7 +77,11 @@ const reject = (reason: TriggerRejection["reason"], detail: string, retry?: true
  * asks for a retry. Nothing from the body is read or logged before the
  * signature passes.
  */
-function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, secret: string | undefined): Inspection {
+export function inspectGranolaDelivery(
+  req: { headers: Record<string, string>; rawBody: Uint8Array },
+  secret: string | undefined,
+  nowMs: number,
+): Inspection {
   const key = signingKey(secret);
   if (!key) {
     return reject("bad_signature", "The saved Granola signing secret is missing or is not a whsec_ secret. Save the signing secret that Granola showed when it created the webhook.");
@@ -92,7 +96,7 @@ function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, 
   if (!signatureMatches(signatures, expected)) return reject("bad_signature", badSignature);
 
   const seconds = /^\d{1,12}$/.test(timestamp) ? Number(timestamp) : Number.NaN;
-  const ageSeconds = Math.floor(Date.now() / 1000) - seconds;
+  const ageSeconds = Math.floor(nowMs / 1000) - seconds;
   if (!Number.isFinite(ageSeconds) || Math.abs(ageSeconds) > TIMESTAMP_TOLERANCE_SECONDS) {
     return reject("stale_delivery", `A signed Granola delivery had a timestamp ${Number.isFinite(ageSeconds) ? `${ageSeconds}s from now` : "that is not a Unix time"}. Valet accepts deliveries within ${TIMESTAMP_TOLERANCE_SECONDS}s. Valet answers 503 so Granola retries with a new timestamp. If this repeats, check the server clock.`, true);
   }
@@ -112,13 +116,17 @@ function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, 
 }
 
 const verify: TriggerDef["verify"] = (req, secrets) => {
-  const result = inspect(req, secrets.signingSecret);
+  const result = inspectGranolaDelivery(req, secrets.signingSecret, Date.now());
   return result.ok ? { eventType: result.eventType, deliveryId: result.deliveryId, payload: result.payload } : null;
 };
 
-/** Runs only after `verify` declined the request. */
+/**
+ * Runs only after `verify` declined the request. It reads the clock again, so
+ * the Granola route does not call `verify` and this in sequence. The route
+ * uses one `inspectGranolaDelivery` call with one clock reading instead.
+ */
 const explainRejection: NonNullable<TriggerDef["explainRejection"]> = (req, secrets) => {
-  const result = inspect(req, secrets.signingSecret);
+  const result = inspectGranolaDelivery(req, secrets.signingSecret, Date.now());
   return result.ok
     ? { reason: "malformed_callback", detail: "A Granola delivery verified but was declined." }
     : result.rejection;

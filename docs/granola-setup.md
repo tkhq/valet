@@ -94,8 +94,7 @@ Granola retries on 408, 429, 5xx, and timeouts. The 503 answer makes Granola ret
 ## Troubleshooting
 
 - **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Without a saved secret, Valet answers 503 and Granola retries.
-- **`bad_signature` in the drop log.** The saved secret does not match the Granola webhook, or a second Granola webhook sends to this URL. Granola does not replay the deliveries that got 403, so they are lost. Save the right secret, delete extra Granola webhooks for this URL, then send a test event.
+- **`bad_signature` in the drop log.** The saved secret does not match the Granola webhook, or a second Granola webhook sends to this URL. Valet answers 403. Granola does not retry or replay 403 deliveries, so those events are lost. Save the right secret, delete extra Granola webhooks for this URL, then send a test event.
 - **`secret_unavailable` in the drop log.** Save the secret again with the command above.
-- **`bad_signature` in the drop log.** Save the signing secret again. If you have several Granola webhooks that send to this URL, delete the extra ones.
 - **`stale_delivery` in the drop log.** Granola sent a validly signed delivery with an old or future timestamp, and Valet asked Granola to retry. If this repeats, check the clock on the Valet server.
 - **A subscription never fires.** Valet does not check that the secret exists when you create the subscription. Save the secret first.
