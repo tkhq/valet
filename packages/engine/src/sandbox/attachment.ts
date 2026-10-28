@@ -205,7 +205,10 @@ export class SandboxAttachment {
   private lastStartError: string | undefined;
   /** Armed by a terminal startup failure (spec 8.1). `kickProvision` stays
    * quiet until `at + window`; `ensureReady` inside the window rejects at
-   * once with `error` so callers get the cause instead of a timeout. */
+   * once with `error` so callers get the cause instead of a timeout.
+   * Caller-driven (spec 8.1): nothing wakes the attachment when the window
+   * ends; the next `ensureReady` after it re-provisions. An unattended timer
+   * would re-create pods every window for a session nobody is using. */
   private terminalFailure: { at: number; attempts: number; error: SandboxStartupError | SandboxPreparationError } | null = null;
 
   constructor(

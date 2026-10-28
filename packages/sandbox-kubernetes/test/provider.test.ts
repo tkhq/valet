@@ -1262,7 +1262,7 @@ describe("create() resource adoption and pod rollout", () => {
       expect((err as SandboxStartupError).kind).toBe("ownership");
       expect((err as SandboxStartupError).message).toContain("is owned by Sandbox/");
       expect((err as SandboxStartupError).message).toContain(
-        "The controller is still waiting for the previous sandbox's pod and volume to be removed; this retries automatically.");
+        "The controller is still waiting for the previous sandbox's pod and volume to be removed. Retry shortly; the next attempt reuses this sandbox once they are gone.");
       expect((err as SandboxStartupError).message).not.toContain("Check Kubernetes API access");
       expect(objectsApi.deleteCalls).toBe(0);
     } finally {

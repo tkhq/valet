@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   SandboxAttachment,
+  STARTUP_BACKOFF_CAP_MS,
   PolicySandbox,
   SandboxStartupError,
   WorkspaceProvisioningError,
@@ -709,6 +710,33 @@ describe("terminal startup backoff", () => {
       provider.nextDeferred().resolve(makeFakeSandbox("ok"));
       await attachment.ensureReady({ timeoutMs: 60_000 });
       expect(provider.createCalls).toBe(3);
+      expect(attachment.state).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays caller-driven: the window ending does not start a provision by itself; the next ensureReady does", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new FakeProvider();
+      const attachment = new SandboxAttachment(provider, {});
+      const d1 = provider.nextDeferred();
+      const p1 = attachment.ensureReady({ timeoutMs: 60_000 });
+      d1.reject(new SandboxStartupError("s", "owned by a deleted predecessor", "ownership"));
+      await expect(p1).rejects.toBeInstanceOf(SandboxStartupError);
+      expect(provider.createCalls).toBe(1);
+
+      // The window ends and then some. No caller, no provision: an unattended
+      // retry would re-create pods for a session nobody is using.
+      await vi.advanceTimersByTimeAsync(STARTUP_BACKOFF_CAP_MS * 2);
+      expect(provider.createCalls).toBe(1);
+      expect(attachment.state).toBe("error");
+
+      // The next caller re-provisions at once (adopting the kept CR in k8s).
+      provider.nextDeferred().resolve(makeFakeSandbox("ok"));
+      await attachment.ensureReady({ timeoutMs: 60_000 });
+      expect(provider.createCalls).toBe(2);
       expect(attachment.state).toBe("ready");
     } finally {
       vi.useRealTimers();
