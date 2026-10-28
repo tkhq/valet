@@ -9,6 +9,14 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { metrics } from "@opentelemetry/api";
+import {
+  AggregationTemporality,
+  DataPointType,
+  InMemoryMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
 import {
   type ExecResult,
   type Sandbox,
@@ -20,6 +28,7 @@ import {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, imageSources, bakes, securityEngagements, securityCells, sessionRepos } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
+import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
 import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { contentsBody, startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -52,7 +61,7 @@ class RecordingSandbox implements Sandbox {
   async destroy(): Promise<void> {}
 }
 
-function makeIsolatedProvider(opts: { customImage?: boolean } = {}): SandboxProvider & {
+function makeIsolatedProvider(opts: { customImage?: boolean; backend?: string } = {}): SandboxProvider & {
   execs: string[];
   createCalls: SandboxCreateOpts[];
 } {
@@ -61,7 +70,7 @@ function makeIsolatedProvider(opts: { customImage?: boolean } = {}): SandboxProv
   let nextId = 1;
   const sandboxes = new Map<string, RecordingSandbox>();
   return {
-    backend: "recording-isolated",
+    backend: opts.backend ?? "recording-isolated",
     execs,
     createCalls,
     capabilities(): SandboxCapabilities {
@@ -415,6 +424,134 @@ describe("EngineHost buildSpecProvider", () => {
     expect(provider.execs.some((c) => c.includes("command -v semgrep"))).toBe(true);
   });
 
+  it("an incompatible repo bake records agent_sessions.image_fallback, calls the handler once, and clears on a compatible bake", async () => {
+    // Same in-memory harness as image-fallback-metrics.test.ts. The counter
+    // binds to the global provider on its first use, which is in this test.
+    metrics.disable();
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const meterProvider = new MeterProvider({
+      readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })],
+    });
+    metrics.setGlobalMeterProvider(meterProvider);
+    const fallbackCount = async (): Promise<number> => {
+      await meterProvider.forceFlush();
+      const metric = exporter.getMetrics()
+        .flatMap((resource) => resource.scopeMetrics)
+        .flatMap((scope) => scope.metrics)
+        .filter((candidate) => candidate.descriptor.name === "valet.sandbox.image_fallback")
+        .at(-1);
+      if (!metric || metric.dataPointType !== DataPointType.SUM) throw new Error("expected a counter metric");
+      return metric.dataPoints.reduce((sum, point) => sum + point.value, 0);
+    };
+    try {
+      const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
+      api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
+      const events: ImageFallbackEvent[] = [];
+      api.providers.engineHost.setImageFallbackHandler(async (e) => { events.push(e); });
+
+      const now = Date.now();
+      await api.providers.db.insert(imageSources).values({
+        id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
+        setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
+        schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      const bakeRow = (id: string, createdAt: number, contract: { contractVersion: number | null; contractSource: "label" | "missing" | "override" | null }) => ({
+        id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${id}`, status: "pushed" as const,
+        builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
+        startedAt: createdAt, finishedAt: createdAt, createdAt, ...contract,
+      });
+      await api.providers.db.insert(bakes).values(bakeRow("pb-bad", now, { contractVersion: 0, contractSource: "missing" }));
+
+      const sessionId = "fb-session";
+      await insertSession(api.providers.db, sessionId);
+      const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
+      const session = await api.providers.engineHost.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+      // Stock image, not the bad bake; fallback recorded; handler called once.
+      expect(provider.createCalls[0].image).toBe("stock:img");
+      const row = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect(row.imageFallback).toMatchObject({ reason: "contract", sourceId: "fb-cfg1", bakeId: "pb-bad" });
+      expect(events).toEqual([expect.objectContaining({ sessionId, sourceId: "fb-cfg1", bakeId: "pb-bad", contract: 0, repoFullName: "acme/widgets" })]);
+
+      // Re-evaluating while the bake is still bad stamps and counts nothing new.
+      const firstAt = (row.imageFallback as { at: number }).at;
+      expect(await fallbackCount()).toBe(1);
+      await new Promise((r) => setTimeout(r, 5));
+      await session.options.specProvider!();
+      const again = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect((again.imageFallback as { at: number }).at).toBe(firstAt);
+      expect(await fallbackCount()).toBe(1);
+      // The handler stays unconditional (workflow sessions have no row); the
+      // source service dedupes on its side.
+      expect(events).toHaveLength(2);
+
+      // A compatible bake lands. Re-evaluating the spec provider (the same
+      // closure a reconcile sweep runs) clears the fallback and picks the bake.
+      await api.providers.db.insert(bakes).values(bakeRow("pb-good", now + 1000, { contractVersion: 3, contractSource: "label" }));
+      const desired = await session.options.specProvider!();
+      expect(desired.image).toBe("valet-prebuild/acme-widgets:pb-good");
+      const cleared = (await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)))[0];
+      expect(cleared.imageFallback).toBeNull();
+      expect(events).toHaveLength(2);
+    } finally {
+      await meterProvider.shutdown();
+      metrics.disable();
+    }
+  });
+
+  describe("startup warning", () => {
+    async function seed(bakeIds: Array<{ id: string; contractVersion: number; contractSource: "label" | "missing" }>) {
+      const provider = makeIsolatedProvider({ customImage: true, backend: "kubernetes" });
+      api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
+      const now = Date.now();
+      await api.providers.db.insert(imageSources).values({
+        id: "fb-cfg1", orgId: ORG, kind: "repo", parentId: null, name: "acme/widgets", externalRef: null, pullSecretName: null,
+        setupCommands: null, repoHost: "github", repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git",
+        schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      for (const [i, b] of bakeIds.entries()) {
+        await api.providers.db.insert(bakes).values({
+          id: b.id, sourceId: "fb-cfg1", identityHash: "", commitSha: "sha1", imageRef: `valet-prebuild/acme-widgets:${b.id}`, status: "pushed" as const,
+          builderBackend: "kubernetes", recipe: { recipe: [], setup: [], image: undefined }, error: null, logTail: null,
+          startedAt: now + i, finishedAt: now + i, createdAt: now + i, contractVersion: b.contractVersion, contractSource: b.contractSource,
+        });
+      }
+      const sessionId = "fb-warn-session";
+      await insertSession(api.providers.db, sessionId);
+      const meta = { userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding] };
+      return { sessionId, meta, host: api.providers.engineHost };
+    }
+    const noteCount = async (sessionId: string, threadId: string) =>
+      ((await api!.providers.engineStore.getThreadSnapshot(sessionId, threadId))?.entries ?? [])
+        .filter((e) => e.type === "message" && e.role === "system" && String(e.content).includes("failed its compatibility check")).length;
+
+    it("a session that falls back gets the startup warning in its system prompt and one thread note", async () => {
+      const { sessionId, meta, host } = await seed([{ id: "pb-bad", contractVersion: 0, contractSource: "missing" }]);
+      const session = await host.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      const prompt = session.options.systemPrompt ?? "";
+      expect(prompt).toContain("## Startup warning");
+      expect(prompt).toContain("Prebuilt dependencies for `acme/widgets` are unavailable right now because the repo image is being rebuilt.");
+      const thread = await session.createThread("web:default");
+      expect(await noteCount(sessionId, thread.id)).toBe(1);
+      // A rebuild of the same session does not add a second note.
+      await host.invalidateSession(sessionId);
+      const again = await host.sessionFor(sessionId, meta);
+      await again.attachment.ensureReady({ timeoutMs: 5_000 });
+      expect(again).not.toBe(session);
+      expect(again.options.systemPrompt ?? "").toContain("## Startup warning");
+      expect(await noteCount(sessionId, thread.id)).toBe(1);
+    });
+
+    it("a session whose repo bake is compatible has no startup warning", async () => {
+      const { sessionId, meta, host } = await seed([{ id: "pb-good", contractVersion: 3, contractSource: "label" }]);
+      const session = await host.sessionFor(sessionId, meta);
+      await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      expect(session.options.systemPrompt ?? "").not.toContain("## Startup warning");
+    });
+  });
+
   it("repo session on isolated+customImage provider: newer pushed prebuild produces different image ref", async () => {
     const provider = makeIsolatedProvider({ customImage: true });
     api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
@@ -567,5 +704,15 @@ describe("EngineHost buildSpecProvider", () => {
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
     expect(session.attachment.state).toBe("ready");
     expect(provider.execs).toHaveLength(0);
+  });
+});
+
+describe("imageFallbackPrompt", () => {
+  it("renders the spec 7.2 paragraph and nothing when there is no fallback", async () => {
+    const { imageFallbackPrompt } = await import("./host.js");
+    expect(imageFallbackPrompt(undefined)).toBe("");
+    expect(imageFallbackPrompt("acme/widgets")).toBe(
+      "\n\n## Startup warning\n\nPrebuilt dependencies for `acme/widgets` are unavailable right now because the repo image is being rebuilt. The workspace is checked out; install what you need.",
+    );
   });
 });

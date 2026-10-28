@@ -387,6 +387,7 @@ export interface SandboxCRRead {
 export interface PodOwnerReference {
   kind: string;
   name: string;
+  uid?: string;
   controller?: boolean;
 }
 

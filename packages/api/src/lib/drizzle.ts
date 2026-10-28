@@ -401,6 +401,30 @@ END $cost_view$`;
  * statement then stops its boot. Do not rename or drop here.
  */
 
+/** Spec 5.4: first stock image containing tini (2026-09-18T20:31:00Z,
+ * commit 56edb1bd9). Base bakes created at or after it are contract 3. */
+const TINI_EPOCH_MS = 1789763460000;
+
+/** Spec 5.4 backfill as ONE statement: base bakes by age, repo bakes by the
+ * parent base's newest pushed bake created at or before them, else 0. The
+ * sub-select reads the pre-statement snapshot, which is fine: it derives the
+ * parent's contract from created_at, not from the column being written. */
+const CONTRACT_BACKFILL_SQL = `WITH base AS (
+  UPDATE bakes b SET contract_version = CASE WHEN b.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END, contract_source = 'missing'
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'base' AND b.contract_version IS NULL
+  RETURNING b.id
+), repo AS (
+  UPDATE bakes b SET contract_version = COALESCE((
+      SELECT CASE WHEN pb.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END
+      FROM bakes pb JOIN image_sources ps ON ps.id = pb.source_id
+      WHERE ps.kind = 'base' AND ps.id = s.parent_id AND pb.status = 'pushed' AND pb.created_at <= b.created_at
+      ORDER BY pb.created_at DESC LIMIT 1), 0),
+    contract_source = CASE WHEN b.recipe->>'image' IS NOT NULL THEN 'override' ELSE 'missing' END
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'repo' AND b.contract_version IS NULL
+  RETURNING b.id
+)
+SELECT id FROM base UNION ALL SELECT id FROM repo`;
+
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
@@ -2296,6 +2320,30 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "tagging accounting use case", probe: { kind: "table", table: "tagging_accounting_ready" },
     sql: `DO $repair$ BEGIN ${taggingAccountingPublishSql} END $repair$` },
 
+  {
+    describe: "bakes contract and lineage columns",
+    probe: { kind: "column", table: "bakes", column: "contract_version" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_version integer;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_source text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS parent_bake_id text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS base_image_ref text; END $repair$`,
+    backfill: CONTRACT_BACKFILL_SQL,
+  },
+  {
+    describe: "image_sources health columns",
+    probe: { kind: "column", table: "image_sources", column: "health" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health text NOT NULL DEFAULT 'healthy';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_reason text NOT NULL DEFAULT 'ok';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_detail text;
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_checked_at bigint; END $repair$`,
+  },
+  {
+    describe: "agent_sessions.image_fallback column",
+    probe: { kind: "column", table: "agent_sessions", column: "image_fallback" },
+    sql: `ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS image_fallback jsonb`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

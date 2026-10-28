@@ -900,3 +900,12 @@ describe("scratchSizeLimit (fix wave 4, security N2)", () => {
     }
   });
 });
+
+describe("image runtime contract constants", () => {
+  it("pins the current and minimum contract", async () => {
+    const { SANDBOX_IMAGE_CONTRACT, MIN_IMAGE_CONTRACT } = await import("../src/index.js");
+    expect(SANDBOX_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBeLessThanOrEqual(SANDBOX_IMAGE_CONTRACT);
+  });
+});

@@ -407,6 +407,9 @@ export const agentSessions = pgTable(
     // matching source/bake, or a `customImage: false` provider). Nullable
     // — the vast majority of sessions never resolve a bake.
     bakeId: text("bake_id"),
+    // Set when session start fell back from the repo image (spec 7.1);
+    // cleared by the spec provider once a compatible repo bake resolves.
+    imageFallback: jsonb("image_fallback").$type<ImageFallback>(),
     // Sandbox id recorded at hibernate time — the reaper's destroy handle
     // for sessions an api restart evicts from the host cache (same rationale
     // as child_watches.parked_sandbox_id).
@@ -1955,6 +1958,21 @@ export const githubInstallations = pgTable(
 //   kind='external'/'base' sources may never bake. `commit_sha` is optional
 //   for the same reason.
 
+/** Spec 6.1: persisted source health, written by the scheduler. */
+export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
+export type SourceHealthReason =
+  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
+  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+/** Spec 5.2: where a bake's contract value came from. */
+export type ContractSource = "label" | "missing" | "override";
+/** Spec 7.1: why a session is not on its repo image. */
+export interface ImageFallback {
+  reason: "contract";
+  sourceId: string;
+  bakeId: string;
+  at: number;
+}
+
 export const imageSources = pgTable(
   "image_sources",
   {
@@ -1982,6 +2000,14 @@ export const imageSources = pgTable(
       .default("nightly"),
     enabled: boolean("enabled").notNull().default(true),
     lastBoundAt: bigint("last_bound_at", { mode: "number" }),
+    // Spec 6.1. Defaults are what a row looked like before health existed;
+    // the first scheduler pass after deploy overwrites them.
+    health: text("health", { enum: ["healthy", "stale", "incompatible", "failing", "unbaked"] }).notNull().default("healthy"),
+    healthReason: text("health_reason", {
+      enum: ["ok", "resolve_failed", "repo_unreachable", "credentials", "registry_full", "bake_failed", "contract", "contract_unknown", "waiting_for_base"],
+    }).notNull().default("ok"),
+    healthDetail: text("health_detail"),
+    healthCheckedAt: bigint("health_checked_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -2014,6 +2040,15 @@ export const bakes = pgTable(
     startedAt: bigint("started_at", { mode: "number" }),
     finishedAt: bigint("finished_at", { mode: "number" }),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
+    // Image runtime contract (spec 5). `contractVersion` is the OCI label
+    // value read from the registry after push, or the backfilled lineage
+    // guess; null until read. `contractSource` says which.
+    contractVersion: integer("contract_version"),
+    contractSource: text("contract_source", { enum: ["label", "missing", "override"] }),
+    // Lineage (spec 5.2): the parent base bake this bake FROMed, and the
+    // exact FROM ref. Null on rows from before this column.
+    parentBakeId: text("parent_bake_id"),
+    baseImageRef: text("base_image_ref"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("bakes_source_status_created").on(t.sourceId, t.status, t.createdAt)],

@@ -173,7 +173,7 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
 
 interface FakePod {
   name: string;
-  ownerReferences?: { kind: string; name: string; controller?: boolean }[];
+  ownerReferences?: { kind: string; name: string; uid?: string; controller?: boolean }[];
 }
 
 class FakePodsApi implements SandboxPodsApi {
@@ -1135,7 +1135,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([
@@ -1176,7 +1176,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([["sess-1", { phase: "Running", containerStatuses: [{ name: "sandbox" }] }]]),
@@ -1289,7 +1289,7 @@ describe("resolvePodName", () => {
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
       { name: "unrelated-pod", ownerReferences: [{ kind: "ReplicaSet", name: "sess-1", controller: true }] },
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBe("sess-1");
   });
@@ -1307,9 +1307,35 @@ describe("resolvePodName", () => {
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: false }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: false }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBeNull();
+  });
+});
+
+describe("resolvePodName owner matching", () => {
+  it("prefers the pod whose ownerReference uid matches the live CR over a same-name predecessor", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    objectsApi.seed(toCRRead(manifest, { uid: "uid-new" }));
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-recovered", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb-recovered");
+  });
+
+  it("falls back to name matching when the CR has no uid", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    const cr = toCRRead(manifest);
+    delete cr.metadata.uid;
+    objectsApi.seed(cr);
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-2", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb");
   });
 });
 

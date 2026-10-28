@@ -240,6 +240,7 @@ CREATE TABLE "agent_sessions" (
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
+	"image_fallback" jsonb,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
@@ -1104,6 +1105,10 @@ CREATE TABLE "image_sources" (
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
 	"enabled" boolean NOT NULL DEFAULT TRUE,
 	"last_bound_at" bigint,
+	"health" text NOT NULL DEFAULT 'healthy' CHECK (health IN ('healthy','stale','incompatible','failing','unbaked')),
+	"health_reason" text NOT NULL DEFAULT 'ok',
+	"health_detail" text,
+	"health_checked_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -1126,6 +1131,10 @@ CREATE TABLE "bakes" (
 	"started_at" bigint,
 	"finished_at" bigint,
 	"size_bytes" BIGINT,
+	"contract_version" integer,
+	"contract_source" text CHECK (contract_source IS NULL OR contract_source IN ('label','missing','override')),
+	"parent_bake_id" text,
+	"base_image_ref" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint

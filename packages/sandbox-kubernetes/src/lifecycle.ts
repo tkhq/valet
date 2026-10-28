@@ -407,7 +407,7 @@ export function customObjectsApiAdapter(api: k8s.CustomObjectsApi): SandboxCusto
 
 function podOwnerReferencesFrom(refs: k8s.V1OwnerReference[] | undefined): PodOwnerReference[] | undefined {
   if (!refs) return undefined;
-  return refs.map((ref) => ({ kind: ref.kind, name: ref.name, controller: ref.controller }));
+  return refs.map((ref) => ({ kind: ref.kind, name: ref.name, uid: ref.uid, controller: ref.controller }));
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance, projecting `V1Pod` down to the
@@ -1601,8 +1601,13 @@ export async function resolvePodName(
     namespace: cfg.namespace,
     labelSelector: cr.status?.selector,
   });
+  // Match by owner uid when the CR has one: a same-name predecessor pod
+  // owned by a deleted-and-recreated Sandbox must not be returned.
+  const crUid = cr.metadata.uid;
   const owned = items.find((pod) =>
-    pod.ownerReferences?.some((ref) => ref.kind === SANDBOX_KIND && ref.name === name && ref.controller === true),
+    pod.ownerReferences?.some(
+      (ref) => ref.kind === SANDBOX_KIND && ref.controller === true && (crUid ? ref.uid === crUid : ref.name === name),
+    ),
   );
   return owned?.name ?? null;
 }
