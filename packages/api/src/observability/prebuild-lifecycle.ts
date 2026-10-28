@@ -1,4 +1,5 @@
 /** Bounded OpenTelemetry signals for the image source and bake lifecycle. */
+import type { SourceHealth, SourceHealthReason } from "@valet/shared";
 import { metrics, trace, type Attributes, type Counter, type Histogram, type ObservableGauge, type Span } from "@opentelemetry/api";
 
 interface Instruments {
@@ -17,6 +18,9 @@ interface Instruments {
   queueOldest: ObservableGauge;
   activeBuilds: ObservableGauge;
   latestStatus: ObservableGauge;
+  sources: ObservableGauge;
+  sourcesBoundUnhealthy: ObservableGauge;
+  schedulerPassAge: ObservableGauge;
 }
 
 let instruments: Instruments | undefined;
@@ -44,6 +48,9 @@ function getInstruments(): Instruments {
     queueOldest: meter.createObservableGauge("valet.prebuild.queue.oldest_age", { unit: "s", description: "Age of the oldest queued bake" }),
     activeBuilds: meter.createObservableGauge("valet.prebuild.builds.active", { description: "Current active bake count" }),
     latestStatus: meter.createObservableGauge("valet.prebuild.bakes.latest", { description: "Current latest bake count by status" }),
+    sources: meter.createObservableGauge("valet.prebuild.sources", { description: "Image sources by health and reason" }),
+    sourcesBoundUnhealthy: meter.createObservableGauge("valet.prebuild.sources.bound_unhealthy", { description: "Unhealthy image sources that a recent session depends on" }),
+    schedulerPassAge: meter.createObservableGauge("valet.prebuild.scheduler.last_pass_age", { unit: "s", description: "Age of the last completed bake scheduler pass" }),
   };
   created.queueDepth.addCallback((result) => {
     for (const snapshot of snapshots) result.observe(snapshot.queued, boundedPrebuildAttributes(snapshot));
@@ -60,6 +67,37 @@ function getInstruments(): Instruments {
         result.observe(count, { ...boundedPrebuildAttributes(snapshot), status });
       }
     }
+  });
+  // The SDK keeps every attribute set a cumulative gauge has ever observed
+  // at its last value, so omitting a vanished series would leave it stuck.
+  // Zero it instead; the snapshot still replaces rather than accumulates.
+  const observeReplacing = (seen: Map<string, Attributes>, current: Map<string, { attrs: Attributes; value: number }>, observe: (value: number, attrs: Attributes) => void) => {
+    for (const [key, { attrs, value }] of current) { observe(value, attrs); seen.set(key, attrs); }
+    for (const [key, attrs] of seen) if (!current.has(key)) observe(0, attrs);
+  };
+  const seenSources = new Map<string, Attributes>();
+  const seenBound = new Map<string, Attributes>();
+  created.sources.addCallback((result) => {
+    const current = new Map<string, { attrs: Attributes; value: number }>();
+    for (const s of healthSnapshots) {
+      const attrs = { ...boundedPrebuildAttributes({ sourceKind: s.sourceKind, profile: null, provider: null }), health: s.health, reason: s.reason };
+      const key = JSON.stringify(attrs);
+      current.set(key, { attrs, value: (current.get(key)?.value ?? 0) + s.count });
+    }
+    observeReplacing(seenSources, current, (v, a) => result.observe(v, a));
+  });
+  created.sourcesBoundUnhealthy.addCallback((result) => {
+    const current = new Map<string, { attrs: Attributes; value: number }>();
+    for (const s of healthSnapshots) {
+      const attrs = boundedPrebuildAttributes({ sourceKind: s.sourceKind, profile: null, provider: null });
+      const key = JSON.stringify(attrs);
+      current.set(key, { attrs, value: (current.get(key)?.value ?? 0) + s.boundUnhealthy });
+    }
+    observeReplacing(seenBound, current, (v, a) => result.observe(v, a));
+  });
+  created.schedulerPassAge.addCallback((result) => {
+    const at = lastSchedulerPassAt();
+    if (at !== undefined) result.observe(Math.max(0, (Date.now() - at) / 1000));
   });
   instruments = created;
   instrumentProvider = provider;
@@ -120,6 +158,12 @@ export function updatePrebuildQueueSnapshot(next: QueueSnapshot[]): void {
   snapshots = [...aggregated.values()];
   getInstruments();
 }
+
+export interface SourceHealthSnapshot { sourceKind: string; health: SourceHealth; reason: SourceHealthReason; count: number; boundUnhealthy: number }
+let healthSnapshots: SourceHealthSnapshot[] = [];
+/** Replaces (never accumulates) the source health gauge series. */
+export function updateSourceHealthSnapshot(next: SourceHealthSnapshot[]): void { healthSnapshots = [...next]; getInstruments(); }
+export function currentSourceHealthSnapshot(): SourceHealthSnapshot[] { return healthSnapshots; }
 
 let schedulerPassAt: number | undefined;
 /** Spec 6.3: when `runSchedulerPass` last completed, in process memory. PR 3

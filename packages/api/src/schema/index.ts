@@ -1959,10 +1959,8 @@ export const githubInstallations = pgTable(
 //   for the same reason.
 
 /** Spec 6.1: persisted source health, written by the scheduler. */
-export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
-export type SourceHealthReason =
-  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
-  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+import type { SourceHealth, SourceHealthReason } from "@valet/shared";
+export type { SourceHealth, SourceHealthReason };
 /** Spec 5.2: where a bake's contract value came from. */
 export type ContractSource = "label" | "missing" | "override";
 /** Spec 7.1: why a session is not on its repo image. */

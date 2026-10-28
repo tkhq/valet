@@ -101,6 +101,52 @@ describe("POST /api/sessions: profile", () => {
   });
 });
 
+describe("GET /api/sessions/:id: sandboxImage", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  it("reports the sandbox image: repo bake with build time, or stock with the fallback reason", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-image-"));
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace }),
+    });
+    const sessionId = ((await res.json()) as CreateSessionResponse).id;
+    const now = Date.now();
+    await db.insert(sessionRepos).values({ sessionId, fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", position: 0 });
+    await db.insert(imageSources).values({
+      id: "src_img", orgId: "local-org", kind: "repo", name: "acme/widgets", profile: null, repoHost: "github",
+      repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", schedule: "nightly", enabled: true,
+      createdAt: now, updatedAt: now,
+    });
+    await db.insert(bakes).values({ id: "pb_img", sourceId: "src_img", identityHash: "x", imageRef: "registry/x", status: "pushed", recipe: [], createdAt: 4000, finishedAt: 5000 });
+    await db.update(agentSessions).set({ bakeId: "pb_img" }).where(eq(agentSessions.id, sessionId));
+    const getSession = async (): Promise<GetSessionResponse> =>
+      (await (await fetch(`${api!.baseUrl}/api/sessions/${sessionId}`)).json()) as GetSessionResponse;
+
+    let detail = await getSession();
+    expect(detail.sandboxImage).toEqual({ source: "repo", repoFullName: "acme/widgets", builtAt: 5000, fallback: null });
+
+    // The host keeps bake_id on a fallback (it records only image_fallback),
+    // so the session still points at an existing repo bake: fallback wins.
+    await db.update(agentSessions).set({ bakeId: "pb_img", imageFallback: { reason: "contract", sourceId: "src", bakeId: "pb_bad", at: 1 } }).where(eq(agentSessions.id, sessionId));
+    detail = await getSession();
+    expect(detail.sandboxImage).toEqual({ source: "stock", repoFullName: "acme/widgets", builtAt: null, fallback: { reason: "contract", sourceId: "src", bakeId: "pb_bad", at: 1 } });
+
+    // A bake row pruned by retention degrades to stock instead of a 500.
+    await db.update(agentSessions).set({ bakeId: "pb_gone", imageFallback: null }).where(eq(agentSessions.id, sessionId));
+    detail = await getSession();
+    expect(detail.sandboxImage).toEqual({ source: "stock", repoFullName: "acme/widgets", builtAt: null, fallback: null });
+  });
+});
+
 describe("POST /api/sessions: docker flag", () => {
   let api: TestApi | undefined;
 

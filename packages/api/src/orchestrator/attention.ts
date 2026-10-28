@@ -39,7 +39,7 @@ import type { Providers } from "../providers/types.js";
 import { governingThreadKey, isPersonalThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
 import { notifications, pendingChannelDeliveries, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
-export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
+export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review" | "platform";
 export type AttentionUrgency = "low" | "normal" | "high";
 
 export interface AttentionEvent {
@@ -188,7 +188,7 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
 
 /** Default delay while web delivery is actionable. General updates wait longer. */
 export function defaultChannelGraceSeconds(kind: AttentionKind): number {
-  return kind === "notification" ? 300 : 120;
+  return kind === "notification" || kind === "platform" ? 300 : 120;
 }
 
 function notificationId(event: AttentionEvent, userId: string): string {
@@ -316,7 +316,8 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
           sessionId: event.sessionId ?? null, createdAt: now, readAt: null,
         }).onConflictDoNothing();
       }
-      if (event.owner.type === "team" && preference?.teamDm !== true) return;
+      // Team events and platform notices are web-only unless the member opted in to DM copies; other org-owned kinds keep channel delivery.
+      if ((event.owner.type === "team" || event.kind === "platform") && preference?.teamDm !== true) return;
       let deliverAfter = now;
       let previousOrder: number | undefined;
       for (const tier of tiers) {

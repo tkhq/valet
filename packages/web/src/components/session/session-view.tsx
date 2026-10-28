@@ -57,6 +57,8 @@ import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messag
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button } from "~/components/primitives";
+import { ImageFallbackBanner } from "~/components/session/image-fallback-banner";
+import { useOrg } from "~/api/settings";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 import { flattenChildWork, useChildWork } from "~/api/child-work";
@@ -233,6 +235,7 @@ export function SessionView({
       messagesQ.data.hasMore,
     );
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
+  const isOrgAdmin = useOrg().data?.callerRole === "admin";
   const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
 
   async function branch(message: StreamMessage, destination?: "private") {
@@ -405,6 +408,7 @@ export function SessionView({
       onTabChange={changeTab}
       notice={scopeNotice}
       sandbox={stream.sandbox}
+      image={session.data.sandboxImage}
       viewsInMenu={!panel}
       compact={mobileNavigation}
     />
@@ -497,6 +501,7 @@ export function SessionView({
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
+          <ImageFallbackBanner image={session.data?.sandboxImage} isOrgAdmin={isOrgAdmin} />
           {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
             active={chatActive}
             sessionId={sessionId}

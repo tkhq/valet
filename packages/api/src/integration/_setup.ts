@@ -402,6 +402,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     builder: opts.imageBuilder ?? null,
     githubTokenDeps,
+    attention: { db },
   });
 
   engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));

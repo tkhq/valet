@@ -37,6 +37,10 @@ function makeSource(overrides: Partial<SourceSummary> = {}): SourceSummary {
     lastBoundAt: Date.now(),
     createdAt: 1000,
     updatedAt: 1000,
+    health: "healthy",
+    healthReason: "ok",
+    healthDetail: null,
+    healthCheckedAt: 1000,
     ...overrides,
   };
 }

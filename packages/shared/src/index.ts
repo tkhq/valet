@@ -28,3 +28,4 @@ export * from './thread-projects.js';
 export * from './thread-recap.js';
 
 export * from "./tool-intent.js";
+export * from './source-health.js';

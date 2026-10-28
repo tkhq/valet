@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewerFaces } from "./viewer-faces";
-import type { ActiveViewer, Message, SessionDetail } from "@valet/api/wire";
+import type { ActiveViewer, Message, SessionDetail, SessionSandboxImage } from "@valet/api/wire";
 import {
   Check,
   ClipboardCopy,
@@ -53,6 +53,7 @@ import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { isAppAssistantThread, teamThreadNotice } from "~/lib/thread-default";
 import { cn } from "~/lib/cn";
+import { relativeTime } from "~/lib/relative-time";
 import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { workspaceKeyForOwner } from "~/lib/workspace-scope";
@@ -591,6 +592,7 @@ export function SessionHeader({
           </Tooltip>
         )}
         <div className="hidden md:contents">
+          <SandboxChip sandbox={sandbox} image={session.sandboxImage} />
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
           <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>
             <Button
@@ -810,7 +812,7 @@ export function SessionHeader({
  * Renders nothing until the first `sandbox.status` frame arrives (absent =
  * unknown, not "detached") to avoid layout shift / a misleading state.
  */
-export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: number } }) {
+export function SandboxChip({ sandbox, image }: { sandbox?: { state: string; epoch: number }; image?: SessionSandboxImage }) {
   if (!sandbox) return null;
   const map: Record<string, { dot: string; label: string }> = {
     provisioning: { dot: "bg-amber-500", label: "workspace provisioning…" },
@@ -823,10 +825,22 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
   };
   const entry = map[sandbox.state];
   if (!entry) return null;
+  const imageText = image
+    ? image.source === "repo" && image.repoFullName
+      ? `repo image${image.builtAt ? `, built ${relativeTime(image.builtAt)}` : ""}`
+      : "stock image"
+    : null;
+  const imageLabel = image
+    ? image.source === "repo" && image.repoFullName
+      ? `Image: ${image.repoFullName}${image.builtAt ? `, built ${relativeTime(image.builtAt)}` : ""}`
+      : image.repoFullName ? `Image: stock (${image.repoFullName} unavailable)` : "Image: stock"
+    : null;
+  const label = imageLabel ? `${entry.label}. ${imageLabel}` : entry.label;
   return (
-    <Tooltip content={entry.label}>
-      <span className="inline-flex items-center gap-1.5 px-1" aria-label={entry.label}>
+    <Tooltip content={label}>
+      <span className="inline-flex items-center gap-1.5 px-1" aria-label={label}>
         <span className={cn("h-1.5 w-1.5 rounded-full", entry.dot)} />
+        {imageText && <span className="text-xs text-muted">{imageText}</span>}
       </span>
     </Tooltip>
   );

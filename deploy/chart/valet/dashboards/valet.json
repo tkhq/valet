@@ -746,13 +746,227 @@
       ]
     },
     {
+      "id": 34,
+      "type": "row",
+      "title": "Images",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Sources by health",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "stacking": {
+              "mode": "none"
+            },
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (health) (valet_prebuild_sources)",
+          "legendFormat": "{{health}}"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Unhealthy sources a session depends on",
+      "gridPos": {
+        "x": 6,
+        "y": 32,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "stacking": {
+              "mode": "none"
+            },
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(valet_prebuild_sources_bound_unhealthy)",
+          "legendFormat": "bound unhealthy"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Scheduler last pass age",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "stacking": {
+              "mode": "none"
+            },
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "valet_prebuild_scheduler_last_pass_age_seconds",
+          "legendFormat": "last pass age"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Fallbacks and startup failures (per hour)",
+      "gridPos": {
+        "x": 18,
+        "y": 32,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "stacking": {
+              "mode": "none"
+            },
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(valet_sandbox_image_fallback_total[1h]))",
+          "legendFormat": "image fallbacks"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (kind) (increase(valet_sandbox_startup_failed_total[1h]))",
+          "legendFormat": "startup failed: {{kind}}"
+        }
+      ]
+    },
+    {
       "id": 19,
       "type": "row",
       "title": "API & store",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 40,
         "w": 24,
         "h": 1
       },
@@ -764,7 +978,7 @@
       "title": "HTTP request p95, by route",
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 41,
         "w": 12,
         "h": 8
       },
@@ -813,7 +1027,7 @@
       "title": "Store call p95, by method",
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 41,
         "w": 12,
         "h": 8
       },
@@ -863,7 +1077,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 49,
         "w": 24,
         "h": 1
       },
@@ -875,7 +1089,7 @@
       "title": "Recent submissions (submission.run) — click a trace ID for the full tree",
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 50,
         "w": 24,
         "h": 10
       },
@@ -922,7 +1136,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 78,
+        "y": 87,
         "w": 24,
         "h": 1
       },
@@ -934,7 +1148,7 @@
       "title": "Queue depth and active builds",
       "gridPos": {
         "x": 0,
-        "y": 79,
+        "y": 88,
         "w": 12,
         "h": 8
       },
@@ -979,7 +1193,7 @@
       "title": "Oldest queued bake",
       "gridPos": {
         "x": 12,
-        "y": 79,
+        "y": 88,
         "w": 12,
         "h": 8
       },
@@ -1019,7 +1233,7 @@
       "title": "Bake throughput by outcome",
       "gridPos": {
         "x": 0,
-        "y": 87,
+        "y": 96,
         "w": 12,
         "h": 8
       },
@@ -1059,7 +1273,7 @@
       "title": "Queue wait and build duration p95",
       "gridPos": {
         "x": 12,
-        "y": 87,
+        "y": 96,
         "w": 12,
         "h": 8
       },
@@ -1104,7 +1318,7 @@
       "title": "Cache and rebuild decisions",
       "gridPos": {
         "x": 0,
-        "y": 95,
+        "y": 104,
         "w": 12,
         "h": 8
       },
@@ -1144,7 +1358,7 @@
       "title": "Registry operations",
       "gridPos": {
         "x": 12,
-        "y": 95,
+        "y": 104,
         "w": 12,
         "h": 8
       },
@@ -1184,7 +1398,7 @@
       "title": "Latest bake state and DB registry divergence",
       "gridPos": {
         "x": 0,
-        "y": 103,
+        "y": 112,
         "w": 12,
         "h": 8
       },
@@ -1229,7 +1443,7 @@
       "title": "Image size p95",
       "gridPos": {
         "x": 12,
-        "y": 103,
+        "y": 112,
         "w": 12,
         "h": 8
       },
@@ -1269,7 +1483,7 @@
       "title": "Recent image bakes. Select a trace ID to inspect the build.",
       "gridPos": {
         "x": 0,
-        "y": 111,
+        "y": 120,
         "w": 24,
         "h": 10
       },

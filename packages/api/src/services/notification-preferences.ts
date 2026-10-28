@@ -5,7 +5,7 @@ import { userNotificationPreferences } from "../schema/index.js";
 import type { NotificationKind, NotificationPreferenceSummary, SetNotificationPreferenceRequest } from "../wire/types.js";
 
 /** The Notifications page and the settings actions read and write the same rows. */
-export const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];
+export const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review", "platform"];
 
 function isNotificationKind(value: unknown): value is NotificationKind {
   return NOTIFICATION_KINDS.some((kind) => kind === value);

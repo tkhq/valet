@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { NotificationKind } from "@valet/api/wire";
+import { useOrg } from "~/api/settings";
 import { useNotificationPreferences, useSetNotificationPreference } from "~/api/queries";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
@@ -24,6 +25,7 @@ const NOTIFICATION_KINDS: NotificationKind[] = [
   "escalation",
   "approval",
   "review",
+  "platform",
 ];
 
 const KIND_LABEL: Record<NotificationKind, string> = {
@@ -32,6 +34,7 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   escalation: "Escalations",
   approval: "Approvals",
   review: "Team deletion requests",
+  platform: "Platform",
 };
 
 const KIND_DESCRIPTION: Record<NotificationKind, string> = {
@@ -40,10 +43,13 @@ const KIND_DESCRIPTION: Record<NotificationKind, string> = {
   escalation: "When something needs your attention urgently.",
   approval: "When a decision gate is waiting on you.",
   review: "When a team resource needs your review before deletion.",
+  platform: "When a sandbox image for your organization cannot be built or used. Org admins only.",
 };
 
 export function NotificationsPage() {
   const prefsQ = useNotificationPreferences();
+  // Platform events go to org admins only, so members never see the row.
+  const isOrgAdmin = useOrg().data?.callerRole === "admin";
   const setPref = useSetNotificationPreference();
   // Device-local on purpose. Whether a machine may make noise depends on
   // where it is — a desk, a meeting room, a laptop in a cafe — not on who
@@ -112,7 +118,7 @@ export function NotificationsPage() {
       )}
       {!prefsQ.isLoading &&
         !prefsQ.error &&
-        NOTIFICATION_KINDS.map((kind) => {
+        NOTIFICATION_KINDS.filter((kind) => kind !== "platform" || isOrgAdmin).map((kind) => {
           // Web delivery defaults to on until the caller has an explicit
           // row — mirrors the API's own default (see notifications.ts).
           const web = byKind.get(kind)?.web ?? true;
