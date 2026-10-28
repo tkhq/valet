@@ -38,9 +38,10 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { canViewSession } from "../services/session-access.js";
+import { isValidInternalToken } from "../lib/internal-auth.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import { threadVisibility, visibleThreadIds } from "../services/thread-access.js";
+import { requestViewer, threadVisibility, visibleThreadIds, type ThreadViewer } from "../services/thread-access.js";
 import { viewerOf } from "./_thread-access.js";
 import type { Providers } from "../providers/types.js";
 import {
@@ -74,7 +75,9 @@ import {
 import type {
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
+  ArtifactCommentThreadWire,
   ArtifactCommentWire,
+  ArtifactCommentsResponse,
   ArtifactListItem,
   GetArtifactResponse,
   ListArtifactCommentsResponse,
@@ -276,6 +279,7 @@ function toCommentWire(row: ArtifactCommentRow, authorName: string): ArtifactCom
   return {
     id: row.id,
     vdid: row.vdid,
+    anchorLabel: row.anchorLabel,
     parentId: row.parentId,
     body: row.body,
     authorUserId: row.authorUserId,
@@ -420,6 +424,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
         artifactId: artifact.id,
         version: artifact.version,
         vdid: typeof body.vdid === "string" ? body.vdid : undefined,
+        anchorLabel: typeof body.anchorLabel === "string" ? body.anchorLabel : undefined,
         parentId: typeof body.parentId === "string" ? body.parentId : undefined,
         body: body.body,
         authorUserId: user.id,
@@ -432,7 +437,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       if (body.sendToSession === true) {
         const send = await canSendToSourceSession(providers, artifact, user);
         if (send.ok) {
-          const anchor = row.vdid ? `element ${row.vdid}` : "page";
+          const anchor = row.anchorLabel ? `element "${row.anchorLabel}"` : row.vdid ? `element ${row.vdid}` : "page";
           const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;
           const resp = await submitSessionPrompt(providers, send.row, text, {
             author: promptAuthorFromUser(user, userPrincipal(user.id), loaded.authVia),
@@ -632,6 +637,59 @@ async function orgIdForShare(c: Context<AppEnv>, db: AppDb): Promise<string> {
   return resolveOrgId(db);
 }
 
+/** The user an agent or API call reads comments as. An internal tool call
+ * carries no session, so its host-supplied actor and org stand in (the org
+ * falls back to this deployment's, the way the share route resolves it). */
+async function commentReader(c: Context<AppEnv>, db: AppDb): Promise<{ id: string; orgId: string; viewer: ThreadViewer } | undefined> {
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    const actor = c.req.header("x-valet-actor");
+    if (!actor) return undefined;
+    const orgId = c.req.header("x-valet-org-id") || await orgIdForShare(c, db);
+    return { id: actor, orgId, viewer: { orgId, userId: actor } };
+  }
+  const user = requireActingUser(c);
+  if (!user) return undefined;
+  return { id: user.id, orgId: user.orgId, viewer: requestViewer(user.orgId, userPrincipal(user.id), user.id) };
+}
+
+/** Comments on one artifact, grouped into threads, for the `artifact_comments`
+ * tool and the MCP `list_artifact_comments` tool. `:ref` is the artifact id
+ * or its link token. Not `/:id/comments`: the public router mounted first
+ * owns that shape for the page's token-addressed comment routes.
+ *
+ * Access is the page's comment rule (an org member who may read the page),
+ * plus the list rule for a team page published from a thread the reader may
+ * not see. Everything else answers 404. */
+artifactsRouter.get("/:ref/comment-threads", async (c) => {
+  const { db } = c.var.providers;
+  const reader = await commentReader(c, db);
+  if (!reader) return c.json({ error: "unauthorized" }, 401);
+
+  const ref = c.req.param("ref");
+  const artifact = (await getArtifactById(db, ref)) ?? (await getArtifactByToken(db, ref));
+  const notFound = () => c.json({ error: "Artifact not found. Pass its link or the artifact_id from list_artifacts." }, 404);
+  if (!artifact || artifact.orgId !== reader.orgId || await hasUnknownTeamSource(db, artifact)) return notFound();
+  const access = decideArtifactAccess({
+    artifact, allowPublicArtifacts: false, user: reader,
+    teamMember: await hasArtifactTeamAccess(db, artifact, reader),
+  });
+  if (access.kind !== "serve" || (await keepVisibleSources(c, [artifact], reader.viewer)).length === 0) return notFound();
+
+  const rows = await listArtifactComments(db, artifact.id);
+  const names = await authorNames(db, rows.map((r) => r.authorUserId));
+  const threads = new Map<string, ArtifactCommentThreadWire>();
+  for (const row of rows) {
+    const wire = toCommentWire(row, names.get(row.authorUserId) ?? row.authorUserId);
+    if (row.parentId === null) threads.set(row.id, { ...wire, replies: [] });
+    else threads.get(row.parentId)?.replies.push(wire);
+  }
+  const body: ArtifactCommentsResponse = {
+    artifact: { id: artifact.id, title: artifact.title, url: shareUrl(c, artifact.token), version: artifact.version },
+    threads: [...threads.values()],
+  };
+  return c.json(body);
+});
+
 /** "1" or "true" — the same loose boolean-query convention as the rest of
  * this route (an owner filter's presence, not its value, gates it; `mine`
  * needs an explicit value because its absence is the default list). */
@@ -643,7 +701,7 @@ function truthyQuery(value: string | undefined): boolean {
  * see, such as another member's helper thread or a private channel's thread
  * (`services/thread-access.ts`). */
 async function keepVisibleSources<T extends { id: string; ownerId: string; orgId: string; ownerType: string; sourceSessionId: string | null; sourceThreadId: string | null }>(
-  c: Context<AppEnv>, rows: T[],
+  c: Context<AppEnv>, rows: T[], viewer: ThreadViewer = viewerOf(c),
 ): Promise<T[]> {
   const retained = new Set<string>();
   for (const row of rows) {
@@ -653,7 +711,7 @@ async function keepVisibleSources<T extends { id: string; ownerId: string; orgId
   }
   const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId && !retained.has(row.id));
   if (judged.length === 0) return rows;
-  const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewerOf(c),
+  const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewer,
     judged.filter((row) => row.sourceThreadId).map((row) => ({ sessionId: row.sourceSessionId!, threadId: row.sourceThreadId! })));
   return rows.filter((row) => !judged.includes(row) || shown.has(`${row.sourceSessionId}:${row.sourceThreadId}`));
 }

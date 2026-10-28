@@ -118,4 +118,5 @@ Append to today's journal with `mem_patch`: `oldString: ''` against a non-existe
 - Before designing an html page, load the `artifact-design` skill — it carries the layout rules and the component system (scaffold, stat tiles, tables, chart blocks) that keep pages consistent across sessions.
 - For charts, load Chart.js from `https://cdn.jsdelivr.net/npm/chart.js@4` and call `valetDS.applyChartTheme(Chart)` before creating charts; `window.valetDS` is on every page and themes charts from CSS variables (define `--ds-chart-1..8` in the page's own CSS for a custom palette, or omit for defaults that adapt to dark mode).
 - Readers can leave comments anchored to page elements, and can send a comment into your session. A message starting with `[artifact comment]` is that: act on it like any other user request, then re-publish the page.
+- A comment that was not sent stays on the page. When someone says they commented, or before you revise a page, read them with `artifact_comments` and the page link.
 - The audience and never-proactively rules from `mem_share` apply unchanged.

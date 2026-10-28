@@ -4230,6 +4230,8 @@ export interface ArtifactCommentWire {
   id: string;
   /** Element anchor; null = a page-level comment. */
   vdid: string | null;
+  /** The anchored element's leading text when the comment was written. */
+  anchorLabel: string | null;
   /** Root-thread id; null = this IS a root. One level of nesting. */
   parentId: string | null;
   body: string;
@@ -4254,9 +4256,23 @@ export interface ListArtifactCommentsResponse {
   canResolveAll: boolean;
 }
 
+/** `GET /api/artifacts/:id/comments`: the comments on one artifact for an
+ * agent or API caller, addressed by artifact id or link token. */
+export interface ArtifactCommentsResponse {
+  artifact: { id: string; title: string; url: string; version: number };
+  /** Root comments, oldest first, each with its replies. */
+  threads: ArtifactCommentThreadWire[];
+}
+
+export interface ArtifactCommentThreadWire extends ArtifactCommentWire {
+  replies: ArtifactCommentWire[];
+}
+
 export interface AddArtifactCommentRequest {
   body: string;
   vdid?: string;
+  /** The picked element's text label, stored with the anchor. */
+  anchorLabel?: string;
   parentId?: string;
   /** Also deliver the comment into the artifact's source session as a
    * prompt. Requires session view access; when the caller lacks it the

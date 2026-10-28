@@ -632,11 +632,17 @@ export async function getAllowPublicArtifacts(db: AppDb, orgId: string): Promise
 // ─── Comments ────────────────────────────────────────────────────────────
 
 const COMMENT_BODY_MAX = 4096;
+/** The viewer shows up to 80 characters of an element's text; the cap leaves
+ * room without letting a page-supplied label grow without bound. */
+const ANCHOR_LABEL_MAX = 160;
 
 export interface AddArtifactCommentOpts {
   artifactId: string;
   version: number;
   vdid?: string;
+  /** The anchored element's text as the viewer showed it. Page-supplied, so
+   * it is kept as plain text, trimmed and capped, and dropped without a vdid. */
+  anchorLabel?: string;
   parentId?: string;
   body: string;
   authorUserId: string;
@@ -678,6 +684,7 @@ export async function addArtifactComment(db: AppDb, opts: AddArtifactCommentOpts
       artifactId: opts.artifactId,
       version: opts.version,
       vdid: opts.vdid ?? null,
+      anchorLabel: opts.vdid !== undefined ? opts.anchorLabel?.replace(/\s+/g, " ").trim().slice(0, ANCHOR_LABEL_MAX) || null : null,
       parentId: opts.parentId ?? null,
       body,
       authorUserId: opts.authorUserId,
