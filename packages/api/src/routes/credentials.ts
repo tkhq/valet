@@ -52,6 +52,8 @@ import { fromJsonbColumn } from "@valet/store-postgres";
 import { credentialSecret, type CredentialOwner, type CredentialStore, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import { isGranolaSigningSecret } from "@valet/plugin-granola/triggers";
+import { GRANOLA_WEBHOOK_CREDENTIAL_SERVICE } from "../plugins/http-installations.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import {
@@ -505,6 +507,20 @@ credentialsRouter.put("/:service", async (c) => {
   if (service === GITHUB_CREDENTIAL_SERVICE && body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) &&
       "githubId" in body.metadata) {
     return c.json({ error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow." }, 400);
+  }
+  // The Granola webhook route reads this row for every unsigned delivery, so
+  // it accepts one stored form only: a direct `whsec_` API key at org scope.
+  // A 1Password reference or another type would save and then never verify.
+  if (service === GRANOLA_WEBHOOK_CREDENTIAL_SERVICE) {
+    if (scope !== "org") {
+      return c.json({ error: "The Granola webhook signing secret is an organization setting. Set scope to org." }, 400);
+    }
+    if (body.onepassword || body.type !== "api_key" || typeof body.apiKey !== "string" || body.accessToken !== undefined) {
+      return c.json({ error: "Save the Granola signing secret directly as type api_key with the apiKey field. A 1Password reference or another type is not supported." }, 400);
+    }
+    if (!isGranolaSigningSecret(body.apiKey)) {
+      return c.json({ error: "apiKey must be the signing secret that Granola showed when it created the webhook. It starts with whsec_." }, 400);
+    }
   }
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over

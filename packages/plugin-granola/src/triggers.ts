@@ -24,6 +24,11 @@ function lookupHeader(headers: Record<string, string>, name: string): string | u
   return undefined;
 }
 
+/** True when `secret` has the `whsec_` base64 form that Granola issues. */
+export function isGranolaSigningSecret(secret: string): boolean {
+  return signingKey(secret) !== undefined;
+}
+
 /** The HMAC key, or undefined when the saved secret is not a `whsec_` base64 value. */
 function signingKey(secret: string | undefined): Buffer | undefined {
   if (!secret?.startsWith(SECRET_PREFIX)) return undefined;

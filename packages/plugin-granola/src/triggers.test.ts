@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { granolaTriggerDefs } from "./triggers.js";
+import { granolaTriggerDefs, isGranolaSigningSecret } from "./triggers.js";
 
 const def = granolaTriggerDefs[0];
 const KEY = Buffer.from("granola-test-key-0123456789abcdef");
@@ -124,5 +124,14 @@ describe("granola toEvent", () => {
 
   it("catalogs exactly the three documented events", () => {
     expect(def.catalog.map((entry) => entry.key).sort()).toEqual(["granola.note.access_granted", "granola.note.edited", "granola.note.generated"]);
+  });
+});
+
+describe("isGranolaSigningSecret", () => {
+  it("accepts a whsec_ base64 secret and rejects other forms", () => {
+    expect(isGranolaSigningSecret(SECRET)).toBe(true);
+    for (const bad of ["", "whsec_", KEY.toString("base64"), "whsec_not base64!", "op://vault/item/field"]) {
+      expect(isGranolaSigningSecret(bad)).toBe(false);
+    }
   });
 });

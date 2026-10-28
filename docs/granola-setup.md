@@ -47,6 +47,8 @@ You can filter a subscription on `note_id`.
 7. Create a workflow trigger or an event subscription for one of the event keys above.
 8. In Granola, send a test event. Check that the event appears in the Valet event log.
 
+Valet saves the secret only as a direct `api_key` at `org` scope, and the value must start with `whsec_`. Valet refuses a 1Password reference, a `bot_token`, or any other form with a 400 answer, because it must read the secret on every unsigned request.
+
 Each Valet organization uses one signing secret. Create one Granola webhook for the organization. Do not use the service name `granola` for this credential. That name is the personal Granola MCP connection.
 
 ## How Valet checks a delivery
@@ -66,13 +68,14 @@ Valet follows the Standard Webhooks scheme that Granola documents.
 | Signed, but timestamp outside 300 seconds | 200 | `stale_delivery` |
 | Signed, but not a JSON object or a field is missing | 200 | `malformed_callback` |
 | Signed, but unsupported event type | 200 | `unsupported_event` |
-| Unknown organization or no saved secret | 200 | none |
+| No saved secret, or a saved secret Valet cannot read | 503 | `secret_unavailable` (only for an existing organization) |
 
-Granola retries on 408, 429, 5xx, and timeouts. It treats other 4xx answers as permanent failures. Retries reuse `event_id`, which Valet uses as the dedupe key, so a retry never starts a second run. Granola disables an endpoint that fails for four days. Valet limits the body to 64 KiB.
+Granola retries on 408, 429, 5xx, and timeouts. The 503 answer makes Granola retry, so a delivery that arrives before you save the secret, or while the saved secret is unreadable, is delivered after you fix it. It treats other 4xx answers as permanent failures. Retries reuse `event_id`, which Valet uses as the dedupe key, so a retry never starts a second run. Granola disables an endpoint that fails for four days. Valet limits the body to 64 KiB.
 
 ## Troubleshooting
 
-- **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Valet records nothing when no secret is saved.
+- **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Without a saved secret, Valet answers 503 and Granola retries.
+- **`secret_unavailable` in the drop log.** Save the secret again with the command above.
 - **`bad_signature` in the drop log.** Save the signing secret again. If you have several Granola webhooks that send to this URL, delete the extra ones.
 - **`stale_delivery` in the drop log.** Check the clock on the Valet server.
 - **A subscription never fires.** Valet does not check that the secret exists when you create the subscription. Save the secret first.

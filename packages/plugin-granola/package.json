@@ -9,6 +9,10 @@
     "plugin": "./dist/plugin.js"
   },
   "exports": {
+    "./triggers": {
+      "types": "./dist/triggers.d.ts",
+      "default": "./dist/triggers.js"
+    },
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"

@@ -42,6 +42,12 @@ function delivery(over: Record<string, unknown> = {}, opts: { key?: Uint8Array; 
   return { body, headers: { "content-type": "application/json", "webhook-id": id, "webhook-timestamp": ts, "webhook-signature": signature } };
 }
 
+function putCredential(a: TestApi, body: Record<string, unknown>) {
+  return fetch(`${a.baseUrl}/api/credentials/granola-webhook`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
 function post(a: TestApi, d: ReturnType<typeof delivery>, orgId = "local-org") {
   return fetch(`${a.baseUrl}/plugins/granola/http/events/${orgId}`, { method: "POST", headers: d.headers, body: d.body });
 }
@@ -101,12 +107,49 @@ describe("POST /plugins/granola/http/events/:orgId", () => {
     expect((await post(api, delivery({ event_id: "evt-2" }), "other-org")).status).toBe(403);
   });
 
-  it("acknowledges an unknown or unconfigured organization without ingesting", async () => {
+  it("answers 503 and logs when no secret is saved for an existing organization", async () => {
     api = await bootTestApi({ plugins: [granolaPlugin] });
-    expect((await post(api, delivery())).status).toBe(200);
-    expect((await post(api, delivery(), "no-such-org")).status).toBe(200);
+    const res = await post(api, delivery());
+    expect(res.status).toBe(503);
+    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+    const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
+    expect(drops.map((d) => d.reason)).toEqual(["secret_unavailable"]);
+    expect(drops[0].detail).toContain("no signing secret is saved");
+  });
+
+  it("answers 503 for an unknown organization ID without writing a drop-log row", async () => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    expect((await post(api, delivery(), "no-such-org")).status).toBe(503);
     expect(await api.providers.db.select().from(events)).toHaveLength(0);
     expect(await api.providers.db.select().from(eventDropLog)).toHaveLength(0);
+  });
+
+  it.each([
+    ["a bot_token", { type: "bot_token" as const, accessToken: SECRET }],
+    ["a 1Password reference", { type: "api_key" as const, metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } } }],
+    ["an api_key row with no secret", { type: "api_key" as const }],
+  ])("answers 503 and logs for %s, never acknowledging an unreadable secret", async (_label, stored) => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    await api.providers.eventDispatcher.stop();
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "granola-webhook", stored);
+    await seedSubscription(api, ["granola.note.generated"]);
+    const res = await post(api, delivery());
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(await res.json())).not.toContain(SECRET);
+    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+    const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
+    expect(drops.map((d) => d.reason)).toEqual(["secret_unavailable"]);
+    expect(drops[0].detail).toContain("cannot be read");
+    expect(drops[0].detail).not.toContain(SECRET);
+  });
+
+  it("verifies and ingests with a secret saved through the credentials route", async () => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    await api.providers.eventDispatcher.stop();
+    await seedSubscription(api, ["granola.note.generated"]);
+    expect((await putCredential(api, { scope: "org", type: "api_key", apiKey: SECRET })).status).toBe(200);
+    expect((await post(api, delivery())).status).toBe(200);
+    expect(await api.providers.db.select().from(events)).toHaveLength(1);
   });
 
   it("acknowledges a signed unsupported event and logs why", async () => {
@@ -145,6 +188,22 @@ describe("POST /plugins/granola/http/events/:orgId", () => {
     await seedSecret(api);
     const res = await fetch(`${api.baseUrl}/plugins/granola/http/events/local-org`, { method: "POST", body: "x".repeat(64 * 1024 + 1) });
     expect(res.status).toBe(413);
+  });
+
+  it.each([
+    ["a bot_token", { scope: "org", type: "bot_token", accessToken: SECRET }],
+    ["an oauth2 token", { scope: "org", type: "oauth2", accessToken: SECRET }],
+    ["a 1Password reference", { scope: "org", type: "api_key", onepassword: { reference: "op://vault/item/field", tokenScope: "org" } }],
+    ["a personal scope", { scope: "user", type: "api_key", apiKey: SECRET }],
+    ["a secret without the whsec_ prefix", { scope: "org", type: "api_key", apiKey: KEY.toString("base64") }],
+    ["an empty secret", { scope: "org", type: "api_key", apiKey: "" }],
+  ])("refuses to save %s as the signing secret", async (_label, body) => {
+    api = await bootTestApi({ plugins: [granolaPlugin] });
+    const res = await putCredential(api, body);
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).not.toContain(SECRET);
+    const list = await fetch(`${api.baseUrl}/api/credentials?scope=org`);
+    expect(JSON.stringify(await list.json())).not.toContain("granola-webhook");
   });
 
   it("lists the three events in the catalog", async () => {

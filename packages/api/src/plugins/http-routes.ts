@@ -8,7 +8,7 @@ import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { waiterMatchDeps } from '../events/waiters.js';
 import { writeDropLog } from '../orchestrator/signals.js';
-import { httpInstallationResolvers } from './http-installations.js';
+import { HttpInstallationUnavailable, httpInstallationResolvers } from './http-installations.js';
 import { httpBindingMismatch, httpRouteBinding, httpRouteBindings, type PluginHttpRefusals } from './http-bindings.js';
 
 export interface LegacyRoute {
@@ -187,7 +187,14 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         if (key === null) return ack();
         if (!resolveInstallation) throw new Error('Plugin installation resolver is unavailable. Restart the API.');
         const { db, eventDispatcher, encryptionKey } = c.var.providers;
-        const installation = await resolveInstallation(db, key, encryptionKey);
+        let installation;
+        try {
+          installation = await resolveInstallation(db, key, encryptionKey);
+        } catch (err) {
+          if (!(err instanceof HttpInstallationUnavailable)) throw err;
+          if (err.orgId) await writeDropLog(db, { orgId: err.orgId, reason: 'secret_unavailable', detail: err.detail });
+          return c.json({ error: 'signing secret unavailable' }, 503);
+        }
         if (!installation) return ack();
         const triggers = c.var.providers.plugins.flatMap((loaded) => loaded.triggers ?? []).filter((trigger) => trigger.service === plugin.name);
         const verification = await route.verify(request, installation.secrets, triggers);
