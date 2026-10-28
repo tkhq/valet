@@ -153,6 +153,18 @@ describe("the health probe", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("refetches nothing when a socket reconnects while the api still answered", async () => {
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    healthy = true;
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      reportServerUnavailable();
+      reportServerReachable();
+      await vi.advanceTimersByTimeAsync(REFETCH_SPREAD_MS);
+    }
+    expect(useApiConnection.getState().status).toBe("online");
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
   it("says the api is unreachable after 90 s of failed probes and keeps probing", async () => {
     reportServerUnavailable();
     await vi.advanceTimersByTimeAsync(UNREACHABLE_AFTER_MS - 10_000);

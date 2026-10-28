@@ -28,7 +28,12 @@ export class AppQueryClient extends QueryClient {
     const defaulted = super.defaultQueryOptions(options);
     // Options defaulted before already carry the wrapped rule.
     if (defaulted === options) return defaulted;
-    return { ...defaulted, retry: retryThroughOutage(defaulted.retry) };
+    // A paused query with no data is neither loading nor failed, so a panel
+    // would show its empty state during the outage. A query without data
+    // keeps retrying instead, and stays loading until the api answers.
+    const hasData = this.getQueryCache().get(defaulted.queryHash)?.state.data !== undefined;
+    const networkMode = defaulted.networkMode ?? (hasData ? undefined : "always");
+    return { ...defaulted, retry: retryThroughOutage(defaulted.retry), ...(networkMode ? { networkMode } : {}) };
   }
 }
 

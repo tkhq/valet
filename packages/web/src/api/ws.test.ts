@@ -177,15 +177,31 @@ describe("useSessionWebSocket", () => {
     const third = FakeWebSocket.instances[2];
     expect(third).toBeDefined();
 
+    // A socket that closes right after init keeps backing off.
     act(() => {
       third?.onopen?.();
       third?.onmessage?.({
         data: JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } }),
       });
       third?.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(1_999);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    act(() => vi.advanceTimersByTime(1));
+    const fourth = FakeWebSocket.instances[3];
+    expect(fourth).toBeDefined();
+
+    // One that stays open after init starts the backoff again.
+    act(() => {
+      fourth?.onopen?.();
+      fourth?.onmessage?.({
+        data: JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } }),
+      });
+      vi.advanceTimersByTime(10_000);
+      fourth?.onclose?.({ code: 1006 });
       vi.advanceTimersByTime(500);
     });
-    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(FakeWebSocket.instances).toHaveLength(5);
     unmount();
   });
 

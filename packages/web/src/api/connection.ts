@@ -20,7 +20,7 @@
  *    open tabs, so they do not all reach the new api at the same moment.
  *
  * A session socket's `init` after a reconnect also proves that the api
- * answers, and it runs the same recovery.
+ * answers, and it ends a confirmed outage the same way.
  */
 import { onlineManager, type QueryClient } from "@tanstack/react-query";
 import { create } from "zustand";
@@ -150,8 +150,12 @@ export function waitForOutageEnd(signal: AbortSignal): Promise<boolean> {
 
 /** A session socket reconnected and the api sent `init`. */
 export function reportServerReachable(): void {
+  const wasDown = apiStatus() === "reconnecting";
   useApiConnection.setState({ status: "online", unreachable: false });
-  refetchAfterOutage();
+  // Only a confirmed outage paused the queries. A socket that dropped while
+  // the api still answered REST paused nothing, and a socket that drops after
+  // every `init` would otherwise refetch every query on each cycle.
+  if (wasDown) refetchAfterOutage();
 }
 
 async function probeUntilHealthy(): Promise<void> {

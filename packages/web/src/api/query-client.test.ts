@@ -47,6 +47,8 @@ describe("the app query client across an api restart", () => {
     const stop = observer.subscribe((result) => states.push(result.status));
     await vi.advanceTimersByTimeAsync(0);
     expect(observer.getCurrentResult().data).toEqual({ threads: 1 });
+    // `useQuery` passes its options again on the render that shows the data.
+    observer.setOptions({ queryKey: ["threads"], queryFn, retry: false });
 
     down = true;
     void observer.refetch();
@@ -65,6 +67,32 @@ describe("the app query client across an api restart", () => {
     expect(observer.getCurrentResult()).toMatchObject({ status: "success", error: null });
     expect(observer.getCurrentResult().data).not.toEqual({ threads: 1 });
     expect(states).not.toContain("error");
+    stop();
+    client.unmount();
+  });
+
+  it("keeps a query that has no data loading during an outage, not empty", async () => {
+    const client = createQueryClient();
+    client.mount();
+    reportServerUnavailable();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useApiConnection.getState().status).toBe("reconnecting");
+
+    let up = false;
+    const queryFn = vi.fn(async () => {
+      if (!up) throw new TypeError("Failed to fetch");
+      return { connections: [] };
+    });
+    // Mounted for the first time while the api is down, like a newly opened page.
+    const observer = new QueryObserver(client, { queryKey: ["team-credentials"], queryFn, retry: false });
+    const stop = observer.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(observer.getCurrentResult()).toMatchObject({ isLoading: true, data: undefined, error: null });
+
+    up = true;
+    healthy = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(observer.getCurrentResult()).toMatchObject({ status: "success", data: { connections: [] } });
     stop();
     client.unmount();
   });

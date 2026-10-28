@@ -20,6 +20,8 @@ import { backoffDelay, reportServerReachable, reportServerUnavailable } from "./
 
 /** `WebSocket.OPEN`. */
 const SOCKET_OPEN = 1;
+/** A socket open this long after `init` counts as stable, and its close starts the backoff again. */
+const STABLE_CONNECTION_MS = 10_000;
 
 function isSettingsWrite(toolName: string, args: unknown): boolean {
   const actionId = typeof args === "object" && args !== null && "tool_id" in args ? args.tool_id : undefined;
@@ -236,8 +238,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
       }
     }
   }
-  /** Reconnect tries since the last `init`; the shared backoff (`connection.ts`) sets the wait. */
+  /** Reconnect tries since the last stable connection; the shared backoff (`connection.ts`) sets the wait. */
   let retryAttempt = 0;
+  /** When the current socket got `init`. */
+  let initAt: number | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   /** Set when the socket closed under this connection, cleared by the next `init`. */
   let reconnecting = false;
@@ -325,11 +329,11 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           // Unloaded rows can move above the saved cursor. Fetch just that row.
           void refreshMissingActivityThread(qc, wire.threadId);
         }
-        // Reset backoff only after receiving init — confirms the session
-        // is valid and the connection is healthy. Resetting in onopen
-        // allowed a connect→immediate-close loop at the first backoff step.
+        // The backoff resets only when a socket that got init stays open
+        // (onclose). Resetting at onopen or init allowed a connect→close
+        // loop at the first backoff step.
         if (wire.type === "init") {
-          retryAttempt = 0;
+          initAt = Date.now();
           // The server sends current viewer lists again for the threads this
           // tab reports; lists from before a reconnect may be stale.
           useActiveViewersStore.getState().clear(sessionId);
@@ -367,6 +371,8 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
       reconnecting = true;
       reportServerUnavailable();
       if (!opened) void checkRefusedUpgrade();
+      if (initAt !== undefined && Date.now() - initAt >= STABLE_CONNECTION_MS) retryAttempt = 0;
+      initAt = undefined;
       retryAttempt += 1;
       retryTimer = setTimeout(open, backoffDelay(retryAttempt));
     };
