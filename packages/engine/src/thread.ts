@@ -4169,7 +4169,7 @@ export class Thread {
     errorText: string = "interrupted",
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant") continue;
       if (e.queueItemId !== item.id) continue;
@@ -4683,7 +4683,7 @@ export class Thread {
     // or a second cap pass) must not duplicate it. Return the persisted
     // entry's attachments (the authoritative on-disk shape) so a retried
     // attempt still feeds the model the same image blocks.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     const existingUserEntry = existing.find(
       (e): e is MessageEntry =>
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
@@ -7576,7 +7576,8 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
+    // Every reader below looks at this submission only.
+    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
     const text =
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)
