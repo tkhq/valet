@@ -49,6 +49,19 @@ You can filter a subscription on `note_id`.
 
 Valet saves the secret only as a direct `api_key` at `org` scope, and the value must start with `whsec_`. Valet refuses a 1Password reference, a `bot_token`, or any other form with a 400 answer, because it must read the secret on every unsigned request.
 
+## Warning: Granola cannot replay lost deliveries
+
+Valet checks only that the saved value is a well-formed `whsec_` secret. It cannot tell whether the secret is the right one for your Granola webhook. If the saved secret is wrong, Valet answers 403 to every delivery. Granola treats a 403 as a permanent failure, does not retry it, and does not replay missed events later. Those events are lost.
+
+The same loss happens when a second, unsupported Granola webhook sends to the same URL (see the next section).
+
+To avoid loss, check the secret before you rely on the webhook:
+
+1. Copy the secret from the Granola confirmation dialog without extra spaces.
+2. Save it in Valet.
+3. Send the test event from Granola. Check that it appears in the Valet event log.
+4. If the drop log shows `bad_signature`, save the secret again, then send another test event. Only then enable the webhook for real notes.
+
 ## Limitation: one webhook for each organization
 
 Valet supports one Granola webhook endpoint and one signing secret for each organization. Granola allows more endpoints, such as separate personal, public, workspace, and folder endpoints. Each Granola endpoint has its own signing secret.
@@ -81,6 +94,7 @@ Granola retries on 408, 429, 5xx, and timeouts. The 503 answer makes Granola ret
 ## Troubleshooting
 
 - **No events arrive.** Check that the URL contains your organization ID and that the secret is saved. Without a saved secret, Valet answers 503 and Granola retries.
+- **`bad_signature` in the drop log.** The saved secret does not match the Granola webhook, or a second Granola webhook sends to this URL. Granola does not replay the deliveries that got 403, so they are lost. Save the right secret, delete extra Granola webhooks for this URL, then send a test event.
 - **`secret_unavailable` in the drop log.** Save the secret again with the command above.
 - **`bad_signature` in the drop log.** Save the signing secret again. If you have several Granola webhooks that send to this URL, delete the extra ones.
 - **`stale_delivery` in the drop log.** Granola sent a validly signed delivery with an old or future timestamp, and Valet asked Granola to retry. If this repeats, check the clock on the Valet server.

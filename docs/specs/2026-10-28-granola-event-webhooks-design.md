@@ -25,6 +25,10 @@ Workflows can trigger on GitHub, Slack, and Linear events but not on Granola. Gr
 - **Responses.** Bad signature gives 403. A signed event Valet cannot use for another reason (unsupported type, malformed body) gives 200 plus a drop-log row, so Granola does not retry or disable the endpoint.
 - **Dedupe.** `dedupeKey` is the `webhook-id`. The ingest unique key makes a retry a no-op.
 
+## Known limit: wrong secret
+
+The save route checks the `whsec_` format only. It cannot check the secret against Granola. A wrong secret gives 403 on every delivery, and Granola fails those permanently and does not replay them. Keeping 403 is deliberate, so authentication is not weakened. The setup guide tells admins to send a test event and read the drop log before they enable the webhook.
+
 ## Out of scope
 
 - A web UI for the secret. The admin saves it through the credentials API.
