@@ -186,8 +186,8 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         const ack = () => new Response(null, { status: route.acknowledgementStatus });
         if (key === null) return ack();
         if (!resolveInstallation) throw new Error('Plugin installation resolver is unavailable. Restart the API.');
-        const { db, eventDispatcher } = c.var.providers;
-        const installation = await resolveInstallation(db, key);
+        const { db, eventDispatcher, encryptionKey } = c.var.providers;
+        const installation = await resolveInstallation(db, key, encryptionKey);
         if (!installation) return ack();
         const triggers = c.var.providers.plugins.flatMap((loaded) => loaded.triggers ?? []).filter((trigger) => trigger.service === plugin.name);
         const verification = await route.verify(request, installation.secrets, triggers);

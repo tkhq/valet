@@ -93,6 +93,7 @@
     "@valet/plugin-gmail": "workspace:*",
     "@valet/plugin-google-calendar": "workspace:*",
     "@valet/plugin-google-workspace": "workspace:*",
+    "@valet/plugin-granola": "workspace:*",
     "@valet/plugin-linear": "workspace:*",
     "@valet/plugin-memory": "workspace:*",
     "@valet/plugin-native-documents": "workspace:*",

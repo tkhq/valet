@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { AppDb } from '../lib/drizzle.js';
 import { isRecord } from '../lib/oauth-state.js';
+import { decryptSecret, deriveSecretKey } from '../lib/secret-crypto.js';
 import { credentials, linearInstallations } from '../schema/index.js';
 import { LINEAR_CREDENTIAL_SERVICE } from '../services/linear-app.js';
 import { writeDropLog } from '../orchestrator/signals.js';
@@ -11,7 +12,18 @@ export interface HttpInstallation {
 }
 
 /** Compatibility adapter for existing installations, pending plugin-owned storage. */
-export const httpInstallationResolvers: Readonly<Record<string, (db: AppDb, externalId: string) => Promise<HttpInstallation | null>>> = {
+/** The org credential that holds a Granola webhook signing secret. Not `granola`: that service is the personal MCP token. */
+export const GRANOLA_WEBHOOK_CREDENTIAL_SERVICE = 'granola-webhook';
+
+export const httpInstallationResolvers: Readonly<Record<string, (db: AppDb, externalId: string, encryptionKey: string) => Promise<HttpInstallation | null>>> = {
+  granola: async (db, externalId, encryptionKey) => {
+    // The URL names a candidate organization. It authorizes nothing until the
+    // route verifies the signature with that organization's secret.
+    const [credential] = await db.select({ apiKeyEnc: credentials.apiKeyEnc }).from(credentials)
+      .where(and(eq(credentials.ownerType, 'org'), eq(credentials.ownerId, externalId), eq(credentials.service, GRANOLA_WEBHOOK_CREDENTIAL_SERVICE))).limit(1);
+    if (!credential?.apiKeyEnc) return null;
+    return { orgId: externalId, secrets: { signingSecret: decryptSecret(credential.apiKeyEnc, deriveSecretKey(encryptionKey)) } };
+  },
   linear: async (db, externalId) => {
     // A provider workspace identifies a candidate tenant. It authorizes nothing
     // until the route verifies the signature with this installation's secret.

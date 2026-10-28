@@ -119,6 +119,9 @@ importers:
       '@valet/plugin-google-workspace':
         specifier: workspace:*
         version: link:../plugin-google-workspace
+      '@valet/plugin-granola':
+        specifier: workspace:*
+        version: link:../plugin-granola
       '@valet/plugin-linear':
         specifier: workspace:*
         version: link:../plugin-linear
@@ -738,6 +741,22 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-granola:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.20.1)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/plugin-linear:
     dependencies:

@@ -126,6 +126,7 @@ Wire event types are listed in
 | `/api/plugins` | GET | Installed plugins and their capabilities |
 | `/api/credentials` | GET / POST / DELETE | Integration credentials (manual entry) |
 | `/api/credentials/...connect` | GET/POST | OAuth connect flow (per-service, driven by plugin credential declarations) |
+| `/plugins/granola/http/events/:orgId` | POST | Public Granola note webhook ingress. Standard Webhooks signature. See [granola-setup.md](granola-setup.md) |
 | `/api/me/github` | — | GitHub App user-OAuth connect. Alias of `/api/plugins/github/http/connection` |
 | `/api/plugins/:name/http/*` | varies | Authenticated routes that a plugin declares |
 | `/api/me/identity-links` | GET / DELETE | Chat identity links (e.g. Telegram) + link codes |

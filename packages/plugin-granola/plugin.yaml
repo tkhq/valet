@@ -1,0 +1,4 @@
+name: granola
+version: 0.0.1
+description: Granola note webhook events for workflow triggers
+v2: true
