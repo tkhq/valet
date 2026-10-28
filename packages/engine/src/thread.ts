@@ -3047,11 +3047,11 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(
-      this.session.id,
-      this.id,
-    );
+  private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const store = this.session.providers.store;
+    const snapshot = store.getTranscriptSnapshot
+      ? await store.getTranscriptSnapshot(this.session.id, this.id, keepQueueItemId === undefined ? undefined : { keepQueueItemId })
+      : await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) throw new Error(`thread not found: ${this.id}`);
     this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
     return snapshot;
@@ -3069,7 +3069,7 @@ export class Thread {
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const snapshot = await this.transcriptSnapshot();
+          const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
           span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
           this.rehydrateTranscript(snapshot.entries);
         },
@@ -4324,7 +4324,7 @@ export class Thread {
     await this.ensureTranscript();
     const taskSource = this.taskSourceFor(item);
     if (taskSource) {
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(taskSource);
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
@@ -4514,7 +4514,7 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
       const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);

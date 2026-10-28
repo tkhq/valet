@@ -1096,6 +1096,7 @@ Metadata requests, including `/threads` and `/commands`, do not load idle transc
 The `thread.hydrate` span records `valet.thread.entries_loaded` with session and thread identifiers.
 PostgreSQL entry reads emit `store.entries.read` with `valet.entries.loaded` and `valet.entries.parts_bytes` before parsing returned parts. Byte counts use stored UTF-8 JSON without serializing hydrated objects.
 Active threads still load full history and retain their transcript. This change does not establish a per-thread byte ceiling or a cache memory budget.
+A transcript load reads `SessionStore.getTranscriptSnapshot` when the store has it (2026-10-28). It returns the same entries as `getThreadSnapshot`, but a message or compaction covered by the newest compaction on the active branch comes back as a stub without its payload. The transcript and skill-invocation rebuilds never read a covered entry's payload. The one exception is the task-source prompt, which the caller keeps whole through `keepQueueItemId`. A branch that left before that compaction stubs nothing. On agents-dev, a Slack channel thread held 205.7 MB of entries with 1.1 MB of live context, and every load parsed all of it. The PostgreSQL store reads stubs first, walks the active branch with `walkTranscriptDag`, and then reads full rows for uncovered entries only. `store.transcript_snapshot` records `valet.entries.loaded` and `valet.entries.stubbed`.
 
 #### Auto-continue after compaction
 
