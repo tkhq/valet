@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@valet/engine": "workspace:*",
+    "@valet/shared": "workspace:*",
     "mdast-util-from-markdown": "^2.0.2",
     "mdast-util-gfm-autolink-literal": "^2.0.1",
     "mdast-util-gfm-strikethrough": "^2.0.0",

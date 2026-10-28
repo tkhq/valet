@@ -2,9 +2,11 @@ import { defineRegistry, JSONUIProvider, Renderer } from "@json-render/react";
 import { ArrowDownRight, ArrowUpRight, CalendarDays, MapPin, Quote as QuoteIcon, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { widgetCatalog, type WidgetSpec } from "@valet/api/widgets";
+import { readChart } from "@valet/shared";
 import { Badge, Button, StatusDot } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useSendAsPerson, useThreadReplyTarget } from "../send-as-person";
+import { ChartView } from "./chart-view";
 
 /**
  * Valet's components for the widget catalog (`@valet/api/widgets`). The
@@ -129,6 +131,10 @@ const { registry } = defineRegistry(widgetCatalog, {
       </div>
     </div>,
     Heatmap: ({ props }) => <Heatmap values={props.values} label={props.label} />,
+    Chart: ({ props }) => {
+      const chart = readChart(props);
+      return chart ? <ChartView {...chart} /> : null;
+    },
     Button: ({ props }) => <ReplyButton label={props.label} reply={props.reply} primary={props.primary} />,
     Link: ({ props }) => <a href={props.href} target="_blank" rel="noreferrer" className="w-fit text-sm text-moss hover:underline">{props.label}</a>,
     Divider: () => <hr className="border-line" />,
