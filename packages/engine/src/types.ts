@@ -2121,6 +2121,21 @@ export interface SessionStore {
     sessionId: string,
     threadId: string,
   ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
+  /**
+   * The snapshot that rebuilds an agent transcript. Same thread and entry
+   * order as `getThreadSnapshot`, but an entry covered by the newest
+   * compaction on the active branch comes back as a stub: ids, links, type,
+   * role and queue item, without content, parts or other payload. The
+   * transcript never reads a covered entry's payload, except the task-source
+   * prompt, which `keepQueueItemId` keeps whole. On a long, compacted thread
+   * this reads the live context instead of the whole history. Optional: a
+   * store without it serves the full snapshot.
+   */
+  getTranscriptSnapshot?(
+    sessionId: string,
+    threadId: string,
+    opts?: { keepQueueItemId?: string },
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
   appendEntries(

@@ -13,6 +13,7 @@ import {
   StaleAttemptError,
   SUBMISSION_TIMEOUT_MS,
   ValidationError,
+  walkTranscriptDag,
   withSpan,
 } from "@valet/engine";
 import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
@@ -294,6 +295,18 @@ const ENTRY_COLUMNS = [
   "attachments",
   "created_at",
 ] as const;
+
+/** Payload a transcript stub leaves NULL, by entry type (see `getTranscriptSnapshot`).
+ * Messages and compactions carry the bulk of a long thread. Other types are
+ * small, and some (decision gates) cannot be read without their metadata. */
+const STUB_NULL_COLUMNS: Record<string, readonly string[]> = {
+  message: ["content", "parts", "signal", "author", "channel", "metadata", "usage", "cost", "attachments"],
+  compaction: ["summary", "covered_entry_ids", "file_context", "metadata"],
+};
+const STUB_SELECT = [...ENTRY_COLUMNS.map((column) => {
+  const types = Object.keys(STUB_NULL_COLUMNS).filter((type) => STUB_NULL_COLUMNS[type]!.includes(column));
+  return types.length === 0 ? column : `CASE WHEN entry_type IN (${types.map((type) => `'${type}'`).join(", ")}) THEN NULL ELSE ${column} END AS ${column}`;
+}), "seq"].join(", ");
 
 const INSERT_ENTRY_SQL = `
   INSERT INTO engine_entries (${ENTRY_COLUMNS.join(", ")})
@@ -748,6 +761,56 @@ export class PgSessionStore implements SessionStore {
         entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
       };
     });
+  }
+
+  async getTranscriptSnapshot(
+    sessionId: string,
+    threadId: string,
+    opts?: { keepQueueItemId?: string },
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return withSpan("store.transcript_snapshot", { "valet.session.id": sessionId, "valet.thread.id": threadId }, (span) =>
+      this.db.transaction(async (tx) => {
+        const threadResult = await tx.query(
+          "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+          [sessionId, threadId],
+        );
+        const rawThread = threadResult.rows[0];
+        if (!rawThread) return null;
+        const thread = rowToThread(rawToThreadRow(rawThread));
+        const order = "ORDER BY created_at ASC, seq ASC";
+        // Stubs first: every entry without its payload, so the active branch
+        // and its newest compaction come from the same walk the engine runs.
+        const stubResult = await tx.query(
+          `SELECT ${STUB_SELECT} FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ${order}`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE],
+        );
+        const stubs = stubResult.rows.map(rawToEntryRow).map(rowToEntry);
+        let path: SessionEntry[];
+        try {
+          path = walkTranscriptDag(stubs, thread.activeLeafEntryId);
+        } catch {
+          path = [];
+        }
+        const compaction = [...path].reverse().find((entry) => entry.type === "compaction");
+        const covered = compaction
+          ? await tx.query("SELECT covered_entry_ids FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND id = $3", [sessionId, threadId, compaction.id])
+          : undefined;
+        const rawCovered: unknown = covered?.rows[0]?.covered_entry_ids;
+        const coveredIds = new Set(parseJson<string[]>(typeof rawCovered === "string" ? rawCovered : null) ?? []);
+        for (const stub of stubs) {
+          if (stub.type === "message" && opts?.keepQueueItemId !== undefined && stub.queueItemId === opts.keepQueueItemId) coveredIds.delete(stub.id);
+        }
+        // A broken walk keeps the full read: the engine reports the DAG error itself.
+        const full = await tx.query(
+          `SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 AND NOT (id = ANY($4::text[])) ${order}`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE, path.length === 0 ? [] : [...coveredIds]],
+        );
+        const loaded = new Map(full.rows.map(rawToEntryRow).map(rowToEntry).map((entry) => [entry.id, entry]));
+        span.setAttribute("valet.entries.loaded", loaded.size);
+        span.setAttribute("valet.entries.stubbed", stubs.length - loaded.size);
+        return { thread, entries: stubs.map((stub) => loaded.get(stub.id) ?? stub) };
+      }),
+    );
   }
 
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
