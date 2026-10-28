@@ -32,3 +32,31 @@ it("reads an unknown thread as missing", async () => {
   api = await bootTestApi();
   expect((await fetch(`${api.baseUrl}/api/threads/th-missing/context`)).status).toBe(404);
 });
+
+it("applies a new org compaction window to a loaded thread without a rebuild", async () => {
+  api = await bootTestApi();
+  const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: "local-user" }, {
+    actorUserId: "local-user", orgId: "local-org",
+  });
+  const thread = await session.createThread("web:compaction-window");
+  const limit = async () => {
+    const res = await fetch(`${api!.baseUrl}/api/threads/${thread.id}/context`);
+    const body = await res.json() as ThreadContextResponse;
+    if (!body.context) throw new Error("The test model has a context window.");
+    return body.context;
+  };
+  const before = await limit();
+  expect(before.contextWindow - 20_000).toBeGreaterThan(60_000);
+  expect(before.limit).toBe(Math.min(before.contextWindow - 20_000, 200_000));
+
+  const patch = async (compactionWindowTokens: number | null) => fetch(`${api!.baseUrl}/api/org/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ compactionWindowTokens }),
+  });
+  expect((await patch(60_000)).status).toBe(200);
+  expect((await limit()).limit).toBe(Math.min(before.contextWindow - 20_000, 60_000));
+
+  expect((await patch(null)).status).toBe(200);
+  expect((await limit()).limit).toBe(before.limit);
+});

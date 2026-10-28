@@ -124,6 +124,7 @@ async function loadOrgResponse(
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    compactionWindowTokens: row.compactionWindowTokens,
     plugins,
     callerRole,
   };

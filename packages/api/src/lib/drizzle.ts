@@ -883,6 +883,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_installations" boolean NOT NULL DEFAULT true',
   },
   {
+    describe: "orgs.compaction_window_tokens column",
+    probe: { kind: "column", table: "orgs", column: "compaction_window_tokens" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "compaction_window_tokens" integer',
+  },
+  {
     describe: "image_sources.sandbox_resources column",
     probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },
     sql: 'ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "sandbox_resources" jsonb',
