@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useApiConnection } from "~/api/connection";
 import { ReconnectingBanner } from "./reconnecting-banner";
 
-afterEach(() => useApiConnection.setState({ status: "online" }));
+afterEach(() => useApiConnection.setState({ status: "online", unreachable: false }));
 
 describe("ReconnectingBanner", () => {
   it("shows only while a failed health probe confirms the outage", () => {
@@ -17,5 +17,12 @@ describe("ReconnectingBanner", () => {
     expect(screen.getByRole("status").textContent).toContain("Valet is restarting. Reconnecting…");
     act(() => useApiConnection.setState({ status: "online" }));
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("stops calling a long outage a restart", () => {
+    render(<ReconnectingBanner />);
+    act(() => useApiConnection.setState({ status: "reconnecting", unreachable: true }));
+    expect(screen.getByRole("status").textContent).toContain("Valet is unreachable. Still trying to reconnect…");
+    expect(screen.getByRole("status").textContent).not.toContain("restarting");
   });
 });

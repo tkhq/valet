@@ -14,8 +14,12 @@
  *
  * The text also persists to localStorage, so a draft survives a reload and
  * shows in another window. Attachments stay in memory: they are uploads in
- * flight, not text that can be written back. The send key of a failed send
- * persists beside the text, so a resend after a reload keeps it.
+ * flight, not text that can be written back.
+ *
+ * The send key persists beside the text from the moment a send starts. A
+ * send with a 2xx answer or a definite 4xx answer drops it. If the page
+ * reloads while the send is in flight, the key brings its text back into
+ * the box, so a resend reuses the key and the api does not post twice.
  */
 import { create } from "zustand";
 import type { ComposerImage } from "~/components/session/composer-images";
@@ -36,9 +40,10 @@ export interface ComposerDraft {
    */
   recall?: number;
   /**
-   * The idempotency key of a send that got no answer (`SendPromptRequest.clientMessageId`).
-   * A resend of the same text and the same attachments reuses it, so the api
-   * does not post the message twice when the first try landed after all.
+   * The idempotency key of a send that is in flight or got no answer
+   * (`SendPromptRequest.clientMessageId`). A resend of the same text and the
+   * same attachments reuses it, so the api does not post the message twice
+   * when the first try landed after all.
    */
   sendKey?: SendKey;
 }
@@ -95,7 +100,8 @@ function isEmpty(draft: ComposerDraft): boolean {
     draft.images.length === 0 &&
     draft.files.length === 0 &&
     draft.imageErrors.length === 0 &&
-    draft.fileErrors.length === 0
+    draft.fileErrors.length === 0 &&
+    draft.sendKey === undefined
   );
 }
 
@@ -103,7 +109,7 @@ interface ComposerDraftStore {
   owner: string;
   activateOwner(owner: string): void;
   byKey: Record<string, ComposerDraft>;
-  /** Replace the text. This ends a recall. */
+  /** Replace the text. This ends a recall. An empty text also drops the send key. */
   setText(key: string, text: string): void;
   /** Show history prompt `index` as the text, or an empty text when `index` is null. */
   recallText(key: string, index: number | null, text: string): void;
@@ -112,6 +118,8 @@ interface ComposerDraftStore {
   setImageErrors(key: string, update: ListUpdate<string>): void;
   setFileErrors(key: string, update: ListUpdate<string>): void;
   setSendKey(key: string, sendKey: ComposerDraft["sendKey"]): void;
+  /** Drop the send key if it is still `id`. A later send on the slot can own a newer key. */
+  settleSendKey(key: string, id: string): void;
   /** Drop the whole draft (a successful send). */
   clear(key: string): void;
   /**
@@ -146,16 +154,23 @@ function parseSendKey(raw: string | null): SendKey | undefined {
   }
 }
 
+/**
+ * The owner's stored drafts. A send key without text is a send that was in
+ * flight at the reload: its text comes back into the box with it.
+ */
 function storedDrafts(owner: string): Record<string, ComposerDraft> {
   const byKey: Record<string, ComposerDraft> = {};
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const name = localStorage.key(i);
-      const text = name?.startsWith(STORAGE_PREFIX + owner + "\u0000") ? localStorage.getItem(name) : null;
-      if (!name || !text) continue;
-      const key = name.slice(STORAGE_PREFIX.length);
+      const prefix = [STORAGE_PREFIX, SEND_KEY_PREFIX].find((p) => name?.startsWith(p + owner + "\u0000"));
+      if (!name || !prefix) continue;
+      const key = name.slice(prefix.length);
+      if (byKey[key]) continue;
+      const text = localStorage.getItem(STORAGE_PREFIX + key);
       const sendKey = parseSendKey(localStorage.getItem(SEND_KEY_PREFIX + key));
-      byKey[key] = sendKey ? { ...EMPTY_DRAFT, text, sendKey } : { ...EMPTY_DRAFT, text };
+      if (text) byKey[key] = sendKey ? { ...EMPTY_DRAFT, text, sendKey } : { ...EMPTY_DRAFT, text };
+      else if (sendKey) byKey[key] = { ...EMPTY_DRAFT, text: sendKey.text, sendKey };
     }
   } catch { /* nothing stored */ }
   return byKey;
@@ -196,7 +211,9 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
     byKey: {},
     // Never attribute legacy unscoped drafts to whichever account signs in next.
     activateOwner: (owner) => set((state) => state.owner === owner ? state : { owner, byKey: owner ? storedDrafts(owner) : {} }),
-    setText: (key, text) => patch(key, ({ recall: _, ...d }) => ({ ...d, text })),
+    // An emptied box drops the key too. Otherwise a key whose text the
+    // person deleted would bring that text back at the next reload.
+    setText: (key, text) => patch(key, ({ recall: _, sendKey, ...d }) => (text && sendKey ? { ...d, text, sendKey } : { ...d, text })),
     recallText: (key, index, text) =>
       patch(key, ({ recall: _, ...d }) => (index === null ? { ...d, text } : { ...d, text, recall: index })),
     setImages: (key, update) => patch(key, (d) => ({ ...d, images: resolve(update, d.images) })),
@@ -206,6 +223,8 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
     setFileErrors: (key, update) =>
       patch(key, (d) => ({ ...d, fileErrors: resolve(update, d.fileErrors) })),
     setSendKey: (key, sendKey) => patch(key, (d) => ({ ...d, sendKey })),
+    settleSendKey: (key, id) =>
+      patch(key, ({ sendKey, ...d }) => (sendKey && sendKey.id !== id ? { ...d, sendKey } : d)),
     clear: (key) =>
       set((state) => {
         if (!key.startsWith(state.owner + "\u0000") || state.byKey[key] === undefined) return state;

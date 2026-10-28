@@ -4,6 +4,8 @@ import { ApiError } from "./api-error";
 import {
   backoffDelay,
   installConnection,
+  REFETCH_SPREAD_MS,
+  UNREACHABLE_AFTER_MS,
   isServerUnavailable,
   reportServerReachable,
   reportServerUnavailable,
@@ -77,7 +79,7 @@ describe("the health probe", () => {
     vi.stubGlobal("fetch", vi.fn(async () => (healthy ? new Response("{}", { status: 200 }) : Promise.reject(new TypeError("Failed to fetch")))));
     client = new QueryClient();
     installConnection(client);
-    useApiConnection.setState({ status: "online" });
+    useApiConnection.setState({ status: "online", unreachable: false });
     onlineManager.setOnline(true);
   });
 
@@ -108,6 +110,8 @@ describe("the health probe", () => {
     healthy = true;
     await vi.advanceTimersByTimeAsync(1_000);
     expect(useApiConnection.getState().status).toBe("online");
+    // The refetch waits a random share of REFETCH_SPREAD_MS.
+    await vi.advanceTimersByTimeAsync(REFETCH_SPREAD_MS);
     expect(onlineManager.isOnline()).toBe(true);
     expect(invalidate).toHaveBeenCalledTimes(1);
   });
@@ -142,9 +146,44 @@ describe("the health probe", () => {
 
     reportServerReachable();
     expect(useApiConnection.getState().status).toBe("online");
+    await vi.advanceTimersByTimeAsync(0);
     expect(onlineManager.isOnline()).toBe(true);
     expect(invalidate).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the api is unreachable after 90 s of failed probes and keeps probing", async () => {
+    reportServerUnavailable();
+    await vi.advanceTimersByTimeAsync(UNREACHABLE_AFTER_MS - 10_000);
+    expect(useApiConnection.getState()).toMatchObject({ status: "reconnecting", unreachable: false });
+    // The next failed probe after 90 s flips it. Probes run at most 8 s apart.
+    await vi.advanceTimersByTimeAsync(18_000);
+    expect(useApiConnection.getState()).toMatchObject({ status: "reconnecting", unreachable: true });
+    const probes = vi.mocked(fetch).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(probes);
+
+    healthy = true;
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(useApiConnection.getState()).toMatchObject({ status: "online", unreachable: false });
+  });
+
+  it("waits a random 0 to 2 s before the refetch, and recovers once for several reports", async () => {
+    vi.mocked(Math.random).mockReturnValue(0.75);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    reportServerUnavailable();
+    await vi.advanceTimersByTimeAsync(0);
+    healthy = true;
+    // The first probe retry waits 500 ms plus 25 % jitter at random 0.75.
+    await vi.advanceTimersByTimeAsync(594);
+    expect(useApiConnection.getState().status).toBe("online");
+    reportServerReachable();
+    await vi.advanceTimersByTimeAsync(0.75 * REFETCH_SPREAD_MS - 1);
+    expect(onlineManager.isOnline()).toBe(false);
+    expect(invalidate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onlineManager.isOnline()).toBe(true);
+    expect(invalidate).toHaveBeenCalledTimes(1);
   });
 });

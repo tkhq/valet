@@ -12,8 +12,12 @@
  * 1. Probes `GET /api/health`. A failed probe marks the api `reconnecting`
  *    and takes TanStack Query offline. Queries keep their data and pause
  *    their retries and polls, so panels show no error for the restart.
- * 2. Probes again on the shared backoff until the api answers.
- * 3. Brings TanStack Query back online and refetches every active query.
+ * 2. Probes again on the shared backoff until the api answers. After 90 s
+ *    of failed probes, it marks the outage `unreachable`, so the banner
+ *    stops saying that Valet is restarting. It keeps probing.
+ * 3. Waits a random 0 to 2 s, then brings TanStack Query back online and
+ *    refetches every active query. The wait spreads the refetches of all
+ *    open tabs, so they do not all reach the new api at the same moment.
  *
  * A session socket's `init` after a reconnect also proves that the api
  * answers, and it runs the same recovery.
@@ -89,12 +93,21 @@ export function retryThroughOutage<TError>(retry: RetryOption<TError>): (failure
 /** `checking` is a health probe in flight that has not failed yet. The banner shows only for `reconnecting`. */
 export type ApiConnection = "online" | "checking" | "reconnecting";
 
-export const useApiConnection = create<{ status: ApiConnection }>(() => ({ status: "online" }));
+/**
+ * `unreachable` is true while `reconnecting` lasts longer than
+ * `UNREACHABLE_AFTER_MS`. A deploy restart ends well before that, so a
+ * longer outage is not a restart.
+ */
+export const useApiConnection = create<{ status: ApiConnection; unreachable?: boolean }>(() => ({ status: "online" }));
 
 const PROBE_TIMEOUT_MS = 5_000;
+export const UNREACHABLE_AFTER_MS = 90_000;
+/** The longest random wait before the refetch after an outage. */
+export const REFETCH_SPREAD_MS = 2_000;
 
 let queryClient: QueryClient | undefined;
 let probing = false;
+let refetchTimer: ReturnType<typeof setTimeout> | undefined;
 
 function apiStatus(): ApiConnection {
   return useApiConnection.getState().status;
@@ -137,35 +150,54 @@ export function waitForOutageEnd(signal: AbortSignal): Promise<boolean> {
 
 /** A session socket reconnected and the api sent `init`. */
 export function reportServerReachable(): void {
-  useApiConnection.setState({ status: "online" });
+  useApiConnection.setState({ status: "online", unreachable: false });
   refetchAfterOutage();
 }
 
 async function probeUntilHealthy(): Promise<void> {
+  let downSince: number | undefined;
   for (let attempt = 1; ; attempt += 1) {
     if (await healthy()) break;
     // A socket proved the api answers while this probe ran, and recovered.
     if (apiStatus() === "online") return;
+    downSince ??= Date.now();
     if (apiStatus() !== "reconnecting") {
+      // A refetch that still waits from the last recovery must not bring
+      // the queries back online during this outage.
+      clearTimeout(refetchTimer);
+      refetchTimer = undefined;
       useApiConnection.setState({ status: "reconnecting" });
       onlineManager.setOnline(false);
+    }
+    if (!useApiConnection.getState().unreachable && Date.now() - downSince >= UNREACHABLE_AFTER_MS) {
+      useApiConnection.setState({ unreachable: true });
     }
     await sleep(backoffDelay(attempt));
     if (apiStatus() === "online") return;
   }
   const wasDown = apiStatus() === "reconnecting";
-  useApiConnection.setState({ status: "online" });
+  useApiConnection.setState({ status: "online", unreachable: false });
   // A probe that passed at once means the api answered the failed request
   // itself. No query paused, so there is nothing to recover.
   if (wasDown) refetchAfterOutage();
 }
 
+/**
+ * Brings queries back online after a random wait of up to
+ * `REFETCH_SPREAD_MS`. Every open tab sees the api return at about the same
+ * moment, and without the wait all their queries reach it together. Queries
+ * stay paused during the wait, and a second recovery shares the first wait.
+ */
 function refetchAfterOutage(): void {
-  onlineManager.setOnline(true);
-  // Data can change while the api is down, so every query is stale. Active
-  // queries refetch now, and inactive ones refetch when a view mounts them.
-  // `cancelRefetch: false` lets several reconnecting sockets share one fetch.
-  void queryClient?.invalidateQueries(undefined, { cancelRefetch: false });
+  if (refetchTimer !== undefined) return;
+  refetchTimer = setTimeout(() => {
+    refetchTimer = undefined;
+    onlineManager.setOnline(true);
+    // Data can change while the api is down, so every query is stale. Active
+    // queries refetch now, and inactive ones refetch when a view mounts them.
+    // `cancelRefetch: false` lets several reconnecting sockets share one fetch.
+    void queryClient?.invalidateQueries(undefined, { cancelRefetch: false });
+  }, Math.round(Math.random() * REFETCH_SPREAD_MS));
 }
 
 async function healthy(): Promise<boolean> {

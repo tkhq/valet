@@ -1039,6 +1039,40 @@ describe("Composer beside the Ask Valet dock", () => {
     expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).not.toBe(firstKey);
   });
 
+  it("keeps the key in the draft while the send is in flight, and drops it on a 2xx", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    let answer: (value: { messageId: string; threadId: string }) => void = () => {};
+    sendMutateAsync.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+    const id = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+    // A reload now reads this key and its text back from storage.
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey).toEqual({ id, text: "deploy the fix", attachments: [] });
+    expect(page.value).toBe("");
+
+    await act(async () => answer({ messageId: "q-1", threadId: "shared" }));
+    expect(useComposerDraftStore.getState().byKey[slot]).toBeUndefined();
+  });
+
+  it("drops the key on a definite 4xx and keeps it on a 5xx", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    sendMutateAsync.mockRejectedValueOnce(new ApiError(400, "POST → 400", { error: "Text is too long." }));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey).toBeUndefined();
+
+    sendMutateAsync.mockRejectedValueOnce(new ApiError(500, "POST → 500", { error: "boom" }));
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    const id = sendMutateAsync.mock.calls[1]?.[0].clientMessageId;
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey?.id).toBe(id);
+  });
+
   it("sends a slash command without a key and does not promise a single post", async () => {
     sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
     const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });

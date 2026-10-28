@@ -34,10 +34,16 @@ this. Do not add a second retry loop or a second "reconnecting" notice.
   The rule wraps each query's own `retry`, even `retry: false`, so a panel never
   shows an error for a restart. Render `isError` for real errors only.
 - **One banner** (`ReconnectingBanner`) reads `useApiConnection`. Panels do not.
+  After 90 s of failed health probes, the banner says that Valet is unreachable
+  instead of restarting. The probe keeps trying.
+- **Recovery is spread.** When the api answers again, each tab waits a random
+  0 to 2 s before it refetches, so all open tabs do not hit the new api at once.
 - **Mutations** never retry. They fail at once, and `errorText` names the
   outage. A queued message send carries `clientMessageId`, so a resend after a
-  lost answer cannot post the message twice. The composer keeps the key, also
-  across a reload, only for the same text and the same attachments. The api
+  lost answer cannot post the message twice. The composer saves the key in the
+  draft before the request and drops it on a 2xx or a 4xx answer. A reload
+  while the send is in flight brings the text back with its key. A resend
+  reuses the key only for the same text and the same attachments. The api
   refuses a reused key with different content (409). Edits and slash commands
   carry no key.
 - **A loop outside TanStack Query** (a socket, a frame feed) waits with

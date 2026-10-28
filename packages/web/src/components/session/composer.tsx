@@ -695,9 +695,10 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
-    // One key per queued message, kept across a send with no answer
-    // (`ComposerDraft.sendKey`). An edit or a slash command the registry
-    // knows runs without a queue item, so it has no key.
+    // One key per queued message (`ComposerDraft.sendKey`). The draft keeps
+    // it from before the request until a 2xx or a definite 4xx, so a reload
+    // or a closed tab mid-send cannot lose it. An edit or a slash command
+    // the registry knows runs without a queue item, so it has no key.
     const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
     const canonical = typedName
       ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
@@ -706,7 +707,9 @@ export function Composer({
     const clientMessageId = editTarget || canonical
       ? undefined
       : reusableSendKey(useComposerDraftStore.getState().byKey[slot]?.sendKey, t, attachmentIds) ?? crypto.randomUUID();
+    const sendKey = clientMessageId ? { id: clientMessageId, text: t, attachments: attachmentIds } : undefined;
     useComposerDraftStore.getState().clear(slot);
+    if (sendKey) useComposerDraftStore.getState().setSendKey(slot, sendKey);
     announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
@@ -733,6 +736,7 @@ export function Composer({
               ...(clientMessageId ? { clientMessageId } : {}),
             }),
       });
+      if (sendKey) useComposerDraftStore.getState().settleSendKey(slot, sendKey.id);
       if (editTarget) onEditResult?.(true);
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -798,11 +802,14 @@ export function Composer({
         : pendingFiles;
       drafts.setFiles(slot, (prev) => [...restored, ...prev]);
       // The failure must be visible — a console-only error reads as a dead
-      // send button. With no answer from the api the message may have
-      // landed, and only a kept key makes a resend safe. An answer means
-      // nothing was queued, so the next send gets a new key.
+      // send button. Only a definite 4xx means nothing was queued, so the
+      // next send gets a new key. Any other failure may have landed, and
+      // only the kept key makes a resend safe.
       const unanswered = isServerUnavailable(err);
-      if (unanswered && clientMessageId) drafts.setSendKey(slot, { id: clientMessageId, text: t, attachments: attachmentIds });
+      if (sendKey) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500) drafts.settleSendKey(slot, sendKey.id);
+        else drafts.setSendKey(slot, sendKey);
+      }
       drafts.setFileErrors(slot, [!unanswered
         ? `The message did not send. ${errorText(err, "Unknown error.")}`
         : clientMessageId
