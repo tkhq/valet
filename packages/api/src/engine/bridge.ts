@@ -557,6 +557,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "turn_retry":
+      return [{ ...e }];
+
     case "branch_switched":
       return [{ type: "branch_switched", threadId: e.threadId, noteEntryId: e.noteEntryId }];
 

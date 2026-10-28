@@ -175,10 +175,37 @@ describe("empty assistant reply", () => {
     );
     expect(
       screen.getByText(
-        "This turn failed: 429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s. Try again or choose another model.",
+        "The model provider is limiting requests and did not recover after several tries. Try again in a minute, or choose another model.",
       ),
     ).toBeTruthy();
+    // The raw provider text stays one click away, under Details.
+    expect(screen.getByText("Details")).toBeTruthy();
+    expect(screen.getByText("429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.")).toBeTruthy();
     expect(screen.queryByText(/No response/)).toBeNull();
+  });
+
+  it("names the provider and a usage limit apart from an outage", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        model: "openai/gpt-5.6-luna",
+        errorMessage: "You exceeded your current quota, please check your plan and billing details. (insufficient_quota)",
+      }),
+    );
+    expect(screen.getByText("OpenAI usage limit is reached. Choose another model, or try again after the limit resets.")).toBeTruthy();
+  });
+
+  it("words the OpenAI server error a person saw without the raw help-center text", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        model: "openai/gpt-5.6-luna",
+        errorMessage: "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_1 in your message.",
+      }),
+    );
+    expect(screen.getByText("OpenAI had a server error and did not recover after several tries. Try again, or choose another model.")).toBeTruthy();
   });
 
   it("keeps the generic text when the turn has no error text", () => {

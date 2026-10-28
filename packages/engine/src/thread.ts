@@ -5,6 +5,7 @@ import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -274,12 +275,17 @@ const TURN_STREAM_TIMEOUT_MS = 600_000;
  * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
  * wait up to the max hint; a longer hint ends the retries.
  */
-const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
-const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
-const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
-const INTERACTIVE_TURN_RETRY_ATTEMPTS = 2;
-const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 8_000];
-const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 20_000;
+// A person's prompt gets four tries over about 30s, the order of what Claude
+// Code (10 tries) and Codex (4 request + 5 stream retries) allow, so a
+// passing outage does not cost a resend. An unattended turn has nobody
+// waiting on it, so it rides out a longer outage: six tries over about 13
+// minutes, each wait capped at 5 minutes.
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 6;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 240_000, 300_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 300_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 4;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 30_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -390,34 +396,6 @@ const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
-/**
- * Build the user-facing text for a `turn_transient_retry` event (TKAI-325).
- * The old text embedded the raw provider error blob and read as an internal
- * Valet judgment. This version names the upstream cause, tells the reader
- * what to do if retries fail, and keeps the raw JSON out — the request ID
- * (when the error carries one) is enough for a support escalation. Exported
- * so tests can pin the copy without spinning up a whole retry loop.
- */
-export function formatTransientRetryMessage(args: {
-  provider: string;
-  errorMessage: string | undefined;
-  waitMs: number;
-  attempt: number;
-  maxAttempts: number;
-}): string {
-  const providerLabel = args.provider
-    ? args.provider.charAt(0).toUpperCase() + args.provider.slice(1)
-    : "The upstream provider";
-  const requestId = args.errorMessage?.match(/request_id["':\s]+"?([A-Za-z0-9_-]+)"?/)?.[1];
-  const seconds = Math.round(args.waitMs / 1000);
-  const primary = `${providerLabel}'s API is unavailable or overloaded. The turn will retry automatically in ${seconds}s (attempt ${args.attempt}/${args.maxAttempts}).`;
-  const detail = requestId
-    ? ` If retries fail, switch to a different model or contact support (request ID: ${requestId}).`
-    : " If retries fail, switch to a different model.";
-  return primary + detail;
-}
-
-
 const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
   [/^(?:ms|milliseconds?)$/i, 1],
   [/^(?:h|hours?)$/i, 3_600_000],
@@ -444,6 +422,24 @@ export function parseProviderRetryHintMs(errorMessage: string | undefined): numb
     total += Number(part[1]) * scale;
   }
   return total > 0 ? Math.ceil(total) : undefined;
+}
+
+/**
+ * Each retry wait moves by up to this fraction either way. Threads that share
+ * one provider key fail together in an outage. Without jitter they all retry
+ * at the same moment and fail together again.
+ */
+const TURN_RETRY_JITTER = 0.25;
+
+/**
+ * The wait before one retry: the backoff, raised to the provider's hint, then
+ * moved by up to ±25%. The hint stays a floor, so jitter never retries
+ * sooner than the provider asked. Exported for tests.
+ */
+export function turnRetryWaitMs(backoffMs: number, hintMs: number | undefined, random: () => number = Math.random): number {
+  const base = Math.max(backoffMs, hintMs ?? 0);
+  const jittered = Math.round(base * (1 - TURN_RETRY_JITTER + 2 * TURN_RETRY_JITTER * random()));
+  return Math.max(jittered, hintMs ?? 0);
 }
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
@@ -5345,8 +5341,8 @@ export class Thread {
       const error = last.errorMessage ?? "";
       // Provider capacity cannot override authentication, input, policy, or
       // application budget failures, even when their text also mentions 429.
-      if (/authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?key|request|input|argument)|permission[_ -]denied|\b(?:40[013]|422)\b|content[_ -]?(?:policy|filter)|policy[_ -]?(?:violation|denied)|\bbudget\b|context[_ -]?(?:length|window)|aborted|cancelled/i.test(error)) return;
-      const quota = /\bquota\b|insufficient_quota|payment_required|\b402\b|billing[_ -](?:error|limit|hard_limit)|credit balance.*(?:low|insufficient|exhausted)|(?:insufficient|exhausted)[_ -]credits|(?:monthly|spend(?:ing)?)[_ -]limit|quota[_ -](?:exceeded|exhausted)/i.test(error);
+      if (isNonRetryableProviderFailure(error)) return;
+      const quota = isUsageLimitFailure(error);
       const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
       if (!quota && !transient) return;
       if (!(await this.canRunCurrentSubmission())) return;
@@ -5376,10 +5372,7 @@ export class Thread {
         this.agent.state.model = fallback.model;
         this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
         if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
-        this.emitError(
-          "turn_provider_fallback",
-          `${previousProvider} is unavailable. Continuing this turn with ${fallback.model.provider}.`,
-        );
+        this.emitTurnRetry({ action: "fallback", provider: previousProvider, reason: classifyProviderFailure(error), toProvider: fallback.model.provider });
       } else {
         if (!transient || sameProviderAttempts >= maxAttempts) return;
         // A provider that asks for a longer wait than this turn allows gets
@@ -5387,14 +5380,11 @@ export class Thread {
         const hintMs = parseProviderRetryHintMs(last.errorMessage);
         if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
-        this.emitError("turn_transient_retry", formatTransientRetryMessage({
-          provider: this.agent.state.model.provider,
-          errorMessage: last.errorMessage,
-          waitMs,
-          attempt: sameProviderAttempts,
-          maxAttempts,
-        }));
+        const waitMs = turnRetryWaitMs(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs);
+        this.emitTurnRetry({
+          action: "retry", provider: this.agent.state.model.provider, reason: classifyProviderFailure(error),
+          attempt: sameProviderAttempts, maxAttempts, waitMs,
+        });
         if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
       }
       if (!(await this.canRunCurrentSubmission())) return;
@@ -7479,6 +7469,13 @@ export class Thread {
       }
       throw err;
     }
+  }
+
+  /** Progress for a failed model call this turn retries. Not an error: see
+   * the `turn_retry` event. Logged too, as `emitError` is. */
+  private emitTurnRetry(retry: Omit<Extract<EngineEvent, { type: "turn_retry" }>, "type" | "threadId">): void {
+    console.warn(`[engine] thread retry session=${this.session.id} thread=${this.id} ${retry.action} ${retry.provider} ${retry.reason}${retry.attempt ? ` ${retry.attempt}/${retry.maxAttempts}` : ""}${retry.toProvider ? ` -> ${retry.toProvider}` : ""}`);
+    void this.session.emit({ type: "turn_retry", threadId: this.id, ...retry });
   }
 
   private emitError(code: string, message: string): void {

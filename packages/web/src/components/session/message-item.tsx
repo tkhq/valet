@@ -1,5 +1,6 @@
 import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Lock, Pencil, Reply } from "lucide-react";
 import { memo, useMemo, useState } from "react";
+import { classifyProviderFailure, providerFailureSummary } from "@valet/shared";
 import type {
   MessagePart,
   MessageSkillInvocation,
@@ -227,10 +228,16 @@ export const MessageItem = memo(function MessageItem({
                   collapseStructured={collapseStructured}
                 />)}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (message.errorMessage?.trim()
-              ? <p role="alert" className="flex items-start gap-1.5 text-sm text-danger-600 dark:text-danger-500 [overflow-wrap:anywhere]">
-                <AlertCircle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{emptyReplyNotice(message)}</span>
-              </p>
+              ? <div role="alert" className="space-y-1 text-sm text-danger-600 dark:text-danger-500 [overflow-wrap:anywhere]">
+                <p className="flex items-start gap-1.5">
+                  <AlertCircle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{emptyReplyNotice(message)}</span>
+                </p>
+                <details className="pl-5 text-xs text-muted">
+                  <summary className="cursor-pointer select-none">Details</summary>
+                  <p className="mt-1 whitespace-pre-wrap">{message.errorMessage?.trim()}</p>
+                </details>
+              </div>
               : <p className="text-xs italic text-muted [overflow-wrap:anywhere]">{emptyReplyNotice(message)}</p>)}
             {workedForMs !== undefined && <p className="text-xs text-muted">Worked for {formatDuration(workedForMs)}</p>}
           </div>
@@ -290,15 +297,21 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
 }
 
 /**
- * The muted line for an empty assistant reply. A failed turn names the
- * provider's error, which REST keeps after a reload. Other empty replies
- * keep the generic text.
+ * The line for an empty assistant reply. A failed turn gets one sentence that
+ * names the cause and the next step. The provider's raw text, which REST
+ * keeps after a reload, stays under Details. Other empty replies keep the
+ * generic text.
  */
 function emptyReplyNotice(message: StreamMessage): string {
   const error = message.errorMessage?.trim();
   if (!error) return "No response. Try again or choose another model.";
-  const sentence = /[.!?…]$/.test(error) ? error : `${error}.`;
-  return `This turn failed: ${sentence} Try again or choose another model.`;
+  return providerFailureSummary(classifyProviderFailure(error), modelProvider(message.model));
+}
+
+/** "openai/gpt-5.6" or "openai:gpt-5.6" → "openai". A bare id names no provider. */
+function modelProvider(model: string | undefined): string | undefined {
+  const match = model ? /^([^/:]+)[/:]/.exec(model) : null;
+  return match?.[1];
 }
 
 /** "45s", "3m 12s", or "1h 4m": how long a turn ran. Exported for tests. */

@@ -63,7 +63,8 @@ describe("automatic provider fallback", () => {
     expect(entries.filter((entry) => entry.type === "message" && entry.role === "user")).toHaveLength(1);
     expect(fallback.mock.calls[0]?.[0]).toMatchObject({ requestedSpec: "primary/spec", attemptedProviderIds: [primary.getModel().provider], failedModel: { apiKey: "primary-key" } });
     expect(events.some(({ event }) => event.type === "model_state" && event.model === `${backup.getModel().provider}/${backup.getModel().id}`)).toBe(true);
-    expect(events.some(({ event }) => event.type === "error" && event.code === "turn_provider_fallback" && event.recoverable)).toBe(true);
+    expect(events.some(({ event }) => event.type === "turn_retry" && event.action === "fallback" && event.toProvider === backup.getModel().provider)).toBe(true);
+    expect(events.some(({ event }) => event.type === "error" && event.code !== "error")).toBe(false);
     const next = await session.prompt("another turn", { author: { id: "u" } });
     await waitFor(() => events.some(({ event }) => event.type === "submission_settled" && event.queueItemId === next.queueItemId));
     expect(seenKeys).toEqual(["backup-key", "primary-key"]);
