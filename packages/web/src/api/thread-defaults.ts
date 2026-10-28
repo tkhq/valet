@@ -31,3 +31,18 @@ export function defaultSaveBody(
   if (defaults.reasoningScope && current.reasoning && current.reasoning !== defaults.reasoning) body.defaultReasoning = current.reasoning;
   return body.defaultModel !== undefined || body.defaultReasoning !== undefined ? body : undefined;
 }
+
+/**
+ * The fields where this thread differs from what new threads get, while the
+ * assistant's own setting for that field outranks the defaults. No save can
+ * change those fields for new threads.
+ */
+export function carriedFields(
+  defaults: ThreadDefaultsResponse,
+  current: { model?: string; reasoning?: string | null },
+): ("model" | "reasoning")[] {
+  const fields: ("model" | "reasoning")[] = [];
+  if (!defaults.scope && current.model && !sameModelSpec(current.model, defaults.model)) fields.push("model");
+  if (!defaults.reasoningScope && current.reasoning && current.reasoning !== defaults.reasoning) fields.push("reasoning");
+  return fields;
+}

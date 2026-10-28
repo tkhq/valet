@@ -97,7 +97,7 @@ Centralize selected tier label resolution in `packages/web/src/lib/model-tiers.t
 
 `ModelPicker` reads the approved-models setting. If the restriction is active, it removes the full-catalog reveal and limits the list to approved entries.
 
-In a workspace conversation, the picker footer shows "New threads:" with the model and reasoning from `thread-defaults` (2026-10-22). When a save would change what new threads get, a **Make default** button saves the differing fields the defaults control (`defaultSaveBody`): `PATCH /api/me` for `personal`, `PATCH /api/teams/:id` for `team`. The picker only renders for a person who may change the session, so a team thread offers the button to team admins. Every personal or team default change refreshes the footer.
+In a workspace conversation, the picker footer shows "New threads:" with the model and reasoning from `thread-defaults` (2026-10-22). When a save would change what new threads get, a button saves the differing fields the defaults control (`defaultSaveBody`): `PATCH /api/me` for `personal`, `PATCH /api/teams/:id` for `team`. The button names whose default changes: **Make my default** for `personal`, **Make team default** for `team`. A team change applies to every member, so the menu closes and a `ConfirmDialog` asks first. The picker only renders for a person who may change the session, so a team thread offers the button to team admins. If the thread differs from the default only in fields that the assistant's own setting outranks (`carriedFields`), the footer shows that reason instead of a button. Every personal or team default change refreshes the footer.
 
 ## Error handling
 
