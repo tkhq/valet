@@ -13,7 +13,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
-import { buildOrgCatalog, catalogValidIds, thinkingLevelsFor } from "./model-catalog.js";
+import { BEDROCK_CATALOG_FILTER, buildOrgCatalog, catalogValidIds, thinkingLevelsFor } from "./model-catalog.js";
 import { registryModels } from "./model-registry.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 import { setApprovedModels } from "./approved-models.js";
@@ -29,6 +29,49 @@ describe("model catalog", () => {
     db = appDb;
     credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+  });
+
+  describe("amazon-bedrock", () => {
+    const bedrockEntries = async () => (await buildOrgCatalog(db, credentials, orgId)).filter((e) => e.providerKind === "amazon-bedrock");
+
+    it("lists only US Anthropic inference profiles with registry pricing when ambient AWS credentials exist", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      try {
+        const entries = await bedrockEntries();
+        expect(entries.length).toBeGreaterThan(0);
+        for (const e of entries) {
+          expect(e.id.startsWith("amazon-bedrock/")).toBe(true);
+          expect(e.id.slice("amazon-bedrock/".length)).toMatch(BEDROCK_CATALOG_FILTER);
+          expect(e.pricing?.input).toBeGreaterThan(0);
+          expect(e.active).toBe(true);
+          expect(e.providerName).toBe("Amazon Bedrock");
+        }
+        expect(entries.some((e) => e.id.includes("meta.llama"))).toBe(false);
+        expect(entries.some((e) => e.id.startsWith("amazon-bedrock/anthropic."))).toBe(false);
+        expect(entries.some((e) => e.id.startsWith("amazon-bedrock/global."))).toBe(false);
+        expect(entries.some((e) => e.id.startsWith("amazon-bedrock/eu."))).toBe(false);
+        expect(entries.some((e) => e.id === "amazon-bedrock/us.anthropic.claude-sonnet-5-5")).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("marks Bedrock models inactive when the row is disabled even with ambient credentials", async () => {
+      vi.stubEnv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token");
+      try {
+        const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+        await updateLlmProvider(db, orgId, row.id, { enabled: false });
+        const entries = await bedrockEntries();
+        expect(entries.length).toBeGreaterThan(0);
+        expect(entries.every((e) => e.active === false)).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("lists no Bedrock models with no row and no AWS environment", async () => {
+      expect(await bedrockEntries()).toEqual([]);
+    });
   });
 
   describe("zero-config env-only boot (today's behavior pin)", () => {

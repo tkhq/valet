@@ -97,7 +97,7 @@ export async function setOrgDefaultTier(db: AppQueryable, orgId: string, tier: S
 }
 
 /** The known kinds the catalog synthesizes from a deployment env key alone. */
-const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google"];
+const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google", "amazon-bedrock"];
 
 /**
  * The walk both tier callers share: the first spec in `tier`'s list whose

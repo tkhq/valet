@@ -317,6 +317,29 @@ describe("GET /api/org/llm-providers", () => {
     }
   });
 
+  it("envFallback for amazon-bedrock follows ambient AWS credentials", async () => {
+    api = await bootTestApi();
+    const created = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "amazon-bedrock", name: "Amazon Bedrock" }),
+    });
+    expect(created.status).toBe(201);
+
+    const before = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+    expect(((await before.json()) as ListLlmProvidersResponse).providers[0]?.envFallback).toBe(false);
+
+    const prev = process.env.AWS_PROFILE;
+    process.env.AWS_PROFILE = "dev";
+    try {
+      const after = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+      expect(((await after.json()) as ListLlmProvidersResponse).providers[0]?.envFallback).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AWS_PROFILE;
+      else process.env.AWS_PROFILE = prev;
+    }
+  });
+
   it("envFallback is false once an org key is stored, even with the env var stubbed", async () => {
     api = await bootTestApi();
     const created = await createAnthropicProvider(api.baseUrl);

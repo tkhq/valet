@@ -69,15 +69,31 @@ export type CatalogEntry = ModelInfo & { resolvable: boolean };
  * registry-backed too but its ~274 models would flood pickers, so it goes
  * through a curated-selection branch below; `openai_compatible` has no
  * pi-ai registry / env fallback at all. */
-type KnownCatalogKind = "anthropic" | "openai" | "google";
+type KnownCatalogKind = "anthropic" | "openai" | "google" | "amazon-bedrock";
 
-const KNOWN_KINDS: readonly KnownCatalogKind[] = ["anthropic", "openai", "google"];
+const KNOWN_KINDS: readonly KnownCatalogKind[] = ["anthropic", "openai", "google", "amazon-bedrock"];
 
 const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+  "amazon-bedrock": "Amazon Bedrock",
 };
+
+/**
+ * Which of pi-ai's ~185 Bedrock models the catalog offers. US cross-region
+ * inference profiles for Anthropic only (bedrock-provider design, decision 4):
+ * bare `anthropic.*` ids are rejected by Bedrock for on-demand invocation on
+ * Claude 4.x/5.x, non-US profiles are unreachable from a us-east-1 pod, and
+ * `global.*` routes to any commercial region (excluded pending a
+ * data-residency decision). Widen here when that changes.
+ */
+export const BEDROCK_CATALOG_FILTER = /^us\.anthropic\./;
+
+function registryModelsForCatalog(kind: KnownCatalogKind) {
+  const models = registryModels(kind);
+  return kind === "amazon-bedrock" ? models.filter((m) => BEDROCK_CATALOG_FILTER.test(m.id)) : models;
+}
 
 /** True when an org credential exists at `llm:{rowId}` — the sole
  * resolvability signal for a custom (`openai_compatible`) row (no env
@@ -100,7 +116,7 @@ function knownKindEntries(
   providerName: string,
   approvedList: string[] | null,
 ): CatalogEntry[] {
-  return registryModels(kind).map((m) => {
+  return registryModelsForCatalog(kind).map((m) => {
     const id = `${namespace}/${m.id}`;
     return {
       id,
