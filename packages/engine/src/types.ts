@@ -5,6 +5,7 @@ import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAudit
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
+import type { PlaybookSeedResult } from "./roles-skills/playbook.js";
 import type {
   EventMatchDigest,
   Lease,
@@ -796,6 +797,8 @@ export interface ToolContext {
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
+  seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;

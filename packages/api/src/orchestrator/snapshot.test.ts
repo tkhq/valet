@@ -1,12 +1,13 @@
 /**
- * Snapshot assembly (Phase 4 decision 18): pinned files + 3 most recent
- * journal files + the virtual root index, own-scope only, budget
- * truncation with a note.
+ * Snapshot assembly (Phase 4 decision 18): the Principles section, pinned
+ * files + 3 most recent journal files + the virtual root index, own-scope
+ * only, budget truncation with a note.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { writeFile, type MemoryScope } from "../services/memory.js";
 import { assembleMemorySnapshot, DEFAULT_SNAPSHOT_BUDGET_CHARS } from "./snapshot.js";
+import { renderPrinciplesSection } from "./principles.js";
 
 let api: TestApi;
 
@@ -86,11 +87,45 @@ describe("assembleMemorySnapshot", () => {
     await writeFile(db, scope, { path: "journal/2026-07-02.md", content: `# Mid\n\n${big} MIDDLE\n`, type: "journal-entry" });
     await writeFile(db, scope, { path: "journal/2026-07-03.md", content: `# New\n\n${big} NEWEST\n`, type: "journal-entry" });
 
-    const snapshot = await assembleMemorySnapshot(db, scope, { budgetChars: 3000 });
+    // The Principles section is never dropped, so the budget carries it on top.
+    const budgetChars = 3000 + renderPrinciplesSection([]).length;
+    const snapshot = await assembleMemorySnapshot(db, scope, { budgetChars });
 
-    expect(snapshot.length).toBeLessThanOrEqual(3000 + 500); // note itself adds a little over budget, bounded
+    expect(snapshot.length).toBeLessThanOrEqual(budgetChars + 500); // note itself adds a little over budget, bounded
     expect(snapshot).toContain("NEWEST");
     expect(snapshot).not.toContain("OLDEST");
     expect(snapshot).toContain("truncated");
+  });
+
+  it("always carries the Principles section: the base principle, then the principle index", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    const empty = await assembleMemorySnapshot(db, scope);
+    expect(empty).toContain("## Principles");
+    expect(empty).toContain("learn-from-the-org (built in)");
+    expect(empty).toContain("No principles yet.");
+
+    await writeFile(db, scope, {
+      path: "principles/prove-it-works.md",
+      content: "# Prove it works\n\nRun the real app before you say done.\n",
+      description: "Before you report a change as done",
+    });
+    await writeFile(db, scope, { path: "notes/other.md", content: "# Other\n\nNot a principle.\n" });
+
+    const snapshot = await assembleMemorySnapshot(db, scope);
+    expect(snapshot).toMatch(/- principles\/prove-it-works\.md — .*: Before you report a change as done/);
+    expect(snapshot).not.toContain("No principles yet.");
+    // The index carries no bodies; the model reads one with mem_read.
+    expect(snapshot).not.toContain("Run the real app before you say done.");
+  });
+
+  it("keeps the Principles section when the budget drops pinned files", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await writeFile(db, scope, { path: "preferences/big.md", content: `# Big\n\n${"x".repeat(5_000)}\n`, pinned: true });
+    const snapshot = await assembleMemorySnapshot(db, scope, { budgetChars: 3_000 });
+    expect(snapshot).toContain("truncated");
+    expect(snapshot).toContain("learn-from-the-org (built in)");
   });
 });

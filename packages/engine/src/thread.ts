@@ -41,7 +41,7 @@ import {
   UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
-import { renderTemplate } from "./roles-skills/index.js";
+import { isPlaybook, playbookPlanItems, readPlaybookSteps, renderTemplate, type PlaybookSeedResult } from "./roles-skills/index.js";
 import {
   buildOverheardDigest,
   completedSubmissionOutcome,
@@ -908,6 +908,15 @@ export class Thread {
       effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
+    // A slash-invoked playbook sets the plan before its turn starts, so the
+    // turn's plan overlay already shows the steps. An outside author cannot
+    // change the plan, the same rule as `update_plan` (`refuseOutsideAuthors`).
+    const owner = this.session.options.owner;
+    const outsideAuthor = opts.author?.externalSender === true ||
+      (owner?.type === "user" && opts.author !== undefined && opts.author.id !== owner.id);
+    if (wasAdmitted && !outsideAuthor && opts.skillInvocation && isPlaybook(opts.skillInvocation.skill)) {
+      await this.seedPlaybookPlan(opts.skillInvocation.skill);
+    }
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
@@ -6744,6 +6753,20 @@ export class Thread {
     return plan;
   }
 
+  /**
+   * Seed the plan from a playbook's steps, so the model spends no tokens to
+   * write it. An open plan (an item not `done`) stays: the person or the
+   * model made it, and a playbook load must not erase it.
+   */
+  async seedPlaybookPlan(skill: SkillSource): Promise<PlaybookSeedResult> {
+    const read = readPlaybookSteps(skill.content);
+    if (read.kind === "invalid") return read;
+    const current = readThreadPlan(this.threadMetadata);
+    if (current?.items.some((item) => item.status !== "done")) return { kind: "kept", steps: read.steps };
+    await this.setPlan(playbookPlanItems(read.steps));
+    return { kind: "seeded", steps: read.steps };
+  }
+
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
     await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
@@ -6774,6 +6797,7 @@ export class Thread {
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
       setThreadPlan: (items) => this.setPlan(items),
+      seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.

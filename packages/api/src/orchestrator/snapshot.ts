@@ -13,6 +13,7 @@
  */
 import { listFiles, readFile, type MemoryScope } from "../services/memory.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { renderPrinciplesSection } from "./principles.js";
 
 export interface AssembleMemorySnapshotOptions {
   budgetChars?: number;
@@ -33,14 +34,21 @@ function ownerLabel(scope: MemoryScope): string {
   return `${scope.owner.type}:${scope.owner.id}`;
 }
 
-function renderSnapshot(header: string, pinned: SnapshotBlock[], journals: SnapshotBlock[], indexContent: string): string {
+function renderSnapshot(
+  header: string,
+  principles: string,
+  pinned: SnapshotBlock[],
+  journals: SnapshotBlock[],
+  indexContent: string,
+): string {
   const pinnedPart = pinned.map((b) => `\n## pinned: ${b.path}\n\n${b.content}\n`).join("");
   const journalPart = journals.map((b) => `\n## journal: ${b.path}\n\n${b.content}\n`).join("");
-  return `${header}${pinnedPart}${journalPart}\n## index: /\n\n${indexContent}`;
+  return `${header}\n${principles}\n${pinnedPart}${journalPart}\n## index: /\n\n${indexContent}`;
 }
 
 /**
  * Assembles the wake-time memory snapshot for `scope`: a header line, the
+ * Principles section (`./principles.ts`), the
  * full rendered body of every pinned file (path order), the 3 most recent
  * journal files, and the virtual root `index.md`. Own-scope only — never
  * pulls in team-projected files, even though `listFiles`/`readFile` would
@@ -48,7 +56,7 @@ function renderSnapshot(header: string, pinned: SnapshotBlock[], journals: Snaps
  *
  * When the assembled content exceeds `budgetChars`, pinned + journal
  * blocks are dropped oldest-first (by `updatedAt`) until it fits (or until
- * none remain — the header and root index are never dropped), and a
+ * none remain — the header, principles, and root index are never dropped), and a
  * truncation note is appended.
  */
 export async function assembleMemorySnapshot(
@@ -95,13 +103,18 @@ export async function assembleMemorySnapshot(
   const indexResult = await readFile(db, scope, "");
   const indexContent = indexResult.kind === "directory" ? indexResult.rendered : "";
 
+  // The principle index reads the whole read-union: a team's principles
+  // guide its members too. It is never dropped for the budget, so
+  // `renderPrinciplesSection` caps it.
+  const principles = renderPrinciplesSection(summaries);
+
   const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (the date the snapshot was built, not the current date)\n`;
 
   // `journalBlocks` is already newest-first (see the sort above); its last
   // element is the oldest of the (up to 3) included journals.
   let remainingPinned = [...pinnedBlocks];
   let remainingJournals = [...journalBlocks];
-  let rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+  let rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   let droppedCount = 0;
 
   // Oldest-first within each section (decision 18): journals (routine,
@@ -112,7 +125,7 @@ export async function assembleMemorySnapshot(
   while (rendered.length > budgetChars && remainingJournals.length > 0) {
     remainingJournals = remainingJournals.slice(0, -1);
     droppedCount++;
-    rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+    rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   }
   while (rendered.length > budgetChars && remainingPinned.length > 0) {
     let oldestIdx = 0;
@@ -121,7 +134,7 @@ export async function assembleMemorySnapshot(
     }
     remainingPinned = remainingPinned.filter((_, i) => i !== oldestIdx);
     droppedCount++;
-    rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+    rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   }
 
   if (droppedCount > 0) {
