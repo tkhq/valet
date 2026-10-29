@@ -42,7 +42,7 @@ function MessageRating({ message }: { message: StreamMessage }) {
         rate.mutate({ entryId: message.id, threadId: message.threadId ?? undefined, rating })
       }
       className={cn(
-        "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity",
+        "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity max-sm:opacity-100",
         value !== null && "opacity-100",
       )}
     />
@@ -178,25 +178,27 @@ export const MessageItem = memo(function MessageItem({
         "mx-auto flex w-full min-w-0 max-w-3xl justify-end"
       )}>
 
-        <div className={cn("flex-1 min-w-0 space-y-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
+        <div className={cn("flex min-w-0 flex-1 flex-col gap-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
           {!continuation && (
-            <div className="text-xs text-muted flex min-w-0 flex-wrap items-center gap-2">
-              <span className="font-medium text-ink/80">
-                {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
-              </span>
-              <span>•</span>
-              <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
-              {isUser && message.editOf && <span className="text-muted/80">edited</span>}
-              {message.role === "assistant" && message.model && (
-                <span
-                  className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
-                  title={message.model}
-                >
-                  {shortModelLabel(message.model)}
+            <div className={cn("text-xs text-muted flex min-w-0 flex-wrap items-center gap-2", !isUser && "max-sm:contents")}>
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="font-medium text-ink/80">
+                  {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
                 </span>
-              )}
-              {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
-              <div className="ml-auto flex items-center gap-1">{actions}</div>
+                <span>•</span>
+                <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+                {isUser && message.editOf && <span className="text-muted/80">edited</span>}
+                {message.role === "assistant" && message.model && (
+                  <span
+                    className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
+                    title={message.model}
+                  >
+                    {shortModelLabel(message.model)}
+                  </span>
+                )}
+                {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
+              </div>
+              <div className={cn("ml-auto flex items-center gap-1", !isUser && "max-sm:order-2 max-sm:ml-0 max-sm:flex-wrap")}>{actions}</div>
             </div>
           )}
           <div className="space-y-2">
@@ -243,10 +245,8 @@ export const MessageItem = memo(function MessageItem({
           </div>
           {/* A continuation has no header line, so a reply's actions sit
               under its text instead. A tool-only continuation has none. */}
-          {/* On a phone the row takes no space until focus: a phone has no
-              hover, and an invisible row left a gap under every reply. */}
           {continuation && copyText && (
-            <div className="flex items-center justify-end gap-1 text-xs text-muted max-md:max-h-0 max-md:overflow-hidden max-md:group-hover:max-h-8 max-md:group-focus-within:max-h-8">{actions}</div>
+            <div className="flex items-center justify-end gap-1 text-xs text-muted max-sm:flex-wrap max-sm:justify-start">{actions}</div>
           )}
         </div>
       </div>

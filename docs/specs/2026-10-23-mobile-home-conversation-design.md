@@ -198,3 +198,21 @@ Approval surfaces distinguish the requester from a shared-account owner.
 Legacy unmarked team approvals retain member-authorized behavior after restart.
 New requester gates use their stored approver, and explicit actor-only and shared-account approvals stay restricted.
 Requester gates retain their one-shot marker for bulk approval; shared-account gates remain excluded.
+
+
+### Mobile conversation controls
+
+Home and workspace threads place thread controls beside Chat, Tasks, and Make.
+The thread menu keeps browser access, sharing, and the thread audience visible.
+Embedded assistant panels retain their own close and host controls.
+Each project shows a touch-sized New thread button. Creation expands a collapsed project.
+
+Questions use one response area within the available phone viewport. Ordinary approvals leave the composer available.
+The composer stays mounted but hidden while a response form is expanded, preserving its draft with input shortcuts inactive.
+Folding or resolving the request restores the composer. Folding keeps the answer text and attachments mounted for Show. Desktop keeps its existing layout.
+
+The phone composer places message text above an action row with attachments, a model-and-thinking pill, and Send.
+The pill opens the existing thread-scoped model settings. Context usage remains available in those settings.
+People without model administration access retain the context control beside the composer.
+The phone thread menu omits sandbox configuration. Desktop retains those controls.
+Assistant reply, rating, copy, and branch actions appear together below the response on phones.

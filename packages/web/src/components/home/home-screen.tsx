@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
 import { useHomeConversation } from "~/api/home";
@@ -16,6 +17,7 @@ export type HomeView = MobileConversationView;
  */
 export function HomeScreen({ view, onViewChange }: { view: HomeView; onViewChange: (view: HomeView) => void }) {
   const home = useHomeConversation();
+  const [answering, setAnswering] = useState(false);
   const showSide = view !== "chat";
   if (home.isError) return <div className="m-auto max-w-sm space-y-3 p-6 text-center">
     <ErrorRow>Could not open your conversation with Valet. {errorText(home.error)}</ErrorRow>
@@ -23,9 +25,10 @@ export function HomeScreen({ view, onViewChange }: { view: HomeView; onViewChang
   </div>;
   if (!home.data) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening Valet…" /></div>;
   return <MobileConversationLayout view={view} onViewChange={onViewChange}>
-    <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} panel hidePanelHeader chatOnly enableReplies
+    <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} panel hidePanelHeader chatOnly sharedConversationChrome enableReplies
       active={!showSide}
-      composerAccessory={<NeedsYouDock homeThreadId={home.data.threadId} onOpenTasks={() => onViewChange("tasks")} />}
+      suppressComposer={answering}
+      composerAccessory={<NeedsYouDock homeThreadId={home.data.threadId} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />}
       emptyState={<HomeEmptyState sessionId={home.data.sessionId} threadId={home.data.threadId} />} />
   </MobileConversationLayout>;
 }

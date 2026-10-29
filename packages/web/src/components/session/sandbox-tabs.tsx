@@ -83,7 +83,7 @@ export function SandboxTabs({
         </>}
 
       </div>}
-      {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
+      {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} compact={compact} />}
       {(activeTab === "terminal" || activeTab === "vscode") && (
         <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} />
       )}

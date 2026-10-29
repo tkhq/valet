@@ -7,7 +7,7 @@
  * surfaces the mutation's error text verbatim on failure (e.g. the 409
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { RouterContextProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { act, render as renderUnrouted, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -160,14 +160,16 @@ function renderHeader(
   sandbox?: { state: string; epoch: number },
   threadId?: string,
   session = baseSession(),
+  modelControlTarget?: HTMLElement | null,
 ) {
-  return render(headerElement(sandbox, threadId, session));
+  return render(headerElement(sandbox, threadId, session, modelControlTarget));
 }
 
 function headerElement(
   sandbox?: { state: string; epoch: number },
   threadId?: string,
   session = baseSession(),
+  modelControlTarget?: HTMLElement | null,
 ) {
   return (
     <TooltipProvider>
@@ -177,6 +179,7 @@ function headerElement(
         conn="open"
         sandbox={sandbox}
         threadId={threadId}
+        modelControlTarget={modelControlTarget}
       />
     </TooltipProvider>
   );
@@ -1244,5 +1247,26 @@ describe("SessionHeader: subject thread place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1 }];
     renderHeader(undefined, "th-1");
     expect(screen.queryByRole("link")).toBeNull();
+  });
+});
+
+
+describe("mobile composer model control", () => {
+  it("opens settings from the composer and removes sandbox configuration from the phone menu", async () => {
+    mobileLayout = true;
+    function WithComposerSlot() {
+      const [target, setTarget] = useState<HTMLDivElement | null>(null);
+      return <><div ref={setTarget} data-testid="composer-model" />{headerElement(undefined, undefined, baseSession(), target)}</>;
+    }
+    render(<WithComposerSlot />);
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ });
+    expect(screen.getByTestId("composer-model").contains(trigger)).toBe(true);
+    await userEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Model and thinking" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(document.activeElement).toBe(trigger);
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(screen.queryByRole("menuitem", { name: "Model and thinking" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Pause sandbox|Replace sandbox|Turn on Terminal/ })).toBeNull();
   });
 });

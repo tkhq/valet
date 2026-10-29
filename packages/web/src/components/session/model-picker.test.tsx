@@ -624,3 +624,15 @@ it("only offers supported thinking levels on a phone, within the organization li
   expect(select).toHaveProperty("value", "medium");
   expect(Array.from(select.querySelectorAll("option"), o => o.value)).toEqual(["", "low", "medium", "high"]);
 });
+
+
+describe("ModelPicker composer trigger", () => {
+  it("opens the supplied settings panel and shows the model and thinking", async () => {
+    const open = vi.fn();
+    render(<TooltipProvider><ModelPicker presentation="trigger" currentId="anthropic/claude-opus-4-7" currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={open} /></TooltipProvider>);
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Medium/ });
+    await userEvent.click(trigger);
+    expect(open).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+});

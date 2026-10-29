@@ -82,7 +82,9 @@ import { matchesNeedle } from "~/lib/text-match";
 export interface ModelPickerProps {
   currentId?: string;
   /** A phone settings dialog embeds the controls without a second popup. */
-  presentation?: "menu" | "panel";
+  presentation?: "menu" | "panel" | "trigger";
+  /** A composer pill opens the existing model settings dialog. */
+  onOpenPanel?: () => void;
   /** Model shown in the closed trigger. Picker behavior remains based on
    * `currentId`. */
   displayId?: string;
@@ -160,6 +162,7 @@ type FlatEntry = { kind: "tier"; tier: SizeTier } | { kind: "model"; model: Mode
 export function ModelPicker({
   currentId,
   presentation = "menu",
+  onOpenPanel,
   displayId,
   ariaDescription,
   onSelect,
@@ -287,7 +290,7 @@ export function ModelPicker({
     : "Inherit";
   const triggerReasoning = currentReasoning
     ? ` · ${reasoningLabelFor(currentReasoning)}`
-    : "";
+    : presentation === "trigger" ? " · Default" : "";
   const descriptionId = useId();
   const thinkingFieldId = useId();
   const thinkingHelpId = useId();
@@ -338,6 +341,26 @@ export function ModelPicker({
       {unavailableReasoning && <p id={thinkingHelpId} className="mt-1.5 text-xs text-muted">Choose an available thinking level.</p>}
     </div>
   );
+
+  const trigger = (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={disabled}
+      className={cn("min-w-0 max-w-full font-normal gap-1.5", presentation === "trigger" && "rounded-full bg-ink-wash")}
+      onClick={presentation === "trigger" ? onOpenPanel : undefined}
+      aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
+      aria-describedby={ariaDescription ? descriptionId : undefined}
+    >
+      {presentation !== "trigger" && <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
+      <span className={presentation === "trigger" ? "truncate text-sm" : "truncate text-xs"}>
+        {triggerLabel}
+        {triggerReasoning}
+      </span>
+      <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
+    </Button>
+  );
+  if (presentation === "trigger") return <>{trigger}{ariaDescription && <span id={descriptionId} className="sr-only">{ariaDescription}</span>}</>;
 
   if (panel && !moreModels) return (
     <div className="min-w-0 space-y-4" role="group" aria-label="Model and thinking settings">
@@ -611,21 +634,7 @@ export function ModelPicker({
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={disabled}
-          className="min-w-0 max-w-full font-normal gap-1.5"
-          aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
-          aria-describedby={ariaDescription ? descriptionId : undefined}
-        >
-          <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-          <span className="truncate text-xs">
-            {triggerLabel}
-            {triggerReasoning}
-          </span>
-          <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
-        </Button>
+        {trigger}
       </DropdownMenuTrigger>
       {ariaDescription && (
         <span id={descriptionId} className="sr-only">

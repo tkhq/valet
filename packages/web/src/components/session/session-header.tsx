@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewerFaces } from "./viewer-faces";
 import type { ActiveViewer, Message, SessionDetail } from "@valet/api/wire";
@@ -66,7 +67,8 @@ import {
 } from "~/stores/stream";
 import { canAdministerSession } from "./use-can-administer-session";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
-import { ModelPicker } from "./model-picker";
+import { ModelPicker, type ModelPickerProps } from "./model-picker";
+import { ContextMeter } from "./context-meter";
 import { MoveSessionDialog } from "./move-session-dialog";
 import type { SandboxTabId } from "./sandbox-tabs";
 import { ShareThreadDialog } from "./share-thread-dialog";
@@ -168,6 +170,8 @@ export function SessionHeader({
   onOpenView,
   viewers = [],
   scopeNotice,
+  compact = false,
+  modelControlTarget,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -184,6 +188,10 @@ export function SessionHeader({
   /** The other people with this thread open now. */
   viewers?: ActiveViewer[];
   scopeNotice?: string;
+  /** Only the thread controls, for the shared phone navigation row. */
+  compact?: boolean;
+  /** Place the mobile model pill in the active conversation composer. */
+  modelControlTarget?: HTMLElement | null;
 }) {
   const navigate = useNavigate();
   const mobile = useMobileLayout();
@@ -434,10 +442,11 @@ export function SessionHeader({
   // switcher's: a team thread's place lists the team's listeners.
   const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
-  const modelPicker = canAdminister ? (
+  const modelPicker = (presentation: ModelPickerProps["presentation"] = mobile ? "panel" : "menu") => canAdminister ? (
     <span className={cn("min-w-0", mobile && "block")}>
         <ModelPicker
-          presentation={mobile ? "panel" : "menu"}
+          presentation={presentation}
+          onOpenPanel={() => modelSettings.setOpen(true)}
           currentId={configuredModel}
           displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
           ariaDescription={modelHint}
@@ -512,8 +521,8 @@ export function SessionHeader({
 
   return (
     <header className={cn("border-b border-line bg-paper shrink-0 flex min-w-0 flex-wrap items-center",
-      mobile ? "gap-2 px-4 py-2" : "px-3 py-1 min-h-[--nav-height] gap-1 sm:px-4 sm:py-2 sm:gap-3")}>
-      <Tooltip content={workspaceHint} delayDuration={400}>
+      compact ? "border-b-0" : mobile ? "gap-2 px-4 py-2" : "px-3 py-1 min-h-[--nav-height] gap-1 sm:px-4 sm:py-2 sm:gap-3")}>
+      {!compact && <Tooltip content={workspaceHint} delayDuration={400}>
         <div className={cn("min-w-0 flex-1 max-w-full flex cursor-default", mobile ? "flex-col gap-0.5" : "flex-wrap items-baseline gap-2")}>
           {canRename ? (
             <button
@@ -556,9 +565,9 @@ export function SessionHeader({
             </span>
           )}
         </div>
-      </Tooltip>
-      <ViewerFaces viewers={viewers} />
-      {place && (
+      </Tooltip>}
+      {!compact && <ViewerFaces viewers={viewers} />}
+      {!compact && place && (
         <div className="basis-full min-w-0 -mt-1">
           <Link
             to="/presence/places/$subject"
@@ -570,7 +579,7 @@ export function SessionHeader({
           </Link>
         </div>
       )}
-      {activeThread?.channel && (
+      {!compact && activeThread?.channel && (
         <ThreadChannelChip
           channel={activeThread.channel}
           {...(session.owner.type === "user" || session.owner.type === "team"
@@ -578,7 +587,7 @@ export function SessionHeader({
         />
       )}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
-        {!mobile && <Tooltip content={modelHint}>{modelPicker}</Tooltip>}
+        {!mobile && <Tooltip content={modelHint}>{modelPicker()}</Tooltip>}
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
@@ -626,7 +635,7 @@ export function SessionHeader({
                 {scopeNotice ?? (activeThread?.share ? "Shared by link." : owner.type === "team" ? teamThreadNotice(team?.name ?? "this team", activeThread?.key)
                   : "Only you can see this thread.")}
               </DropdownMenuLabel>
-              {mobile && canAdminister && <DropdownMenuItem onSelect={() => modelSettings.setOpen(true)}>Model and thinking</DropdownMenuItem>}
+              {mobile && canAdminister && !modelControlTarget && <DropdownMenuItem onSelect={() => modelSettings.setOpen(true)}>Model and thinking</DropdownMenuItem>}
               <div className="flex max-w-64 flex-wrap items-center gap-2 px-2 py-1.5">
                 <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
               </div>
@@ -673,6 +682,7 @@ export function SessionHeader({
             )}
             {canAdminister && (
               <>
+                {!mobile && <>
                 {/* Sleeps the sandbox until the next message. A menu item with a
                     label, not a header icon nobody could read. */}
                 <DropdownMenuItem
@@ -698,6 +708,7 @@ export function SessionHeader({
                   <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
                   Replace sandbox
                 </DropdownMenuItem>
+                </>}
                 {/* Workspace runtime ownership is structural, and a child
                     session follows its parent, so the API refuses both. */}
                 {session.isWorkspaceRuntime === false && session.parentWork === undefined && (
@@ -732,6 +743,7 @@ export function SessionHeader({
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
       {guard.dialog}
+      {mobile && canAdminister && modelControlTarget && createPortal(modelPicker("trigger"), modelControlTarget)}
       <ConfirmDialog
         open={confirmBypass}
         onOpenChange={setConfirmBypass}
@@ -751,9 +763,10 @@ export function SessionHeader({
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            threadMenuTrigger.current?.focus();
+            (modelControlTarget?.querySelector<HTMLButtonElement>("button") ?? threadMenuTrigger.current)?.focus();
           }}>
-          {modelPicker}
+          {modelPicker()}
+          {modelControlTarget && threadId && <div className="mt-4 flex items-center justify-between border-t border-line pt-3 text-sm text-muted"><span>Context usage</span><ContextMeter sessionId={session.id} threadId={threadId} working={threadBusy} /></div>}
           {modelSaveError && <p role="alert" className="mt-3 break-words text-xs text-danger-500">
             {extractActionError(modelSaveError, "Could not save the model. Choose a model and try again.")}
           </p>}

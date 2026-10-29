@@ -1259,6 +1259,10 @@ A policy update closes the browser and its egress connections.
 The next authorized start launches a new runtime generation with fresh origin authority.
 A daemon crash marks outstanding cells lost and dispatched effects uncertain.
 Cookies and website storage remain in the private session profile.
+A replaced sandbox can leave Chromium's SingletonLock, SingletonCookie, and SingletonSocket links in that profile after a forced stop.
+After taking owner.lock, the daemon removes those links only if SingletonLock names a different hostname.
+Same-host locks remain for Chromium to validate. Cookies and other profile files remain unchanged.
+The Browser panel keeps a failed start response visible across status polls and permits a retry.
 Old handles cannot target new documents.
 
 Audit records exclude page text, typed input, cookies, and result bodies.
@@ -1329,3 +1333,42 @@ Viewport scrolling accepts wheel deltas in `{x, y, deltaX, deltaY}` and directio
 The API carries validated coordinates with each image. Human input, navigation, and private transitions clear old activity.
 The transparent input layer does not draw a focus border around the browser. Remote controls retain their native focus appearance.
 See [animated browser agent pointer](2026-09-24-browser-agent-pointer-design.md) for capture, animation, and expiry details.
+
+
+### Mobile browser view (2026-10-23)
+
+Below 640 pixels, browser activity adds a compact card below the messages.
+Completed browser calls keep this entry point available when a conversation reopens.
+This includes chat-only assistant conversations. Desktop visibility stays unchanged.
+The card uses the existing read-only preview and does not start the runtime.
+When idle, the card collapses to a single bar without a preview or image requests.
+Browser execution expands the preview. When execution ends, the preview collapses again.
+The person can restore or minimize the preview at any time.
+Manual minimization lasts until the next browser execution starts.
+Execution changes do not close the full-screen browser that the person opened.
+The card aligns with the composer. A chevron toggles the preview; the expand icon opens the full browser.
+
+Open browser shows the existing interactive pane in a full-screen dialog.
+Back to chat closes the dialog without stopping the remote browser.
+Only the dialog streams images while it is open. Resizing to desktop closes the dialog.
+The dialog uses the app visual-viewport height and top offset, with dynamic viewport fallback and safe-area padding.
+The keyboard therefore reduces the canvas and keeps its controls above the keyboard.
+Shared interaction, exclusive control, and private sign-in retain their existing access checks.
+
+A touch tap clicks the remote page. A swipe scrolls it instead of dragging.
+Scroll distances account for the scaled remote image. Cancellation sends no tap.
+The keyboard button focuses the input surface for text entry.
+In the mobile pane, the input surface covers only the visible part of the canvas.
+Focus and typed text therefore do not move the local view, and a mouse or pen click stays a click.
+Mobile delete and return input events work without desktop key events.
+The remote viewport does not change when the viewer switches devices.
+The mobile pane starts at 100% image size, with a scrollable canvas instead of letterboxing.
+Zoom, scroll mode, and local view position survive navigation within the same tab and runtime.
+A document change still disposes the input surface and cancels pending input.
+Touch in the full pane retains tap-to-focus and pointer dragging.
+Zoom controls offer 25–200% scale and a fit/actual-size toggle.
+Pan mode moves the local view; Page scroll mode sends swipes to the remote page.
+Tap input maps through the scaled canvas in either mode.
+The keyboard and view controls stay outside the scrollable canvas.
+Secondary actions and page selection sit inside a collapsed Browser actions menu.
+The primary navigation shows Back and an editable address. Desktop tab chrome stays off mobile.

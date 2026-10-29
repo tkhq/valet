@@ -1091,11 +1091,14 @@ describe("ThreadTree: Needs you section", () => {
 });
 
 describe("ThreadTree: project row controls", () => {
-  it("hides per-project actions on a phone, keeps the list menu, and always shows them on a wider screen", () => {
+  it("keeps project creation visible on a phone with a touch target", () => {
     saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
     renderTree();
 
-    for (const name of ["New thread in ACME", "Project menu: ACME", "New project"]) {
+    const create = screen.getByRole("button", { name: "New thread in ACME" });
+    expect(create.className).not.toContain("max-md:hidden");
+    expect(create.className).toContain("max-md:min-h-11");
+    for (const name of ["Project menu: ACME", "New project"]) {
       const control = screen.getByRole("button", { name });
       expect(control.className).toContain("max-md:hidden");
       expect(control.className).not.toContain("opacity-0");
