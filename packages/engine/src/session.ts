@@ -874,7 +874,7 @@ export class Session {
     // a `wait` item is owned by a live attempt or a collect window, not a
     // wedged head.
     if (action.kind !== "wait") {
-      this.maybeEmitStuck(item, now);
+      this.maybeEmitStuck(item, now, opts?.startup === true);
     }
     switch (action.kind) {
       case "wait":
@@ -924,11 +924,16 @@ export class Session {
    * submission crosses the retry threshold or wall-clock bound. Gate-blocked
    * items are excluded (their bound is the gate's own expiry). Once per
    * observation pass — no dedup in Phase 1.
+   *
+   * The startup pass checks only the retry threshold. A restart interrupts
+   * every running turn, and resuming them is the designed recovery, so a
+   * long turn's age at startup is not evidence of a wedge. A crash loop
+   * still pages: each resume adds an attempt.
    */
-  private maybeEmitStuck(item: QueueItem, now: number): void {
+  private maybeEmitStuck(item: QueueItem, now: number, startup: boolean): void {
     if (item.status === "blocked_on_decision_gate") return;
     const ageMs = now - item.createdAt;
-    const stuck = item.attemptCount >= 3 || ageMs > 15 * 60_000;
+    const stuck = item.attemptCount >= 3 || (!startup && ageMs > 15 * 60_000);
     if (!stuck) return;
     void this.emit({
       type: "submission_stuck",

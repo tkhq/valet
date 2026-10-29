@@ -19,6 +19,8 @@ import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useCancelQueuedItem, useEditPreview, useResumeThread, useSendPrompt } from "~/api/queries";
 import { FileChangeChoice } from "./file-change-choice";
 import { ApiError } from "~/api/client";
+import { isServerUnavailable } from "~/api/connection";
+import { errorText } from "~/lib/error-text";
 import {
   queueBusy,
   useStreamStore,
@@ -27,7 +29,7 @@ import {
   type StreamMessage,
 } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
+import { draftKey, reusableSendKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
@@ -635,7 +637,7 @@ export function Composer({
     try {
       await cancelQueued.mutateAsync({ threadId, itemId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "Could not cancel the queued message. Try again."));
+      setSubmitError(errorText(err, "Could not cancel the queued message. Try again."));
     }
   }
 
@@ -659,7 +661,7 @@ export function Composer({
       }
     } catch (err) {
       setSubmitError(
-        apiErrorDetail(
+        errorText(
           err,
           "The message was not sent. Send a new message, or wait for the current turn to finish.",
         ),
@@ -696,7 +698,21 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
+    // One key per queued message (`ComposerDraft.sendKey`). The draft keeps
+    // it from before the request until a 2xx or a definite 4xx, so a reload
+    // or a closed tab mid-send cannot lose it. An edit or a slash command
+    // the registry knows runs without a queue item, so it has no key.
+    const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
+    const canonical = typedName
+      ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
+      : undefined;
+    const attachmentIds = [...pendingImages.map((i) => i.id), ...pendingFiles.flatMap((f) => (f.attachmentRef ? [f.id] : []))];
+    const clientMessageId = editTarget || canonical
+      ? undefined
+      : reusableSendKey(useComposerDraftStore.getState().byKey[slot]?.sendKey, t, attachmentIds) ?? crypto.randomUUID();
+    const sendKey = clientMessageId ? { id: clientMessageId, text: t, attachments: attachmentIds } : undefined;
     useComposerDraftStore.getState().clear(slot);
+    if (sendKey) useComposerDraftStore.getState().setSendKey(slot, sendKey);
     announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
@@ -720,8 +736,10 @@ export function Composer({
           : {
               ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
               ...(working ? { queueMode: "inject" as const } : {}),
+              ...(clientMessageId ? { clientMessageId } : {}),
             }),
       });
+      if (sendKey) useComposerDraftStore.getState().settleSendKey(slot, sendKey.id);
       if (editTarget) onEditResult?.(true);
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -748,10 +766,6 @@ export function Composer({
       // failed send is not a "use". Matched case-insensitively (dispatch
       // is too) and recorded under the canonical name so the recency key
       // always lines up with the popup's names.
-      const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
-      const canonical = typedName
-        ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
-        : undefined;
       if (canonical) {
         setCommandRecency(recordCommandUse(canonical));
       }
@@ -791,16 +805,19 @@ export function Composer({
         : pendingFiles;
       drafts.setFiles(slot, (prev) => [...restored, ...prev]);
       // The failure must be visible — a console-only error reads as a dead
-      // send button.
-      const detail =
-        typeof payload?.corrective === "string"
-          ? payload.corrective
-          : typeof payload?.error === "string"
-            ? payload.error
-            : err instanceof Error
-              ? err.message
-              : "Unknown error.";
-      drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
+      // send button. Only a definite 4xx means nothing was queued, so the
+      // next send gets a new key. Any other failure may have landed, and
+      // only the kept key makes a resend safe.
+      const unanswered = isServerUnavailable(err);
+      if (sendKey) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500) drafts.settleSendKey(slot, sendKey.id);
+        else drafts.setSendKey(slot, sendKey);
+      }
+      drafts.setFileErrors(slot, [!unanswered
+        ? `The message did not send. ${errorText(err, "Unknown error.")}`
+        : clientMessageId
+          ? "Valet did not respond, so your message is back in the box. Send it again after Valet reconnects. Valet does not post it twice."
+          : "Valet did not respond, so your message is back in the box. After Valet reconnects, check the thread before you send it again."]);
       if (editTarget) onEditResult?.(false);
       console.error("send failed:", err);
     } finally {
@@ -816,7 +833,7 @@ export function Composer({
       setSubmitError(null);
       await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again."));
+      setSubmitError(errorText(err, "Could not stop the agent. Try Stop again."));
     }
   }
 
@@ -826,7 +843,7 @@ export function Composer({
     try {
       await resume.mutateAsync({ threadId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "The queue did not start. Try again."));
+      setSubmitError(errorText(err, "The queue did not start. Try again."));
     }
   }
 
@@ -862,7 +879,7 @@ export function Composer({
       setSubmitError(null);
       abortMutate(
         { threadId, targetItemId },
-        { onError: (err) => setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again.")) },
+        { onError: (err) => setSubmitError(errorText(err, "Could not stop the agent. Try Stop again.")) },
       );
     }
     // With focus on the body, the page's turn stops first: a page composer
@@ -1304,17 +1321,6 @@ export function Composer({
 let lastUsedComposer: object | undefined;
 /** Mounted composers outside the Ask Valet dock. See the Escape effect. */
 let pageComposers = 0;
-
-function apiErrorDetail(err: unknown, fallback: string): string {
-  const payload =
-    err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
-      ? (err.payload as Record<string, unknown>)
-      : undefined;
-  if (typeof payload?.corrective === "string") return payload.corrective;
-  if (typeof payload?.error === "string") return payload.error;
-  if (err instanceof Error && err.message.length > 0) return err.message;
-  return fallback;
-}
 
 /**
  * Small text indicator above the composer for the thread's submission

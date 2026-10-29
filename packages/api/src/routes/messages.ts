@@ -32,7 +32,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type QueueItem, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -327,6 +327,38 @@ function authorFromEntry(
  * onto the user entry, never onto assistant output.
  */
 const REPLY_METADATA_KEY = "replyTo";
+/** `SendPromptRequest.clientMessageId`: a client-minted key, short enough to sit inside a dispatch id. */
+const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * Whether a keyed resend carries the message its key first admitted. The
+ * engine refuses a reused dispatch id with different content, but the route
+ * answers a resend before it reaches the engine. So the route makes the same
+ * check here: the text, each image, and the file count. A skill expansion
+ * queues the expanded text, so for a resend that expands, the route compares
+ * the skill name and arguments that the first try stamped. Other slash text,
+ * such as an unknown "/word", queues unchanged and compares as text. The
+ * resend's file refs cannot be compared without spending them.
+ */
+export function resendMatches(
+  admitted: Pick<QueueItem, "content" | "metadata">,
+  body: Pick<SendPromptRequest, "text" | "attachments" | "fileRefs">,
+  expansion?: { skill: string; args: string },
+): boolean {
+  const content = admitted.content;
+  if (typeof content !== "string" && "kind" in content) return false;
+  const text = typeof content === "string" ? content : content.text ?? "";
+  const parts = typeof content === "string" ? [] : content.attachments ?? [];
+  if (expansion) {
+    if (admitted.metadata?.skill !== expansion.skill || admitted.metadata?.skillArgs !== expansion.args) return false;
+  } else if (text !== (body.text ?? "")) {
+    return false;
+  }
+  const images = parts.flatMap((part) => (part.type === "image" ? [part.url] : []));
+  const sentImages = (body.attachments ?? []).map((att) => att.url);
+  if (images.length !== sentImages.length || images.some((url, i) => url !== sentImages[i])) return false;
+  return parts.length - images.length === (body.fileRefs?.length ?? 0);
+}
 const REPLY_EXCERPT_CHARS = 280;
 
 function replyReferenceFromMetadata(
@@ -1331,6 +1363,8 @@ export async function submitSessionPrompt(
     editEntryId?: string;
     /** With `editEntryId`: also undo the files the replaced turns changed. */
     undoFiles?: boolean;
+    /** Admission key. Two submits with the same key queue one prompt (`QueueItem.dispatchId`). */
+    dispatchId?: string;
   },
 ): Promise<SendPromptResponse | null> {
   const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId, undoFiles } = opts ?? {};
@@ -1490,6 +1524,7 @@ export async function submitSessionPrompt(
           })
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(opts?.dispatchId ? { dispatchId: opts.dispatchId } : {}),
             metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
             ...(outcome?.kind === "expand" && outcome.skill
               ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
@@ -1603,6 +1638,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   if (body.undoFiles !== undefined && (typeof body.undoFiles !== "boolean" || body.editEntryId === undefined)) {
     return c.json({ error: "undoFiles must be true or false, and only with editEntryId." }, 400);
   }
+  if (body.clientMessageId !== undefined && (typeof body.clientMessageId !== "string" || !CLIENT_MESSAGE_ID.test(body.clientMessageId))) {
+    return c.json({ error: "clientMessageId must be 8 to 64 letters, digits, '-' or '_'. Omit it to send without a key." }, 400);
+  }
   if (row.ownerType === "team" && body.threadId !== undefined) {
     const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
@@ -1654,6 +1692,26 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
     let fork: ForkThreadResponse | undefined;
+    const author = promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia);
+    // A resend after a lost answer (an api restart, a gateway error) carries
+    // the first try's key. Answer with that admission before any single-use
+    // attachment ref is spent, so the message is never posted twice. The
+    // sender's id scopes the key, because a team thread has several senders.
+    const dispatchId = body.clientMessageId && !promoteItemId && body.editEntryId === undefined
+      ? `web:${author.id}:${body.clientMessageId}`
+      : undefined;
+    if (dispatchId) {
+      const admitted = await c.var.providers.engineStore.getQueueItemByDispatchId(row.id, dispatchId);
+      const sent = admitted && body.text?.startsWith("/") ? dispatchCommand(body.text, loadedPrompt.engineSession.commandRegistry()) : undefined;
+      const expansion = sent?.kind === "expand" && sent.skill ? { skill: sent.skill.source.name, args: sent.skill.args } : undefined;
+      if (admitted && !resendMatches(admitted, body, expansion)) {
+        return c.json({ error: "This message key already sent a different message. Send the message without clientMessageId, or with a new key." }, 409);
+      }
+      if (admitted) {
+        const replay: SendPromptResponse = { messageId: admitted.id, threadId: admitted.threadId, activityAt: admitted.createdAt };
+        return c.json(replay, 202);
+      }
+    }
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
       forkThread: async (sourceThreadId, prompt) => {
         const result = await forkThreadAt(c, sessionId, sourceThreadId, { latest: true, prompt });
@@ -1671,9 +1729,10 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
-      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
+      author,
       ...(replyTo ? { replyTo } : {}),
       ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId, undoFiles: body.undoFiles === true } : {}),
+      ...(dispatchId ? { dispatchId } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json({ ...resp, ...(fork ? { fork: fork.thread } : {}) }, 202);

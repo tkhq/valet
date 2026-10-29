@@ -731,6 +731,7 @@ describe("Composer — mid-turn submit affordance", () => {
         text: "also update the runbook",
         threadId: "thread-1",
         queueMode: "inject",
+        clientMessageId: expect.any(String),
       }),
     );
     expect(addUserMessage).toHaveBeenCalled();
@@ -800,6 +801,7 @@ describe("Composer — mid-turn submit affordance", () => {
         text: "second followup",
         threadId: "thread-1",
         queueMode: "inject",
+        clientMessageId: expect.any(String),
       }),
     );
   });
@@ -821,6 +823,7 @@ describe("Composer — mid-turn submit affordance", () => {
       expect(sendMutateAsync).toHaveBeenCalledWith({
         text: "hello from idle",
         threadId: "thread-1",
+        clientMessageId: expect.any(String),
       }),
     );
     expect(sendMutateAsync.mock.calls[0][0]).not.toHaveProperty("queueMode");
@@ -1011,6 +1014,93 @@ describe("Composer beside the Ask Valet dock", () => {
     act(() => useComposerDraftStore.getState().setImageErrors(draftKey("orchestrator:user-1", "shared"), ["That image is too large."]));
     await act(async () => fail(new Error("connection lost")));
     expect(page.value).toBe("first question");
+  });
+
+  it("keeps the idempotency key when Valet does not respond, so the resend cannot post twice", async () => {
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    // Both composers on the thread show the shared draft and its error.
+    expect(screen.getAllByText(/Valet did not respond, so your message is back in the box/)).toHaveLength(2);
+    const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+    expect(firstKey).toEqual(expect.any(String));
+
+    // The other composer on the thread resends the same text with the same key.
+    fireEvent.keyDown(dock, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).toBe(firstKey);
+
+    // A new message gets a new key.
+    fireEvent.change(page, { target: { value: "and tell me when it is out" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(3));
+    expect(sendMutateAsync.mock.calls[2]?.[0].clientMessageId).not.toBe(firstKey);
+  });
+
+  it("mints a new key when the person swaps an image before the resend", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    const image = (id: string) => ({ id, name: `${id}.png`, mimeType: "image/png", bytes: 4, dataUrl: "data:image/png;base64,QQ==" });
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    act(() => useComposerDraftStore.getState().setImages(slot, [image("img-a")]));
+    fireEvent.change(page, { target: { value: "look at this" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("look at this"));
+    const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+
+    act(() => useComposerDraftStore.getState().setImages(slot, [image("img-b")]));
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).toEqual(expect.any(String));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).not.toBe(firstKey);
+  });
+
+  it("keeps the key in the draft while the send is in flight, and drops it on a 2xx", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    let answer: (value: { messageId: string; threadId: string }) => void = () => {};
+    sendMutateAsync.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+    const id = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+    // A reload now reads this key and its text back from storage.
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey).toEqual({ id, text: "deploy the fix", attachments: [] });
+    expect(page.value).toBe("");
+
+    await act(async () => answer({ messageId: "q-1", threadId: "shared" }));
+    expect(useComposerDraftStore.getState().byKey[slot]).toBeUndefined();
+  });
+
+  it("drops the key on a definite 4xx and keeps it on a 5xx", async () => {
+    const slot = draftKey("orchestrator:user-1", "shared");
+    sendMutateAsync.mockRejectedValueOnce(new ApiError(400, "POST → 400", { error: "Text is too long." }));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey).toBeUndefined();
+
+    sendMutateAsync.mockRejectedValueOnce(new ApiError(500, "POST → 500", { error: "boom" }));
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    const id = sendMutateAsync.mock.calls[1]?.[0].clientMessageId;
+    expect(useComposerDraftStore.getState().byKey[slot]?.sendKey?.id).toBe(id);
+  });
+
+  it("sends a slash command without a key and does not promise a single post", async () => {
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "/status full" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("/status full"));
+    expect(sendMutateAsync.mock.calls[0]?.[0]).not.toHaveProperty("clientMessageId");
+    expect(screen.getAllByText(/check the thread before you send it again/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/does not post it twice/)).toBeNull();
+    expect(useComposerDraftStore.getState().byKey[draftKey("orchestrator:user-1", "shared")]?.sendKey).toBeUndefined();
   });
 
   it("returns focus to the composer used last when sends overlap", () => {

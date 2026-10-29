@@ -16,11 +16,12 @@ import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } fr
 import { qkThreadContext } from "./thread-context";
 import { qkThreadPlan } from "./thread-plan";
 import { api, ApiError } from "./client";
+import { backoffDelay, reportServerReachable, reportServerUnavailable } from "./connection";
 
-const MAX_RETRY_MS = 8_000;
 /** `WebSocket.OPEN`. */
 const SOCKET_OPEN = 1;
-const INITIAL_RETRY_MS = 500;
+/** A socket open this long after `init` counts as stable, and its close starts the backoff again. */
+const STABLE_CONNECTION_MS = 10_000;
 
 function isSettingsWrite(toolName: string, args: unknown): boolean {
   const actionId = typeof args === "object" && args !== null && "tool_id" in args ? args.tool_id : undefined;
@@ -214,14 +215,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
   // socket schedule a zombie reconnect — two live sockets, duplicated
   // chunk rendering.
   let cancelled = false;
-  // Fresh mount (no durable offset seen yet for this session) resets the
-  // slice and relies on REST to bootstrap history/gates. A resumed
-  // connection (lastOffset non-empty — either a reconnect within this
-  // mount's lifetime, or a remount that still has store state e.g. a
-  // route revisit) must NOT reset: state is continuous and the server
-  // replays the gap via `?fromOffset=`, so wiping here would cause a
-  // flash back to empty before replay refills it.
-  if (!useStreamStore.getState().bySession[sessionId]?.lastOffset) {
+  // REST can hydrate an idle session before its first durable event. An
+  // absent cursor does not mean the transcript is empty. A new socket must
+  // retain that history, including when another scoped view already uses it.
+  if (!useStreamStore.getState().bySession[sessionId]) {
     reset(sessionId);
   }
   setConnection(sessionId, "connecting");
@@ -237,8 +234,13 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
       }
     }
   }
-  let retryDelay = INITIAL_RETRY_MS;
+  /** Reconnect tries since the last stable connection; the shared backoff (`connection.ts`) sets the wait. */
+  let retryAttempt = 0;
+  /** When the current socket got `init`. */
+  let initAt: number | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set when the socket closed under this connection, cleared by the next `init`. */
+  let reconnecting = false;
 
   /**
    * The browser hides why a socket upgrade failed. A signed-out tab is
@@ -335,11 +337,11 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           // Unloaded rows can move above the saved cursor. Fetch just that row.
           void refreshMissingActivityThread(qc, wire.threadId);
         }
-        // Reset backoff only after receiving init — confirms the session
-        // is valid and the connection is healthy. Resetting in onopen
-        // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
+        // The backoff resets only when a socket that got init stays open
+        // (onclose). Resetting at onopen or init allowed a connect→close
+        // loop at the first backoff step.
         if (wire.type === "init") {
-          retryDelay = INITIAL_RETRY_MS;
+          initAt = Date.now();
           // The server sends current viewer lists again for the threads this
           // tab reports; lists from before a reconnect may be stale.
           useActiveViewersStore.getState().clear(sessionId);
@@ -347,6 +349,12 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           // after every initial connection or reconnect to recover a frame
           // missed while this client was disconnected.
           invalidatePersistedTitles(qc, sessionId, true, true);
+          // The api answers again. REST reads that failed while the
+          // socket was down refetch now (connection.ts).
+          if (reconnecting) {
+            reconnecting = false;
+            reportServerReachable();
+          }
         }
       } catch (err) {
         console.error("ws parse failed:", err);
@@ -366,9 +374,15 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         return;
       }
       setConnection(sessionId, "closed");
+      // A close is often the first sign of an api restart. The health
+      // check decides whether the app shows the reconnecting state.
+      reconnecting = true;
+      reportServerUnavailable();
       if (!opened) void checkRefusedUpgrade();
-      retryTimer = setTimeout(open, retryDelay);
-      retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
+      if (initAt !== undefined && Date.now() - initAt >= STABLE_CONNECTION_MS) retryAttempt = 0;
+      initAt = undefined;
+      retryAttempt += 1;
+      retryTimer = setTimeout(open, backoffDelay(retryAttempt));
     };
   }
 

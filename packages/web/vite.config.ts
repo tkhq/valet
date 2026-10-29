@@ -28,6 +28,17 @@ export default defineConfig({
         target: API_URL,
         changeOrigin: true,
         ws: true,
+        // While the api restarts, answer 503 with a plain-text body as the
+        // production load balancer does, so the web app shows its
+        // reconnecting state (src/api/connection.ts). Vite's own handler,
+        // which runs after this one, would answer 500, a real error.
+        configure: (proxy) => {
+          proxy.on("error", (_err, _req, res) => {
+            if ("writeHead" in res && !res.headersSent && !res.writableEnded) {
+              res.writeHead(503, { "Content-Type": "text/plain" }).end("The api is not running.");
+            }
+          });
+        },
       },
       // The recording gateway is mounted at /proxy on the api (NOT under /api).
       // Forward it too so the onboarding snippet's `${origin}/proxy/...` URL —

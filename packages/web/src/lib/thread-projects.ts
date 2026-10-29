@@ -50,7 +50,6 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
   useEffect(() => { setWrite({ key, pending: 0 }); failed.current = undefined; }, [key]);
   const isCurrent = () => mounted.current && identity.current.key === key && identity.current.epoch === epoch;
   const mutation = useMutation({ mutationKey: queryKey,
-    networkMode: "always",
     mutationFn: (request: { sessionId: string; viewerId: string; key: string; epoch: number; operations: ThreadProjectsOperation[]; continuation: boolean }) => {
       if (!request.continuation && (!mounted.current || identity.current.key !== request.key || identity.current.epoch !== request.epoch)) throw new CancelledError({ silent: true });
       return api.changeThreadProjects(request.sessionId, request.operations, request.viewerId);

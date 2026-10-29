@@ -15,6 +15,15 @@ import { useSidebarThreads } from "./queries";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useSessionWebSocket } from "./ws";
 import { useStreamStore } from "~/stores/stream";
+import { reportServerReachable, reportServerUnavailable } from "./connection";
+
+// The socket reports closes and reconnects to the app's connection state.
+// The health probe behind it is tested in connection.test.ts.
+vi.mock("./connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./connection")>()),
+  reportServerReachable: vi.fn(),
+  reportServerUnavailable: vi.fn(),
+}));
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -42,6 +51,10 @@ class FakeWebSocket {
 beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
+  // No jitter, so the reconnect waits are exactly 500 ms, 1 s, 2 s.
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  vi.mocked(reportServerReachable).mockClear();
+  vi.mocked(reportServerUnavailable).mockClear();
   // A socket that closes before it opens asks whether the tab is signed in.
   vi.spyOn(api, "getMe").mockClear().mockResolvedValue({} as Awaited<ReturnType<typeof api.getMe>>);
   useStreamStore.setState({ bySession: {} });
@@ -50,16 +63,42 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-function renderSocketHook(sessionId: string) {
+function renderSocketHook(sessionId: string, sharedThreadId?: string) {
   const queryClient = new QueryClient();
   const wrapper = ({ children }: PropsWithChildren) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
-  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId), { wrapper }) };
+  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId, sharedThreadId), { wrapper }) };
 }
 
 describe("useSessionWebSocket", () => {
+  it("keeps REST history when a second scoped view opens before any durable event", () => {
+    const main = renderSocketHook("s1");
+    act(() => useStreamStore.getState().setThreadMessages("s1", "parent", [{
+      id: "saved-parent", sessionId: "s1", threadId: "parent", role: "assistant",
+      content: "Saved answer", parts: [], createdAt: 1,
+    }]));
+    expect(useStreamStore.getState().bySession.s1.lastOffset).toBe("");
+    const scoped = renderSocketHook("s1", "child");
+    expect(useStreamStore.getState().bySession.s1.messages.map(message => message.id)).toEqual(["saved-parent"]);
+    scoped.unmount();
+    main.unmount();
+  });
+
+  it("keeps REST history when revisiting an idle session without an event cursor", () => {
+    const initial = renderSocketHook("s1");
+    act(() => useStreamStore.getState().setThreadMessages("s1", "parent", [{
+      id: "saved-parent", sessionId: "s1", threadId: "parent", role: "assistant",
+      content: "Saved answer", parts: [], createdAt: 1,
+    }]));
+    initial.unmount();
+    const revisit = renderSocketHook("s1");
+    expect(useStreamStore.getState().bySession.s1.messages.map(message => message.id)).toEqual(["saved-parent"]);
+    revisit.unmount();
+  });
+
   it("refreshes settings after a successful settings action, while unrelated and failed tools leave them alone", () => {
     const { queryClient } = renderSocketHook("s1");
     const key = ["settings", "me"];
@@ -174,15 +213,31 @@ describe("useSessionWebSocket", () => {
     const third = FakeWebSocket.instances[2];
     expect(third).toBeDefined();
 
+    // A socket that closes right after init keeps backing off.
     act(() => {
       third?.onopen?.();
       third?.onmessage?.({
         data: JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } }),
       });
       third?.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(1_999);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    act(() => vi.advanceTimersByTime(1));
+    const fourth = FakeWebSocket.instances[3];
+    expect(fourth).toBeDefined();
+
+    // One that stays open after init starts the backoff again.
+    act(() => {
+      fourth?.onopen?.();
+      fourth?.onmessage?.({
+        data: JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } }),
+      });
+      vi.advanceTimersByTime(10_000);
+      fourth?.onclose?.({ code: 1006 });
       vi.advanceTimersByTime(500);
     });
-    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(FakeWebSocket.instances).toHaveLength(5);
     unmount();
   });
 
@@ -205,6 +260,25 @@ describe("useSessionWebSocket", () => {
 
     expect(invalidate).toHaveBeenCalledTimes(3);
     expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
+    unmount();
+  });
+
+  it("reports a dropped socket, and the init after its reconnect, to the app's connection state", () => {
+    vi.useFakeTimers();
+    const { unmount } = renderSocketHook("s1");
+    const init = JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } });
+    const first = FakeWebSocket.instances[0];
+    // The first init is not a recovery: nothing failed before it.
+    act(() => first?.onmessage?.({ data: init }));
+    expect(reportServerReachable).not.toHaveBeenCalled();
+
+    act(() => {
+      first?.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(500);
+    });
+    expect(reportServerUnavailable).toHaveBeenCalledTimes(1);
+    act(() => FakeWebSocket.instances[1]?.onmessage?.({ data: init }));
+    expect(reportServerReachable).toHaveBeenCalledTimes(1);
     unmount();
   });
 

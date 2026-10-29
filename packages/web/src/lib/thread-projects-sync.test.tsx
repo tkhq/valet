@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ThreadProjects, ThreadProjectsResponse } from "@valet/shared";
 import { useThreadProjects } from "./thread-projects";
 import { ApiError } from "~/api/client";
+import { APP_MUTATION_DEFAULTS } from "~/api/query-client";
 
 const remote = vi.hoisted(() => ({ read: vi.fn(), change: vi.fn() }));
 vi.mock("~/api/client", async importOriginal => ({ ...await importOriginal<typeof import("~/api/client")>(),
@@ -14,7 +15,7 @@ vi.mock("~/api/client", async importOriginal => ({ ...await importOriginal<typeo
 const empty: ThreadProjects = { projects: [], assignments: {}, pinned: [], grouped: true, collapsed: false };
 const project = { id: "reports", name: "Customer reports", collapsed: false };
 function client() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { ...APP_MUTATION_DEFAULTS, retry: false } } });
   return { queryClient, wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> };
 }
 beforeEach(() => {

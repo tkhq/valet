@@ -6,7 +6,7 @@
  * survives a reload.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { draftKey, EMPTY_DRAFT, useComposerDraftStore, prefillComposerDraft } from "./composer-drafts";
+import { draftKey, EMPTY_DRAFT, useComposerDraftStore, prefillComposerDraft, reusableSendKey } from "./composer-drafts";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -108,6 +108,53 @@ describe("starter drafts", () => {
 
     store().clear(key);
     expect(localStorage.getItem(`valet:composer-draft:v2:${key}`)).toBeNull();
+  });
+
+  it("keeps a failed send's key across a reload and drops it with the draft", () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "deploy the fix");
+    store().setSendKey(key, { id: "key-0000001", text: "deploy the fix", attachments: [] });
+    store().activateOwner("");
+    store().activateOwner("account-a");
+    expect(store().byKey[key]?.sendKey).toEqual({ id: "key-0000001", text: "deploy the fix", attachments: [] });
+
+    store().clear(key);
+    expect(localStorage.getItem(`valet:composer-send-key:v1:${key}`)).toBeNull();
+  });
+
+  it("brings an in-flight send's text back with its key after a reload", () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "deploy the fix");
+    // The composer empties the box and keeps the key before the request.
+    store().clear(key);
+    store().setSendKey(key, { id: "key-0000001", text: "deploy the fix", attachments: [] });
+    expect(localStorage.getItem(`valet:composer-draft:v2:${key}`)).toBeNull();
+    store().activateOwner("");
+    store().activateOwner("account-a");
+    expect(store().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "deploy the fix", sendKey: { id: "key-0000001", text: "deploy the fix", attachments: [] } });
+
+    // An emptied box drops the key, so the text does not come back again.
+    store().setText(key, "");
+    expect(store().byKey[key]).toBeUndefined();
+    expect(localStorage.getItem(`valet:composer-send-key:v1:${key}`)).toBeNull();
+  });
+
+  it("settles only the send key that is still current", () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setSendKey(key, { id: "key-0000002", text: "second", attachments: [] });
+    store().settleSendKey(key, "key-0000001");
+    expect(store().byKey[key]?.sendKey?.id).toBe("key-0000002");
+    store().settleSendKey(key, "key-0000002");
+    expect(store().byKey[key]).toBeUndefined();
+  });
+
+  it("reuses a send key only for the same text and the same attachments", () => {
+    const sendKey = { id: "key-0000001", text: "look at this", attachments: ["img-a", "file-b"] };
+    expect(reusableSendKey(sendKey, "look at this", ["file-b", "img-a"])).toBe("key-0000001");
+    expect(reusableSendKey(sendKey, "look at this", ["img-c", "file-b"])).toBeUndefined();
+    expect(reusableSendKey(sendKey, "look at this", ["img-a"])).toBeUndefined();
+    expect(reusableSendKey(sendKey, "look at that", ["img-a", "file-b"])).toBeUndefined();
+    expect(reusableSendKey(undefined, "look at this", [])).toBeUndefined();
   });
 
   it("does not replay a queued draft update over newer text in shared storage", () => {

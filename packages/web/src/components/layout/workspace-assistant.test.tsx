@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MutationObserver, QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { api } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
-import { ENSURE_CONVERSATION_MUTATION, WorkspaceAssistantDock, WorkspaceAssistantProvider, useWorkspaceAssistant } from "./workspace-assistant";
+import { WorkspaceAssistantDock, WorkspaceAssistantProvider, useWorkspaceAssistant } from "./workspace-assistant";
 
 vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ key: "user" }) }));
 vi.mock("~/components/session/assistant-panel", () => ({
@@ -14,7 +14,6 @@ vi.mock("~/components/session/assistant-panel", () => ({
 }));
 
 afterEach(() => {
-  onlineManager.setOnline(true);
   vi.restoreAllMocks();
   useComposerDraftStore.setState({ byKey: {} });
 });
@@ -36,21 +35,6 @@ function renderAt(path: string) {
   render(<QueryClientProvider client={new QueryClient()}><RouterProvider router={router} /></QueryClientProvider>);
   return router;
 }
-
-describe("Ask Valet conversation request", () => {
-  // With the default network mode, an offline open paused and never settled,
-  // so the panel showed neither an error nor Retry.
-  it("fails at once while the browser is offline, so the panel can offer Retry", async () => {
-    onlineManager.setOnline(false);
-    const observer = new MutationObserver(new QueryClient(), {
-      ...ENSURE_CONVERSATION_MUTATION,
-      mutationFn: () => Promise.reject(new Error("Failed to fetch")),
-    });
-    const settled = observer.mutate().then(() => "resolved", (error: Error) => error.message);
-    const timeout = new Promise((resolve) => setTimeout(() => resolve("paused"), 200));
-    expect(await Promise.race([settled, timeout])).toBe("Failed to fetch");
-  });
-});
 
 describe("Ask Valet panel", () => {
   // The panel shares one socket per session with the open thread, so it
