@@ -227,7 +227,7 @@ through further — there is no fallback beyond the tier itself.
 
 - Per-user LLM keys (org + deployment env only this pass).
 - Provider-level spend limits/quotas (usage spec shows spend; enforcement is future).
-- Azure OpenAI / Bedrock / Vertex specific auth flows (pi-ai supports them; each has bespoke credential shapes — add per demand as new `kind`s).
+- Azure OpenAI / Vertex specific auth flows (pi-ai supports them; each has bespoke credential shapes — add per demand as new `kind`s). Amazon Bedrock was added 2026-10-29 as the `amazon-bedrock` kind; see `2026-10-29-bedrock-provider-design.md`.
 - Automatic model failover mid-turn.
 - Proxying/rewriting model traffic through the api (turns call providers directly from the api process as today).
 - Migrating legacy D1 service-config keys (pre-1.0).
