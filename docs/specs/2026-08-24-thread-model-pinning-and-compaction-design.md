@@ -122,8 +122,8 @@ sessions in that process without a rebuild.
 The proactive trigger has two levels. "overflow" means the next request does
 not fit the usable context, and the pass behaves as before. "budget" means
 the request fits but exceeds the budget. A budget pass never continues the
-turn, and a budget pass that finds nothing to reclaim does not count toward
-the circuit breaker. When it runs depends on who watches the thread:
+turn. A budget pass that finds nothing to reclaim or fails does not count
+toward the circuit breaker; a failure still emits `compaction_failed`. When it runs depends on who watches the thread:
 
 - An unattended turn (workflow work, a delivery nobody watches) or a channel
   turn (Slack, Telegram) runs it at turn end. It skips the pass when another

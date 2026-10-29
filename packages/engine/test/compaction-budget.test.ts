@@ -212,6 +212,24 @@ describe("compaction budget: a finished turn above the budget", () => {
     faux.unregister();
   });
 
+  it("reports a failed budget pass without opening the circuit breaker", async () => {
+    const { faux, events, session, thread } = await bigWindowSession("budget-fails", { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 0 });
+    const reply = () => fauxAssistantMessage("reply " + "y".repeat(16_000));
+    const summarizerError = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
+    // Three turns above the budget, and each turn-end pass fails. Three
+    // failed overflow passes would open the breaker.
+    faux.setResponses([reply, summarizerError, reply, summarizerError, reply, summarizerError]);
+
+    for (const text of ["third prompt", "fourth prompt", "fifth prompt"]) {
+      const receipt = await session.prompt(text, { channel: SLACK });
+      await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    }
+    await waitFor(() => errorCodes(events).filter((c) => c === "compaction_failed").length === 3);
+
+    expect(errorCodes(events)).not.toContain("compaction_circuit_open");
+    faux.unregister();
+  });
+
   it("compacts a workflow submission that stopped at its model call limit above the budget", async () => {
     // The limit ends the submission after a tool call. An overflow pass would
     // continue the turn, so it stays off; the budget pass never continues.

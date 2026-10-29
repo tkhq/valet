@@ -5538,7 +5538,7 @@ export class Thread {
 
   /**
    * Shared handling for both proactive compaction passes (pre-turn
-   * rehydration and post-turn). A thrown compaction counts as a failure; an
+   * rehydration and post-turn). A thrown overflow pass counts as a failure; an
    * overflow pass's "noop" outcome ALSO counts — the trigger fired but nothing was
    * reclaimable (context dominated by system overhead the estimate cannot
    * reduce), and without the breaker that repeats silently on every turn.
@@ -5559,10 +5559,11 @@ export class Thread {
         ...(turnModel ? { turnModel } : {}),
       });
     } catch (err) {
-      this.recordProactiveCompactionFailure(
-        "compaction_failed",
-        err instanceof Error ? err.message : String(err),
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      // A budget pass runs while the context still fits the model. Report its
+      // failure, but keep it off the breaker that overflow compaction needs.
+      if (trigger === "budget") this.emitError("compaction_failed", message);
+      else this.recordProactiveCompactionFailure("compaction_failed", message);
       return;
     }
 
