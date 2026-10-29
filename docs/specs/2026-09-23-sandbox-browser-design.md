@@ -1358,6 +1358,8 @@ Shared interaction, exclusive control, and private sign-in retain their existing
 A touch tap clicks the remote page. A swipe scrolls it instead of dragging.
 Scroll distances account for the scaled remote image. Cancellation sends no tap.
 The keyboard button focuses the input surface for text entry.
+In the mobile pane, the input surface covers only the visible part of the canvas.
+Focus and typed text therefore do not move the local view, and a mouse or pen click stays a click.
 Mobile delete and return input events work without desktop key events.
 The remote viewport does not change when the viewer switches devices.
 The mobile pane starts at 100% image size, with a scrollable canvas instead of letterboxing.

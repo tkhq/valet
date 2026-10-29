@@ -271,7 +271,7 @@ describe("touch browser input", () => {
     fireEvent.load(screen.getByAltText("Browser page"));
     fireEvent.click(screen.getByRole("button", { name: "Page scroll" }));
     const surface = screen.getByRole("textbox", { name: "Browser page input" });
-    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+    vi.spyOn(screen.getByLabelText("Remote page canvas"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
     fireEvent.pointerDown(surface, { clientX: 200, clientY: 200 });
     fireEvent.pointerMove(surface, { clientX: 200, clientY: 150 });
     fireEvent.pointerUp(surface, { clientX: 200, clientY: 150 });
@@ -295,7 +295,7 @@ it("clicks on touch release and sends nothing for a cancelled touch", async () =
   render(<BrowserViewport frame={frame} mobile canControl send={send} onError={() => {}} />);
   fireEvent.load(screen.getByAltText("Browser page"));
   const surface = screen.getByRole("textbox", { name: "Browser page input" });
-  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+  vi.spyOn(screen.getByLabelText("Remote page canvas"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
   fireEvent.pointerDown(surface, { clientX: 200, clientY: 100 });
   expect(send).not.toHaveBeenCalled();
   fireEvent.pointerCancel(surface);
@@ -352,7 +352,7 @@ it("maps mobile taps through zoom without clicking after a pan gesture", async (
   fireEvent.load(screen.getByAltText("Browser page"));
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   const surface = screen.getByRole("textbox", { name: "Browser page input" });
-  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(-200, -100, 1600, 900));
+  vi.spyOn(screen.getByLabelText("Remote page canvas"), "getBoundingClientRect").mockReturnValue(new DOMRect(-200, -100, 1600, 900));
   fireEvent.pointerDown(surface, { clientX: 300, clientY: 150 });
   fireEvent.pointerMove(surface, { clientX: 350, clientY: 150 });
   fireEvent.pointerUp(surface, { clientX: 350, clientY: 150 });
@@ -360,4 +360,74 @@ it("maps mobile taps through zoom without clicking after a pan gesture", async (
   fireEvent.pointerDown(surface, { clientX: 300, clientY: 150 });
   fireEvent.pointerUp(surface, { clientX: 300, clientY: 150 });
   await waitFor(() => expect(send.mock.calls).toEqual([[{ type: "click", x: 400, y: 200, button: "left" }]]));
+});
+
+describe("mobile reader position during input", () => {
+  // jsdom has no layout, so these helpers model what Chromium does: focus
+  // without preventScroll scrolls the reader to the input's origin, and each
+  // typed character scrolls it to the caret unless the input is pinned to the
+  // visible viewport.
+  function emulateFocusScroll() {
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      focus.call(this, options);
+      if (!options?.preventScroll) revealCaret(this);
+    });
+  }
+  function revealCaret(input: HTMLElement) {
+    if (input.style.position === "sticky") return;
+    for (let node = input.parentElement; node; node = node.parentElement) {
+      node.scrollLeft = 0;
+      node.scrollTop = 0;
+    }
+  }
+  function renderReader(send = vi.fn().mockResolvedValue(undefined)) {
+    render(<BrowserViewport frame={frame} mobile canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const canvas = screen.getByLabelText("Remote page canvas");
+    return { send, canvas, scroller: canvas.parentElement!, surface: screen.getByRole("textbox", { name: "Browser page input" }) };
+  }
+
+  it("keeps the reader position when the browser keyboard opens", () => {
+    emulateFocusScroll();
+    const { scroller, surface } = renderReader();
+    scroller.scrollLeft = 700;
+    scroller.scrollTop = 85;
+    fireEvent.click(screen.getByRole("button", { name: "Show browser keyboard" }));
+    expect(document.activeElement).toBe(surface);
+    expect([scroller.scrollLeft, scroller.scrollTop]).toEqual([700, 85]);
+  });
+
+  it("keeps the reader position while typing on the browser keyboard", async () => {
+    const { send, scroller, surface } = renderReader();
+    fireEvent.click(screen.getByRole("button", { name: "Show browser keyboard" }));
+    scroller.scrollLeft = 700;
+    scroller.scrollTop = 85;
+    fireEvent.change(surface, { target: { value: "ab" } });
+    revealCaret(surface);
+    expect([scroller.scrollLeft, scroller.scrollTop]).toEqual([700, 85]);
+    await waitFor(() => expect(send.mock.calls).toEqual([[{ type: "text", text: "ab" }]]));
+  });
+
+  it("keeps a mouse click in the compact viewer a click after scrolling", async () => {
+    class MousePointer extends MouseEvent { pointerType = "mouse"; pointerId = 1; }
+    vi.stubGlobal("PointerEvent", MousePointer);
+    emulateFocusScroll();
+    const { send, canvas, scroller, surface } = renderReader();
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByText("150%")).toBeTruthy();
+    scroller.scrollLeft = 900;
+    scroller.scrollTop = 445;
+    const rect = () => new DOMRect(-scroller.scrollLeft, -scroller.scrollTop, 1920, 1080);
+    vi.spyOn(canvas, "getBoundingClientRect").mockImplementation(rect);
+    fireEvent.pointerDown(surface, { clientX: 300, clientY: 300 });
+    fireEvent.pointerUp(surface, { clientX: 300, clientY: 300 });
+    const point = { x: 800, y: (300 + 445) / 1.5 };
+    await waitFor(() => expect(send.mock.calls).toEqual([
+      [{ type: "pointer", phase: "down", ...point, button: "left" }],
+      [{ type: "pointer", phase: "up", ...point, button: "left" }],
+    ]));
+    expect([scroller.scrollLeft, scroller.scrollTop]).toEqual([900, 445]);
+  });
 });

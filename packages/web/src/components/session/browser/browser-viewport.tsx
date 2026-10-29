@@ -36,6 +36,7 @@ export function BrowserViewport({
   onError: (message: string) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const canvas = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(initialReaderState?.zoom ?? 1);
   const [pan, setPan] = useState(initialReaderState?.pan ?? true);
   const savedReaderState = useRef(initialReaderState);
@@ -173,6 +174,10 @@ export function BrowserViewport({
     pointerPoint.current = null;
     setCursor("default");
   }
+  // The compact input covers only the visible part of the canvas, so map points from the canvas.
+  function bounds(event: PointerEvent<HTMLTextAreaElement>) {
+    return (mobile && canvas.current ? canvas.current : event.currentTarget).getBoundingClientRect();
+  }
   function pointer(
     event: PointerEvent<HTMLTextAreaElement>,
     phase: "down" | "up" | "move",
@@ -181,8 +186,7 @@ export function BrowserViewport({
     if (mobile && event.pointerType === "touch") {
       event.preventDefault();
       if (phase === "down") {
-        const point = browserPoint(event.clientX, event.clientY,
-          event.currentTarget.getBoundingClientRect(), frame.viewport);
+        const point = browserPoint(event.clientX, event.clientY, bounds(event), frame.viewport);
         if (touch.current || !point) return;
         touch.current = {
           id: event.pointerId, x: event.clientX, y: event.clientY,
@@ -198,14 +202,14 @@ export function BrowserViewport({
           if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >= 8) gesture.scrolling = true;
           return;
         }
-        const bounds = event.currentTarget.getBoundingClientRect();
+        const rect = bounds(event);
         const scale = Math.min(
-          bounds.width / frame.viewport.width, bounds.height / frame.viewport.height,
+          rect.width / frame.viewport.width, rect.height / frame.viewport.height,
         );
         if (!gesture.scrolling &&
             Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 8) return;
         if (!gesture.scrolling) {
-          const point = browserPoint(gesture.startX, gesture.startY, bounds, frame.viewport);
+          const point = browserPoint(gesture.startX, gesture.startY, rect, frame.viewport);
           if (point) input({ type: "move", ...point });
           gesture.scrolling = true;
         }
@@ -220,7 +224,7 @@ export function BrowserViewport({
       touch.current = null;
       if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
       if (!gesture.scrolling) {
-        const point = browserPoint(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), frame.viewport);
+        const point = browserPoint(event.clientX, event.clientY, bounds(event), frame.viewport);
         if (point) input({ type: "click", ...point, button: "left" });
       }
       return;
@@ -228,7 +232,7 @@ export function BrowserViewport({
     const point = browserPoint(
       event.clientX,
       event.clientY,
-      event.currentTarget.getBoundingClientRect(),
+      bounds(event),
       frame.viewport,
     );
     if (!point) {
@@ -241,7 +245,7 @@ export function BrowserViewport({
       event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
     if (phase === "down") {
       event.preventDefault();
-      event.currentTarget.focus();
+      event.currentTarget.focus({ preventScroll: mobile });
       event.currentTarget.setPointerCapture?.(event.pointerId);
       heldPointer.current = { ...point, button };
     }
@@ -262,8 +266,9 @@ export function BrowserViewport({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-ink-wash">
-    <div ref={scroller} onScroll={saveReaderState} className={mobile ? "relative min-h-0 flex-1 overflow-auto" : "relative min-h-48 flex-1 overflow-hidden"}>
-    <div aria-label="Remote page canvas" className={mobile ? "relative" : "absolute inset-0"}
+    <div ref={scroller} onScroll={saveReaderState} className={mobile ? "relative min-h-0 flex-1 overflow-auto" : "relative min-h-48 flex-1 overflow-hidden"}
+      style={mobile ? { containerType: "size" } : undefined}>
+    <div ref={canvas} aria-label="Remote page canvas" className={mobile ? "relative" : "absolute inset-0"}
       style={mobile ? { width: frame.viewport.width * zoom, height: frame.viewport.height * zoom } : undefined}>
       <BrowserPageImage
         frame={frame}
@@ -288,11 +293,15 @@ export function BrowserViewport({
         autoComplete="off"
         autoCapitalize="off"
         spellCheck={false}
-        className="absolute inset-0 h-full w-full cursor-default resize-none border-0 bg-transparent text-transparent caret-transparent outline-none"
+        className={`${mobile ? "block" : "absolute inset-0 h-full w-full"} cursor-default resize-none border-0 bg-transparent text-transparent caret-transparent outline-none`}
         onPointerDown={(event) => pointer(event, "down")}
         onPointerMove={(event) => pointer(event, "move")}
         onPointerUp={(event) => pointer(event, "up")}
-        style={{ cursor: ready ? cursor : "default", touchAction: mobile && pan ? "pan-x pan-y" : "none", fontSize: 16 }}
+        style={{
+          cursor: ready ? cursor : "default", touchAction: mobile && pan ? "pan-x pan-y" : "none", fontSize: 16,
+          // Pinned to the visible part of the reader: focus and typed text then never scroll it to the canvas origin.
+          ...(mobile && { position: "sticky", left: 0, top: 0, width: "min(100cqw, 100%)", height: "min(100cqh, 100%)" }),
+        }}
         onPointerLeave={leavePointer}
         onPointerCancel={() => { touch.current = null; releaseHeld(); leavePointer(); }}
         onContextMenu={(event) => {
@@ -374,7 +383,7 @@ export function BrowserViewport({
       <Button variant={!pan ? "secondary" : "ghost"} aria-label="Page scroll" className="min-w-0 px-1" aria-pressed={!pan} onClick={() => setPan(!pan)}><Move className="h-4 w-4" aria-hidden />Scroll</Button>
       <Button variant="ghost" className="w-11 shrink-0 px-0"
         aria-label="Show browser keyboard" disabled={!ready}
-        onClick={() => surface.current?.focus()}>
+        onClick={() => surface.current?.focus({ preventScroll: true })}>
         <Keyboard className="h-5 w-5" aria-hidden />
       </Button>
     </div>
