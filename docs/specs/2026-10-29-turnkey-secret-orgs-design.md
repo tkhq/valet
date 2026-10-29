@@ -31,20 +31,19 @@ level. The Valet implementation is a follow-up.
 
 ## Valet architecture
 
-```
-Sandbox                         Valet API                          Turnkey
-valet-secrets run               sandbox secret broker
-  --env X=turnkey://NAME          │                                  │
-  -- cmd                          │                                  │
-   │── resolve, sandbox token ───►│ who is asking: user, session     │
-   │                              │ may this session read NAME?      │
-   │                              │ which org: parent or user's      │
-   │                              │   sub-org (created if missing)   │
-   │                              │── export, request_context ──────►│ decrypt to a
-   │                              │◄──────── encrypted value ────────│ one-time key
-   │◄────────── value ────────────│ decrypt in memory                │
-   │ put X in cmd's environment,                                     │
-   │ drop the sandbox token, run cmd                                 │
+```mermaid
+sequenceDiagram
+    participant S as Sandbox<br/>valet-secrets run --env X=turnkey://NAME -- cmd
+    participant V as Valet API<br/>sandbox secret broker
+    participant T as Turnkey
+    S->>V: resolve NAME, with sandbox token
+    Note over V: who is asking: user, session<br/>may this session read NAME?<br/>which org: parent or user's sub-org<br/>(sub-org created if missing)
+    V->>T: export NAME, with request_context
+    Note over T: encrypt to a one-time key
+    T-->>V: encrypted value
+    Note over V: decrypt in memory
+    V-->>S: value
+    Note over S: put X in cmd's environment,<br/>drop the sandbox token, run cmd
 ```
 
 - **Sandbox.** Runs agent code and holds only its sandbox token, which is
@@ -61,12 +60,13 @@ valet-secrets run               sandbox secret broker
 
 ## Organizations
 
-```
-valet-turnkey-secrets            company secrets
-│   root: valet-broker, administrators; threshold 1
-├── valet-user-<VALET_USER_ID>   alice's personal secrets
-│       root: valet-broker; threshold 1
-└── valet-user-<VALET_USER_ID>   bob's personal secrets
+```mermaid
+flowchart TD
+    P["valet-turnkey-secrets<br/>company secrets<br/>root: valet-broker, administrators; threshold 1"]
+    A["valet-user-&lt;VALET_USER_ID&gt;<br/>alice's personal secrets<br/>root: valet-broker; threshold 1"]
+    B["valet-user-&lt;VALET_USER_ID&gt;<br/>bob's personal secrets<br/>root: valet-broker; threshold 1"]
+    P --> A
+    P --> B
 ```
 
 - **Parent.** Created once in the Turnkey dashboard. Its root quorum is the
