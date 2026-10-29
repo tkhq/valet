@@ -11,12 +11,14 @@ import { SourcesSection } from "~/components/settings/sources-section";
  * `/settings/organization`'s `OrgRouteGuard` — no per-page admin re-check.
  */
 export const Route = createFileRoute("/settings/organization/sandbox-images")({
+  validateSearch: (s: Record<string, unknown>): { source?: string } => ({ source: typeof s.source === "string" ? s.source : undefined }),
   component: OrganizationSandboxSettingsPage,
 });
 
 export function OrganizationSandboxSettingsPage() {
   const org = useOrg();
   const patch = usePatchOrgSettings();
+  const { source } = Route.useSearch();
   return (
     <div className="space-y-10">
       <Section title="Anonymous image bakes" description="Allow public repository images to build without an org GitHub credential. Off by default.">
@@ -31,7 +33,7 @@ export function OrganizationSandboxSettingsPage() {
         </div>
         {patch.error && <p className="text-sm text-danger-500">{patch.error.message}</p>}
       </Section>
-      <SourcesSection />
+      <SourcesSection initiallyExpandedId={source} />
     </div>
   );
 }

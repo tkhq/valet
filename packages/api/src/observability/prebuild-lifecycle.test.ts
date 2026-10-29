@@ -155,4 +155,40 @@ describe("prebuild lifecycle metrics", () => {
     }
     await provider.shutdown();
   });
+
+  it("exports source health gauges and the scheduler pass age", async () => {
+    const { exporter, provider, lifecycle } = await testMetrics();
+    lifecycle.recordSchedulerPass(Date.now() - 120_000);
+    lifecycle.updateSourceHealthSnapshot([
+      { sourceKind: "repo", health: "failing", reason: "bake_failed", count: 2, boundUnhealthy: 1 },
+      { sourceKind: "base", health: "healthy", reason: "ok", count: 1, boundUnhealthy: 0 },
+    ]);
+    await provider.forceFlush();
+    const sources = metricNamed(exporter, "valet.prebuild.sources");
+    expect(sources?.dataPoints.map((p) => [p.attributes, p.value])).toEqual(expect.arrayContaining([
+      [{ source_kind: "repo", profile: "shared", provider: "none", health: "failing", reason: "bake_failed" }, 2],
+    ]));
+    const bound = metricNamed(exporter, "valet.prebuild.sources.bound_unhealthy");
+    expect(bound?.dataPoints.find((p) => p.attributes.source_kind === "repo")?.value).toBe(1);
+    const age = metricNamed(exporter, "valet.prebuild.scheduler.last_pass_age");
+    expect(age?.dataPoints[0]?.value).toBeGreaterThanOrEqual(119);
+    lifecycle.updateSourceHealthSnapshot([]);
+    exporter.reset();
+    await provider.forceFlush();
+    // The SDK retains cumulative gauge series, so a vanished series reads 0.
+    for (const name of ["valet.prebuild.sources", "valet.prebuild.sources.bound_unhealthy"]) {
+      const points = metricNamed(exporter, name)?.dataPoints ?? [];
+      expect(points.length, name).toBeGreaterThan(0);
+      expect(points.every((p) => p.value === 0), name).toBe(true);
+    }
+    await provider.shutdown();
+  });
+
+  it("emits no scheduler age series before a pass is recorded", async () => {
+    const { exporter, provider, lifecycle } = await testMetrics();
+    lifecycle.updateSourceHealthSnapshot([]);
+    await provider.forceFlush();
+    expect(metricNamed(exporter, "valet.prebuild.scheduler.last_pass_age")?.dataPoints ?? []).toEqual([]);
+    await provider.shutdown();
+  });
 });

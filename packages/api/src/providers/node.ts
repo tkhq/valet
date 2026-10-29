@@ -73,6 +73,7 @@ import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunApprovalAttention, buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
+import type { AttentionDeps } from "../orchestrator/attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -580,10 +581,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
   // Constructed before the child spawner, whose zero-config repo binding
   // needs it. `start()`/`stop()` are called from `main.ts`.
+  // `channels` is filled in once the channel host exists (it is built later).
+  const sourceHealthAttention: AttentionDeps = { db, access: { engineCredentials, onePassword } };
   const prebuildService = new SourceService({
     db,
     builder: imageBuilder,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    attention: sourceHealthAttention,
   });
 
   engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
@@ -709,6 +713,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     resolveOrgId: () => resolveOrgId(db),
     onePassword,
   });
+  sourceHealthAttention.channels = channelHost.attentionDeliverers();
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,

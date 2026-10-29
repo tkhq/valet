@@ -37,7 +37,7 @@ import { recordBakeHealth } from "./metrics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { and, desc, eq, gte, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -72,6 +72,8 @@ import { measureBakeSize } from "../prebuilds/bake-size.js";
 import { compatible, readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
 import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { routeAttention, markAttentionNotificationsRead, type AttentionDeps } from "../orchestrator/attention.js";
+import { sourceHealthGuidance } from "@valet/shared";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
@@ -84,6 +86,8 @@ import {
   recordRegistryOperation,
   startBakeSpan,
   updatePrebuildQueueSnapshot,
+  updateSourceHealthSnapshot,
+  type SourceHealthSnapshot,
   type PrebuildDimensions,
 } from "../observability/prebuild-lifecycle.js";
 
@@ -318,7 +322,11 @@ export function healthReasonForError(err: unknown): SourceHealthReason {
   }
   if (err instanceof AnonymousImageBakesDisabledError) return "credentials";
   if (err instanceof RegistryCapacityError) return "registry_full";
-  return "bake_failed";
+  // Anything else thrown from a scheduler pass (a network TypeError, a parse
+  // error) happened while resolving, not while running setup commands, so it
+  // must not read as "the setup commands failed". `bake_failed` is reserved
+  // for a bake that ran and failed (`syncActiveBuilds`).
+  return "resolve_failed";
 }
 
 const HEALTH_DETAIL_MAX = 2000;
@@ -769,6 +777,36 @@ function readSetupCommands(source: ImageSourceRow): string[] {
   return raw.filter((v): v is string => typeof v === "string");
 }
 
+const RECOVERY_MIN_EPISODE_MS = 10 * 60_000;
+const BOUND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const UNHEALTHY: ReadonlySet<SourceHealth> = new Set(["incompatible", "failing", "unbaked"]);
+
+/** Where a health write comes from. Spec 11.1 names only a bake transition
+ * and a fallback as immediate notification triggers; a scheduler-pass write
+ * into an unhealthy state is provisional and notifies only when the next
+ * pass still observes it (one transient GitHub error must not page). */
+export type HealthOrigin = "scheduler" | "bake" | "fallback";
+const SCHEDULER = { origin: "scheduler" } as const;
+const BAKE = { origin: "bake" } as const;
+
+/** One open notification episode per source: opened on entering an
+ * unhealthy state, closed only on entering healthy. */
+interface HealthEpisode {
+  /** The reason the source is currently in. */
+  reason: SourceHealthReason;
+  /** `health_checked_at` of the current reason: the `at` in its dedupe key. */
+  keyAt: number;
+  startedAt: number;
+  /** Whether any notification was posted (or assumed posted) in this episode. */
+  notified: boolean;
+  /** Each reason notifies at most once per episode (A→B→A posts A once). */
+  notifiedReasons: Set<SourceHealthReason>;
+  /** The dedupe key of the last posted, still-relevant notification. */
+  notifiedKey: string | null;
+  /** A scheduler write not yet confirmed by a later pass. */
+  pending?: { health: SourceHealth; reason: SourceHealthReason; pass: number };
+}
+
 export interface SourceServiceDeps {
   db: AppDb;
   builder: ImageBuilder | null;
@@ -786,6 +824,8 @@ export interface SourceServiceDeps {
    * `readImageContractLabel` against this service's registry settings;
    * tests inject a fake. */
   contractReader?: (backend: string, imageRef: string) => Promise<ContractRead>;
+  /** Routes health-transition notifications to org admins. Unset: none. */
+  attention?: AttentionDeps;
 }
 
 function newBakeId(newId: () => string): string {
@@ -824,6 +864,16 @@ export class SourceService {
     createdAt: number;
   }> = [];
   private readonly registryFetch: typeof fetch;
+  private readonly attention?: AttentionDeps;
+  /** Last fallback seen per source by this process (recovery notification). */
+  private readonly lastFallbackAt = new Map<string, number>();
+  /** Open notification episodes (see `HealthEpisode`). */
+  private readonly episodes = new Map<string, HealthEpisode>();
+  /** Scheduler pass sequence: a provisional write observed in pass N is
+   * confirmed at the end of pass N+1 or later. */
+  private passSeq = 0;
+  /** The one-time startup catch-up started by `start()` (tests await it). */
+  startupCatchUp?: Promise<void>;
   private readonly contractReader: (backend: string, imageRef: string) => Promise<ContractRead>;
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthReporting = false;
@@ -833,6 +883,7 @@ export class SourceService {
   constructor(deps: SourceServiceDeps) {
     this.db = deps.db;
     this.registryFetch = deps.registryFetch ?? fetch;
+    this.attention = deps.attention;
     this.builder = deps.builder;
     this.githubTokenDeps = deps.githubTokenDeps;
     this.now = deps.now ?? Date.now;
@@ -889,6 +940,7 @@ export class SourceService {
       commitSha: bake.commitSha, imageRef: bake.imageRef, status: bake.status,
       builderBackend: bake.builderBackend, error: bake.error, logTail: bake.logTail,
       startedAt: bake.startedAt, finishedAt: bake.finishedAt, createdAt: bake.createdAt,
+      contractVersion: bake.contractVersion, contractSource: bake.contractSource, parentBakeId: bake.parentBakeId,
       sourceName: source.name, sourceKind: source.kind, repoFullName: source.repoFullName,
     });
     const snapshot = this.builder?.queueSnapshot?.();
@@ -1031,19 +1083,215 @@ export class SourceService {
    * current (health, reason) was entered, so PR 3 can key a notification
    * episode on it and the UI can say "failing since". A changed detail
    * alone updates `health_detail` only. Returns true on a transition. */
-  async setSourceHealth(sourceId: string, health: SourceHealth, reason: SourceHealthReason, detail?: string | null): Promise<boolean> {
+  async setSourceHealth(
+    sourceId: string,
+    health: SourceHealth,
+    reason: SourceHealthReason,
+    detail?: string | null,
+    opts: { origin?: HealthOrigin } = {},
+  ): Promise<boolean> {
     const trimmed = detail == null ? null : detail.slice(0, HEALTH_DETAIL_MAX);
-    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail })
+    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail, checkedAt: imageSources.healthCheckedAt })
       .from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
     if (!row) return false;
     const transition = row.health !== health || row.reason !== reason;
     if (!transition && row.detail === trimmed) return false;
+    const at = this.now();
     await this.db.update(imageSources)
       .set(transition
-        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: this.now() }
+        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: at }
         : { healthDetail: trimmed })
       .where(eq(imageSources.id, sourceId));
+    if (transition) {
+      await this.refreshSourceHealthSnapshot().catch((err) => console.error("source health snapshot refresh failed:", err));
+      await this.notifyHealthTransition(sourceId, { health: row.health, reason: row.reason, checkedAt: row.checkedAt }, { health, reason, detail: trimmed, at }, opts.origin ?? "bake")
+        .catch((err) => console.error(`health notification for ${sourceId} failed:`, err));
+    }
     return transition;
+  }
+
+  /** Spec 10/11 "bound": a repo bound in the last 7 days, or a base with
+   * such a repo beneath it. Dormant sources neither page nor notify. */
+  async sourceMatters(source: ImageSourceRow): Promise<boolean> {
+    // A disabled source does not matter: disabling is how an admin silences
+    // it. `schedule: "off"` still matters (sessions still use its image).
+    if (!source.enabled) return false;
+    const since = this.now() - BOUND_WINDOW_MS;
+    if (source.kind === "repo") return (source.lastBoundAt ?? 0) >= since;
+    if (source.kind === "base") {
+      const rows = await this.db.select({ id: imageSources.id }).from(imageSources)
+        .where(and(eq(imageSources.parentId, source.id), eq(imageSources.kind, "repo"), gte(imageSources.lastBoundAt, since))).limit(1);
+      return rows.length > 0;
+    }
+    return false;
+  }
+
+  private async notifyHealthTransition(
+    sourceId: string,
+    previous: { health: SourceHealth; reason: SourceHealthReason; checkedAt: number | null },
+    next: { health: SourceHealth; reason: SourceHealthReason; detail: string | null; at: number },
+    origin: HealthOrigin,
+  ): Promise<void> {
+    if (!this.attention) return;
+    const source = await this.loadSource(sourceId).catch(() => null);
+    if (!source) return;
+    if (!(await this.sourceMatters(source))) {
+      // Dormant: no notifications, but a recovery still drops the episode.
+      if (next.health === "healthy") this.episodes.delete(sourceId);
+      return;
+    }
+    const isUnhealthy = UNHEALTHY.has(next.health);
+    // Seed from the previous state so a restart mid-episode still closes it.
+    // The stored state was notified before the restart or by the startup
+    // catch-up, so the seed counts as notified.
+    // Known gap: failing -> stale -> restart -> healthy has no seed (stale is
+    // not unhealthy), so that recovery posts nothing.
+    let ep = this.episodes.get(sourceId);
+    if (!ep && UNHEALTHY.has(previous.health) && previous.checkedAt !== null) {
+      ep = {
+        reason: previous.reason, keyAt: previous.checkedAt, startedAt: previous.checkedAt,
+        notified: true, notifiedReasons: new Set([previous.reason]), notifiedKey: this.healthKey(sourceId, previous.reason, previous.checkedAt),
+      };
+      this.episodes.set(sourceId, ep);
+    }
+    if (isUnhealthy) {
+      if (ep && ep.reason === next.reason && ep.notifiedReasons.has(next.reason)) return; // the retry loop: same episode
+      if (!ep) {
+        ep = { reason: next.reason, keyAt: next.at, startedAt: next.at, notified: false, notifiedReasons: new Set(), notifiedKey: null };
+        this.episodes.set(sourceId, ep);
+      } else {
+        // The key tracks the row's `health_checked_at`, so the startup
+        // catch-up after a restart dedupes against the same id.
+        ep.reason = next.reason;
+        ep.keyAt = next.at;
+      }
+      ep.pending = undefined;
+      // A reason already notified in this episode posts nothing new and
+      // leaves every row as it is (A→B→A).
+      if (ep.notifiedReasons.has(next.reason)) return;
+      if (origin === "scheduler") {
+        ep.pending = { health: next.health, reason: next.reason, pass: this.passSeq };
+        return;
+      }
+      await this.postUnhealthy(source, ep, next.health, next.reason, next.detail);
+      return;
+    }
+    if (next.health === "healthy" && ep) {
+      this.episodes.delete(sourceId);
+      if (ep.notifiedKey) await markAttentionNotificationsRead(this.attention.db, "platform", ep.notifiedKey);
+      if (!ep.notified) return; // never confirmed: close silently
+      if (next.at - ep.startedAt >= RECOVERY_MIN_EPISODE_MS || (await this.fellBackSince(source, ep.startedAt))) {
+        await routeAttention(this.attention, {
+          kind: "platform", owner: { type: "org", id: source.orgId }, urgency: "normal",
+          title: `Image for \`${source.repoFullName ?? source.name}\` is healthy again`, href: this.healthHref(sourceId),
+          dedupeKey: `image-source:${sourceId}:recovered:${next.at}`,
+        });
+      }
+    }
+  }
+
+  private healthKey(sourceId: string, reason: SourceHealthReason, at: number): string {
+    return `image-source:${sourceId}:${reason}:${at}`;
+  }
+
+  private healthHref(sourceId: string): string {
+    return `/settings/organization/sandbox-images?source=${sourceId}`;
+  }
+
+  /** Posts the unhealthy notification for the episode's current reason under
+   * `image-source:<id>:<reason>:<keyAt>`, marks the previous notified key
+   * read, and records the reason as notified. */
+  private async postUnhealthy(source: ImageSourceRow, ep: HealthEpisode, health: SourceHealth, reason: SourceHealthReason, detail: string | null): Promise<void> {
+    if (!this.attention) return;
+    const key = this.healthKey(source.id, reason, ep.keyAt);
+    const previousKey = ep.notifiedKey;
+    ep.notified = true;
+    ep.notifiedReasons.add(reason);
+    ep.notifiedKey = key;
+    ep.pending = undefined;
+    if (previousKey && previousKey !== key) await markAttentionNotificationsRead(this.attention.db, "platform", previousKey);
+    const name = source.repoFullName ?? source.name;
+    const title = health === "failing" ? `Image for \`${name}\` cannot be rebuilt`
+      : health === "incompatible" ? `Image for \`${name}\` is unusable; sessions are using the stock image`
+      : `Image for \`${name}\` has not been built yet`;
+    await routeAttention(this.attention, {
+      kind: "platform", owner: { type: "org", id: source.orgId }, urgency: health === "unbaked" ? "normal" : "high",
+      title, body: [sourceHealthGuidance(reason), detail].filter(Boolean).join("\n\n"), href: this.healthHref(source.id),
+      dedupeKey: key,
+    });
+  }
+
+  /** End of a scheduler pass: a provisional state observed in an earlier
+   * pass and still stored now is confirmed and notified. A state that moved
+   * on just drops its pending mark. Never throws. */
+  private async confirmPendingEpisodes(): Promise<void> {
+    if (!this.attention) return;
+    for (const [sourceId, ep] of this.episodes) {
+      const pending = ep.pending;
+      if (!pending || pending.pass >= this.passSeq) continue;
+      try {
+        ep.pending = undefined;
+        const source = await this.loadSource(sourceId).catch(() => null);
+        if (!source) { this.episodes.delete(sourceId); continue; }
+        if (source.health !== pending.health || source.healthReason !== pending.reason) continue;
+        if (ep.notifiedReasons.has(pending.reason)) continue;
+        if (!(await this.sourceMatters(source))) continue;
+        // A bake or fallback write may have moved (and posted) this episode
+        // while `sourceMatters` was awaited: drop the stale pending reason.
+        if (this.episodes.get(sourceId) !== ep || ep.reason !== pending.reason || ep.notifiedReasons.has(pending.reason)) continue;
+        await this.postUnhealthy(source, ep, pending.health, pending.reason, source.healthDetail ?? null);
+      } catch (err) {
+        console.error(`health notification confirm for ${sourceId} failed:`, err);
+      }
+    }
+  }
+
+  /** Spec 11.1: a fallback notifies immediately. When the scheduler already
+   * diagnosed the state (so the fallback makes no health write) and the
+   * episode is still provisional on that same state, a session has now run
+   * on stock: post it through the confirmation path. */
+  private async promotePendingOnFallback(sourceId: string, health: SourceHealth, reason: SourceHealthReason): Promise<void> {
+    const ep = this.episodes.get(sourceId);
+    if (!this.attention || !ep?.pending) return;
+    if (ep.pending.health !== health || ep.pending.reason !== reason || ep.notifiedReasons.has(reason)) return;
+    const source = await this.loadSource(sourceId).catch(() => null);
+    if (!source || !(await this.sourceMatters(source))) return;
+    if (this.episodes.get(sourceId) !== ep || ep.pending?.reason !== reason || ep.notifiedReasons.has(reason)) return;
+    await this.postUnhealthy(source, ep, health, reason, source.healthDetail ?? null);
+  }
+
+  /** Spec 11 rollout (M2): only transitions notify, so a source already
+   * unhealthy at boot would stay silent. Opens a notified episode for every
+   * unhealthy source that matters, keyed by its stored `health_checked_at`.
+   * `routeAttention` inserts by deterministic id with ON CONFLICT DO NOTHING,
+   * so a restart re-posts nothing, read or unread. */
+  async catchUpUnhealthySources(): Promise<void> {
+    if (!this.attention) return;
+    const rows = await this.db.select().from(imageSources).where(inArray(imageSources.health, [...UNHEALTHY]));
+    for (const source of rows) {
+      try {
+        if (source.healthCheckedAt === null || this.episodes.has(source.id)) continue;
+        if (!(await this.sourceMatters(source))) continue;
+        const ep: HealthEpisode = {
+          reason: source.healthReason, keyAt: source.healthCheckedAt, startedAt: source.healthCheckedAt,
+          notified: false, notifiedReasons: new Set(), notifiedKey: null,
+        };
+        this.episodes.set(source.id, ep);
+        await this.postUnhealthy(source, ep, source.health, source.healthReason, source.healthDetail ?? null);
+      } catch (err) {
+        console.error(`startup health catch-up for ${source.id} failed:`, err);
+      }
+    }
+  }
+
+  /** Whether a session fell back from this source since `since`. The
+   * in-process record survives a cleared `image_fallback`; the session
+   * query covers a restarted process. */
+  private async fellBackSince(source: ImageSourceRow, since: number): Promise<boolean> {
+    if ((this.lastFallbackAt.get(source.id) ?? 0) >= since) return true;
+    const rows = await this.db.select({ id: agentSessions.id }).from(agentSessions)
+      .where(and(eq(agentSessions.orgId, source.orgId), sql`${agentSessions.imageFallback} ->> 'sourceId' = ${source.id}`, sql`(${agentSessions.imageFallback} ->> 'at')::bigint >= ${since}`)).limit(1);
+    return rows.length > 0;
   }
 
   /** Spec 6.3: the image contract only gates the kubernetes provider (the
@@ -1667,6 +1915,36 @@ export class SourceService {
       group.latest[row.status] = (group.latest[row.status] ?? 0) + 1;
     }
     updatePrebuildQueueSnapshot([...groups.values()]);
+    await this.refreshSourceHealthSnapshot();
+  }
+
+  /** Gauges for source health. One query over all sources; the "bound" test
+   * is `sourceMatters` evaluated in memory (a repo bound within the window,
+   * a base with such a repo beneath it) so there is no per-source query. */
+  private async refreshSourceHealthSnapshot(): Promise<void> {
+    const rows = await this.db.select({
+      id: imageSources.id,
+      kind: imageSources.kind,
+      parentId: imageSources.parentId,
+      health: imageSources.health,
+      reason: imageSources.healthReason,
+      lastBoundAt: imageSources.lastBoundAt,
+      enabled: imageSources.enabled,
+    }).from(imageSources);
+    const since = this.now() - BOUND_WINDOW_MS;
+    const basesWithBoundRepo = new Set<string>();
+    for (const r of rows) if (r.kind === "repo" && r.parentId && (r.lastBoundAt ?? 0) >= since) basesWithBoundRepo.add(r.parentId);
+    const groups = new Map<string, SourceHealthSnapshot>();
+    for (const r of rows) {
+      const key = `${r.kind}|${r.health}|${r.reason}`;
+      const group = groups.get(key) ?? { sourceKind: r.kind, health: r.health, reason: r.reason, count: 0, boundUnhealthy: 0 };
+      group.count += 1;
+      // Same rule as `sourceMatters`: a disabled source never counts.
+      const matters = r.enabled && (r.kind === "repo" ? (r.lastBoundAt ?? 0) >= since : r.kind === "base" && basesWithBoundRepo.has(r.id));
+      if (matters && UNHEALTHY.has(r.health)) group.boundUnhealthy += 1;
+      groups.set(key, group);
+    }
+    updateSourceHealthSnapshot([...groups.values()]);
   }
 
   /** One poll pass: syncs every `queued`/`building` row from
@@ -1746,9 +2024,9 @@ export class SourceService {
         }
         const contract = await this.stampContract(row, source).catch((err): ContractRead => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
         const stamped = (await this.db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
-        if (!contract.ok) await this.setSourceHealth(row.sourceId, "stale", "contract_unknown", contract.error);
-        else if (stamped && this.contractOk(stamped)) await this.setSourceHealth(row.sourceId, "healthy", "ok", null);
-        else await this.setSourceHealth(row.sourceId, "incompatible", "contract", contractDetail(row.id, stamped?.contractVersion ?? null));
+        if (!contract.ok) await this.setSourceHealth(row.sourceId, "stale", "contract_unknown", contract.error, BAKE);
+        else if (stamped && this.contractOk(stamped)) await this.setSourceHealth(row.sourceId, "healthy", "ok", null, BAKE);
+        else await this.setSourceHealth(row.sourceId, "incompatible", "contract", contractDetail(row.id, stamped?.contractVersion ?? null), BAKE);
         recordPrebuildTransition(dimensions, "succeeded");
         recordPrebuildCompletion(dimensions, observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, measuredSize);
         this.bakeSpans.get(row.id)?.end();
@@ -1771,7 +2049,7 @@ export class SourceService {
         this.bakeSpans.delete(row.id);
         logPrebuildEvent(canceled ? "bake_canceled" : "bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, error: status.error });
         const survivor = await this.currentBake(row.sourceId);
-        await this.setSourceHealth(row.sourceId, survivor && this.contractOk(survivor) ? "stale" : "failing", "bake_failed", status.error ?? null);
+        await this.setSourceHealth(row.sourceId, survivor && this.contractOk(survivor) ? "stale" : "failing", "bake_failed", status.error ?? null, BAKE);
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).
@@ -1998,6 +2276,7 @@ export class SourceService {
    */
   async runSchedulerPass(): Promise<void> {
     if (!this.builder) return;
+    this.passSeq += 1;
     const all = await this.db.select().from(imageSources);
     // Parent-first: base (and external, though it never bakes) before repo.
     const bases = all.filter((s) => s.kind === "base");
@@ -2009,10 +2288,13 @@ export class SourceService {
         else if (source.kind === "repo") await this.maybeScheduleRepo(source);
       } catch (err) {
         console.error(`prebuild scheduler: source ${source.id} (${source.repoFullName ?? source.name}) failed:`, err);
-        await this.setSourceHealth(source.id, "failing", healthReasonForError(err), err instanceof Error ? err.message : String(err))
+        await this.setSourceHealth(source.id, "failing", healthReasonForError(err), err instanceof Error ? err.message : String(err), SCHEDULER)
           .catch((healthErr) => console.error(`prebuild scheduler: health write for ${source.id} failed:`, healthErr));
       }
     }
+    // One place, after every source: confirm provisional states observed in
+    // an earlier pass and still stored now (spec 11.1 hysteresis on opening).
+    await this.confirmPendingEpisodes();
     recordSchedulerPass(this.now());
   }
 
@@ -2025,7 +2307,7 @@ export class SourceService {
     // A base parented at another base waits for that parent's consistent,
     // compatible bake; the cascade starts it when the parent pushes.
     if (await this.parentBaseDefers(source)) {
-      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null, SCHEDULER);
       console.log(`prebuild scheduler: defer ${source.name}: waiting for parent base bake`);
       return;
     }
@@ -2035,13 +2317,13 @@ export class SourceService {
     const current = reread.current;
     if (current && current.identityHash === identity && this.contractOk(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
-      await this.setSourceHealth(source.id, "healthy", "ok", null);
+      await this.setSourceHealth(source.id, "healthy", "ok", null, SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
     const kind = this.contractRebakeFor(current, identity);
     if (kind === "reread") {
-      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read", SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
@@ -2049,12 +2331,12 @@ export class SourceService {
     // have dispatched one that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)), SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     if (kind === "stuck") {
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null), SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
       return;
     }
@@ -2063,7 +2345,7 @@ export class SourceService {
     // pass's catch (failing/<reason>) without flapping through pending first.
     const newest = await this.newestBake(source.id);
     await this.startBake(source.id, "scheduler");
-    await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
+    await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest), SCHEDULER);
   }
 
   private async maybeScheduleRepo(source: ImageSourceRow): Promise<void> {
@@ -2072,7 +2354,7 @@ export class SourceService {
     // Defer when the parent base has no consistent pushed bake yet — the
     // push-kick in `syncActiveBuilds` (or the next scheduler tick) rebakes.
     if (await this.repoBakeDefers(source)) {
-      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null, SCHEDULER);
       console.log(`prebuild scheduler: defer ${source.name}: waiting for base bake`);
       return;
     }
@@ -2109,13 +2391,13 @@ export class SourceService {
     const current = reread.current;
     if (current && current.commitSha === head.sha && current.identityHash === identity && this.contractOk(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
-      await this.setSourceHealth(source.id, "healthy", "ok", null);
+      await this.setSourceHealth(source.id, "healthy", "ok", null, SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
     const kind = this.contractRebakeFor(current, identity, head.sha);
     if (kind === "reread") {
-      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read", SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
@@ -2123,12 +2405,12 @@ export class SourceService {
     // tick) may have dispatched a bake for this source that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)), SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     if (kind === "stuck") {
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null), SCHEDULER);
       console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
       return;
     }
@@ -2139,13 +2421,13 @@ export class SourceService {
     // above already gated the expensive builder dispatch.
     try {
       await this.startBake(source.id, "scheduler");
-      await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest), SCHEDULER);
     } catch (err) {
       // A newly declared/changed `baseSetup` surfaces here on the first pass:
       // startRepoBake linked the synthetic base and kicked ITS bake instead.
       // That is a defer, not a failure — the push cascade bakes this repo.
       if (err instanceof RepoBaseLayerBakingError) {
-        await this.setSourceHealth(source.id, "stale", "waiting_for_base", err.message);
+        await this.setSourceHealth(source.id, "stale", "waiting_for_base", err.message, SCHEDULER);
         console.log(`prebuild scheduler: defer ${source.name}: ${err.message}`);
         return;
       }
@@ -2269,8 +2551,13 @@ export class SourceService {
       // Never overwrite a diagnosis (failing/*, stale/<not ok>, incompatible/*).
       const undiagnosed = row.health === "healthy" || row.health === "unbaked" || (row.health === "stale" && row.reason === "ok");
       if (undiagnosed) {
-        await this.setSourceHealth(event.sourceId, "incompatible", "contract", contractDetail(event.bakeId, event.contract));
+        await this.setSourceHealth(event.sourceId, "incompatible", "contract", contractDetail(event.bakeId, event.contract), { origin: "fallback" });
+      } else {
+        await this.promotePendingOnFallback(event.sourceId, row.health, row.reason)
+          .catch((err) => console.error(`health notification for ${event.sourceId} failed:`, err));
       }
+      // After the health write, so a fallback that opens the episode counts.
+      this.lastFallbackAt.set(event.sourceId, this.now());
       // Act only when nothing newer was tried (failed or active) since the
       // bake this session fell back from.
       const newest = await this.newestBake(event.sourceId);
@@ -2553,7 +2840,11 @@ export class SourceService {
     }, this.schedulerIntervalMs);
     this.schedulerTimer.unref();
     // Arming counts as a pass, so a scheduler stuck from boot still ages.
-    recordSchedulerPass(this.now());
+    // Without a builder no pass ever runs, so no age series is started.
+    if (this.builder) recordSchedulerPass(this.now());
+    // One-time catch-up for sources already unhealthy at boot (spec 11, M2).
+    this.startupCatchUp = this.catchUpUnhealthySources()
+      .catch((err) => console.error("startup health catch-up failed:", err));
   }
 
   /** Clears all intervals. Safe to call even if `start()` was never

@@ -100,6 +100,7 @@ sourcesRouter.get("/", async (c) => {
       sourceId: bakes.sourceId,
       status: bakes.status,
       createdAt: bakes.createdAt,
+      finishedAt: bakes.finishedAt,
     })
     .from(bakes)
     .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
@@ -433,6 +434,9 @@ sourcesRouter.get("/:id/bakes", async (c) => {
       startedAt: bakes.startedAt,
       finishedAt: bakes.finishedAt,
       createdAt: bakes.createdAt,
+      contractVersion: bakes.contractVersion,
+      contractSource: bakes.contractSource,
+      parentBakeId: bakes.parentBakeId,
     })
     .from(bakes)
     .where(eq(bakes.sourceId, id))

@@ -119,7 +119,20 @@ export interface RepoBinding {
   auth?: "auto" | "app" | "user";
 }
 
+import type { SourceHealth, SourceHealthReason } from "@valet/shared";
+export type { SourceHealth, SourceHealthReason };
+export interface ImageFallback { reason: "contract"; sourceId: string; bakeId: string; at: number }
+
+export interface SessionSandboxImage {
+  source: "repo" | "stock";
+  repoFullName: string | null;
+  builtAt: number | null;
+  fallback: ImageFallback | null;
+}
+
 export interface SessionDetail extends SessionSummary {
+  /** Which image the sandbox runs (spec 7.4). Absent on list rows. */
+  sandboxImage?: SessionSandboxImage;
   /** History remains readable; execution is disabled for this session. */
   readOnlyReason?: string;
   /** Permanent owner runtime; cannot be moved or deleted. */
@@ -2378,7 +2391,7 @@ export interface CreateTeamApiKeyResponse {
 // — every route derives `userId` from the caller's session, never a path
 // param. 30s polling from the web client; no WS plumbing this phase.
 
-export type NotificationKind = "notification" | "question" | "escalation" | "approval" | "review";
+export type NotificationKind = "notification" | "question" | "escalation" | "approval" | "review" | "platform";
 export type NotificationUrgency = "low" | "normal" | "high";
 
 export interface NotificationSummary {
@@ -5252,7 +5265,7 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 /** Mirrors the `image_sources` row for all kinds (external/base/repo). */
 export interface SourceSummary {
   /** Latest build summary on list responses. Older servers omit this field. */
-  latestBake?: Pick<BakeSummary, "status" | "createdAt"> | null;
+  latestBake?: Pick<BakeSummary, "status" | "createdAt" | "finishedAt"> | null;
   id: string;
   orgId: string;
   kind: "external" | "base" | "repo";
@@ -5269,6 +5282,10 @@ export interface SourceSummary {
   schedule: "nightly" | "off";
   enabled: boolean;
   lastBoundAt: number | null;
+  health: SourceHealth;
+  healthReason: SourceHealthReason;
+  healthDetail: string | null;
+  healthCheckedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -5287,6 +5304,9 @@ export interface BakeSummary {
   startedAt: number | null;
   finishedAt: number | null;
   createdAt: number;
+  contractVersion: number | null;
+  contractSource: "label" | "missing" | "override" | null;
+  parentBakeId: string | null;
 }
 
 export interface ListSourcesResponse {
