@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { createSkill } from "../services/skills.js";
 import type { CreateSessionResponse, SendPromptResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -97,6 +98,32 @@ describe("POST /messages: clientMessageId", () => {
 
     const queued = await api.providers.engineStore.listUnsettledSubmissions(sessionId);
     expect(queued).toHaveLength(1);
+  });
+
+  it("compares slash text as text unless it expands a skill", async () => {
+    api = await bootTestApi();
+    await createSkill(api.providers.db, { userId: "local-user", orgId: "local-org" }, {
+      name: "standup", description: "Summarize a standup", content: "Summarize $1", frontmatter: { invocation: "prompt" },
+    });
+    const { sessionId, threadId } = await pausedSession(api);
+    // An unknown "/word" is an ordinary prompt, so it compares like one.
+    const first = await send(api, sessionId, { text: "/alpha", threadId, clientMessageId: "key-0000005" });
+    expect(first.status).toBe(202);
+    const other = await send(api, sessionId, { text: "/beta", threadId, clientMessageId: "key-0000005" });
+    expect(other.status).toBe(409);
+
+    // A skill queues its expansion, so a resend compares the skill and its arguments.
+    const skill = await send(api, sessionId, { text: "/skill:standup ops", threadId, clientMessageId: "key-0000006" });
+    expect(skill.status).toBe(202);
+    const resend = await send(api, sessionId, { text: "/skill:standup ops", threadId, clientMessageId: "key-0000006" });
+    expect(resend.status).toBe(202);
+    expect(((await resend.json()) as SendPromptResponse).messageId).toBe(((await skill.json()) as SendPromptResponse).messageId);
+    const otherArgs = await send(api, sessionId, { text: "/skill:standup eng", threadId, clientMessageId: "key-0000006" });
+    expect(otherArgs.status).toBe(409);
+
+    const queued = await api.providers.engineStore.listUnsettledSubmissions(sessionId);
+    expect(queued.map((item) => item.dispatchId)).toEqual(["web:local-user:key-0000005", "web:local-user:key-0000006"]);
+    expect(queued.map((item) => item.content)).toEqual(["/alpha", expect.stringContaining("Summarize ops")]);
   });
 
   it("refuses a malformed key and names the fix", async () => {

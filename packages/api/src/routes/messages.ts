@@ -32,7 +32,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type PromptContent, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type QueueItem, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -334,16 +334,26 @@ const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{8,64}$/;
  * Whether a keyed resend carries the message its key first admitted. The
  * engine refuses a reused dispatch id with different content, but the route
  * answers a resend before it reaches the engine. So the route makes the same
- * check here: the text, each image, and the file count. Slash text is not
- * compared, because an expansion queues different text. The resend's file
- * refs cannot be compared without spending them.
+ * check here: the text, each image, and the file count. A skill expansion
+ * queues the expanded text, so for a resend that expands, the route compares
+ * the skill name and arguments that the first try stamped. Other slash text,
+ * such as an unknown "/word", queues unchanged and compares as text. The
+ * resend's file refs cannot be compared without spending them.
  */
-export function resendMatches(admitted: PromptContent, body: Pick<SendPromptRequest, "text" | "attachments" | "fileRefs">): boolean {
-  if (typeof admitted !== "string" && "kind" in admitted) return false;
-  const text = typeof admitted === "string" ? admitted : admitted.text ?? "";
-  const parts = typeof admitted === "string" ? [] : admitted.attachments ?? [];
-  const sentText = body.text ?? "";
-  if (!sentText.startsWith("/") && text !== sentText) return false;
+export function resendMatches(
+  admitted: Pick<QueueItem, "content" | "metadata">,
+  body: Pick<SendPromptRequest, "text" | "attachments" | "fileRefs">,
+  expansion?: { skill: string; args: string },
+): boolean {
+  const content = admitted.content;
+  if (typeof content !== "string" && "kind" in content) return false;
+  const text = typeof content === "string" ? content : content.text ?? "";
+  const parts = typeof content === "string" ? [] : content.attachments ?? [];
+  if (expansion) {
+    if (admitted.metadata?.skill !== expansion.skill || admitted.metadata?.skillArgs !== expansion.args) return false;
+  } else if (text !== (body.text ?? "")) {
+    return false;
+  }
   const images = parts.flatMap((part) => (part.type === "image" ? [part.url] : []));
   const sentImages = (body.attachments ?? []).map((att) => att.url);
   if (images.length !== sentImages.length || images.some((url, i) => url !== sentImages[i])) return false;
@@ -1692,7 +1702,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       : undefined;
     if (dispatchId) {
       const admitted = await c.var.providers.engineStore.getQueueItemByDispatchId(row.id, dispatchId);
-      if (admitted && !resendMatches(admitted.content, body)) {
+      const sent = admitted && body.text?.startsWith("/") ? dispatchCommand(body.text, loadedPrompt.engineSession.commandRegistry()) : undefined;
+      const expansion = sent?.kind === "expand" && sent.skill ? { skill: sent.skill.source.name, args: sent.skill.args } : undefined;
+      if (admitted && !resendMatches(admitted, body, expansion)) {
         return c.json({ error: "This message key already sent a different message. Send the message without clientMessageId, or with a new key." }, 409);
       }
       if (admitted) {
