@@ -33,7 +33,7 @@ level. The Valet implementation is a follow-up.
 
 ```mermaid
 sequenceDiagram
-    participant S as Sandbox<br/>valet-secrets run --env X=turnkey://NAME -- cmd
+    participant S as Sandbox<br/>valet-secrets run --env X=turnkey://personal/NAME -- cmd
     participant V as Valet API<br/>sandbox secret broker
     participant T as Turnkey
     S->>V: resolve NAME, with sandbox token
@@ -138,10 +138,28 @@ Against a test parent with synthetic values:
 
 ## Follow-up
 
-Valet-side detail, specified separately: the access rules per scope, the
-reference grammar and routing, the user-to-sub-organization table, the
-personal secret entry flow and routes, the broker key's deployment
-configuration, and tests.
+Valet-side detail, specified separately. How each piece should work:
+
+- **Access rules per scope.** Any session in the Valet organization can read
+  company secrets. Only a user-owned session whose token holder is the owner
+  can read that user's personal secrets.
+- **Reference grammar and routing.** `turnkey://company/NAME` resolves in the
+  parent and `turnkey://personal/NAME` in the session owner's sub-organization,
+  so a reference never names another user. `op://` keeps its 1Password path,
+  and `.valet/credentials.yaml` accepts both.
+- **User-to-sub-organization table.** One row per Valet user holding its
+  sub-organization ID, written when the sub-organization is first created,
+  with creation serialized per user so a retry never makes a second one.
+- **Personal secret entry flow and routes.** The API starts the import in the
+  user's sub-organization and returns the enclave key, the browser encrypts
+  the value with `encryptSecretToBundle`, and the API submits the import;
+  list and delete routes return metadata only.
+- **Broker key deployment configuration.** `VALET_TURNKEY_ORG_ID`,
+  `VALET_TURNKEY_API_PUBLIC_KEY`, and `VALET_TURNKEY_API_PRIVATE_KEY`, stored
+  like `VALET_ENCRYPTION_KEY` and listed in `docs/environment-variables.md`.
+- **Tests.** End-to-end against a test parent: a company secret resolves, a
+  personal secret resolves for its owner and not for another user's session,
+  and one command can mix `op://` and `turnkey://` references.
 
 ## References
 
