@@ -45,7 +45,7 @@ const done = "completed" as const;
 export const workTurnMessages: Message[] = [
   turnMessage(0, { role: "user", content: "What did Teammate say about pricing, and is the retry fix ready?", parts: [], author: { id: stressMe.id, name: stressMe.name } }),
   turnMessage(1, { role: "assistant", content: "", parts: [
-    { kind: "thinking", text: "", startedAt: NOW - 39 * MINUTE, durationMs: 2400 },
+    { kind: "thinking", text: "", summary: "The staging migration needs the shared credentials rotated first, so check the secret store before running it.", startedAt: NOW - 39 * MINUTE, durationMs: 2400 },
     { kind: "tool_call", callId: "turn-ff", toolName: "call_tool", status: done, args: { tool_id: "fireflies.fireflies_search", summary: "Find last week's pricing calls", params: { query: "pricing" } }, result: { text: "2 meetings" } },
   ] }),
   turnMessage(2, { role: "assistant", content: "", parts: [

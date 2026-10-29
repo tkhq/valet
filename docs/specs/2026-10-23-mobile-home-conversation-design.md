@@ -100,7 +100,7 @@ reply as a normal user message; it cannot bypass tool approval policy.
 Thinking duration comes from measured provider events and saved timing
 metadata. Adjacent reasoning intervals combine into one timing line.
 Historical messages without timing metadata do not receive invented times.
-The UI does not expose private reasoning text.
+A thought line opens to the provider's reasoning summary. The model's own reasoning text is not stored, and the summary is never sent back to the model.
 
 Processing feedback covers the gap before text or tools stream. Slack work
 status is tracked separately from response streaming and cleared when work

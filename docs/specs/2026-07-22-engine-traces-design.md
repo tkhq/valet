@@ -512,13 +512,13 @@ Landed as specified, with these resolved deviations / answered open questions:
 
 ### Measured reasoning intervals
 
-New thinking parts contain an empty `text` field; private provider reasoning is neither streamed nor stored.
+New thinking parts contain an empty `text` field, so a rebuilt transcript sends the model no reasoning text. The provider's reasoning summary is stored in `summary` for display only (2026-10-29), capped at 16,000 characters. A redacted block stores no summary, because its content is an opaque payload. Nothing that builds model input or estimates tokens reads `summary`. Live `thinking_update` events carry the summary once, when the block ends, not on every delta.
 Thinking parts retain optional `startedAt` and `durationMs` values for each provider content block.
 The engine measures from `thinking_start` to `thinking_end`, or the next content block or interrupted message end.
 These values measure observed thinking events. Some providers stream summaries after hidden computation, which this interval cannot measure.
 Live `thinking_update` events use the ephemeral stream. A final durable `message_update` carries the persisted parts before `message_end`.
 REST history retains the same timing. Older thinking parts have no duration and show an untimed label.
-The web shows `Thought for Ns` for a measured block, including inside expanded work groups.
+The web shows `Thought for Ns` for a measured block, including inside expanded work groups. The line opens to the summary when one exists.
 Adjacent thinking blocks without a tool between them share one label, using the sum of their measured durations.
 A round without thinking content has no thought label. Turn duration never supplies a reasoning duration.
 
