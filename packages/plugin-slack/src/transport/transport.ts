@@ -427,14 +427,18 @@ export class SlackTransport implements ChannelTransport {
     if (subtype !== undefined && subtype !== "file_share") return null;
 
     // The agent surface is the DM, plus a group DM message that mentions the
-    // app. Other channel traffic is the event pipeline's.
+    // app or replies in a thread without a mention. The host delivers such a
+    // reply only to a chat the sender's own mention opened in that thread.
+    // Other channel traffic is the event pipeline's.
     const channelType = str(event.channel_type);
     const group = channelType === "mpim";
-    if (channelType !== "im" && !(group && this.mentionsSelf(event))) return null;
+    const mentioned = group && this.mentionsSelf(event);
+    const ts = str(event.ts) ?? str(event.event_ts);
+    const threadReply = str(event.thread_ts) !== undefined && str(event.thread_ts) !== ts;
+    if (channelType !== "im" && !mentioned && !(group && threadReply)) return null;
 
     const channel = str(event.channel);
     const user = str(event.user);
-    const ts = str(event.ts) ?? str(event.event_ts);
     if (!channel || !user || !ts) return null;
     if (this.botUserId !== undefined && user === this.botUserId) return null;
 
@@ -458,7 +462,9 @@ export class SlackTransport implements ChannelTransport {
 
     // Match the command against the user's own text: a forward riding along
     // (its unfurl text is appended above) must not defeat the $ anchor.
-    const linkCmd = ownText !== "" ? LINK_COMMAND_RE.exec(ownText) : null;
+    // A group reply without a mention is not addressed to the app, so it is
+    // never a link command.
+    const linkCmd = ownText !== "" && (!group || mentioned) ? LINK_COMMAND_RE.exec(ownText) : null;
     if (linkCmd) {
       const inbound: InboundChannelEvent = {
         dispatchId: `slack:${eventId}`,
@@ -485,7 +491,7 @@ export class SlackTransport implements ChannelTransport {
     if (group) {
       // The envelope marks a conversation shared with another organization.
       const external = rec(update)?.is_ext_shared_channel === true;
-      inbound.group = { channelId: channel, messageTs: ts, ...(external ? { external } : {}) };
+      inbound.group = { channelId: channel, messageTs: ts, ...(external ? { external } : {}), ...(mentioned ? {} : { followUp: true as const }) };
     }
     const context = this.contextOf(event);
     if (context) inbound.context = context;

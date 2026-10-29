@@ -402,10 +402,33 @@ describe("parseUpdate — the agent surface events", () => {
     });
   });
 
-  it("leaves a group DM message without a mention to the event pipeline", () => {
+  it("passes a group DM thread reply without a mention to the host as a follow-up", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "link me to the thread for this",
+      ts: "1700000000.000700", thread_ts: "1700000000.000100",
+    })));
+    expect(event).toMatchObject({
+      kind: "message",
+      conversationKey: conversationKeyFor(TEAM, "C0GROUP", "1700000000.000100"),
+      text: "link me to the thread for this",
+      threadTs: "1700000000.000100",
+      group: { channelId: "C0GROUP", messageTs: "1700000000.000700", followUp: true },
+    });
+    // A reply without a mention is not addressed to the app, so it is never a link command.
+    expect(transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "link ABC123", ts: "1700000000.000800", thread_ts: "1700000000.000100",
+    })))?.kind).toBe("message");
+  });
+
+  it("leaves a top-level group DM message without a mention to the event pipeline", () => {
     const transport = makeTransport();
     expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "lunch?" })))).toBeNull();
     expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UOTHER> lunch?" })))).toBeNull();
+    // A thread root names its own ts as thread_ts; it is not a reply.
+    expect(transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "lunch?", ts: "1700000000.000100", thread_ts: "1700000000.000100",
+    })))).toBeNull();
     // Without its own user id the app cannot tell that it was mentioned.
     expect(makeTransport({ botUserId: undefined }).parseUpdate(
       envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UBOT> hi" })),

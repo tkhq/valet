@@ -560,6 +560,54 @@ describe("ChannelHost.handleUpdate", () => {
     }
   });
 
+  it("delivers a group DM reply without a mention to the chat its sender opened there, overheard", async () => {
+    const fetchThreadWindow = vi.fn(async () => null);
+    const setStatus = vi.fn(async () => {});
+    const { slackHost, slack } = await startSlackHost({ fetchThreadWindow, setStatus });
+    try {
+      const key = "slack:T1:C0FOLLOW:444.1";
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-1", conversationKey: key, text: "can you see this", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.1" },
+      }));
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = await session.threadByKey("slack:C0FOLLOW:444.1");
+      if (!thread) throw new Error("Expected the group conversation's thread");
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
+      setStatus.mockClear();
+
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-2", conversationKey: key, text: "link me to the thread for this", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.7", followUp: true },
+      }));
+      const followUp = async () => (await engineStore.getEntries(session.id, thread.id)).find((e) =>
+        e.type === "message" && e.role === "user" && e.content.includes("link me to the thread for this"));
+      await vi.waitFor(async () => expect(await followUp()).toBeDefined());
+      const entry = await followUp();
+      // Overheard, as in a followed channel thread: the assistant replies
+      // with reply_to_origin only when the message is for it.
+      expect(entry?.type === "message" ? entry.signal?.origin : undefined)
+        .toEqual({ channelType: "slack", threadKey: "slack:C0FOLLOW:444.1", reply: "manual", messageTs: "444.7" });
+      expect(setStatus).not.toHaveBeenCalled();
+
+      // Another person's reply, and a reply in a thread with no chat, open nothing.
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-3", conversationKey: key, sender: { externalId: "U-NOT-LINKED" }, text: "tracing logs", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.8", followUp: true },
+      }));
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-4", conversationKey: "slack:T1:C0FOLLOW:555.1", text: "lunch?", threadTs: "555.1",
+        group: { channelId: "C0FOLLOW", messageTs: "555.2", followUp: true },
+      }));
+      expect(await session.threadByKey("slack:C0FOLLOW:555.1")).toBeNull();
+      expect(slack.send).not.toHaveBeenCalledWith(key, { markdown: expect.stringContaining("Link your Valet account") });
+      const drops = await testDb.appDb.select().from(eventDropLog);
+      expect(drops.filter((d) => d.conversationKey === key || d.conversationKey === "slack:T1:C0FOLLOW:555.1")).toHaveLength(0);
+    } finally {
+      await slackHost.stop();
+    }
+  });
+
   it("leaves a group DM mention to a rule that listens there", async () => {
     const fetchThreadWindow = vi.fn(async () => null);
     const { slackHost } = await startSlackHost({ fetchThreadWindow }, true);

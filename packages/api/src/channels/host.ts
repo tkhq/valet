@@ -1567,8 +1567,10 @@ export class ChannelHost {
     }
 
     // A group conversation shared with another organization reaches people
-    // outside it, so the assistant does not answer there at all.
+    // outside it, so the assistant does not answer there at all. A reply
+    // without a mention asked nothing, so it gets no notice.
     if (event.group?.external) {
+      if (event.group.followUp) return;
       await this.dropLog(orgId, "external_group", event.conversationKey, `externalId=${event.sender.externalId}`);
       await transport?.send(event.conversationKey, {
         markdown: "I can't answer in a group conversation with people from another organization. Message me directly, or mention me in a channel of this workspace.",
@@ -1577,8 +1579,10 @@ export class ChannelHost {
     }
 
     // A rule that listens to this group DM answers there itself, as it does in
-    // a channel, so the sender's own assistant stays out of it.
-    if (event.group && await this.groupRuleAnswers(orgId, event)) {
+    // a channel, so the sender's own assistant stays out of it. A reply
+    // without a mention reaches only a chat that the sender's own mention
+    // opened, which a rule did not take, so it skips this check.
+    if (event.group && !event.group.followUp && await this.groupRuleAnswers(orgId, event)) {
       await this.dropLog(orgId, "group_rule_answers", event.conversationKey, `channel=${event.group.channelId}`);
       return;
     }
@@ -1586,6 +1590,9 @@ export class ChannelHost {
     // Rule 3: resolve sender identity for every other event kind.
     const identity = await identityForExternal(this.deps.db, channelType, event.sender.externalId);
     if (!identity) {
+      // Anyone can talk in a group DM thread. A reply without a mention from
+      // someone with no Valet account is not a request, so it gets no notice.
+      if (event.group?.followUp) return;
       await this.dropLog(orgId, "unlinked_sender", event.conversationKey, `externalId=${event.sender.externalId}`);
       await this.maybeReplyUnlinked(transport, event.conversationKey);
       return;
@@ -1803,8 +1810,14 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, true);
-    if (!thread) throw new Error("A new direct message must resolve to a chat.");
+    // A group DM reply without a mention continues the sender's chat in that
+    // thread when their own mention opened one. It never opens a chat.
+    const followUp = event.group?.followUp === true;
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, !followUp);
+    if (!thread) {
+      if (followUp) return;
+      throw new Error("A new direct message must resolve to a chat.");
+    }
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1812,7 +1825,8 @@ export class ChannelHost {
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
-    const processing = event.threadTs ? this.processingStatus.begin({
+    // The assistant may stay silent on a follow-up, so it shows no status.
+    const processing = event.threadTs && !followUp ? this.processingStatus.begin({
       channelType, conversationKey: event.conversationKey, threadTs: event.threadTs,
       sessionId: session.id, threadId: thread.id,
     }) : undefined;
@@ -1853,7 +1867,10 @@ export class ChannelHost {
         kind: "signal",
         signalType: `${channelType}.message`,
         body,
-        origin: { channelType, threadKey },
+        // A follow-up is overheard, as in a followed channel thread: the
+        // assistant replies with reply_to_origin only when the message is
+        // for it, and stays silent when people talk to each other.
+        origin: { channelType, threadKey, ...(followUp && event.group ? { reply: "manual" as const, messageTs: event.group.messageTs } : {}) },
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
       };
@@ -1870,6 +1887,9 @@ export class ChannelHost {
           // Gate and command-result delivery use this mark to distinguish a
           // channel turn from a web turn on the same bound thread (TKAI-323).
           channel: { channelType, channelId: event.conversationKey },
+          // An overheard follow-up waits behind a running turn and merges with
+          // other overheard lines; it never interrupts the turn.
+          ...(followUp ? { queueMode: "followup" as const } : {}),
         },
       );
       this.processingStatus.bind(processing, receipt.queueItemId);
