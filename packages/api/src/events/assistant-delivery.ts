@@ -427,7 +427,8 @@ async function deliverToAssistantThreadInner(
   // submission check covers an api restart between admit and claim.)
   if (deps.fetchThreadContext && signal.origin) {
     const store = session.providers.store;
-    const existing = await store.getEntries(session.id, thread.id);
+    // Only whether the thread is empty: one entry answers it.
+    const existing = await store.getEntries(session.id, thread.id, { limit: 1 });
     if (existing.length === 0) {
       const unsettled = await store.listUnsettledSubmissions(session.id);
       if (!unsettled.some((item) => item.threadId === thread.id)) {

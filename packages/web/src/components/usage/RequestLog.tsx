@@ -5,6 +5,7 @@
  */
 import type { ProxyRequestListItem } from "@valet/api/wire";
 import { Button } from "~/components/primitives";
+import { formatRequestDateTime } from "~/lib/format-when";
 
 interface RequestLogProps {
   items: ProxyRequestListItem[];
@@ -43,7 +44,7 @@ export function RequestLog({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line bg-paper-muted">
-              <th className="px-3 py-2 text-left font-medium text-muted whitespace-nowrap">Time</th>
+              <th className="px-3 py-2 text-left font-medium text-muted whitespace-nowrap">Date / time</th>
               <th className="px-3 py-2 text-left font-medium text-muted">Model</th>
               <th className="px-3 py-2 text-left font-medium text-muted">Harness</th>
               <th className="px-3 py-2 text-right font-medium text-muted">Tokens</th>
@@ -57,24 +58,28 @@ export function RequestLog({
                 <td colSpan={6} className="px-3 py-3 text-center text-muted">No requests recorded on this page.</td>
               </tr>
             )}
-            {items.map((item) => (
-              <tr key={item.id} className="h-11 border-b border-line last:border-0 sm:h-auto hover:bg-ink-wash">
-                <td className="px-3 py-2 text-muted whitespace-nowrap">
-                  {new Date(item.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                </td>
-                <td className="px-3 py-2 text-muted truncate max-w-[12rem]" title={item.model ?? undefined}>
-                  {item.model ?? <span className="italic">—</span>}
-                </td>
-                <td className="px-3 py-2 text-muted truncate max-w-[8rem]" title={item.harness ?? undefined}>
-                  {item.harness ?? <span className="italic">—</span>}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted">{item.totalTokens.toLocaleString()}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted">
-                  {item.costUsd != null ? `$${item.costUsd.toFixed(4)}` : "—"}
-                </td>
-                <td className="px-3 py-2">{statusBadge(item.statusCode, item.hasError)}</td>
-              </tr>
-            ))}
+            {items.map((item) => {
+              const date = new Date(item.createdAt);
+              const validDate = !Number.isNaN(date.getTime());
+              return (
+                <tr key={item.id} className="h-11 border-b border-line last:border-0 sm:h-auto hover:bg-ink-wash">
+                  <td className="px-3 py-2 text-muted whitespace-nowrap" title={validDate ? date.toISOString() : undefined}>
+                    {formatRequestDateTime(item.createdAt)}
+                  </td>
+                  <td className="px-3 py-2 text-muted truncate max-w-[12rem]" title={item.model ?? undefined}>
+                    {item.model ?? <span className="italic">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-muted truncate max-w-[8rem]" title={item.harness ?? undefined}>
+                    {item.harness ?? <span className="italic">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-muted">{item.totalTokens.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-muted">
+                    {item.costUsd != null ? `$${item.costUsd.toFixed(4)}` : "—"}
+                  </td>
+                  <td className="px-3 py-2">{statusBadge(item.statusCode, item.hasError)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

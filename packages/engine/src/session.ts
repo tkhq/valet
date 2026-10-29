@@ -1059,6 +1059,14 @@ export class Session {
     return [...this.threads.values()];
   }
 
+  /** Release the agent transcripts of loaded threads idle since `idleSince`
+   * (see `Thread.releaseIdleTranscript`). Returns how many it released. */
+  releaseIdleTranscripts(idleSince: number): number {
+    let released = 0;
+    for (const thread of this.listThreads()) if (thread.releaseIdleTranscript(idleSince)) released += 1;
+    return released;
+  }
+
   /**
    * Returns true when any thread OTHER than `excludeThreadId` currently has
    * an active run (i.e. is mid-turn). Used by the run-start reconcile window

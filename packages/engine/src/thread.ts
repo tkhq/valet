@@ -743,6 +743,10 @@ export class Thread {
   private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
+  /** When a turn, gate reconcile or compaction last loaded or used the agent transcript. */
+  private transcriptUsedAt = 0;
+  /** Background drives (resume drives, gate replays) in flight. */
+  private backgroundDrives = 0;
 
   constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
     this.transcriptPending = opts.restoreTranscript ?? false;
@@ -1647,6 +1651,8 @@ export class Thread {
   }): Promise<void> {
     const { suspended, resolution } = args;
     this.rearmedGate = false;
+    // The replay appends to the live transcript, so it must be loaded.
+    await this.ensureTranscript();
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -3041,11 +3047,20 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(
-      this.session.id,
-      this.id,
-    );
+  /** Every entry, payloads included. Compaction prunes, selects its cut point
+   * and rebuilds from all path entries, so it must not see stubs. */
+  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
+  private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const store = this.session.providers.store;
+    const snapshot = store.getTranscriptSnapshot
+      ? await store.getTranscriptSnapshot(this.session.id, this.id, keepQueueItemId === undefined ? undefined : { keepQueueItemId })
+      : await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) throw new Error(`thread not found: ${this.id}`);
     this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
     return snapshot;
@@ -3053,13 +3068,17 @@ export class Thread {
 
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
+    // Every caller is about to use the transcript, so mark it used even when
+    // it is already loaded: a gate reconcile awaits store calls before it sets
+    // `runningItem`, and the idle release must not land in that gap.
+    this.transcriptUsedAt = Date.now();
     if (!this.transcriptPending) return;
     if (!this.transcriptLoad) {
       this.transcriptLoad = withSpan(
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const snapshot = await this.transcriptSnapshot();
+          const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
           span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
           this.rehydrateTranscript(snapshot.entries);
         },
@@ -3068,6 +3087,24 @@ export class Thread {
       });
     }
     await this.transcriptLoad;
+    this.transcriptUsedAt = Date.now();
+  }
+
+  /**
+   * Drop the in-memory agent transcript of a thread that has not used it
+   * since `idleSince`, and return whether it did. The store keeps the
+   * history: the next turn, gate reconcile or compaction reloads it through
+   * `ensureTranscript`, as after a restart. Without this, a cached assistant
+   * session holds every transcript it loaded until the process exits.
+   */
+  releaseIdleTranscript(idleSince: number): boolean {
+    if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
+      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+    this.replaceAgentMessages([]);
+    this.transcriptPending = true;
+    // Mid-turn ids only matter while their turn runs.
+    this.midTurnAppended.clear();
+    return true;
   }
 
   /**
@@ -3615,6 +3652,7 @@ export class Thread {
     drive: () => Promise<void>,
   ): void {
     registerBackgroundDrive(itemId);
+    this.backgroundDrives += 1;
     const p = drive()
       .catch((err: unknown) => {
         this.emitError(errorCode, err instanceof Error ? err.message : String(err));
@@ -3624,6 +3662,7 @@ export class Thread {
         }
       })
       .finally(() => {
+        this.backgroundDrives -= 1;
         unregisterBackgroundDrive(itemId);
         this.session.notifyExecutionIdle();
       });
@@ -4145,7 +4184,7 @@ export class Thread {
     errorText: string = "interrupted",
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant") continue;
       if (e.queueItemId !== item.id) continue;
@@ -4294,7 +4333,7 @@ export class Thread {
     await this.ensureTranscript();
     const taskSource = this.taskSourceFor(item);
     if (taskSource) {
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(taskSource);
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
@@ -4426,6 +4465,7 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    await this.ensureTranscript();
     return withSpan(
       "agent.turn",
       {
@@ -4483,7 +4523,7 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
       const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
@@ -4659,7 +4699,7 @@ export class Thread {
     // or a second cap pass) must not duplicate it. Return the persisted
     // entry's attachments (the authoritative on-disk shape) so a retried
     // attempt still feeds the model the same image blocks.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     const existingUserEntry = existing.find(
       (e): e is MessageEntry =>
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
@@ -4813,6 +4853,7 @@ export class Thread {
           try {
             await this.runItemInner(item);
           } finally {
+            this.transcriptUsedAt = Date.now();
             this.turnSpan = undefined;
             this.llmSpan?.end();
             this.llmSpan = undefined;
@@ -4956,7 +4997,8 @@ export class Thread {
     // Retire an injected contract before an unrelated submission runs.
     const taskSource = this.taskSourceFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
-      const snapshot = await this.transcriptSnapshot();
+      // Keep the task's covered prompt whole: the rebuild below restores it.
+      const snapshot = await this.transcriptSnapshot(taskSource);
       const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
       const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
       const checkpoint = findMostRecentCompaction(activeEntries);
@@ -5731,7 +5773,7 @@ export class Thread {
 
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.transcriptSnapshot();
+    const snapshot = await this.fullSnapshot();
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
@@ -6065,7 +6107,7 @@ export class Thread {
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.transcriptSnapshot();
+      const updatedSnapshot = await this.fullSnapshot();
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
@@ -6544,7 +6586,9 @@ export class Thread {
 
   /** Whether the transcript already holds the user entry of queue item `itemId`. */
   private async hasUserEntry(itemId: string): Promise<boolean> {
-    const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+    // Only this item's entries: a whole-thread read here ran once per queued
+    // message that joined a running turn.
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: itemId });
     return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
   }
 
@@ -7549,7 +7593,8 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
+    // Every reader below looks at this submission only.
+    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
     const text =
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)
