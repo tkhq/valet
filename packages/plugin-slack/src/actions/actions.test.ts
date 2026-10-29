@@ -376,6 +376,33 @@ describe('slack actions', () => {
     expect(result).toMatchObject({ success: true });
   });
 
+  // A label with a pipe and a newline passes the chart check. The table
+  // fallback put it into a cell unchanged, which split the row and added a
+  // forged one.
+  it('reply_to_origin keeps a label with pipes and newlines in one table cell', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const forged = { title: 'Share', chart: { type: 'pie', segments: [{ label: 'P|\n|forged|9|', value: 1 }] } };
+    await action('slack.reply_to_origin').execute({ text: 'Share:', charts: [forged] }, pluginCtx({ origin: slackOrigin }));
+    const [, retry] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const { blocks } = JSON.parse(retry.body as string) as { blocks: { text?: string }[] };
+    const table = blocks.map((block) => block.text ?? '').join('\n').split('\n').filter((line) => line.startsWith('|'));
+    expect(table).toEqual(['| Segment | Value |', '| --- | ---: |', '| P\\| \\|forged\\|9\\| | 1 |']);
+  });
+
+  // The table fallback is mrkdwn, where Slack reads <@U…> in a label as a
+  // mention. The mention check saw only the reply text.
+  it('reply_to_origin refuses a chart label that mentions an unknown user', async () => {
+    mockSlackMethods(fetchMock, (user) => user === 'U01ZZZZZZZ'
+      ? jsonResponse(200, { ok: false, error: 'user_not_found' })
+      : jsonResponse(200, { ok: true, user: { id: user } }));
+    const mention = { title: 'Owners', chart: { type: 'pie', segments: [{ label: '<@U01ZZZZZZZ>', value: 1 }] } };
+    const result = await action('slack.reply_to_origin').execute({ text: 'Owners:', charts: [mention] }, pluginCtx({ origin: slackOrigin }));
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('U01ZZZZZZZ') });
+    expect(messageWrites(fetchMock)).toHaveLength(0);
+  });
+
   it('reply_to_origin refuses a chart Slack would reject, before it posts', async () => {
     const tooLong = { ...ticketsChart, title: 'x'.repeat(51) };
     const result = await action('slack.reply_to_origin').execute(

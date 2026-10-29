@@ -94,16 +94,25 @@ export function readChart(value: unknown): Chart | undefined {
   return chartProblem(value) === undefined ? (value as Chart) : undefined;
 }
 
+/**
+ * Chart text as one table cell: a line break becomes a space, and a pipe or
+ * backslash is escaped. Otherwise a label such as `P|\n|x|9|` splits its row
+ * and adds a forged row.
+ */
+function cell(text: string): string {
+  return text.replace(/[\r\n\u2028\u2029]+/g, " ").replace(/[\\|]/g, "\\$&");
+}
+
 /** The chart as a Markdown table, for a Slack client that rejects the native block. */
 export function chartAsMarkdown(chart: Chart): string {
   const body = chart.chart;
   const rows = body.type === "pie"
-    ? ["| Segment | Value |", "| --- | ---: |", ...body.segments.map((s) => `| ${s.label} | ${s.value} |`)]
+    ? ["| Segment | Value |", "| --- | ---: |", ...body.segments.map((s) => `| ${cell(s.label)} | ${s.value} |`)]
     : [
-      `| ${body.axis_config.x_label ?? ""} | ${body.series.map((s) => s.name).join(" | ")} |`,
+      `| ${cell(body.axis_config.x_label ?? "")} | ${body.series.map((s) => cell(s.name)).join(" | ")} |`,
       `| --- |${body.series.map(() => " ---: |").join("")}`,
       ...body.axis_config.categories.map((category) =>
-        `| ${category} | ${body.series.map((s) => s.data.find((p) => p.label === category)?.value ?? "").join(" | ")} |`),
+        `| ${cell(category)} | ${body.series.map((s) => s.data.find((p) => p.label === category)?.value ?? "").join(" | ")} |`),
     ];
-  return [`**${chart.title}**`, "", ...rows].join("\n");
+  return [`**${cell(chart.title)}**`, "", ...rows].join("\n");
 }

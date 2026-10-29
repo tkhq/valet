@@ -1386,7 +1386,7 @@ const replyToOrigin = action(Type.Object({
       fallbackBlocks = buildContentBlocks(withTables, markdownToSlackMrkdwn(withTables, { preserveSlackNativeSpans: true }),
         SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true, nativeTables: false });
     }
-    const mentionError = await unknownMentionError(o.token, [formattedText]);
+    const mentionError = await unknownMentionError(o.token, [formattedText, body.blocks, fallbackBlocks]);
     if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(o.token, body, ctx, args, fallbackBlocks);
     if (!res.ok) return slackError(res);
