@@ -19,7 +19,12 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
-import { securityCells } from "../schema/index.js";
+import {
+  clearSecurityCredentialSession,
+  registerSecurityCredentialValue,
+  SECURITY_CREDENTIAL_OUTPUT_BLOCKED,
+} from "../services/security-credential-tripwire.js";
+import { notifications, securityCells, securityEngagements, securityNeeds } from "../schema/index.js";
 import type {
   CreateSessionResponse,
   GetSessionSecurityResponse,
@@ -29,6 +34,16 @@ import type {
 
 const REPO = { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git" };
 const SHA = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
+/** The one credential declared for the credential-need-answer scenario below
+ * (Part 12). Written directly onto the engagement row (bypassing the create
+ * route's live 1Password preflight) since this suite runs with no
+ * ANTHROPIC_API_KEY or 1Password credentials. */
+const STAGING_CREDENTIAL = {
+  label: "stagingAdminToken",
+  env: "STAGING_ADMIN_TOKEN",
+  reference: "op://Engineering/staging-admin/token",
+  kind: "headerToken",
+};
 
 async function createSecuritySession(
   baseUrl: string,
@@ -63,6 +78,14 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
     const api = await bootTestApi();
     try {
       const { session, engagementId } = await createSecuritySession(api.baseUrl);
+      // Declare a credential directly on the row: the create route's live
+      // 1Password preflight is out of scope for this suite (no ANTHROPIC_API_KEY
+      // or op:// creds here), and only the label needs to exist for the
+      // needs-resolve path under test.
+      await api.providers.db
+        .update(securityEngagements)
+        .set({ credentialsJson: [STAGING_CREDENTIAL] })
+        .where(eq(securityEngagements.id, engagementId));
       const service = createSecurityEngagementService({ db: api.providers.db });
       const started = await service.startEngagement(engagementId, { resolvedSha: SHA });
       const cells = started.cells;
@@ -88,7 +111,7 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
           "",
         ].join("\n"),
       });
-      await service.completeCell(engagementId, cells[0].id, { settled: true });
+      await service.completeCell(engagementId, cells[0].id, { settled: true, openBackgroundWork: 0 });
       await service.dispatchCell(engagementId, {
         cellId: cells[1].id,
         spawn: async () => ({ childSessionId: "child-2" }),
@@ -126,7 +149,7 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
           "",
         ].join("\n"),
       });
-      await service.completeCell(engagementId, cells[1].id, { settled: true });
+      await service.completeCell(engagementId, cells[1].id, { settled: true, openBackgroundWork: 0 });
 
       // GET /security surfaces the needs_human need.
       const view = await fetch(`${api.baseUrl}/api/sessions/${session.id}/security`);
@@ -137,18 +160,44 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
       // The internal token is refused on the human resolve route.
       const asRunner = await postJson(
         `${api.baseUrl}/api/sessions/${session.id}/security/needs/resolve`,
-        { answers: [{ needId, resolution: "Token: stg_admin." }] },
+        { answers: [{ needId, credentialLabel: STAGING_CREDENTIAL.label }] },
         { "x-valet-internal": internalToken() },
       );
       expect(asRunner.status).toBe(403);
 
-      // The human answers; the delta re-run resets ONLY cell 2.
+      // INV-39: a credential need never takes a `resolution`. A submitted one
+      // is refused, both alongside a label and on its own, so a plaintext
+      // secret cannot be dropped in the free-text field and silently lost.
+      const withBoth = await postJson(
+        `${api.baseUrl}/api/sessions/${session.id}/security/needs/resolve`,
+        {
+          answers: [
+            { needId, credentialLabel: STAGING_CREDENTIAL.label, resolution: "hunter2" },
+          ],
+        },
+      );
+      expect(withBoth.status).toBe(400);
+      expect(((await withBoth.json()) as { error: string }).error).toBe(
+        "A credential need takes a credential label, not a resolution. " +
+          "Choose a declared label in credentialLabel and leave resolution empty.",
+      );
+      const resolutionOnly = await postJson(
+        `${api.baseUrl}/api/sessions/${session.id}/security/needs/resolve`,
+        { answers: [{ needId, resolution: "hunter2" }] },
+      );
+      expect(resolutionOnly.status).toBe(400);
+
+      // The human answers by naming the declared credential's label (INV-39):
+      // a plaintext `resolution` on a credential need would violate the CHECK
+      // constraint. The delta re-run resets ONLY cell 2.
       const resolve = await postJson(`${api.baseUrl}/api/sessions/${session.id}/security/needs/resolve`, {
-        answers: [{ needId, resolution: "Token: stg_admin_abc123." }],
+        answers: [{ needId, credentialLabel: STAGING_CREDENTIAL.label }],
       });
       expect(resolve.status).toBe(200);
       const resolved = (await resolve.json()) as SecurityResolveNeedsResponse;
       expect(resolved.answered).toHaveLength(1);
+      expect(resolved.answered[0].credentialLabel).toBe(STAGING_CREDENTIAL.label);
+      expect(resolved.answered[0].resolution).toBeNull();
       expect(resolved.resetCellIds).toEqual([cells[1].id]);
 
       const rows = await api.providers.db
@@ -159,14 +208,48 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
       expect(byOrdinal.get(1)).toBe("completed"); // untouched
       expect(byOrdinal.get(2)).toBe("pending"); // reset for the delta re-run
 
-      // The delta re-dispatch carries the resolution into the prompt.
+      // The delta re-dispatch carries the resolution into the prompt, naming
+      // the label, never the op:// reference or a resolved value.
       const redispatch = await service.dispatchCell(engagementId, {
         cellId: cells[1].id,
         spawn: async () => ({ childSessionId: "child-2b" }),
       });
       expect(redispatch.prompt).toContain("Resolved needs (continue the blocked work)");
-      expect(redispatch.prompt).toContain("stg_admin_abc123");
+      expect(redispatch.prompt).toContain(STAGING_CREDENTIAL.label);
+      expect(redispatch.prompt).not.toContain(STAGING_CREDENTIAL.reference);
     } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("refuses a need whose description carries a registered credential, before any row or ping", async () => {
+    const api = await bootTestApi();
+    try {
+      const { session, engagementId } = await createSecuritySession(api.baseUrl);
+      const service = createSecurityEngagementService({ db: api.providers.db });
+      const started = await service.startEngagement(engagementId, { resolvedSha: SHA });
+      await service.dispatchCell(engagementId, {
+        cellId: started.cells[0].id,
+        spawn: async () => ({ childSessionId: "child-leak" }),
+      });
+      registerSecurityCredentialValue("child-leak", engagementId, "sk-live-needs-0123456789abcdef");
+
+      // The route also accepts the runner's id in the URL. The scan must key
+      // on the acting child either way, since the tripwire holds the child's values.
+      for (const urlSessionId of ["child-leak", session.id]) {
+        const res = await postJson(
+          `${api.baseUrl}/api/sessions/${urlSessionId}/security/needs`,
+          { kind: "decision", description: "Is sk-live-needs-0123456789abcdef the production key?" },
+          { "x-valet-internal": internalToken(), "x-valet-session-id": "child-leak" },
+        );
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toBe(SECURITY_CREDENTIAL_OUTPUT_BLOCKED);
+      }
+      const needs = await api.providers.db.select().from(securityNeeds).where(eq(securityNeeds.engagementId, engagementId));
+      expect(needs).toEqual([]);
+      expect(await api.providers.db.select().from(notifications)).toEqual([]);
+    } finally {
+      clearSecurityCredentialSession("child-leak");
       await api.cleanup();
     }
   });

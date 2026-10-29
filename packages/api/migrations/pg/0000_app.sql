@@ -1388,7 +1388,8 @@ CREATE TABLE "security_engagements" (
 	"report_json" text,
 	"report_generated_at" bigint,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"credentials_json" jsonb
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
@@ -1481,6 +1482,9 @@ CREATE INDEX "security_handoffs_engagement" ON "security_handoffs" ("engagement_
 --> statement-breakpoint
 CREATE INDEX "security_handoffs_finding" ON "security_handoffs" ("finding_id");
 --> statement-breakpoint
+-- The broker classifies a sandbox caller by its handoff row on every resolve and find.
+CREATE INDEX "security_handoffs_child_session" ON "security_handoffs" ("child_session_id");
+--> statement-breakpoint
 -- One row per human note on a finding (spec §Re-scan / iterate). No unique
 -- constraint — a finding may carry a thread of many comments. author_user_id
 -- is always a user id: commenting is a human action, never the runner's.
@@ -1531,7 +1535,9 @@ CREATE TABLE "security_needs" (
 	"status" text DEFAULT 'open' NOT NULL,
 	"resolution" text,
 	"created_at" bigint NOT NULL,
-	"resolved_at" bigint
+	"resolved_at" bigint,
+	"credential_label" text,
+	CONSTRAINT "security_needs_credential_resolution_null" CHECK ("kind" <> 'credential' OR "resolution" IS NULL)
 );
 --> statement-breakpoint
 CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");

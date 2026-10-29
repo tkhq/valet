@@ -38,6 +38,9 @@ import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { routeAttention } from "../orchestrator/attention.js";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { sessionOwner } from "../services/session-owner.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
@@ -670,6 +673,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     engineStore,
     submit: (row, text, toolScope) => submitSessionPrompt({ db, engineHost }, row, text, { recordUserActivity: false, toolScope, inheritToolScope: true }),
+    // Runs only from a sweep, after `channelHost` below is built.
+    alert: (row, event) => routeAttention(
+      { db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } },
+      {
+        kind: "escalation",
+        owner: sessionOwner(row),
+        sessionId: row.id,
+        title: event.title,
+        body: event.body,
+        href: attentionHref(row.id, undefined, sessionOwner(row)),
+        dedupeKey: event.dedupeKey,
+      },
+    ),
     sweepIntervalMs: resolveSecurityNudgeIntervalMs(process.env),
     maxStalls: resolveSecurityNudgeMaxStalls(process.env),
   });

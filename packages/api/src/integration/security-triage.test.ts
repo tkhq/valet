@@ -7,7 +7,7 @@
  * run (validation, idempotent repeat, internal-token refusal).
  */
 import { describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -405,6 +405,29 @@ describe("api integration: security triage routes (M6)", () => {
       expect(finding?.handoffs).toHaveLength(1);
       expect(finding?.handoffs?.[0].childSessionId).toBe("child_fix_h");
       expect(finding?.handoffs?.[0].task).toBe("patch the ownership check");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("handoff route returns 500 with the child id's whereabouts when the link insert fails", async () => {
+    const api = await bootTestApi();
+    try {
+      const { session, engagementId } = await createSecuritySession(api.baseUrl);
+      await seedFinding(api, engagementId, { id: "fnd_lost" });
+      api.providers.childSpawner = async () => ({ childSessionId: "child_fix_lost", queueItemId: "q1" });
+      // The link insert is the only write after the spawn.
+      await api.providers.db.execute(sql`DROP TABLE "security_handoffs"`);
+
+      const res = await postJson(
+        `${api.baseUrl}/api/sessions/${session.id}/security/handoff`,
+        { findingId: "fnd_lost", threadId: "thread_1" },
+        { "x-valet-internal": internalToken(), "x-valet-session-id": session.id, "Content-Type": "application/json" },
+      );
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "The fix session was started but could not be linked to the finding. Open the session from the children list.",
+      );
     } finally {
       await api.cleanup();
     }

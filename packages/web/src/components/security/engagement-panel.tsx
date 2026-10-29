@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, Callout, ConfirmDialog, Spinner, StatusDot, TabBar } from "~/components/primitives";
+import { Badge, Button, Callout, ConfirmDialog, Spinner, StatusDot, TabBar } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -203,6 +203,23 @@ export function EngagementPanel({
                 ? "Configured by .valet/security.yml"
                 : "Preset: Code review"}
             </span>
+            {/* The labels a persona may name in a credential need. Labels
+                only: a resolved value never reaches this panel. */}
+            <div
+              className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted"
+              data-testid="engagement-credentials"
+            >
+              {engagement.credentialLabels.length > 0 ? (
+                <>
+                  <span>Credentials declared</span>
+                  {engagement.credentialLabels.map((label) => (
+                    <Badge key={label}>{label}</Badge>
+                  ))}
+                </>
+              ) : (
+                "No credentials declared"
+              )}
+            </div>
           </div>
           {cancellable && (
             <Button
@@ -307,7 +324,12 @@ export function EngagementPanel({
         {/* Blocking asks the human must answer (pivot-coordinator) — kept near the
             top so they are not missed. */}
         {needs && needs.length > 0 && (
-          <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
+          <NeedsSection
+            sessionId={sessionId}
+            needs={needs}
+            canAdminister={canAdminister}
+            credentialLabels={engagement.credentialLabels}
+          />
         )}
 
       </div>

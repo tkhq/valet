@@ -18,11 +18,15 @@
  * driver, not a silent invariant repair. A stall cap bounds it: after N
  * no-progress nudges the sweep stops nudging, posts ONE message asking the user
  * to step in, and emits `valet.security.runner.stalled`. A genuinely stuck
- * runner pages a human instead of looping forever.
+ * runner pages a human instead of looping forever. At the stall cap and at the
+ * submit-failure cap, the `alert` seam also sends the owner one attention
+ * escalation, so a person hears it even when the runner does not.
  */
+import { createHash } from "node:crypto";
 import { and, count, eq, or } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
 import { continuationToolScope, type ToolScope } from "@valet/shared";
+import { openBackgroundWork } from "../engine/wakeups-admin.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import {
@@ -38,12 +42,17 @@ import { recordSecurityRunnerStalled } from "../observability/security-metrics.j
 const DEFAULT_SWEEP_INTERVAL_MS = 20_000;
 const DEFAULT_MAX_STALLS = 3;
 
+/** How long a running cell's child may hold background work, measured from
+ * the cell's dispatch. Past it, the driver counts stalls and alerts. */
+export const SECURITY_BACKGROUND_WORK_MAX_MS = 24 * 60 * 60 * 1000;
+
 /** The re-drive prompt. Names the exact next step so the runner resumes the
  * loop rather than re-explaining its state. */
 export const NUDGE_TEXT =
-  "The security engagement is not complete and no cell is running. Do not wait for the user. " +
-  "Call sec_status now and continue the loop: dispatch the next pending or yielded cell, " +
-  "complete a settled one, or call sec_close when every cell is done.";
+  "The security engagement is not complete and the runner is idle. Do not wait for the user. " +
+  "Call sec_status now and continue the loop: complete a running cell whose child settled, " +
+  "dispatch the next pending or yielded cell, or call sec_close when every cell is done. " +
+  "If a running cell's background work has passed its limit, child_send the persona to cancel it with wakeup_cancel, or call sec_cell_fail.";
 
 /** The one message the sweep posts when the stall cap trips, then it goes
  * quiet until the engagement makes progress. */
@@ -69,12 +78,23 @@ export type RunnerSubmit = (
   toolScope?: ToolScope,
 ) => Promise<unknown>;
 
+/** The person-facing alert seam. The real binding routes through attention
+ * (`routeAttention`, kind "escalation") so the owner is notified and
+ * escalated. A runner prompt alone reaches only the model. */
+export type RunnerAlert = (
+  row: typeof agentSessions.$inferSelect,
+  event: { title: string; body: string; dedupeKey: string },
+) => Promise<void>;
+
 /** Per-engagement stall budget. In-memory only: a restart resets the budget,
  * which mirrors ChildWatcher's in-process attempt reset — acceptable, because
  * a nudge that a restart re-issues costs one extra turn, not correctness. */
 interface StallState {
   /** Progress signature at the last would-nudge decision. */
   signature: string;
+  /** `now()` when this entry was created or reset. The stall dedupe key
+   * carries it, so a later episode with a repeated signature alerts again. */
+  since: number;
   /** No-progress nudges accumulated against `signature`. */
   stalls: number;
   /** True once the stall message was posted for `signature` — post it once. */
@@ -84,6 +104,9 @@ interface StallState {
    * silently; this counts the run and trips ONE alert at the cap. Reset to 0 on
    * a submit that succeeds. */
   submitFailures: number;
+  /** `now()` at the first failure of the current run of submit failures. The
+   * submit-failure dedupe key carries it, so a later run alerts again. */
+  submitSince: number;
   /** True once the submit-failure alert fired — post it once, same contract as
    * `alerted`. */
   submitAlerted: boolean;
@@ -96,12 +119,15 @@ const DEFAULT_MAX_SUBMIT_FAILURES = 3;
 
 export interface SecurityRunnerDriverDeps {
   db: AppDb;
-  engineStore: Pick<SessionStore, "getSession" | "listThreads"> & {
+  engineStore: Pick<SessionStore, "getSession" | "listThreads" | "listWakeups" | "listActiveLeases"> & {
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
   };
   /** The submit seam. The real binding is `submitSessionPrompt({db, engineHost},
    * row, text)`; the driver stores it so tests can inject a spy. */
   submit: RunnerSubmit;
+  /** Notifies the session owner when a cap trips. Optional: without it, only
+   * the runner prompt and the metric fire. */
+  alert?: RunnerAlert;
   /** Override for tests. */
   now?: () => number;
   /** `<= 0` disables the sweep (start() no-ops), matching idle-hibernation. */
@@ -110,6 +136,8 @@ export interface SecurityRunnerDriverDeps {
   maxStalls?: number;
   /** Consecutive submit failures before the driver alerts (fix 10b). */
   maxSubmitFailures?: number;
+  /** Defaults to `SECURITY_BACKGROUND_WORK_MAX_MS`. */
+  backgroundWorkMaxMs?: number;
 }
 
 export class SecurityRunnerDriver {
@@ -120,11 +148,27 @@ export class SecurityRunnerDriver {
   private readonly now: () => number;
   private readonly maxStalls: number;
   private readonly maxSubmitFailures: number;
+  private readonly backgroundWorkMaxMs: number;
 
   constructor(private readonly deps: SecurityRunnerDriverDeps) {
     this.now = deps.now ?? Date.now;
     this.maxStalls = deps.maxStalls ?? DEFAULT_MAX_STALLS;
     this.maxSubmitFailures = deps.maxSubmitFailures ?? DEFAULT_MAX_SUBMIT_FAILURES;
+    this.backgroundWorkMaxMs = deps.backgroundWorkMaxMs ?? SECURITY_BACKGROUND_WORK_MAX_MS;
+  }
+
+  /** Send a person-facing alert without waiting for it. A failing or hanging
+   * sink logs and never blocks the sweep. */
+  private safeAlert(
+    runnerRow: typeof agentSessions.$inferSelect,
+    event: { title: string; body: string; dedupeKey: string },
+  ): void {
+    const log = (err: unknown) => console.error("security-runner-driver: alert failed", err);
+    try {
+      void this.deps.alert?.(runnerRow, event).catch(log);
+    } catch (err) {
+      log(err);
+    }
   }
 
   /**
@@ -158,12 +202,18 @@ export class SecurityRunnerDriver {
     } catch (err) {
       const state = this.stalls.get(engagementId);
       if (state) {
+        if (state.submitFailures === 0) state.submitSince = this.now();
         state.submitFailures += 1;
         if (state.submitFailures >= this.maxSubmitFailures && !state.submitAlerted) {
           state.submitAlerted = true;
           recordSecurityRunnerStalled();
-          // Best-effort human ask over the SAME failing seam: if this throws
-          // too, the metric already fired, so the alert is not lost.
+          // The submit seam just failed, so the person hears it over the
+          // alert seam. The runner ask below stays as a best-effort retry.
+          this.safeAlert(runnerRow, {
+            title: "Security runner needs attention",
+            body: SUBMIT_STALL_TEXT,
+            dedupeKey: `security-runner-down:${engagementId}:${state.submitSince}`,
+          });
           try {
             await this.deps.submit(runnerRow, SUBMIT_STALL_TEXT, toolScope);
           } catch (askErr) {
@@ -233,6 +283,17 @@ export class SecurityRunnerDriver {
         runningCell.childSessionId,
       );
       if (childUnsettled.length > 0) return;
+      // A settled child can still run background work (spec C4). Its next
+      // child.settled arrives when the work ends, so a nudge only burns stalls.
+      // The wait is bounded from the cell's dispatch, which a re-armed timer
+      // cannot move. Past the bound, fall through and count stalls.
+      const age = this.now() - (runningCell.dispatchedAt ?? runningCell.createdAt);
+      if (
+        age < this.backgroundWorkMaxMs &&
+        (await openBackgroundWork(this.deps.engineStore, runningCell.childSessionId)) > 0
+      ) {
+        return;
+      }
     }
 
     // 3. A gated OR actively-working submission is UNSETTLED. A non-empty list
@@ -261,9 +322,11 @@ export class SecurityRunnerDriver {
       // will not take a prompt fails regardless of engagement progress.
       this.stalls.set(engagement.id, {
         signature,
+        since: this.now(),
         stalls: 1,
         alerted: false,
         submitFailures: prior?.submitFailures ?? 0,
+        submitSince: prior?.submitSince ?? 0,
         submitAlerted: prior?.submitAlerted ?? false,
       });
       await this.safeSubmit(engagement.id, runnerRow, NUDGE_TEXT);
@@ -278,6 +341,14 @@ export class SecurityRunnerDriver {
         prior.alerted = true;
         recordSecurityRunnerStalled();
         await this.safeSubmit(engagement.id, runnerRow, stallText(prior.stalls));
+        // The key carries the signature hash and the episode start, so a later
+        // stall episode notifies again, even at a repeated signature.
+        const sig = createHash("sha1").update(prior.signature).digest("hex").slice(0, 8);
+        this.safeAlert(runnerRow, {
+          title: "Security review stalled",
+          body: stallText(prior.stalls),
+          dedupeKey: `security-stall:${engagement.id}:${sig}:${prior.since}`,
+        });
       }
       return;
     }

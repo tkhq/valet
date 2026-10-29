@@ -31,6 +31,7 @@ import type { RepoBinding } from "../wire/types.js";
 import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
 import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { BLOCKING_ITEMS_RULE } from "../services/security-engagements.js";
 import { contentsBody, startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 
 const ORG = "local-org";
@@ -422,6 +423,12 @@ describe("EngineHost buildSpecProvider", () => {
     expect(provider.execs.some((c) => c.includes("/usr/local/bin/sec-preflight"))).toBe(true);
     expect(provider.execs.some((c) => c.includes("command -v gitleaks"))).toBe(true);
     expect(provider.execs.some((c) => c.includes("command -v semgrep"))).toBe(true);
+    // A rebuilt persona cell keeps the child rules and the blocking-items
+    // override on every turn; a normal session gets neither.
+    expect(cellSession.options.systemPrompt).toContain("## Questions");
+    expect(cellSession.options.systemPrompt).toContain(BLOCKING_ITEMS_RULE);
+    expect(normal.options.systemPrompt).not.toContain("## Questions");
+    expect(normal.options.systemPrompt).not.toContain(BLOCKING_ITEMS_RULE);
   });
 
   it("an incompatible repo bake records agent_sessions.image_fallback, calls the handler once, and clears on a compatible bake", async () => {

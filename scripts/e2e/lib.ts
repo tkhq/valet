@@ -143,6 +143,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-issue-routes.test.ts",
   "src/integration/security-report.test.ts",
   "src/integration/security-needs.test.ts",
+  "src/integration/security-needs-attention.test.ts",
   "src/integration/security-setup.test.ts",
 ];
 

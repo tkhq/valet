@@ -23,7 +23,9 @@ export const MODEL_CALL_LIMIT_KEY = "modelCallLimit";
 export function readModelCallLimit(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
-const TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The service part of an action name: the text before the first dot. */
+export const SCOPE_SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
+const TOOL_NAME = SCOPE_SERVICE_NAME;
 const ACTION_NAME = /^[a-zA-Z0-9_-]+\.(?:[a-zA-Z0-9_.-]+|\*)$/;
 
 /** Invalid persisted scope data must never remove a restriction. */

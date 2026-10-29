@@ -197,14 +197,10 @@ function cellLine(cell: CellView): string {
   return `  ${cell.dir} [${cell.persona}] ${cell.status} (id ${cell.id}, attempts ${cell.attempts})${child}${progress}`;
 }
 
-/** The parsed `/status` body: the same human text `sec_status` renders, plus
- * the machine-readable facts `sec_wait` parks on. Returns null on an
- * unexpected shape so both tools report the same corrective error. */
+/** The parsed `/status` body: the human text `sec_status` renders.
+ * `sec_status` is the only reader. Returns null on an unexpected shape. */
 interface StatusView {
   text: string;
-  engagementStatus: string;
-  /** null when no cell is running (there is dispatch/close work to do now). */
-  running: { settled: boolean; gone: boolean } | null;
 }
 
 function readStatus(body: unknown): StatusView | null {
@@ -226,50 +222,24 @@ function readStatus(body: unknown): StatusView | null {
       .join(" · ");
     lines.push(`findings: ${counts}`);
   }
-  let running: StatusView["running"] = null;
   if (isRecord(body.runningChild)) {
     const child = body.runningChild;
     const gone = child.childGone === true;
-    running = { settled: child.settled === true, gone };
     lines.push(
       `running cell child ${String(child.childSessionId)}: settled=${child.settled === true}` +
         (typeof child.lastActivityAt === "number" ? ` lastActivityAt=${child.lastActivityAt}` : "") +
+        (typeof child.backgroundWork === "number" && child.backgroundWork > 0
+          ? ` background work: ${child.backgroundWork} open`
+          : "") +
         (gone ? " — CHILD GONE: the child session is missing. Call sec_cell_fail, then re-dispatch with mode 'resume'." : ""),
     );
   }
-  return { text: lines.join("\n"), engagementStatus: String(engagement.status), running };
-}
-
-/** Park primitive bounds (spec §Autonomy). `sec_wait` blocks IN-PROCESS — it
- * polls `/status`, it never runs a sandbox command — so it cannot hit the
- * job-mode exec timeout that a `sleep` shell command does. It returns the
- * moment the running child settles, so it is more responsive than a fixed
- * sleep, not less. */
-export const SEC_WAIT_DEFAULT_SECONDS = 600;
-export const SEC_WAIT_MAX_SECONDS = 1800;
-const SEC_WAIT_POLL_MS = 5_000;
-const SEC_WAIT_FIRST_POLL_MS = 2_000;
-
-/** Resolve after `ms`, or immediately when `signal` aborts — the turn is being
- * superseded/torn down and the park must not outlive it. */
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) return resolve();
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
+  return { text: lines.join("\n") };
 }
 
 /** GET `/status` and parse it, or an `errorText` for any failure mode (non-2xx,
- * network reject, unexpected shape) — never a throw. Shared by sec_status (one
- * read) and sec_wait (a read per park iteration). */
+ * network reject, unexpected shape), never a throw. `sec_status` is the only
+ * caller. */
 async function fetchStatus(cfg: SecurityToolConfig, ctx: ToolContext): Promise<StatusView | { errorText: string }> {
   let res: Response;
   try {
@@ -403,64 +373,6 @@ export const secStatusTool = defineTool({
   },
 });
 
-// ── sec_wait ───────────────────────────────────────────────────────────────
-
-export const secWaitTool = defineTool({
-  name: "sec_wait",
-  description:
-    "Halt and wait for the running cell's child to settle. This is how you wait — NEVER use the bash `sleep` " +
-    "command, which fails in job mode. It parks in-process and returns the moment the child settles (or is gone, " +
-    "or no cell is running, or the engagement stopped), giving you the same snapshot as sec_status so you act at " +
-    "once. After sec_dispatch, or whenever a cell is running and its child has not settled, call sec_wait. If it " +
-    "returns with the child still running, just call sec_wait again.",
-  parameters: Type.Object({
-    timeout_seconds: Type.Optional(
-      Type.Number({
-        description: `Max seconds to park before returning the current status (default ${SEC_WAIT_DEFAULT_SECONDS}, max ${SEC_WAIT_MAX_SECONDS}).`,
-      }),
-    ),
-  }),
-  execute: async (args, ctx) => {
-    const cfg = resolveSecurityConfig(ctx);
-    if (!cfg) return { text: UNAVAILABLE_TEXT };
-
-    const requested = typeof args.timeout_seconds === "number" ? args.timeout_seconds : SEC_WAIT_DEFAULT_SECONDS;
-    const budgetMs = Math.max(0, Math.min(requested, SEC_WAIT_MAX_SECONDS)) * 1000;
-    const deadline = Date.now() + budgetMs;
-
-    let polls = 0;
-    for (;;) {
-      // One `/status` read per iteration, reusing sec_status' own reader so the
-      // returned text is identical — the model resumes the loop without a
-      // separate sec_status call. A `[security_error]` (non-2xx, network
-      // reject, bad shape) is surfaced at once; do not spin on a broken route.
-      const status = await fetchStatus(cfg, ctx);
-      if ("errorText" in status) return { text: status.errorText };
-
-      // Terminal-for-the-park conditions: hand control straight back to the
-      // loop. No running cell → dispatch/close work is due now. Settled or
-      // gone → rule on it. Engagement no longer running → nothing to wait for.
-      if (
-        status.running === null ||
-        status.running.settled ||
-        status.running.gone ||
-        status.engagementStatus !== "running"
-      ) {
-        return { text: status.text };
-      }
-      if (ctx.signal?.aborted || Date.now() >= deadline) {
-        const note = ctx.signal?.aborted
-          ? "\n[sec_wait interrupted]"
-          : `\n[sec_wait: still running after ${Math.round(budgetMs / 1000)}s — call sec_wait again to keep waiting]`;
-        return { text: `${status.text}${note}` };
-      }
-      const waitMs = polls === 0 ? SEC_WAIT_FIRST_POLL_MS : SEC_WAIT_POLL_MS;
-      polls += 1;
-      await delay(Math.min(waitMs, Math.max(0, deadline - Date.now())), ctx.signal);
-    }
-  },
-});
-
 // ── sec_dispatch ───────────────────────────────────────────────────────────
 
 export const secDispatchTool = defineTool({
@@ -510,7 +422,8 @@ export const secCellCompleteTool = defineTool({
   name: "sec_cell_complete",
   description:
     "Rule on a running cell whose child settled. The server checks the exit condition against the cell's latest " +
-    "state doc: done → completed; yielding → yielded (re-dispatch with mode 'resume'); otherwise it names the violation.",
+    "state doc: done → completed; yielding → yielded (re-dispatch with mode 'resume'); otherwise it names the violation. " +
+    "Refused while the child still has background work. End your turn; the next child.settled arrives when the work ends.",
   parameters: Type.Object({
     cell_id: Type.String({ description: "The running cell to rule on." }),
   }),
@@ -530,7 +443,7 @@ export const secCellCompleteTool = defineTool({
           return {
             text:
               `outcome: violation — ${violation}\n` +
-              "The cell stays running. Use child_send to tell the persona to keep looping, then wait for the next settle.",
+              "The cell stays running. Use child_send to tell the persona to keep looping, then end your turn.",
           };
         }
         const cell = asCellView(body.cell);
@@ -1104,7 +1017,6 @@ export function buildSecurityRunnerTools(): ToolDef[] {
     secPlanSetTool,
     secStartTool,
     secStatusTool,
-    secWaitTool,
     secDispatchTool,
     secCellCompleteTool,
     secCellFailTool,

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import type { Wakeup } from "@valet/engine";
 import { codeReviewPresetPlan } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -16,13 +17,16 @@ import {
 } from "../services/security-engagements.js";
 import {
   NUDGE_TEXT,
+  SECURITY_BACKGROUND_WORK_MAX_MS,
   SecurityRunnerDriver,
   SUBMIT_STALL_TEXT,
+  type RunnerAlert,
   type RunnerSubmit,
 } from "./security-runner-driver.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const NOW = 1_700_000_000_000;
+const HOUR_MS = 3_600_000;
 
 describe("SecurityRunnerDriver", () => {
   let db: AppDb;
@@ -33,6 +37,12 @@ describe("SecurityRunnerDriver", () => {
   /** Per-session unsettled override (fix 2): a child session id → its list.
    * Falls back to `unsettled` for any id not in the map (the runner session). */
   let unsettledBySession: Map<string, unknown[]>;
+  /** Child session ids that hold one active hold lease. */
+  let holdsBySession: Set<string>;
+  /** Child session ids → their open wakeups. */
+  let wakeupsBySession: Map<string, Wakeup[]>;
+  /** The driver's clock. A test advances it to start a new stall episode. */
+  let clock: number;
   let spawnCount: number;
   const spawn = async () => ({ childSessionId: `child_${++spawnCount}` });
 
@@ -42,10 +52,13 @@ describe("SecurityRunnerDriver", () => {
     submit = vi.fn(async () => undefined) as ReturnType<typeof vi.fn> & RunnerSubmit;
     unsettled = [];
     unsettledBySession = new Map();
+    holdsBySession = new Set();
+    wakeupsBySession = new Map();
+    clock = NOW;
     spawnCount = 0;
   });
 
-  function makeDriver(maxStalls = 3, maxSubmitFailures = 3): SecurityRunnerDriver {
+  function makeDriver(maxStalls = 3, maxSubmitFailures = 3, alert?: RunnerAlert): SecurityRunnerDriver {
     return new SecurityRunnerDriver({
       db,
       engineStore: {
@@ -53,13 +66,19 @@ describe("SecurityRunnerDriver", () => {
         listThreads: async () => [],
         listUnsettledSubmissions: async (sessionId: string) =>
           unsettledBySession.get(sessionId) ?? unsettled,
+        listWakeups: async (sessionId: string) => wakeupsBySession.get(sessionId) ?? [],
+        listActiveLeases: async (sessionId: string) =>
+          holdsBySession.has(sessionId)
+            ? [{ id: "ls_hold1", sessionId, ownerKind: "hold", reason: "long scan", createdAt: NOW, deadlineAt: NOW + 3_600_000 }]
+            : [],
       },
       submit,
-      now: () => NOW,
+      now: () => clock,
       // Sweep is driven manually; interval is only used by start().
       sweepIntervalMs: 20_000,
       maxStalls,
       maxSubmitFailures,
+      alert,
     });
   }
 
@@ -136,6 +155,22 @@ describe("SecurityRunnerDriver", () => {
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0][1]).toBe(NUDGE_TEXT);
+  });
+
+  it("does not nudge while the running cell's child holds background work", async () => {
+    const { cells } = await seedStarted();
+    await db
+      .update(securityCells)
+      .set({ status: "running", childSessionId: "child_scanning" })
+      .where(eq(securityCells.id, cells[0].id));
+    // The child settled but holds a lease for a background scan. Its next
+    // child.settled arrives when the scan ends, so a nudge only burns stalls.
+    unsettledBySession.set("child_scanning", []);
+    holdsBySession.add("child_scanning");
+
+    await makeDriver().sweep();
+
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("nudges a running cell mid-dispatch (no childSessionId yet)", async () => {
@@ -337,5 +372,210 @@ describe("SecurityRunnerDriver", () => {
     await driver.sweep();
     const after = submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT).length;
     expect(after).toBe(before);
+  });
+
+  it("alerts the owner once when the stall cap trips", async () => {
+    const { engagementId, sessionId, cells } = await seedStarted();
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(3, 3, alert);
+
+    // Three nudges reach the cap; the fourth sweep alerts.
+    for (let i = 0; i < 4; i++) await driver.sweep();
+    expect(alert).toHaveBeenCalledTimes(1);
+    const [row, first] = alert.mock.calls[0];
+    expect(row.id).toBe(sessionId);
+    expect(first.title).toBe("Security review stalled");
+    expect(first.body).toContain("has not progressed");
+    expect(first.dedupeKey).toMatch(new RegExp(`^security-stall:${engagementId}:[0-9a-f]{8}:${NOW}$`));
+
+    // Quiet for the same signature.
+    await driver.sweep();
+    await driver.sweep();
+    expect(alert).toHaveBeenCalledTimes(1);
+
+    // Progress, then a second stall episode alerts again with a new key.
+    await db.update(securityCells).set({ status: "completed" }).where(eq(securityCells.id, cells[0].id));
+    for (let i = 0; i < 4; i++) await driver.sweep();
+    expect(alert).toHaveBeenCalledTimes(2);
+    const second = alert.mock.calls[1][1];
+    expect(second.dedupeKey).toMatch(new RegExp(`^security-stall:${engagementId}:[0-9a-f]{8}:${NOW}$`));
+    expect(second.dedupeKey).not.toBe(first.dedupeKey);
+  });
+
+  it("alerts the owner when submit keeps failing, over the alert seam not the submit seam", async () => {
+    const { engagementId } = await seedStarted();
+    submit.mockImplementation(async () => {
+      throw new Error("cold start failed: session not restorable");
+    });
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(10, 3, alert);
+
+    await driver.sweep();
+    await driver.sweep();
+    expect(alert).not.toHaveBeenCalled();
+    await driver.sweep(); // failure 3 trips the cap
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT)).toHaveLength(1);
+    expect(alert.mock.calls[0][1]).toEqual({
+      title: "Security runner needs attention",
+      body: SUBMIT_STALL_TEXT,
+      dedupeKey: `security-runner-down:${engagementId}:${NOW}`,
+    });
+
+    await driver.sweep();
+    await driver.sweep();
+    expect(alert).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives two submit-failure episodes at the same signature different dedupe keys", async () => {
+    const { engagementId } = await seedStarted();
+    let failing = true;
+    submit.mockImplementation(async () => {
+      if (failing) throw new Error("cold start failed: session not restorable");
+    });
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(10, 3, alert);
+
+    for (let i = 0; i < 3; i++) await driver.sweep();
+    failing = false;
+    await driver.sweep();
+    failing = true;
+    clock = NOW + 60_000;
+    for (let i = 0; i < 3; i++) await driver.sweep();
+
+    expect(alert.mock.calls.map(([, event]) => event.dedupeKey)).toEqual([
+      `security-runner-down:${engagementId}:${NOW}`,
+      `security-runner-down:${engagementId}:${NOW + 60_000}`,
+    ]);
+  });
+
+  it("a synchronously throwing alert sink still lets the submit-stall ask go out", async () => {
+    await seedStarted();
+    submit.mockImplementation(async () => {
+      throw new Error("cold start failed: session not restorable");
+    });
+    const alert = vi.fn<RunnerAlert>(() => {
+      throw new Error("attention router misconfigured");
+    });
+    const driver = makeDriver(10, 3, alert);
+
+    for (let i = 0; i < 3; i++) await expect(driver.sweep()).resolves.toBeUndefined();
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT)).toHaveLength(1);
+  });
+
+  it("a throwing alert sink does not break the sweep", async () => {
+    const { cells } = await seedStarted();
+    const alert = vi.fn<RunnerAlert>(async () => {
+      throw new Error("attention router down");
+    });
+    const driver = makeDriver(3, 3, alert);
+
+    for (let i = 0; i < 3; i++) await driver.sweep();
+    submit.mockClear();
+    // The cap trips: the alert throws, and the stall message still reaches the runner.
+    await expect(driver.sweep()).resolves.toBeUndefined();
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0][1]).toContain("has not progressed");
+
+    // After progress, the next tick nudges as normal.
+    submit.mockClear();
+    await db.update(securityCells).set({ status: "completed" }).where(eq(securityCells.id, cells[0].id));
+    await driver.sweep();
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0][1]).toBe(NUDGE_TEXT);
+  });
+  /** A running cell dispatched `ageMs` ago whose child settled but holds one
+   * timer that fires in 30 days. */
+  async function seedParkedChild(ageMs: number): Promise<{ engagementId: string; cells: SecurityCellRow[] }> {
+    const seeded = await seedStarted();
+    await db
+      .update(securityCells)
+      .set({ status: "running", childSessionId: "child_parked", dispatchedAt: NOW - ageMs })
+      .where(eq(securityCells.id, seeded.cells[0].id));
+    unsettledBySession.set("child_parked", []);
+    wakeupsBySession.set("child_parked", [
+      {
+        id: "wk_timer1",
+        sessionId: "child_parked",
+        threadId: "th_child",
+        kind: "timer",
+        status: "pending",
+        reason: "re-check later",
+        prompt: "re-check later",
+        fireAt: NOW + 30 * 24 * HOUR_MS,
+        logOffset: 0,
+        logTail: "",
+        eventCount: 0,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ]);
+    return seeded;
+  }
+
+  it("counts stalls and alerts once background work outlives the deadline from dispatch", async () => {
+    await seedParkedChild(25 * HOUR_MS);
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(3, 3, alert);
+
+    for (let i = 0; i < 4; i++) await driver.sweep();
+
+    expect(submit.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(submit.mock.calls[0][1]).toBe(NUDGE_TEXT);
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(alert.mock.calls[0][1].title).toBe("Security review stalled");
+    expect(SECURITY_BACKGROUND_WORK_MAX_MS).toBe(24 * HOUR_MS);
+  });
+
+  it("stays quiet while background work is inside the deadline", async () => {
+    await seedParkedChild(HOUR_MS);
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(3, 3, alert);
+
+    for (let i = 0; i < 4; i++) await driver.sweep();
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("gives two stall episodes with the same signature different dedupe keys", async () => {
+    const { engagementId, cells } = await seedStarted();
+    const alert = vi.fn<RunnerAlert>(async () => undefined);
+    const driver = makeDriver(3, 3, alert);
+
+    for (let i = 0; i < 4; i++) await driver.sweep();
+    expect(alert).toHaveBeenCalledTimes(1);
+
+    // A resume moves the engagement away and back to the same signature.
+    clock = NOW + 60_000;
+    await db.update(securityCells).set({ status: "completed" }).where(eq(securityCells.id, cells[0].id));
+    await driver.sweep();
+    clock = NOW + 120_000;
+    await db.update(securityCells).set({ status: "pending" }).where(eq(securityCells.id, cells[0].id));
+    for (let i = 0; i < 4; i++) await driver.sweep();
+
+    expect(alert).toHaveBeenCalledTimes(2);
+    const first = alert.mock.calls[0][1].dedupeKey;
+    const second = alert.mock.calls[1][1].dedupeKey;
+    expect(first).not.toBe(second);
+    const sig = (key: string) => key.split(":")[2];
+    expect(sig(second)).toBe(sig(first));
+    expect(first).toBe(`security-stall:${engagementId}:${sig(first)}:${NOW}`);
+    expect(second).toBe(`security-stall:${engagementId}:${sig(first)}:${NOW + 120_000}`);
+  });
+
+  it("a never-resolving alert sink does not block the sweep", async () => {
+    await seedStarted();
+    const alert = vi.fn<RunnerAlert>(() => new Promise<void>(() => {}));
+    const driver = makeDriver(3, 3, alert);
+    for (let i = 0; i < 3; i++) await driver.sweep();
+
+    const timeout = new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 100));
+    const outcome = await Promise.race([driver.sweep().then(() => "done"), timeout]);
+
+    expect(outcome).toBe("done");
+    expect(alert).toHaveBeenCalledTimes(1);
   });
 });

@@ -24,21 +24,53 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { SignalContent } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
+import {
+  actingAs,
+  buildPausedRunner,
+  completeCellViaRoute,
+  createSecuritySession,
+  dispatchViaRoute,
+  setPlanViaRoute,
+  settleChildByAbort,
+  startViaRoute,
+  stateDoc,
+  writeFileAsChild,
+} from "./security-harness.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { openBackgroundWork } from "../engine/wakeups-admin.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
+import {
+  clearSecurityCredentialSession,
+  hasSecurityCredentialValues,
+  registerSecurityCredentialValue,
+  SECURITY_CREDENTIAL_OUTPUT_BLOCKED,
+} from "../services/security-credential-tripwire.js";
 import { agentSessions, childWatches, eventDropLog, securityCells } from "../schema/index.js";
 import type { CreateSessionResponse, SecurityDispatchResponse } from "../wire/types.js";
 
 const SHA = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
 const REPO = { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", ref: SHA };
 
+const ONE_CELL_PLAN = ["cells:", "  - ordinal: 1", "    persona: code-review", "    name: recon", "    goal: Map the codebase"].join("\n");
+const LEAKED = "sk-live-settlement-0123456789abcdef";
+
 let api: TestApi | undefined;
+const tripwireSessions: string[] = [];
 
 afterEach(async () => {
+  for (const id of tripwireSessions.splice(0)) clearSecurityCredentialSession(id);
   await api?.cleanup();
   api = undefined;
 });
+
+/** Every submission the child holds, settled or not. */
+async function submissionCount(childId: string): Promise<number> {
+  const store = api!.providers.engineStore;
+  const unsettled = await store.listUnsettledSubmissions(childId);
+  const settled = await store.listSettledSubmissionsBefore(childId, Date.now() + 1);
+  return unsettled.length + settled.length;
+}
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const start = Date.now();
@@ -180,4 +212,122 @@ describe("api integration: cell settlement signals the interactive runner", () =
     },
     60_000,
   );
+});
+
+describe("api integration: failing a cell stops its child's background work", () => {
+  it("sec_cell_fail cancels the child's pending wakeup", async () => {
+    api = await bootTestApi();
+    const { engineStore } = api.providers;
+    const { sessionId } = await createSecuritySession(api);
+    const { threadId } = await buildPausedRunner(api, sessionId);
+    await setPlanViaRoute(api, sessionId, ONE_CELL_PLAN);
+    await startViaRoute(api, sessionId);
+    const dispatched = await dispatchViaRoute(api, sessionId, threadId);
+    const childId = dispatched.cell.childSessionId;
+    if (!childId) throw new Error("dispatch returned no child session id");
+
+    const now = Date.now();
+    await engineStore.createWakeup({
+      id: "wk_parked1",
+      sessionId: childId,
+      threadId: "th_child",
+      kind: "timer",
+      status: "pending",
+      reason: "re-check later",
+      prompt: "re-check later",
+      fireAt: now + 30 * 24 * 3_600_000,
+      logOffset: 0,
+      logTail: "",
+      eventCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect(await openBackgroundWork(engineStore, childId)).toBe(1);
+    const submissionsBefore = await submissionCount(childId);
+    const unsettledBefore = (await engineStore.listUnsettledSubmissions(childId)).map((item) => item.id);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/security/cells/${dispatched.cell.id}/fail`, {
+      method: "POST",
+      headers: actingAs(sessionId),
+      body: JSON.stringify({ reason: "The child parked on a 30 day timer." }),
+    });
+    expect(res.status).toBe(200);
+    expect(await openBackgroundWork(engineStore, childId)).toBe(0);
+    // The cancel sends no terminal signal, so the persona starts no new turn.
+    expect(await submissionCount(childId)).toBe(submissionsBefore);
+    const unsettledAfter = await engineStore.listUnsettledSubmissions(childId);
+    expect(unsettledAfter.filter((item) => !unsettledBefore.includes(item.id))).toEqual([]);
+  }, 60_000);
+});
+
+/** Run a one-cell engagement to a completed cell whose child holds a
+ * registered value. Returns the runner session id and the child id. */
+async function completedCellWithValue(): Promise<{ sessionId: string; childId: string }> {
+  const { sessionId, engagementId } = await createSecuritySession(api!);
+  const { threadId } = await buildPausedRunner(api!, sessionId);
+  await setPlanViaRoute(api!, sessionId, ONE_CELL_PLAN);
+  await startViaRoute(api!, sessionId);
+  const dispatched = await dispatchViaRoute(api!, sessionId, threadId);
+  const childId = dispatched.cell.childSessionId;
+  if (!childId) throw new Error("dispatch returned no child session id");
+  registerSecurityCredentialValue(childId, engagementId, LEAKED);
+  tripwireSessions.push(childId);
+  await writeFileAsChild(
+    api!,
+    childId,
+    `/cells/${dispatched.cell.dir}/state.yml`,
+    stateDoc({ cell: dispatched.cell.dir, persona: dispatched.cell.persona, status: "done" }),
+  );
+  await settleChildByAbort(api!, childId);
+  expect((await completeCellViaRoute(api!, sessionId, dispatched.cell.id)).outcome).toBe("completed");
+  return { sessionId, childId };
+}
+
+describe("api integration: the tripwire entry outlives cell settlement", () => {
+  it("sanitizes a signal to a completed cell's child, and clears at destroy", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore } = api.providers;
+    const { childId } = await completedCellWithValue();
+    expect(hasSecurityCredentialValues(childId)).toBe(true);
+
+    // A process the child started can still exit and prompt it.
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, childId)).limit(1);
+    const child = await engineHost.sessionFor(childId, await loadSessionMeta(db, childRow));
+    const receipt = await child.prompt({
+      kind: "signal",
+      signalType: "process.exited",
+      body: `exit 0\n${LEAKED}\n`,
+      attributes: {},
+    });
+    const stored = JSON.stringify((await engineStore.getQueueItem(childId, receipt.queueItemId))?.content);
+    expect(stored).toContain(SECURITY_CREDENTIAL_OUTPUT_BLOCKED);
+    expect(stored).not.toContain(LEAKED);
+
+    await engineHost.destroy(childId);
+    expect(hasSecurityCredentialValues(childId)).toBe(false);
+  }, 60_000);
+
+  it("clears a settled cell's entry when the engagement closes", async () => {
+    api = await bootTestApi();
+    const { sessionId, childId } = await completedCellWithValue();
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/security/close`, {
+      method: "POST",
+      headers: actingAs(sessionId),
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(hasSecurityCredentialValues(childId)).toBe(false);
+  }, 60_000);
+
+  it("clears a settled cell's entry when the engagement is cancelled", async () => {
+    api = await bootTestApi();
+    const { sessionId, childId } = await completedCellWithValue();
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/security/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(hasSecurityCredentialValues(childId)).toBe(false);
+  }, 60_000);
 });

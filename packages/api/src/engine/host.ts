@@ -47,6 +47,7 @@ import {
   type WakeupLimits,
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
+  type ProviderBundle,
 } from "@valet/engine";
 import type { CompactionConfig, CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
@@ -90,6 +91,8 @@ import {
   resolvedRepoPrebuildFlags,
   type RepoPrebuildFlags,
 } from "../bakes/source-service.js";
+import type { CredentialCommand } from "./credential-commands.js";
+import { BLOCKING_ITEMS_RULE, engagementCredentialCommands, mergeCredentialCommands } from "../services/security-engagements.js";
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -164,6 +167,11 @@ import { buildFileAttachTool } from "../services/generated-files.js";
 import { artifactPublishTool, buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
+import {
+  clearSecurityCredentialSession,
+  hasSecurityCredentialValues,
+  sanitizeSecurityCredentialOutput,
+} from "../services/security-credential-tripwire.js";
 import {
   authorizedScopeEnv,
   egressViolations,
@@ -958,6 +966,24 @@ export class EngineHost {
   }
 
   /**
+   * The one provider bundle every engine this host builds runs on. Each
+   * session kind used to repeat the literal, so a new provider reached some
+   * kinds and not others. One method keeps the credential tripwire seams on
+   * every engine.
+   */
+  private engineProviders(): ProviderBundle {
+    return {
+      store: this.opts.engineStore,
+      stream: this.opts.eventStream,
+      credentials: this.opts.engineCredentials,
+      sandboxProvider: this.opts.sandboxProvider,
+      blobs: this.opts.blobs,
+      sanitizeToolOutput: sanitizeSecurityCredentialOutput,
+      canStreamToolCallArguments: (id) => !hasSecurityCredentialValues(id),
+    };
+  }
+
+  /**
    * Idle sweep tick (sandbox hibernation plan, Task 3, decision 3/6):
    * iterates the host's in-memory session cache ONLY. Sessions an api
    * restart evicted (boot-restore only rehydrates unsettled work) are the
@@ -1202,7 +1228,7 @@ export class EngineHost {
     // scope egress allowlist env. Empty for the runner and non-security builds.
     const securityProvisioning = personaCell
       ? await this.securityProvisioningForCell(personaCell)
-      : { mcpPlugins: [], scopeEnv: {} };
+      : { mcpPlugins: [], scopeEnv: {}, credentialCommands: [] };
     const extraPlugins = isSecurityRunner
       ? [securityPlugin]
       : personaCell
@@ -1228,15 +1254,7 @@ export class EngineHost {
     );
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, extraPlugins);
 
-    const engine = new Engine({
-      providers: {
-        store: this.opts.engineStore,
-        stream: this.opts.eventStream,
-        credentials: this.opts.engineCredentials,
-        sandboxProvider: this.opts.sandboxProvider,
-        blobs: this.opts.blobs,
-      },
-    });
+    const engine = new Engine({ providers: this.engineProviders() });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     let sharedTranscript = false;
@@ -1298,7 +1316,13 @@ export class EngineHost {
         );
       });
     };
-    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
+    const specProvider = await this.buildSpecProvider(
+      sessionId,
+      meta,
+      onStartRef,
+      personaCell != null,
+      securityProvisioning.credentialCommands,
+    );
     const credentialResolver = this.buildCredentialResolver(
       sessionId,
       meta.userId,
@@ -1424,7 +1448,7 @@ export class EngineHost {
             resolveFallbackModel,
             sampling: { reasoning },
             compaction: await this.orgCompaction(meta.orgId),
-            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: personaCell != null }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1464,7 +1488,7 @@ export class EngineHost {
           resolveFallbackModel,
           sampling: { reasoning },
           compaction: await this.orgCompaction(meta.orgId),
-          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: personaCell != null }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1816,6 +1840,13 @@ export class EngineHost {
     meta: SessionMeta,
     onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
     installSecurityTools = false,
+    /**
+     * A security persona cell's declared credentials, already resolved
+     * by the caller from `securityProvisioningForCell`. Merged with the
+     * repo's `.valet/credentials.yaml` commands inside the closure below.
+     * Empty for the runner and every non-security build.
+     */
+    securityCredentialCommands: CredentialCommand[] = [],
   ): Promise<import("@valet/engine").SpecProvider | undefined> {
     const hasRepos = meta.repos && meta.repos.length > 0;
     // Non-isolated providers (local/virtual) exec against the host process.
@@ -1853,7 +1884,18 @@ export class EngineHost {
       // wrappers rather than blocking the sandbox. Read inside the closure so
       // an edit is picked up on the next reconcile, like every other part of
       // the spec.
-      snap.credentialCommands = await host.resolveRepoCredentialCommands(meta);
+      //
+      // A security persona cell's declared credentials merge in here,
+      // the same merge the dispatch route runs as a fast preflight before
+      // spawning, but this is the path that actually reaches the sandbox.
+      // A label collision throws: that is a real config conflict the human
+      // must resolve (rename one side), so this surfaces it as a prep
+      // failure rather than silently letting one source win (invariant:
+      // alert, don't auto-repair).
+      snap.credentialCommands = mergeCredentialCommands(
+        securityCredentialCommands,
+        await host.resolveRepoCredentialCommands(meta),
+      );
       // Use the same cached runtime-config resolver as initial creation. A
       // declared or absent repository answer is authoritative. An error has
       // no resource opinion, so reconciliation preserves recorded overrides.
@@ -2365,19 +2407,34 @@ export class EngineHost {
    * A session that cannot read a declaration still starts; it just leaves
    * the agent to name references itself, which is where it started.
    */
-  private async resolveRepoCredentialCommands(
-    meta: SessionMeta,
-  ): Promise<import("./credential-commands.js").CredentialCommand[]> {
+  private async resolveRepoCredentialCommands(meta: SessionMeta): Promise<CredentialCommand[]> {
+    // The shared target guard accepts both stored GitHub host spellings
+    // (TKAI-385). A local copy once disabled credentials.yaml wrappers for
+    // every DB-loaded session because it accepted only "github.com".
+    const target = primaryGitHubRepoTarget(meta.repos);
+    if (!target.ok) return [];
+    return this.resolveRepoCredentialCommandsForTarget(meta.orgId, target.owner, target.repo, target.ref);
+  }
+
+  /**
+   * The same best-effort `.valet/credentials.yaml` read as
+   * `resolveRepoCredentialCommands`, for a caller that already knows the
+   * repo owner/name/ref rather than holding a full `SessionMeta` (Valet
+   * Security dispatch route, E2). The dispatch route calls this before
+   * `dispatchCell` so a credential-label collision refuses the dispatch
+   * instead of only surfacing once the child sandbox tries to install the
+   * wrapper.
+   */
+  async resolveRepoCredentialCommandsForTarget(
+    orgId: string,
+    owner: string,
+    repo: string,
+    ref: string,
+  ): Promise<CredentialCommand[]> {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     if (!tokenDeps || !db) return [];
     try {
-      // The shared target guard accepts both stored GitHub host spellings
-      // (TKAI-385). A local copy once disabled credentials.yaml wrappers for
-      // every DB-loaded session because it accepted only "github.com".
-      const target = primaryGitHubRepoTarget(meta.repos);
-      if (!target.ok) return [];
-      const { owner, repo: repoName, ref } = target;
       const resolved = await resolveSessionGitHubToken(
         {
           db,
@@ -2388,7 +2445,7 @@ export class EngineHost {
           fetchImpl: tokenDeps.fetchImpl,
           now: tokenDeps.now,
         },
-        { orgId: meta.orgId, purpose: "api" },
+        { orgId, purpose: "api" },
       );
       return await repoCredentialCommands(
         {
@@ -2402,7 +2459,7 @@ export class EngineHost {
         },
         resolved.token,
         owner,
-        repoName,
+        repo,
         ref,
       );
     } catch (err) {
@@ -2910,6 +2967,10 @@ export class EngineHost {
    *     (`VALET_SECURITY_AUTHORIZED_SCOPE`), merged into the child sandbox env.
    *     A live tool reads it to bound egress to the human-declared scope
    *     (M-P4b). Empty when no scope is declared.
+   *   - `credentialCommands`: the engagement's declared credentials (Part 12,
+   *     E2), converted to the `CredentialCommand`s the child's sandbox
+   *     wrapper installs. `buildSpecProvider` merges these with the repo's
+   *     `.valet/credentials.yaml` commands.
    *
    * Egress gate: every declared egress host is re-validated against the
    * authorized scope here (the config parser already refused an out-of-scope
@@ -2921,19 +2982,20 @@ export class EngineHost {
    */
   private async securityProvisioningForCell(
     cell: SecurityCellRow,
-  ): Promise<{ mcpPlugins: ValetPlugin[]; scopeEnv: Record<string, string> }> {
+  ): Promise<{ mcpPlugins: ValetPlugin[]; scopeEnv: Record<string, string>; credentialCommands: CredentialCommand[] }> {
     const db = this.opts.db;
-    if (!db) return { mcpPlugins: [], scopeEnv: {} };
+    if (!db) return { mcpPlugins: [], scopeEnv: {}, credentialCommands: [] };
     const rows = await db
       .select({
         tools: securityEngagements.configTools,
         scope: securityEngagements.authorizedScope,
+        credentialsJson: securityEngagements.credentialsJson,
       })
       .from(securityEngagements)
       .where(eq(securityEngagements.id, cell.engagementId))
       .limit(1);
     const row = rows[0];
-    if (!row) return { mcpPlugins: [], scopeEnv: {} };
+    if (!row) return { mcpPlugins: [], scopeEnv: {}, credentialCommands: [] };
     const scopeHosts = parseAuthorizedScopeHosts(row.scope);
     const declared = parseConfigToolDecls(row.tools);
     // Egress gate (M-P4b): drop a decl's out-of-scope egress before provisioning.
@@ -2952,6 +3014,7 @@ export class EngineHost {
     return {
       mcpPlugins: securityDeclaredMcpPlugins(inScope),
       scopeEnv: authorizedScopeEnv(scopeHosts),
+      credentialCommands: engagementCredentialCommands(row.credentialsJson),
     };
   }
 
@@ -3334,15 +3397,7 @@ export class EngineHost {
       ...(commandOptions ?? {}),
     };
 
-    const engine = new Engine({
-      providers: {
-        store: this.opts.engineStore,
-        stream: this.opts.eventStream,
-        credentials: this.opts.engineCredentials,
-        sandboxProvider: this.opts.sandboxProvider,
-        blobs: this.opts.blobs,
-      },
-    });
+    const engine = new Engine({ providers: this.engineProviders() });
 
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
@@ -3433,6 +3488,7 @@ export class EngineHost {
       // orphan rule keys on the engine session row being gone, which is
       // exactly what this delete produces.
       await this.opts.engineStore.deleteSession(sessionId);
+      clearSecurityCredentialSession(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
         try {
@@ -3451,6 +3507,7 @@ export class EngineHost {
       this.cache.delete(sessionId);
       this.draining.delete(sessionId);
       this.buildEpoch.delete(sessionId);
+      clearSecurityCredentialSession(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
         // Grant expiry (action-policies plan, Task 3): a stopped session's
@@ -4381,7 +4438,7 @@ export class EngineHost {
     // set carries them. Empty (byte-identical to before) for a non-persona child.
     const securityProvisioning = personaCell
       ? await this.securityProvisioningForCell(personaCell)
-      : { mcpPlugins: [], scopeEnv: {} };
+      : { mcpPlugins: [], scopeEnv: {}, credentialCommands: [] };
     const provisionedExtras =
       personaCell && securityProvisioning.mcpPlugins.length > 0
         ? await this.sessionExtras(opts.owner, opts.orgId, [], securityProvisioning.mcpPlugins)
@@ -4501,7 +4558,13 @@ export class EngineHost {
     const dockerFlag = opts.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
-    const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
+    const specProvider = await this.buildSpecProvider(
+      childSessionId,
+      meta,
+      undefined,
+      personaCell != null,
+      securityProvisioning.credentialCommands,
+    );
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
     // REST-created session. `builtSession` is assigned below, after the
@@ -4571,7 +4634,7 @@ export class EngineHost {
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4595,15 +4658,7 @@ export class EngineHost {
       ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
     };
 
-    const engine = new Engine({
-      providers: {
-        store: this.opts.engineStore,
-        stream: this.opts.eventStream,
-        credentials: this.opts.engineCredentials,
-        sandboxProvider: this.opts.sandboxProvider,
-        blobs: this.opts.blobs,
-      },
-    });
+    const engine = new Engine({ providers: this.engineProviders() });
 
     const session = existing
       ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions, predecessor: this.draining.get(childSessionId) })
@@ -4785,15 +4840,7 @@ export class EngineHost {
       ...(opts.title ? { metadata: { title: opts.title } } : {}),
     };
 
-    const engine = new Engine({
-      providers: {
-        store: this.opts.engineStore,
-        stream: this.opts.eventStream,
-        credentials: this.opts.engineCredentials,
-        sandboxProvider: this.opts.sandboxProvider,
-        blobs: this.opts.blobs,
-      },
-    });
+    const engine = new Engine({ providers: this.engineProviders() });
 
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })

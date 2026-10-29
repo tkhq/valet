@@ -1,7 +1,6 @@
 /**
- * 1Password service module — the ONLY file in this codebase that imports
- * `@1password/sdk` (mirrors the isolation in the legacy
- * `packages/runner/src/onepassword-provider.ts`). Owns:
+ * 1Password service module, the ONLY file in this codebase that imports
+ * `@1password/sdk`. Owns:
  *
  *   - SDK client construction + adaptation into the narrow `OpClient` shape
  *     this module needs (`defaultCreateClient`), with per-token memoization.
@@ -30,18 +29,11 @@ import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/
 export const ONEPASSWORD_SERVICE = "onepassword";
 
 /**
- * The one `op://` grammar. `op://vault/item/field` or
- * `op://vault/item/section/field`, the two forms the SDK resolves. Segments
- * may contain spaces ("ProDex Labs" is an ordinary vault name) but not a
- * slash or a control character. The prefix and the segment count keep this
- * from becoming a general read primitive: a path, an env var name, or a URL
- * does not match. Credential writes and the sandbox broker share this grammar.
+ * The one `op://` grammar, re-exported under the name this service has always
+ * used for it. Credential writes, the sandbox broker, the security credential
+ * vocabulary, and the setup form all match against this same expression.
  */
-export const OP_REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
-
-export function isOnePasswordReference(value: string): boolean {
-  return OP_REFERENCE.test(value);
-}
+export { OP_REFERENCE_RE as OP_REFERENCE, isOnePasswordReference } from "@valet/shared";
 
 const RESOLVE_TTL_MS = 5 * 60_000;
 
