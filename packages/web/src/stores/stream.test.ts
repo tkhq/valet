@@ -679,6 +679,19 @@ describe("stream store reducer", () => {
     expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates)).toEqual(["older"]);
   });
 
+  it("keeps a pending gate when a newer frame and the snapshot both list it", () => {
+    const { ingest, setPendingGates } = useStreamStore.getState();
+    const gate = {
+      id: "g1", sessionId: SESSION, threadId: THREAD, type: "approval" as const, title: "Approve?",
+      actions: [], status: "pending" as const, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    };
+    const snapshotAt = Date.now() - 1_000;
+    // A replayed frame for a gate that the snapshot already lists.
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate });
+    setPendingGates(SESSION, [gate], snapshotAt);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates)).toEqual(["g1"]);
+  });
+
   it("applies sandbox.status updates", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, {

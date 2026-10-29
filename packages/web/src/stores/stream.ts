@@ -1129,10 +1129,12 @@ export const useStreamStore = create<StreamStore>((set) => ({
   setPendingGates: (sessionId, snapshot, snapshotAt) =>
     set((state) => {
       const slice = ensure(state, sessionId);
+      // For a gate with a frame newer than the snapshot, local state is the
+      // truth: keep the local copy if the frame opened it, drop it if closed.
       const newer = (id: string) => snapshotAt !== undefined && (slice.gateFrameAt[id] ?? 0) > snapshotAt;
       const gates = [
         ...snapshot.filter((g) => !newer(g.id)),
-        ...Object.values(slice.pendingGates).filter((g) => newer(g.id) && !snapshot.some((s) => s.id === g.id)),
+        ...Object.values(slice.pendingGates).filter((g) => newer(g.id)),
       ];
       // Identity guard: seeding is idempotent, and more than one surface
       // seeds (SessionView and ThreadTree both call usePendingGatesSeed).
