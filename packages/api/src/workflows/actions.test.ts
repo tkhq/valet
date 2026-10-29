@@ -876,6 +876,18 @@ describe("DB-backed actions", () => {
     expect(data.url).toBe(`/api/hooks/workflows/${workflowId}/${data.hookId}`);
   });
 
+  it("create_webhook tells the assistant to offer a schedule for a connected source", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+
+    const result = await create.execute({ workflow_id: workflowId }, ctx());
+    if (!result.success) throw new Error("expected the mint to succeed");
+    const { next } = result.data as { next: string };
+    expect(next).toContain("register it in the source");
+    expect(next).toContain("offer a schedule");
+  });
+
   it("create_webhook called twice rotates — second hookId differs from the first", async () => {
     const workflowId = await seedWorkflow();
     const plugin = workflowsActionPlugin(() => deps);
