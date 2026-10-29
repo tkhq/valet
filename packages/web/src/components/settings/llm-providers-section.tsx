@@ -28,15 +28,27 @@ import {
 } from "~/api/settings";
 import { matchesNeedle } from "~/lib/text-match";
 
-type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
+type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
-const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter"];
+const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"];
 
 const KNOWN_LABEL: Record<KnownKind, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
   openrouter: "OpenRouter",
+  "amazon-bedrock": "Amazon Bedrock",
+};
+
+/** Per-kind copy for the key field and the deployment-credential badge.
+ * Bedrock's "key" is a Bedrock API key (bearer token), and its deployment
+ * fallback is the pod's AWS credential chain, not an API-key env var. */
+const KIND_COPY: Record<KnownKind, { placeholder: string; deploymentBadge: string }> = {
+  anthropic: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openai: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  google: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openrouter: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  "amazon-bedrock": { placeholder: "Bedrock API key (bearer token)", deploymentBadge: "using deployment AWS credentials" },
 };
 
 /**
@@ -140,7 +152,7 @@ function KnownProviderCard({
     deleteKey.mutate(row.id);
   }
 
-  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : "sk-…";
+  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : KIND_COPY[kind].placeholder;
   const showDeploymentBadge = Boolean(row?.envFallback && !row.hasKey);
 
   return (
@@ -148,7 +160,7 @@ function KnownProviderCard({
       <div className="flex items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
-          {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
+          {showDeploymentBadge && <Badge variant="neutral">{KIND_COPY[kind].deploymentBadge}</Badge>}
         </div>
         <Switch
           checked={row?.enabled ?? true}

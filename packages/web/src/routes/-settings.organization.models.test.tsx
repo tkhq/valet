@@ -180,6 +180,28 @@ describe("LlmProvidersSection — known provider cards", () => {
     expect(screen.getByText("using deployment key")).toBeTruthy();
   });
 
+  it("renders an Amazon Bedrock card with AWS-credential copy", () => {
+    providersData = {
+      providers: [
+        {
+          id: "row_b",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("Amazon Bedrock")).toBeTruthy();
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    expect(screen.queryByText("using deployment key")).toBeNull();
+    expect(screen.getByPlaceholderText("Bedrock API key (bearer token)")).toBeTruthy();
+  });
+
   it("Escape dismisses the OpenRouter model picker", async () => {
     const user = userEvent.setup();
     providersData = {
