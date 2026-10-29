@@ -242,9 +242,21 @@ org:
     const yaml = `
 version: 1
 llmProviders:
-  - kind: bedrock
+  - kind: nope
 `.trim();
     expect(() => parseInstanceConfig(yaml, path)).toThrow("llmProviders[0].kind");
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(/amazon-bedrock/);
+  });
+
+  it("accepts llmProviders kind amazon-bedrock", () => {
+    const yaml = `
+version: 1
+llmProviders:
+  - kind: amazon-bedrock
+    enabled: true
+`.trim();
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.llmProviders?.[0]).toEqual({ kind: "amazon-bedrock", enabled: true });
   });
 
   it("throws when toolPolicies is not an array", () => {

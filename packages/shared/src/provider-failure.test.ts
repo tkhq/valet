@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyProviderFailure, isNonRetryableProviderFailure, providerFailureSummary } from "./provider-failure.js";
+import { classifyProviderFailure, isNonRetryableProviderFailure, providerFailureSummary, providerLabel } from "./provider-failure.js";
 
 describe("classifyProviderFailure", () => {
   it.each([
@@ -31,5 +31,11 @@ describe("providerFailureSummary", () => {
 
   it("tells a usage limit apart from an outage", () => {
     expect(providerFailureSummary("usage_limit", "anthropic")).toContain("Anthropic usage limit is reached");
+  });
+});
+
+describe("providerLabel", () => {
+  it("names Amazon Bedrock by its pi-ai provider id", () => {
+    expect(providerLabel("amazon-bedrock")).toBe("Amazon Bedrock");
   });
 });

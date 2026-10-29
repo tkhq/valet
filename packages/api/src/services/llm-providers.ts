@@ -20,11 +20,16 @@ import { llmProviders, type LlmProviderModel, type LlmProviderRow } from "../sch
 
 export type LlmProviderKind = LlmProviderRow["kind"];
 
-const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google", "openrouter"];
+const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"];
 
 export function isLlmProviderKind(v: unknown): v is LlmProviderKind {
   return (
-    v === "anthropic" || v === "openai" || v === "google" || v === "openrouter" || v === "openai_compatible"
+    v === "anthropic" ||
+    v === "openai" ||
+    v === "google" ||
+    v === "openrouter" ||
+    v === "amazon-bedrock" ||
+    v === "openai_compatible"
   );
 }
 

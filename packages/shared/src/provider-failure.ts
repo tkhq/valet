@@ -53,7 +53,7 @@ export function classifyProviderFailure(text: string): ProviderFailureKind {
 /** "openai" → "OpenAI". Unknown ids get a capital first letter. */
 export function providerLabel(provider: string | undefined): string {
   if (!provider) return 'The model provider';
-  const known: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', bedrock: 'Amazon Bedrock', openrouter: 'OpenRouter', xai: 'xAI' };
+  const known: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', bedrock: 'Amazon Bedrock', 'amazon-bedrock': 'Amazon Bedrock', openrouter: 'OpenRouter', xai: 'xAI' };
   return known[provider.toLowerCase()] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 

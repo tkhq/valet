@@ -1763,7 +1763,7 @@ export const llmProviders = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     kind: text("kind", {
-      enum: ["anthropic", "openai", "google", "openrouter", "openai_compatible"],
+      enum: ["anthropic", "openai", "google", "openrouter", "amazon-bedrock", "openai_compatible"],
     }).notNull(),
     name: text("name").notNull(),
     baseUrl: text("base_url"),

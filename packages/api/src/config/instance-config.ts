@@ -104,7 +104,7 @@ export interface InstanceConfig {
   };
   teams?: { name: string; members?: InstanceMemberDecl[] }[];
   llmProviders?: {
-    kind: "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
+    kind: "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock" | "openai_compatible";
     name?: string; // required when kind === "openai_compatible"
     baseUrl?: string;
     enabled?: boolean;
@@ -156,6 +156,7 @@ const LLM_PROVIDER_KINDS = new Set<string>([
   "openai",
   "google",
   "openrouter",
+  "amazon-bedrock",
   "openai_compatible",
 ]);
 
@@ -507,7 +508,7 @@ function validateLlmProviders(
         const kindVal = assertString(v, `llmProviders[${i}].kind`, path);
         if (!LLM_PROVIDER_KINDS.has(kindVal)) {
           err(
-            `${path}: llmProviders[${i}].kind got "${kindVal}", allowed values are anthropic, openai, google, openrouter, openai_compatible.`,
+            `${path}: llmProviders[${i}].kind got "${kindVal}", allowed values are anthropic, openai, google, openrouter, amazon-bedrock, openai_compatible.`,
           );
         }
         entry.kind = kindVal as ProviderEntry["kind"];

@@ -4925,7 +4925,7 @@ export interface PatchIdentityLinkResponse {
 // per-tier ordered target lists (`/api/org/model-tiers`) are the org's
 // fallback chain now — org model preferences are removed.
 
-export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
+export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock" | "openai_compatible";
 
 export interface LlmProviderModelWire {
   id: string;
