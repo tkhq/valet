@@ -21,6 +21,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
 import { agentSessions, artifacts, teamMembers } from "../schema/index.js";
 import { writeFile } from "../services/memory.js";
+import { addArtifactComment, resolveArtifactComment } from "../services/artifacts.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -35,6 +36,7 @@ import {
   memLinksTool,
   memShareTool,
   artifactPublishTool,
+  artifactCommentsTool,
   memRmTool,
   buildMemoryTools,
 } from "./memory-tools.js";
@@ -98,6 +100,7 @@ describe("buildMemoryTools", () => {
       "mem_links",
       "mem_share",
       "artifact_publish",
+      "artifact_comments",
       "mem_rm",
     ]);
   });
@@ -401,6 +404,45 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const reRevoke = await memShareTool.execute({ path: "artifacts/report.md", revoke: true }, ctx);
     expect(reRevoke.text).toMatch(/^\[memory_error\]/);
+  });
+
+  // An assistant told "I left comments on the page" had no way to read them.
+  it("artifact_comments reads the threads on a published page by its link", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+    await seedPublishingContext(api, ctx);
+    const published = await artifactPublishTool.execute({ key: "pages/storyboard", content: "<h1>Shots</h1>", format: "html" }, ctx);
+    const link = /→ (\S+)/.exec(published.text)?.[1] ?? "";
+    const [page] = await api.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/storyboard"));
+
+    const empty = decode((await artifactCommentsTool.execute({ artifact: link }, ctx)).text) as Record<string, unknown>;
+    expect(empty).toMatchObject({ threads: [], note: "No comments on this page yet." });
+
+    const root = await addArtifactComment(api.providers.db, {
+      artifactId: page!.id, version: 1, vdid: "a1b2c3d4e5f60718", anchorLabel: "Shot 4: the reveal", body: "Swap shots 3 and 4", authorUserId: "test-member",
+    });
+    await addArtifactComment(api.providers.db, { artifactId: page!.id, version: 1, parentId: root.id, body: "Agreed", authorUserId: "local-user" });
+    const done = await addArtifactComment(api.providers.db, { artifactId: page!.id, version: 1, body: "Tighten the intro", authorUserId: "local-user" });
+    await resolveArtifactComment(api.providers.db, done.id, "local-user");
+
+    for (const ref of [`${link}?ref=chat`, page!.id]) {
+      const out = decode((await artifactCommentsTool.execute({ artifact: ref }, ctx)).text) as {
+        url: string; threads: Array<Record<string, unknown> & { replies: Array<Record<string, unknown>> }>;
+      };
+      expect(out.url).toBe(link);
+      expect(out.threads).toEqual([
+        expect.objectContaining({ author: "Test Member", on: 'element "Shot 4: the reveal"', status: "open", page_version: 1, body: "Swap shots 3 and 4", sent_to_agent: false }),
+        expect.objectContaining({ on: "page", status: "resolved", resolved_at: expect.any(String), body: "Tighten the intro" }),
+      ]);
+      expect(out.threads[0]?.replies).toEqual([expect.objectContaining({ body: "Agreed" })]);
+    }
+
+    const missing = await artifactCommentsTool.execute({ artifact: "https://valet.example/a/not-a-token" }, ctx);
+    expect(missing.text).toMatch(/^\[memory_error\] Artifact not found/);
   });
 
   it("artifact_publish round-trips: publish returns URL + version + audience, republish bumps, revoke confirms", async () => {

@@ -38,8 +38,9 @@
  *     `trigger.timestamp` — which is how a scheduled run knows today's date
  *     without an input.
  *
- * A scheduled run applies no `dataSchema` defaults, so a declared input has
- * to be gone by the time the schedule fires. Install closes that gap: it
+ * A scheduled run fills a field only from the schedule's input or its
+ * `dataSchema` default, so a declared input has to be gone by the time the
+ * schedule fires. Install closes that gap: it
  * refuses a scheduled template that has no value for a required field, then
  * rewrites `{{ trigger.data.<field> }}` to the literal value and drops the
  * field (`api/src/workflows/templates.ts`). That is what lets a scheduled

@@ -350,6 +350,8 @@ let itemCalls: unknown[][] = [];
 let requestFilters: unknown;
 
 vi.mock("~/api/usage", () => ({
+  useSessionOutcomeUsage: () => ({ data: { outcomes: [] }, isPending: false }),
+  useExternalUsage: () => ({ data: { daily: [], tools: [], clients: [], recent: [], hasMore: false, detailsVisible: true }, isPending: false }),
   useUsageBreakdown: (...args: unknown[]) => {
     breakdownCalls.push(args);
     return { ...breakdownResult, isSuccess: !!breakdownResult.data && !breakdownResult.error };
@@ -1258,4 +1260,11 @@ describe("UsagePage view navigation", () => {
     expect(requestFilters).toEqual({ limit: 25, cursor: undefined });
     expect(screen.queryByRole("heading", { name: /request log/ })).toBeNull();
   });
+});
+
+it("opens Tool usage in the existing usage period and scope", () => {
+  render(<UsagePage />);
+  fireEvent.click(screen.getByRole("tab", { name: "Tool usage" }));
+  expect(screen.getByRole("region", { name: "Tool usage" })).toBeTruthy();
+  expect(screen.getByText("No tool calls in this window.")).toBeTruthy();
 });

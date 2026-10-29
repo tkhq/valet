@@ -80,6 +80,9 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
 
   const suffix = iterationSuffix(iteration);
   const dispatchId = `workflow:${run.runId}:${node.id}${suffix}`;
+  // The primary and repair turns go to the same thread, so the repair sees
+  // the reply it corrects.
+  const stepThread = node.thread === 'step' ? { nodeId: node.id, iteration } : undefined;
 
   return await executeSubmissionNode<ThreadDispatchedResult, ThreadSettledResult>(
     { run, nodeId: node.id, attempt, iteration, store, clock, engine, existingCheckpoint },
@@ -96,6 +99,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
           queueMode: 'followup',
           ownerHint: owner,
           modelCallLimit: stepModelCallLimit(node),
+          ...(stepThread ? { stepThread } : {}),
         });
         return {
           sessionId: dispatched.sessionId,
@@ -109,6 +113,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
           queueMode: 'followup',
           ownerHint: owner,
           modelCallLimit: stepModelCallLimit(node),
+          ...(stepThread ? { stepThread } : {}),
         });
         return { threadId: dispatched.threadId, queueItemId: dispatched.queueItemId };
       },

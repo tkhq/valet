@@ -1,16 +1,18 @@
+import { hostedToolUsageSink } from "../services/external-usage.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
-import { assistantExecutions } from "../schema/index.js";
+import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
 import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -91,6 +93,9 @@ import {
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import { repoBakeCompatibility, type ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { recordImageFallback } from "../observability/image-fallback-metrics.js";
+import { recordTranscriptsReleased } from "../observability/transcript-metrics.js";
 import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
   applySandboxResourceOverrides,
@@ -135,6 +140,7 @@ import {
   sessionRepos,
   teams,
   users,
+  type ImageFallback,
   type SecurityCellRow,
 } from "../schema/index.js";
 import {
@@ -151,7 +157,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CHILD_TIMER_HOURS, codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
+import { codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -384,6 +390,8 @@ export interface EngineHostOpts {
    * A getter, because the tools need providers built after this host.
    */
   homeTools?: () => ToolDef[];
+  /** Tools for messaging the threads a branch links to this one (`home/thread-link-tools.ts`). */
+  threadLinkTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -401,6 +409,13 @@ export interface EngineHostOpts {
    * means the plugin-default rung falls through to the risk default.
    */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /**
+   * The cached tool listings of dynamic (MCP) services (`plugins/service-probe.ts`).
+   * The policy resolver reads them so an owner's "always allow" on an MCP
+   * tool passes the override bounds check (`PolicyResolverDeps.serviceProbes`).
+   * Absent: a dynamic tool is unverifiable and the gate hides that option.
+   */
+  serviceProbes?: ServiceProbes;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -546,6 +561,16 @@ export function codingPromptOptions(
  * request left the session without `/scratch`. Empty when nothing dropped. */
 export function scratchWarningPrompt(warning: string | undefined): string {
   return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
+}
+
+/** Spec 7.2. Appended to the system prompt at build time when the eager
+ * compatibility check says the repo image is incompatible, so it repeats on
+ * every turn of that build; a note that disappears mid-task is worse than
+ * one that repeats. */
+export function imageFallbackPrompt(repoFullName: string | undefined): string {
+  return repoFullName
+    ? `\n\n## Startup warning\n\nPrebuilt dependencies for \`${repoFullName}\` are unavailable right now because the repo image is being rebuilt. The workspace is checked out; install what you need.`
+    : "";
 }
 
 export interface SessionMeta {
@@ -808,6 +833,13 @@ export async function verifyFileInSandbox(
  * same Session.
  */
 export class EngineHost {
+  /** Spec 7.1 callback target; attached after construction because the
+   * SourceService is built after the host (providers/node.ts). */
+  private imageFallbackHandler?: (event: ImageFallbackEvent) => Promise<void>;
+  setImageFallbackHandler(handler: (event: ImageFallbackEvent) => Promise<void>): void {
+    this.imageFallbackHandler = handler;
+  }
+
   private cache = new Map<string, CacheEntry>();
   /**
    * Single-flight gate for `sessionFor`. Two concurrent requests for the
@@ -818,10 +850,45 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private sandboxCleanups = new Map<string, Promise<unknown>>();
+
+  /** Child reclaim takes delivery before this barrier and holds both through destroy and cleanup. Barrier owners never acquire delivery. */
+  async withSandboxCleanup<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.sandboxCleanups.get(sessionId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(work);
+    this.sandboxCleanups.set(sessionId, next);
+    try { return await next; }
+    finally { if (this.sandboxCleanups.get(sessionId) === next) this.sandboxCleanups.delete(sessionId); }
+  }
+
+  /** Resolve and admit on one cached session. The callback must not acquire the child delivery lock. */
+  async withSessionFor<T>(sessionId: string, meta: SessionMeta, work: (session: Session) => Promise<T>): Promise<T> {
+    while (true) {
+      const session = await this.sessionFor(sessionId, meta);
+      const used = await this.withSandboxCleanup(sessionId, async () => {
+        // A reclaim can start after resolution and finish before this admission gets the barrier.
+        if (this.liveSession(sessionId) !== session) return null;
+        return { value: await work(session) };
+      });
+      if (used) return used.value;
+    }
+  }
+
+  sessionBuildInFlight(sessionId: string): boolean { return this.inflight.has(sessionId); }
+
+  /** Released attachments are terminal. Eviction keeps durable submissions for the next session restore. */
+  private reusableCacheEntry(sessionId: string): CacheEntry | undefined {
+    const entry = this.cache.get(sessionId);
+    if (entry?.session.attachment.state !== "released" || entry.session.isReclaiming || entry.session.attachment.isDestroying || entry.session.hasActiveExecution) return entry;
+    this.evictCache(sessionId);
+    return undefined;
+  }
+
   private teardown = new Map<string, Promise<void>>();
   private lifecycleEpoch = new Map<string, number>();
 
   private assertSessionBuildAllowed(sessionId: string, epoch = this.lifecycleEpoch.get(sessionId) ?? 0): number {
+    if (this.shuttingDown) throw new Error("Engine host is shutting down.");
     if (this.teardown.has(sessionId) || epoch !== (this.lifecycleEpoch.get(sessionId) ?? 0)) {
       throw new Error("Session teardown interrupted this request. Start a new session and retry.");
     }
@@ -835,6 +902,9 @@ export class EngineHost {
    * row read and its `cache.set` evicts an empty slot, and the stale build
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
+  private configWrites = new Map<string, Promise<void>>();
+  private draining = new Map<string, Session>();
+  private shuttingDown = false;
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
   /** Repo keys whose dropped-scratch warning is active. */
@@ -902,6 +972,10 @@ export class EngineHost {
     const now = Date.now();
     for (const [sessionId, entry] of this.cache) {
       try {
+        // Assistant sessions stay cached while idle (only executions are
+        // evicted below), so drop their idle threads' transcripts. The next
+        // turn reloads one from the store.
+        recordTranscriptsReleased(entry.session.releaseIdleTranscripts(now - idleMs));
         await this.maybeSuspendIdleSession(sessionId, entry.session, now, idleMs);
       } catch (err) {
         console.error(`EngineHost: idle sweep failed for session ${sessionId}:`, err);
@@ -1040,6 +1114,7 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     const lifecycleEpoch = this.assertSessionBuildAllowed(sessionId);
     // Assistant ids must always wake through `assistantSessionFor` so they
     // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
@@ -1061,7 +1136,7 @@ export class EngineHost {
       if (!assistant) throw new ArchivedAssistantError();
       return this.assistantSessionFor(assistant.id, { actorUserId: meta.userId, orgId: meta.orgId }, { sessionId });
     }
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -1076,6 +1151,8 @@ export class EngineHost {
     // lands in the same maps under the same key.
     if (this.opts.db) {
       const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      // The assistant lookup precedes the build's inflight registration.
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
       this.assertSessionBuildAllowed(sessionId, lifecycleEpoch);
       if (assistant) {
         return this.assistantSessionFor(
@@ -1086,7 +1163,7 @@ export class EngineHost {
       }
       // The awaited lookup opened a gap since the cache/inflight checks
       // above — re-check, or two concurrent cold wakes both start a build.
-      const cachedAfter = this.cache.get(sessionId);
+      const cachedAfter = this.reusableCacheEntry(sessionId);
       if (cachedAfter) return cachedAfter.session;
       const pendingAfter = this.inflight.get(sessionId);
       if (pendingAfter) return pendingAfter;
@@ -1100,6 +1177,7 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // Security runner wiring (Valet Security spec §Tools): a session whose
     // app row carries kind='security' gets the sec_* runner tools, the
     // engagement-runner skill, and the child read/send/status seams —
@@ -1190,6 +1268,7 @@ export class EngineHost {
     // SandboxCreateOpts (caps/mounts/exec identity), never which image is
     // resolved.
     const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const dockerFlag = meta.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
@@ -1250,7 +1329,7 @@ export class EngineHost {
     // services START). The specProvider closure may resolve a bake image
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    const image = this.stockImage();
     // Authorized-scope egress allowlist env (M-P4b): a live persona child
     // carries VALET_SECURITY_AUTHORIZED_SCOPE so its live tools bound egress to
     // the human-declared scope. Merged over the mint env; empty otherwise, so a
@@ -1327,8 +1406,10 @@ export class EngineHost {
     const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
+          predecessor: this.draining.get(sessionId),
           sessionId,
           options: {
+            isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
             userId: meta.userId,
             orgId: meta.orgId,
             owner: principal,
@@ -1340,7 +1421,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1359,11 +1440,15 @@ export class EngineHost {
             ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db, personaCell?.persona),
+            } : {}),
           },
         })
       : await engine.createSession({
           id: sessionId,
+          isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
           userId: meta.userId,
           orgId: meta.orgId,
           owner: principal,
@@ -1375,7 +1460,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1394,7 +1479,10 @@ export class EngineHost {
           ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db, personaCell?.persona),
+            } : {}),
         });
 
     builtSession = session;
@@ -1408,9 +1496,16 @@ export class EngineHost {
     if (repoFlags.scratchWarning) {
       await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
     }
+    if (fallbackRepo) {
+      await this.noteSessionWarning(
+        session,
+        `Running on the stock image: the \`${fallbackRepo}\` image failed its compatibility check and is being rebuilt. Prebuilt dependencies are unavailable until then.`,
+        meta.warningThreadKey ?? "web:default",
+      );
+    }
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
     // durable events for submissions that settled outside the retention
@@ -1732,10 +1827,7 @@ export class EngineHost {
     // agree with the create-opts image in `buildSession`/`buildChild` or the
     // `spec.image !== stockImage` comparison below misreports the stock
     // case as an override.
-    const stockImage =
-      this.opts.defaultImages?.full ??
-      this.opts.defaultImage ??
-      "";
+    const stockImage = this.stockImage() ?? "";
 
     return async () => {
       const snap = await resolveSnapshot({
@@ -1745,6 +1837,12 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        onIncompatible: async (info) => {
+          // Count and stamp once per (session, bake), not once per sweep.
+          const changed = await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
+          if (changed) recordImageFallback("contract");
+          await host.imageFallbackHandler?.({ ...info, sessionId });
+        },
       });
       // The repo's own command-to-credential declarations, resolved on the
       // same best-effort footing as the docker flag: read failures yield no
@@ -1761,6 +1859,7 @@ export class EngineHost {
       // Best-effort prebuild-id recording — same as the old eager path.
       if (snap.repoBake) {
         await host.recordPrebuildId(sessionId, snap.repoBake.bakeId);
+        await host.recordImageFallback(sessionId, null);
       }
 
       const spec = computeSpec(snap);
@@ -1822,6 +1921,35 @@ export class EngineHost {
         .where(eq(agentSessions.id, sessionId));
     } catch (err) {
       console.error(`EngineHost: recording bake_id for session ${sessionId} failed:`, err);
+    }
+  }
+
+  /** Best-effort write of `agent_sessions.image_fallback` (spec 7.1). A null
+   * clears it. Both writes are conditional (set only when absent or for a
+   * different bake; clear only when set) so a steady-state session costs no
+   * row write per reconcile. Returns whether a row changed. */
+  private async recordImageFallback(sessionId: string, fallback: ImageFallback | null): Promise<boolean> {
+    if (!this.opts.db) return false;
+    try {
+      if (fallback) {
+        const rows = await this.opts.db.update(agentSessions).set({ imageFallback: fallback })
+          .where(and(
+            eq(agentSessions.id, sessionId),
+            or(
+              isNull(agentSessions.imageFallback),
+              sql`${agentSessions.imageFallback}->>'bakeId' IS DISTINCT FROM ${fallback.bakeId}`,
+            ),
+          ))
+          .returning({ id: agentSessions.id });
+        return rows.length > 0;
+      }
+      const rows = await this.opts.db.update(agentSessions).set({ imageFallback: null })
+        .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.imageFallback)))
+        .returning({ id: agentSessions.id });
+      return rows.length > 0;
+    } catch (err) {
+      console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
+      return false;
     }
   }
 
@@ -1978,6 +2106,7 @@ export class EngineHost {
       this.policyResolverInstance = buildPolicyResolver({
         db: this.opts.db,
         actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+        ...(this.opts.serviceProbes ? { serviceProbes: this.opts.serviceProbes } : {}),
         credentials: this.opts.engineCredentials,
         ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
         ...(this.opts.plugins ? { plugins: this.opts.plugins } : {}),
@@ -2276,6 +2405,14 @@ export class EngineHost {
       console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
       return [];
     }
+  }
+
+  /** The primary repo's full name when its newest pushed bake would fail the
+   * contract gate (one DB read), else undefined. Never throws. */
+  private async repoImageFallbackRepo(meta: SessionMeta): Promise<string | undefined> {
+    if (!meta.repos?.length) return undefined;
+    const check = await repoBakeCompatibility(this.opts.db, meta, this.opts.sandboxProvider);
+    return check && !check.compatible ? check.info.repoFullName : undefined;
   }
 
   /**
@@ -2601,6 +2738,7 @@ export class EngineHost {
       wakeups: buildWakeupsSeam(
         {
           ...wakeupsSeamDeps(this.opts),
+          db: this.opts.db,
           scratchBytes: () => sessionScratchBytes(getSession),
           ...(checkArm ? { checkArm } : {}),
         },
@@ -2902,17 +3040,21 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) {
       const assistant = this.opts.db ? await loadAssistant(this.opts.db, assistantId) : undefined;
       const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
         .where(eq(agentSessions.id, sessionId)).limit(1) : [];
       if (!assistant || assistant.archivedAt !== null || app?.status === "deleted") {
-        this.evictCache(sessionId);
+        await this.invalidateSession(sessionId);
         throw new ArchivedAssistantError();
       }
-      return cached.session;
+      while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
+      this.assertSessionBuildAllowed(sessionId);
+      const current = this.reusableCacheEntry(sessionId);
+      if (current) return current.session;
     }
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -2989,12 +3131,16 @@ export class EngineHost {
     const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
     // Existing scripts can depend on absolute paths. Keep the recorded working
     // directory when adopting a legacy runtime, rather than allocating a new one.
-    let workspace = legacyRuntime && existing ? existing.workspace : execution
-      ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
-      : join(homedir(), ".valet", "assistants", assistantId);
-    if (execution && principal.type === "user") {
-      // The personal root mounts its whole directory. Keep fork files outside it.
+    let workspace = legacyRuntime && existing ? existing.workspace : join(homedir(), ".valet", "assistants", assistantId);
+    if (execution) {
+      // The root sandbox mounts its whole directory, so an execution inside it
+      // would expose a private conversation's files to the root. A live
+      // browser sandbox also owns that directory, and the server could not
+      // create the execution there. Older team executions keep their
+      // recorded directory under `executions/`.
       workspace = existing?.workspace ?? join(homedir(), ".valet", "assistant-executions", assistantId, execution.sessionId);
+    }
+    if (execution && principal.type === "user") {
       const root = await this.opts.engineStore.getSession(assistant.sessionId);
       const sourcePath = resolve(root?.workspace ?? join(homedir(), ".valet", "assistants", assistantId));
       const executionPath = resolve(workspace);
@@ -3104,6 +3250,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && epoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: runtimeUserId,
       orgId: meta.orgId,
       workspace,
@@ -3116,7 +3263,10 @@ export class EngineHost {
       ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
       queueMode,
@@ -3127,7 +3277,7 @@ export class EngineHost {
         // session and a child both use. This path pinned `defaultImage`,
         // which is the wrong image for a `full` assistant: `/start-full.sh`
         // is baked into the full lineage only.
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -3148,7 +3298,7 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...(this.opts.threadLinkTools?.() ?? []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this
@@ -3190,20 +3340,14 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     const epochNow = this.buildEpoch.get(sessionId) ?? 0;
-    if (epochNow !== epoch && attempt < 2) {
-      // A config PATCH evicted the cache while this build was between its
-      // row read and here: the instance in hand was assembled from the
-      // pre-PATCH row. Suspend its timers (they would root it forever, see
-      // evictCache) and rebuild from the current row. CAPPED at two retries:
-      // each rebuild replays the session's durable history, so a caller
-      // PATCHing faster than one build must not livelock the wake. Past the
-      // cap the build in hand is served and cached, and the epoch check
-      // below drops it again if writes are still arriving — bounded
-      // staleness instead of unbounded rebuild.
+    if (epochNow !== epoch && attempt < 2 && !session.hasActiveExecution) {
+      // A generation change during this build invalidates all its claims. Retry an idle build immediately;
+      // an already-reserved execution must drain on this owner before cacheSession can hand it off.
+      session.retireExecution(async () => {});
       session.suspendTimers();
       return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
@@ -3217,20 +3361,9 @@ export class EngineHost {
     builtSession = session;
 
     extras.bindSession(session);
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
-
-    if (epochNow !== epoch) {
-      // Retry cap reached with the epoch still moving: serve this wake on
-      // the (at most one-PATCH-stale) build, but don't let it outlive the
-      // churn — dropping the cache entry makes the NEXT wake rebuild fresh.
-      console.warn(
-        `EngineHost: assistant ${assistantId} was patched ${attempt + 1}x during one build; ` +
-          `serving the last build uncached`,
-      );
-      this.evictCache(sessionId);
-    }
 
     return session;
   }
@@ -3278,15 +3411,15 @@ export class EngineHost {
     // A build can still be inserting its token. Settle it before revocation,
     // including failed builds that may have written only part of their state.
     await this.inflight.get(sessionId)?.catch(() => undefined);
-    const entry = this.cache.get(sessionId);
+    const session = this.liveSession(sessionId);
     // Existing browser state keeps its audit obligation after allocation is disabled.
-    if (entry && !entry.session.options.sandboxLifecycle) {
+    if (session && !session.options.sandboxLifecycle) {
       const rows = await this.opts.sandboxProvider.list?.() ?? [];
       for (const row of rows.filter((value) => value.sessionId === sessionId && value.browserEnabled)) {
         await this.stopBrowserBefore(row.id, 'destroy');
       }
     }
-    if (!entry) {
+    if (!session) {
       await this.destroyRetainedBrowserSandboxes(sessionId);
       // Cold session: nothing cached in this process, but every caller of
       // destroy() means "this session is being deleted", and the durable
@@ -3308,9 +3441,10 @@ export class EngineHost {
     try {
       // Replacement drops its attachment handle before it releases compute.
       // Final deletion also owns any browser state that remains in inventory.
-      await entry.session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
+      await session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
     } finally {
       this.cache.delete(sessionId);
+      this.draining.delete(sessionId);
       this.buildEpoch.delete(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
@@ -3335,35 +3469,82 @@ export class EngineHost {
     }
   }
 
-  /**
-   * Drop a session's in-process cache entry WITHOUT tearing down engine
-   * state — unlike `destroy()`, this never calls `session.destroy()` (which
-   * deletes the underlying engine session row via
-   * `SessionStore.deleteSession`). Used when a configuration change needs
-   * picking up on the next wake: the next `assistantSessionFor` call misses the cache
-   * and rebuilds `systemPrompt`/`systemContext` from current configuration,
-   * restoring the same durable session (same transcript) rather than
-   * creating a new one. Safe to call on an id that isn't cached — no-op.
-   *
-   * Calls `session.suspendTimers()` before dropping the cache entry: the
-   * evicted `Session` would otherwise be rooted forever by its two
-   * unref'd intervals (heartbeat 10s, sweep 5s — each interval closure
-   * captures `this`), permanently leaking the object and continuing to
-   * sweep/heartbeat against the store even though nothing references it
-   * through the cache anymore. `unref()` only keeps the *process* from
-   * staying alive on these timers; it does nothing to stop them from
-   * keeping this *object* alive or from continuing to fire. Suspending
-   * them first means the evicted instance is a normal orphan, collected
-   * once its last reference (this method's local `entry`) goes away.
-   */
-  evictCache(sessionId: string): void {
-    // Invalidate any in-flight build too: it read the row before this
-    // eviction's cause committed, and would otherwise re-populate the cache
-    // with the stale config (`buildAssistantSession` checks the epoch before
-    // its `cache.set`).
-    this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
-    this.cache.get(sessionId)?.session.suspendTimers();
+  /** Persist invalidation before acknowledging configuration-changing requests. The live fence is synchronous. */
+  async invalidateSession(sessionId: string): Promise<void> {
+    const token = randomUUID();
+    const previous = this.configWrites.get(sessionId);
+    const write = (async () => {
+      await previous;
+      await this.opts.db?.insert(sessionConfigInvalidations).values({ sessionId, token })
+        .onConflictDoUpdate({ target: sessionConfigInvalidations.sessionId, set: { token } });
+    })();
+    this.configWrites.set(sessionId, write);
+    this.evictCache(sessionId);
+    try { await write; }
+    finally { if (this.configWrites.get(sessionId) === write) this.configWrites.delete(sessionId); }
+  }
+
+  private async cacheSession(sessionId: string, entry: CacheEntry): Promise<void> {
+    const db = this.opts.db;
+    const [mark] = db ? await db.select().from(sessionConfigInvalidations).where(eq(sessionConfigInvalidations.sessionId, sessionId)).limit(1) : [];
+    this.cache.set(sessionId, entry);
+    if (this.shuttingDown) {
+      entry.session.retireExecution(async () => {});
+      this.dropCacheEntry(sessionId);
+    } else if (entry.session.options.isExecutionCurrent?.() === false) {
+      this.evictCache(sessionId);
+    } else if (mark && db) {
+      await db.delete(sessionConfigInvalidations).where(and(eq(sessionConfigInvalidations.sessionId, sessionId), eq(sessionConfigInvalidations.token, mark.token)));
+    }
+  }
+
+  private dropCacheEntry(sessionId: string): void {
+    this.cache.get(sessionId)?.session.suspendTimers({ permanent: true });
     this.cache.delete(sessionId);
+  }
+
+  /**
+   * Invalidate the cache without deleting durable engine state or destroying compute.
+   * Config eviction retires the owner and rebuilds immediately. Only its active threads wait for handoff.
+   * The identity-checked reclaim path can drop only an idle owner. Old references remain fenced after either handoff.
+   */
+  evictCache(sessionId: string, expected?: Session | null): void {
+    const entry = this.cache.get(sessionId);
+    // Identity-checked eviction is reclaim's terminal step, not config invalidation.
+    if (expected !== undefined && (this.inflight.has(sessionId) || (entry?.session ?? null) !== expected || entry?.session.hasActiveExecution)) return;
+    this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
+    if (!entry) return;
+    if (expected !== undefined) { this.dropCacheEntry(sessionId); return; }
+    const retired = entry.session;
+    if (retired.hasActiveExecution && retired.attachment.state !== "released") this.draining.set(sessionId, retired);
+    retired.retireExecution(async () => {
+      try {
+        await this.configWrites.get(sessionId);
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        await this.withSandboxCleanup(sessionId, async () => {
+          if (this.cache.get(sessionId)?.session === retired) this.cache.delete(sessionId);
+        });
+        if (this.shuttingDown || this.teardown.has(sessionId)) return;
+        const [row] = this.opts.db ? await this.opts.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1) : [];
+        if (row?.status === "deleted" || !(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length) return;
+        const data = await retired.toData();
+        const replacement = await this.sessionFor(sessionId, row && this.opts.db ? await loadSessionMeta(this.opts.db, row) : {
+          userId: data.userId, orgId: data.orgId, workspace: data.workspace, ownerType: data.owner.type,
+        });
+        if (replacement !== retired) await replacement.refreshExecutionThreads();
+        for (const thread of replacement.listThreads()) void thread.kick();
+      } catch (error) {
+        if (!(error instanceof ArchivedAssistantError)) throw error;
+      } finally {
+        if (!retired.hasOwnActiveExecution) {
+          retired.suspendTimers({ permanent: true });
+          if (this.draining.get(sessionId)?.hasDrainingExecution === false) this.draining.delete(sessionId);
+        }
+      }
+    });
+    // The replacement can claim other threads now. Old references stay fenced and recover late admissions.
+    this.cache.delete(sessionId);
+    if (!retired.hasOwnActiveExecution) retired.suspendTimers({ permanent: true });
   }
 
   /**
@@ -3374,11 +3555,30 @@ export class EngineHost {
    * (reconciliation on next boot) is the designed restart story, and it
    * needs those rows. Sandboxes are left as-is — the workspace survives,
    * the sandbox is disposable (Phase 3), and the next boot re-attaches or
-   * re-provisions.
+   * re-provisions. Shutdown is terminal: late builds cannot claim or repopulate this host.
+   * Explicit cache-reset fixtures can opt out of terminal shutdown, but their old owners stay fenced.
    */
-  evictAll(): void {
-    for (const id of [...this.cache.keys()]) this.evictCache(id);
+  evictAll(opts: { shutdown?: boolean } = {}): void {
+    this.shuttingDown = opts.shutdown ?? true;
+    for (const [id, entry] of this.cache) {
+      this.buildEpoch.set(id, (this.buildEpoch.get(id) ?? 0) + 1);
+      entry.session.stopExecutionOwners();
+      this.dropCacheEntry(id);
+    }
+    for (const session of this.draining.values()) {
+      session.stopExecutionOwners();
+    }
+    this.draining.clear();
     this.clearSweepInterval();
+  }
+
+  /** The one stock image every session shape boots when no bake applies.
+   * `buildSpecProvider` compares the resolved spec against this same value
+   * (`spec.image !== stockImage` means an override), so every create site
+   * must use it; a site that pins `defaultImage` alone boots the headless
+   * image under a kubernetes deployment that only ships the full lineage. */
+  private stockImage(): string | undefined {
+    return this.opts.defaultImages?.full ?? this.opts.defaultImage;
   }
 
   /** Shared by `evictAll()`/`destroyAll()` — both are terminal, whole-host
@@ -3397,7 +3597,7 @@ export class EngineHost {
    * `evictAll()`. Kept for tests and true delete-everything flows.
    */
   async destroyAll(): Promise<void> {
-    const ids = [...this.cache.keys()];
+    const ids = [...new Set([...this.cache.keys(), ...this.draining.keys()])];
     await Promise.allSettled(ids.map((id) => this.destroy(id)));
     this.clearSweepInterval();
   }
@@ -3493,11 +3693,18 @@ export class EngineHost {
    * exists while the session is live.
    */
   sessionsWithActiveRuns(): string[] {
-    return [...this.cache].filter(([, entry]) => entry.session.listThreads().some(thread => thread.hasActiveRun)).map(([id]) => id);
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.hasActiveExecution).map(([id]) => id);
+  }
+
+  runningSandboxSessionIds(): string[] {
+    const sessions = new Map([...this.draining, ...[...this.cache].map(([id, entry]) => [id, entry.session] as const)]);
+    return [...sessions].filter(([, session]) => session.attachment.sandboxId !== undefined
+      && session.attachment.state !== "suspended" && session.attachment.state !== "released").map(([id]) => id);
   }
 
   liveSession(sessionId: string): Session | null {
-    return this.cache.get(sessionId)?.session ?? null;
+    return this.cache.get(sessionId)?.session ?? this.draining.get(sessionId) ?? null;
   }
 
   /**
@@ -4031,7 +4238,7 @@ export class EngineHost {
       provider: this.opts.sandboxProvider,
       meta,
       apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-      stockImage: this.opts.defaultImages?.full ?? this.opts.defaultImage ?? "",
+      stockImage: this.stockImage() ?? "",
       preflight: this.opts.prebuildPreflight,
     });
     // Use startup's repo -> base -> stock fallback, including its pull preflight.
@@ -4075,8 +4282,9 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(childSessionId)) await this.sandboxCleanups.get(childSessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(childSessionId);
-    const cached = this.cache.get(childSessionId);
+    const cached = this.reusableCacheEntry(childSessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(childSessionId);
     if (pending) return pending;
@@ -4117,6 +4325,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(childSessionId) ?? 0;
     // `opts.owner` is the child's own principal: the `task` tool reads the
     // parent session's principal and hands it to the spawner, which passes
     // it here and on to `createSession` below. A child of a team-owned
@@ -4243,6 +4452,7 @@ export class EngineHost {
     // claim while REST sessions honored the declaration. Best-effort: any
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     if (repoFlags.outcome === "error") {
       opts.startupWarnings?.push(
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
@@ -4266,6 +4476,7 @@ export class EngineHost {
       specProvider !== undefined,
     );
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(childSessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
@@ -4280,7 +4491,10 @@ export class EngineHost {
       ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
       ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
@@ -4291,7 +4505,7 @@ export class EngineHost {
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         // Authorized-scope egress allowlist env (M-P4b): a live persona child
         // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
         // so the env stays byte-identical.
@@ -4319,7 +4533,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4354,12 +4568,12 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions, predecessor: this.draining.get(childSessionId) })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     builtSession = session;
     provisionedExtras.bindSession(session);
-    this.cache.set(childSessionId, { engine, session });
+    await this.cacheSession(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
@@ -4389,8 +4603,9 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    while (this.sandboxCleanups.has(sessionId)) await this.sandboxCleanups.get(sessionId)?.catch(() => undefined);
     this.assertSessionBuildAllowed(sessionId);
-    const cached = this.cache.get(sessionId);
+    const cached = this.reusableCacheEntry(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
@@ -4415,6 +4630,7 @@ export class EngineHost {
       assistantId?: string;
     },
   ): Promise<Session> {
+    const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
     // the scheduler and the event dispatcher copy from the definition row).
     // A run started from a team-owned workflow therefore reads the team's
@@ -4462,6 +4678,7 @@ export class EngineHost {
       ownerId: opts.owner.id,
     };
     const meta: SessionMeta = this.opts.db ? await loadSessionMeta(this.opts.db, metaSource) : metaSource;
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
@@ -4472,6 +4689,7 @@ export class EngineHost {
     // workflow run cannot wait for events (spec 2026-10-15, R9).
     let builtSession: Session | undefined;
     const sessionOptions = {
+      isExecutionCurrent: () => !this.shuttingDown && configEpoch === (this.buildEpoch.get(sessionId) ?? 0),
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace,
@@ -4487,7 +4705,10 @@ export class EngineHost {
       ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+            ...(this.opts.db ? {
+              skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId),
+              recordToolUsage: hostedToolUsageSink(this.opts.db),
+            } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
@@ -4502,7 +4723,7 @@ export class EngineHost {
       sandbox: {
         browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace,
-        image: this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile: "headless" as const,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -4512,7 +4733,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}), childTimerHours: CHILD_TIMER_HOURS }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name
@@ -4536,12 +4757,12 @@ export class EngineHost {
     });
 
     const session = existing
-      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      ? await engine.restoreSession({ sessionId, options: sessionOptions, predecessor: this.draining.get(sessionId) })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);
     builtSession = session;
-    this.cache.set(sessionId, { engine, session });
+    await this.cacheSession(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;

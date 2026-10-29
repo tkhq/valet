@@ -13,10 +13,11 @@ export async function resolveWorkflowReportTarget(
   meta: { actorUserId: string; orgId: string },
   session: Session,
   thread: Thread,
-  dispatchId: string,
+  /** The dispatch to look up an earlier admission for; omitted when none can exist. */
+  dispatchId: string | undefined,
 ): Promise<{ session: Session; thread: Thread; priorQueueItemId?: string }> {
   if (owner.type !== "team") return { session, thread };
-  const prior = await deps.db.execute(sql`SELECT id, thread_id FROM engine_queue_items
+  const prior = dispatchId === undefined ? { rows: [] } : await deps.db.execute(sql`SELECT id, thread_id FROM engine_queue_items
     WHERE session_id = ${session.id} AND dispatch_id = ${dispatchId} LIMIT 1`) as { rows: Array<{ id: string; thread_id: string }> };
   const existing = prior.rows[0];
   if (existing) {

@@ -240,6 +240,7 @@ CREATE TABLE "agent_sessions" (
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
+	"image_fallback" jsonb,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
@@ -258,7 +259,9 @@ CREATE TABLE "session_threads" (
 	"created_at" bigint NOT NULL,
 	"last_user_activity_at" bigint,
 	"archived_at" bigint,
-	"share_mode" text
+	"share_mode" text,
+	"approval_bypass_by" text,
+	"approval_bypass_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");
@@ -347,6 +350,9 @@ CREATE TABLE "assistant_executions" (
 CREATE UNIQUE INDEX "assistant_executions_conversation" ON "assistant_executions" ("assistant_id", "conversation_key");
 --> statement-breakpoint
 CREATE TABLE "child_watches" (
+ "delivery_active" boolean NOT NULL DEFAULT false,
+ "pending_cap_incident" text,
+	"events_started_at" bigint,
 	"child_session_id" text PRIMARY KEY NOT NULL,
 	"queue_item_id" text NOT NULL,
 	"parent_session_id" text NOT NULL,
@@ -363,11 +369,27 @@ CREATE TABLE "child_watches" (
 	"reply_route" text
 );
 --> statement-breakpoint
+CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
+--> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint
 CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE "session_config_invalidations" (
+  "session_id" text PRIMARY KEY NOT NULL,
+  "token" text NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "child_event_outbox" (
+  "id" text PRIMARY KEY NOT NULL,
+  "child_session_id" text NOT NULL,
+  "event" jsonb NOT NULL,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at");
 --> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -449,6 +471,17 @@ CREATE TABLE "channel_bindings" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "channel_bindings_conversation" ON "channel_bindings" ("org_id","channel_type","conversation_key");
+--> statement-breakpoint
+CREATE TABLE "channel_conversation_bindings" (
+  "org_id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+);
 --> statement-breakpoint
 CREATE TABLE "user_identity_links" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -608,6 +641,7 @@ CREATE TABLE "artifact_comments" (
 	"artifact_id" text NOT NULL,
 	"version" bigint NOT NULL,
 	"vdid" text,
+	"anchor_label" text,
 	"parent_id" text,
 	"body" text NOT NULL,
 	"author_user_id" text NOT NULL,
@@ -1071,6 +1105,10 @@ CREATE TABLE "image_sources" (
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
 	"enabled" boolean NOT NULL DEFAULT TRUE,
 	"last_bound_at" bigint,
+	"health" text NOT NULL DEFAULT 'healthy' CHECK (health IN ('healthy','stale','incompatible','failing','unbaked')),
+	"health_reason" text NOT NULL DEFAULT 'ok',
+	"health_detail" text,
+	"health_checked_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -1093,6 +1131,10 @@ CREATE TABLE "bakes" (
 	"started_at" bigint,
 	"finished_at" bigint,
 	"size_bytes" BIGINT,
+	"contract_version" integer,
+	"contract_source" text CHECK (contract_source IS NULL OR contract_source IN ('label','missing','override')),
+	"parent_bake_id" text,
+	"base_image_ref" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -1576,7 +1618,7 @@ SELECT
         COALESCE(p."team_id", p."user_id") AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case", p."provider_kind" AS "provider"
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", CASE WHEN p.provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END AS "use_case", p."provider_kind" AS "provider"
 FROM "llm_proxy_requests" p
 -- Only rows that carry usage count as billable turns — mirrors the engine
 -- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and
@@ -1763,7 +1805,7 @@ BEGIN
       CASE WHEN team_id IS NOT NULL THEN 'team' ELSE 'user' END,
       COALESCE(team_id,user_id), NULL, NULL,
       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
-      cost_usd, cost_usd IS NOT NULL, 'proxy', provider_kind
+      cost_usd, cost_usd IS NOT NULL, CASE WHEN provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END, provider_kind
     FROM llm_proxy_requests p WHERE total_tokens > 0;
 
   -- usage analytics indexes
@@ -2080,7 +2122,7 @@ CREATE OR REPLACE VIEW usage_daily_entries AS
  WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
- COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
  FROM usage_daily h WHERE h.source_kind='proxy';
 CREATE OR REPLACE VIEW usage_daily_ready AS SELECT 1 AS version FROM usage_daily WHERE false;
 ANALYZE usage_daily;
@@ -2105,7 +2147,7 @@ CREATE OR REPLACE VIEW usage_hourly_entries AS
  WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
- COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
  FROM usage_hourly h WHERE h.source_kind='proxy';
 CREATE OR REPLACE VIEW usage_hourly_ready AS
  SELECT 1 AS version FROM usage_entry_facts f,llm_proxy_requests p,usage_hourly h,usage_hourly_progress progress
@@ -2754,7 +2796,9 @@ CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, ses
 CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
-  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint,
+  "purpose" text NOT NULL DEFAULT 'login', "key_name" text,
+  "requested_by" text REFERENCES "user"("id") ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");
@@ -2812,3 +2856,87 @@ CREATE TABLE IF NOT EXISTS "home_tasks" (
 CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "external_calls" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text,
+  "surface" text NOT NULL, "name" text NOT NULL, "client_name" text, "client_version" text,
+  "session_id" text, "persona" text, "thread_id" text, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "outcome" text NOT NULL, "error_code" text, "duration_ms" integer NOT NULL,
+  "intent" text, "intent_cleared_at" bigint, "created_at" bigint NOT NULL,
+  CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id");
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "mcp_client_info" (
+  "org_id" text NOT NULL, "user_id" text NOT NULL, "client_id" text NOT NULL,
+  "name" text NOT NULL, "version" text NOT NULL, PRIMARY KEY ("org_id", "user_id", "client_id")
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_id, owner_type, owner_id, created_at);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_keys (
+ org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
+ label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
+ origin text NOT NULL, status text NOT NULL, edited_at bigint, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_labels (
+ org_id text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, dimension text NOT NULL, key text NOT NULL,
+ mode text NOT NULL, confidence float8 NOT NULL CHECK (confidence >= 0 AND confidence <= 1), model text NOT NULL,
+ input_hash text NOT NULL, classified_at bigint NOT NULL,
+ PRIMARY KEY (org_id, subject_type, subject_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_subjects (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_jobs (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
+ version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_dimension_state (
+ org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
+ retry_other boolean NOT NULL DEFAULT false, key_limit integer NOT NULL DEFAULT 100, consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+);
+--> statement-breakpoint
+
+CREATE OR REPLACE VIEW tag_resolved_labels AS
+WITH RECURSIVE resolved AS (
+ SELECT org_id, dimension, key AS original_key, key, status, merged_into, 0 AS depth FROM tag_keys
+ UNION ALL
+ SELECT r.org_id, r.dimension, r.original_key, k.key, k.status, k.merged_into, r.depth + 1
+ FROM resolved r JOIN tag_keys k ON k.org_id = r.org_id AND k.dimension = r.dimension AND k.key = r.merged_into
+ WHERE r.status = 'merged' AND r.depth < 1000
+)
+SELECT DISTINCT ON (l.org_id, l.subject_type, l.subject_id, l.dimension, r.key) l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.key AS original_key,
+ l.confidence, l.model, l.input_hash, l.classified_at
+FROM tag_labels l JOIN resolved r ON r.org_id = l.org_id AND r.dimension = l.dimension AND r.original_key = l.key
+WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.classified_at DESC, l.confidence DESC;
+
+--> statement-breakpoint
+CREATE OR REPLACE VIEW tagging_accounting_ready AS SELECT 1 AS version WHERE false;

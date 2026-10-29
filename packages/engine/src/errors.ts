@@ -195,6 +195,35 @@ export class SandboxSupersededError extends Error {
   }
 }
 
+/** Bounded classification of a terminal startup failure, for the
+ * `valet.sandbox.startup_failed` counter. Free text stays in `reason`.
+ * `capacity` is the org sandbox ceiling, not an infrastructure failure, so
+ * alert expressions exclude it. */
+export type SandboxStartupKind =
+  | "crash_loop"
+  | "image_pull"
+  | "unschedulable"
+  | "pod_failed"
+  | "ownership"
+  | "capacity"
+  | "other";
+
+// A Record over the union fails to compile when a kind is added or removed
+// without updating this list.
+const SANDBOX_STARTUP_KIND_SET: Record<SandboxStartupKind, true> = {
+  crash_loop: true,
+  image_pull: true,
+  unschedulable: true,
+  pod_failed: true,
+  ownership: true,
+  capacity: true,
+  other: true,
+};
+
+/** Every `SandboxStartupKind`, so the counter can zero-initialize each
+ * series at instrument creation. */
+export const SANDBOX_STARTUP_KINDS: readonly SandboxStartupKind[] = Object.keys(SANDBOX_STARTUP_KIND_SET) as SandboxStartupKind[];
+
 /**
  * Thrown by a `SandboxProvider.create` implementation when a sandbox
  * definitively FAILED to start (a terminal condition — image pull failure,
@@ -212,6 +241,7 @@ export class SandboxStartupError extends Error {
   constructor(
     public readonly sandboxId: string,
     public readonly reason: string,
+    public readonly kind: SandboxStartupKind = "other",
   ) {
     super(`sandbox failed to start: ${reason}`);
     this.name = "SandboxStartupError";

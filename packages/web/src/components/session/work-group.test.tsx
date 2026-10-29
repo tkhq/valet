@@ -57,6 +57,13 @@ describe("work line text", () => {
     expect(running).toMatchObject({ title: "Reading Slack · read history", status: "running" });
   });
 
+  it("says when a call ran because its thread runs without asking", () => {
+    const automatic = call("call_tool", { tool_id: "slack.send_message", summary: "Post the summary" }, { result: { content: [], details: { ok: true, approval: "automatic" } } });
+    expect(stepView(automatic, new Map()).detail).toBe("Slack · Approved automatically");
+    const asked = call("call_tool", { tool_id: "slack.send_message", summary: "Post the summary" }, { result: { content: [], details: { ok: true } } });
+    expect(stepView(asked, new Map()).detail).toBe("Slack");
+  });
+
   it("names the agents a call talks to, never their ids", () => {
     const titles = new Map([["child_1", "Review retry coverage"]]);
     expect(stepView(call("child_send", { child_session_id: "child_1", message: "go" }), titles).title).toBe("Messaged Review retry coverage");

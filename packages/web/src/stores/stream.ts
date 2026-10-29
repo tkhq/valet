@@ -21,6 +21,10 @@ import type {
 
 export type ConnectionStatus = "idle" | "connecting" | "open" | "closed" | "error";
 
+/** A failed model call the running turn retries, from the wire `turn_retry`
+ * event. `at` is when this client received it, for the countdown. */
+export type ThreadRetry = Omit<Extract<WireEvent, { type: "turn_retry" }>, "seq" | "ts" | "offset" | "type"> & { at: number };
+
 /**
  * Terminal outcome of a queued submission, stashed on the originating user
  * message so the UI can render a badge. Set by the `submission.settled`
@@ -119,6 +123,12 @@ export interface SessionStreamState {
    * other thread in the session. A thread with no entry is idle.
    */
   statusByThread: Record<string, ThreadLiveStatus>;
+  /**
+   * Browser clock minus API clock, measured when the socket's `init`
+   * arrives. Wire timestamps are API time; a turn's start is kept in
+   * browser time so a skewed clock cannot freeze or inflate the timer.
+   */
+  serverClockOffset?: number;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -151,6 +161,12 @@ export interface SessionStreamState {
    * with no entry is not compacting.
    */
   compactingByThread: Record<string, boolean>;
+  /**
+   * The retry a running turn is waiting on, per thread. It is progress for
+   * the working line, never an error. Cleared when the next attempt streams
+   * or the submission settles.
+   */
+  retryByThread: Record<string, ThreadRetry>;
   /**
    * Bumps on every `compaction_end` wire event. The session-view hook
    * watches it and refetches the messages query so the persisted
@@ -271,6 +287,7 @@ const EMPTY: SessionStreamState = {
   activeModelByThread: {},
   modelSwitchNonce: 0,
   compactingByThread: {},
+  retryByThread: {},
   compactionNonce: 0,
 };
 
@@ -323,9 +340,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
       next.errorByThread = {};
+      next.retryByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
       next.activeModelByThread = {};
+      next.serverClockOffset = Date.now() - ev.ts;
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
       // — without this reset the "Compacting context…" strip would survive
@@ -342,6 +361,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (slice.errorByThread[ev.threadId]) {
         const { [ev.threadId]: _, ...rest } = slice.errorByThread;
         next.errorByThread = rest;
+      }
+      // The retried attempt is streaming: the retry is over.
+      if (slice.retryByThread[ev.threadId]) {
+        const { [ev.threadId]: _, ...rest } = slice.retryByThread;
+        next.retryByThread = rest;
       }
       // Any part still `streaming` on this thread belongs to a dead attempt
       // (zombie deltas from a superseded run are unfenced and can arrive
@@ -533,8 +557,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "status": {
       const prev = slice.statusByThread[ev.threadId];
       const wasIdle = prev === undefined || prev.status === "idle";
+      // A frame seeded at connect names the turn's real start; otherwise
+      // the first non-idle frame starts the clock. Both are API time, so
+      // they move to browser time before the timer subtracts them from it.
+      const offset = slice.serverClockOffset ?? Date.now() - ev.ts;
       const turnStartedAt =
-        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+        ev.status === "idle" ? undefined
+          : ev.turnStartedAt !== undefined ? ev.turnStartedAt + offset
+          : wasIdle ? ev.ts + offset : prev.turnStartedAt;
       // Duplicate frames are routine (the engine re-emits tool_calling per
       // tool; the handshake seed and durable replay overlap) — skip them so
       // the entry keeps its identity and subscribers do not re-render. An
@@ -569,6 +599,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "error": {
       // Older servers recorded intentional interruption as a provider error.
       if (ev.code === "aborted") return next;
+      // A model call that ended in an error. The engine sends this before it
+      // decides to retry, so it is not yet a failed turn: `turn_retry` follows
+      // when it retries. When retries run out, the failed reply in the
+      // transcript names the failure and a `failed` settlement marks the thread.
+      if (ev.code === "error") return next;
       // Engine-originated errors name their thread; store the banner and
       // flip the badge for that thread only. A session-level error (no
       // threadId, e.g. `ws_open_failed`) lands in `sessionError` and shows
@@ -678,6 +713,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (slice.activeModelByThread[ev.threadId]?.queueItemId === ev.queueItemId) {
         const { [ev.threadId]: _, ...rest } = slice.activeModelByThread;
         next.activeModelByThread = rest;
+        if (slice.retryByThread[ev.threadId]) {
+          const { [ev.threadId]: _retry, ...retries } = slice.retryByThread;
+          next.retryByThread = retries;
+        }
+        // The turn failed after its retries ran out. The thread now shows as
+        // failed until its next turn starts.
+        if (ev.outcome === "failed") {
+          next.statusByThread = { ...slice.statusByThread, [ev.threadId]: { status: "error" } };
+        }
       }
       // Mark the originating user message with a terminal badge. Match by
       // queue item id only: REST rows carry the engine's queue_item_id via
@@ -719,6 +763,12 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const m = slice.messages[idx];
       const updated: StreamMessage = { ...m, settledOutcome, settledError };
       next.messages = replaceAt(slice.messages, idx, updated);
+      return next;
+    }
+
+    case "turn_retry": {
+      const { seq: _seq, ts: _ts, offset: _offset, type: _type, ...retry } = ev;
+      next.retryByThread = { ...slice.retryByThread, [ev.threadId]: { ...retry, at: Date.now() } };
       return next;
     }
 
@@ -1190,6 +1240,11 @@ export function useErrorForThread(
     if (!slice) return undefined;
     return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
   });
+}
+
+/** The retry this thread's running turn is waiting on, if any. */
+export function useRetryForThread(sessionId: string, threadId: string | undefined): ThreadRetry | undefined {
+  return useStreamStore((s) => (threadId ? s.bySession[sessionId]?.retryByThread[threadId] : undefined));
 }
 
 /** True while this thread is between `compaction_start` and `compaction_end`. */

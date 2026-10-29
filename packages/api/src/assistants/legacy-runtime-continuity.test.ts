@@ -69,7 +69,8 @@ it("keeps legacy chats writable, their working directory usable, and pending app
   await p.engineStore.setSubmissionBlocked(root.sessionId, pending.id, queueItemId, true, fence);
 
   for (let restart = 0; restart < 2; restart++) {
-    p.engineHost.evictCache(root.sessionId);
+    // This simulates process loss, not config invalidation: a re-armed approval still owns an active attempt.
+    p.engineHost.evictAll({ shutdown: false });
     const continued = await ensureAssistantExecution(p, owner, meta, first.key);
     expect(continued.sessionId).toBe(root.sessionId);
     expect(continued.session.options.readOnlyReason).toBeUndefined();

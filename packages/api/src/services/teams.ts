@@ -796,6 +796,10 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     }
     await tx.update(agentSessions).set({ status: "deleted", updatedAt: Date.now() })
       .where(and(eq(agentSessions.orgId, team.orgId), eq(agentSessions.ownerType, "team"), eq(agentSessions.ownerId, opts.teamId)));
+    await tx.execute(sql`UPDATE engine_queue_items q SET child_result_delivery = 'denied'
+      WHERE q.child_result_delivery = 'pending' AND q.session_id IN (
+        SELECT id FROM agent_sessions WHERE org_id = ${team.orgId} AND owner_type = 'team' AND owner_id = ${opts.teamId}
+      )`);
     // Machine-driven delivery targets go too. A surviving team-owned event
     // subscription, channel binding, or followed thread keeps dispatching
     // to the team principal, and `resolveDefaultAssistant` would then MINT

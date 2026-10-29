@@ -152,6 +152,39 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Concurrency contract (docker-pg
     };
   }
 
+  it("claim versus two steer writers takes no deadlock retries on fresh threads", async () => {
+    const { store } = await factory();
+    const sessionId = "claim-steer";
+    await store.saveSession(baseSession(sessionId));
+    let deadlocks = 0;
+    // Count even errors that the transaction wrapper retries successfully.
+    const measured: PgDb = {
+      query: db.query.bind(db), close: async () => {},
+      transaction: fn => db.transaction(async tx => fn({ query: async (text, params) => {
+        try { return await tx.query(text, params); }
+        catch (error) { if (isPgDeadlock(error)) deadlocks++; throw error; }
+      } })),
+    };
+    const racing = new PgSessionStore(measured);
+    const failures: unknown[] = [];
+    const started = Date.now();
+    for (let n = 0; n < 20; n++) {
+      const threadId = `claim-steer-${n}`;
+      await store.saveThread(sessionId, baseThread(sessionId, threadId));
+      const now = Date.now();
+      await store.admitSubmission(sessionId, threadId, makeItem(`head-${n}`, threadId, now));
+      const outcomes = await Promise.allSettled([
+        racing.claimSubmission({ sessionId, threadId, itemId: `head-${n}`, attemptId: `attempt-${n}`, ownerId: "test" }),
+        racing.admitSubmission(sessionId, threadId, makeItem(`steer-a-${n}`, threadId, now + 1), { steer: true }),
+        racing.admitSubmission(sessionId, threadId, makeItem(`steer-b-${n}`, threadId, now + 2), { steer: true }),
+      ]);
+      failures.push(...outcomes.filter(o => o.status === "rejected"));
+    }
+    console.log(`CLAIM_STEER_STRESS iterations=20 deadlocks=${deadlocks} failures=${failures.length} elapsedMs=${Date.now() - started}`);
+    expect(failures).toEqual([]);
+    expect(deadlocks).toBe(0);
+  }, 120_000);
+
   // Task-3-review finding: appendEntries (locks the fenced queue-item row,
   // then touches engine_threads) and admitSubmission with steer:true (locks
   // engine_threads, then touches the queue-item rows it supersedes) take

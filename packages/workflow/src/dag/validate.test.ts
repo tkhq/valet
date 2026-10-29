@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import { validateWorkflowDefinition } from './validate.js';
 import type { WorkflowDefinition } from './shape.js';
-import type { ToolNode } from './nodes.js';
+import type { ThreadNode, ToolNode } from './nodes.js';
 
 /** Deliberately-malformed node for linter-behavior tests. The validator's
  * real-world input is LLM-authored JSON, so tests must hand it shapes the
@@ -490,6 +490,30 @@ describe('validateWorkflowDefinition', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.errors.some((e) => e.includes('orchestrator.prompt must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it('accepts "run" and "step" for thread and rejects any other value', () => {
+      const withThread = (thread: unknown) => validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            // Deliberately unchecked: the validator must reject what the type cannot hold.
+            { id: 'ask', type: 'orchestrator', prompt: 'do the thing', thread } as unknown as ThreadNode,
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'ask' },
+            { from: 'ask', to: 'stop' },
+          ],
+        }),
+      );
+      expect(withThread('run')).toEqual({ ok: true });
+      expect(withThread('step')).toEqual({ ok: true });
+      const result = withThread('iteration');
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContain('node "ask": orchestrator.thread must be "run" or "step", got "iteration"');
       }
     });
   });

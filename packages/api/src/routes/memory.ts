@@ -59,6 +59,7 @@ import {
   searchFiles,
   writeFile,
   type MemoryScope,
+  type WriteSource,
 } from "../services/memory.js";
 
 export const memoryRouter = new Hono<AppEnv>();
@@ -262,6 +263,20 @@ async function resolveOwnerScope(c: Context<AppEnv>, access: ScopeAccess): Promi
   }
   // The actor stays the human who sent the request. Only the owner moves.
   return { owner: requested, actorUserId: user.id };
+}
+
+/** The agent session behind a write, read from host headers only. A
+ * browser write has none. A workflow step sends no session header, so it
+ * has none either. The service records it on principle files. */
+function writeSource(c: Context<AppEnv>): WriteSource | undefined {
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    const sessionId = c.req.header("x-valet-session-id");
+    if (!sessionId) return undefined;
+    const threadId = c.req.header("x-valet-thread-id");
+    return threadId ? { sessionId, threadId } : { sessionId };
+  }
+  const sandbox = c.var.sandbox;
+  return sandbox ? { sessionId: sandbox.sessionId } : undefined;
 }
 
 /** Maps service-layer errors to HTTP responses. Rethrows anything else so
@@ -518,6 +533,7 @@ memoryRouter.put("/", async (c) => {
       origin: body.origin,
       expires: body.expires,
       pinned: body.pinned,
+      source: writeSource(c),
     });
     return c.json(result);
   } catch (err) {
@@ -553,6 +569,7 @@ memoryRouter.post("/patch", async (c) => {
       path: body.path,
       oldString: body.oldString,
       newString: body.newString,
+      source: writeSource(c),
     });
     return c.json(result);
   } catch (err) {

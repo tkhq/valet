@@ -1,4 +1,4 @@
-import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
@@ -42,6 +42,7 @@ export function MessageList({
   onReply,
   onEdit,
   onBranch,
+  onBranchPrivately,
   onReturnToBranch,
   onOpenThread,
   editingId,
@@ -50,7 +51,15 @@ export function MessageList({
   newSince,
   emptyState,
   footer,
+  loading = false,
+  onShowEarlier,
+  loadingEarlier = false,
 }: {
+  /** The transcript has not arrived yet: placeholder rows, not the empty line. */
+  loading?: boolean;
+  /** Older messages exist; called once when the top of the list scrolls into view. */
+  onShowEarlier?: () => void;
+  loadingEarlier?: boolean;
   /** Shown after the last message, such as the agents this thread is running. */
   footer?: ReactNode;
   /** Shown in place of the default line when the thread has no messages. */
@@ -85,6 +94,8 @@ export function MessageList({
   onEdit?: (message: StreamMessage) => void;
   /** Branches a message into a new thread. */
   onBranch?: (message: StreamMessage) => void;
+  /** Branches a message into the viewer's private threads (team threads only). */
+  onBranchPrivately?: (message: StreamMessage) => void;
   /** Goes back to the version a branch note left. */
   onReturnToBranch?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
   /** Opens another thread, for a fork note's source thread. */
@@ -104,10 +115,11 @@ export function MessageList({
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const observedHeightRef = useRef<number | null>(null);
   const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
-  // effect reads it in the same tick a message lands. This mirror exists
-  // only so the button can render, and it flips at the same threshold.
+  // effect reads it in the same tick a message lands. Latest follows the real
+  // position, which a resize can change without changing the reader's pin.
   const [scrolledAway, setScrolledAway] = useState(false);
 
   const visible = useMemo(() => {
@@ -147,18 +159,27 @@ export function MessageList({
     }
   }, [visible, scrollHeader.syncPosition]);
 
-  // A reader at the bottom stays at the bottom when the list gets shorter (a
-  // card opens above the composer) or its content grows without a new
-  // message (a running tool card expands, an image loads). Otherwise the next
-  // scroll event reads the gap as the reader scrolling away.
+  // Pinned readers intentionally follow every resize. The browser handles
+  // unpinned positions; a collapse that reaches the end can pin the reader.
   const hasContent = visible.length > 0;
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (!stickToBottomRef.current) return;
-      el.scrollTop = el.scrollHeight;
-      scrollHeader.syncPosition();
+    const observer = new ResizeObserver((entries) => {
+      if (
+        !el.clientHeight ||
+        entries.some((entry) => entry.target === el && !entry.contentRect.height)
+      ) {
+        return;
+      }
+      observedHeightRef.current = el.clientHeight;
+      if (stickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+        scrollHeader.syncPosition();
+      }
+      // Content grows on every streamed chunk; keep the state when the side did not flip.
+      const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 80;
+      setScrolledAway((prev) => (prev === away ? prev : away));
     });
     observer.observe(el);
     if (contentRef.current) observer.observe(contentRef.current);
@@ -167,11 +188,21 @@ export function MessageList({
 
   function onScroll() {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el?.clientHeight) return;
     scrollHeader.onScroll();
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     const nearBottom = distanceFromBottom < 80; // "near bottom"
-    stickToBottomRef.current = nearBottom;
+    const oldHeight = observedHeightRef.current;
+    if (
+      stickToBottomRef.current && oldHeight !== null &&
+      Math.abs(el.clientHeight - oldHeight) > 2
+    ) {
+      // Anchoring stays near the end at the old or new height. A same-frame
+      // reader scroll can leave both, and must unpin before the resize report.
+      stickToBottomRef.current = nearBottom || el.scrollHeight - el.scrollTop - oldHeight < 80;
+    } else {
+      stickToBottomRef.current = nearBottom;
+    }
     // Return `prev` unchanged when the side did not flip. Scroll fires on
     // every wheel tick, and React skips the re-render on an equal value.
     setScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
@@ -224,12 +255,15 @@ export function MessageList({
             {header}
           </div>
         )}
-        {visible.length === 0 ? (
+        {visible.length === 0 && loading ? (
+          <TranscriptPlaceholder />
+        ) : visible.length === 0 ? (
           emptyState ?? <div className="flex-1 grid place-items-center text-sm text-muted">
             No messages yet — try sending a prompt below.
           </div>
         ) : (
           <div ref={contentRef} className="shrink-0 space-y-2 py-4">
+            {onShowEarlier && <ShowEarlier onShow={onShowEarlier} loading={loadingEarlier} />}
             {transcript.items.map((item, i, items) => {
               const plan = transcript.plans[i]!;
               if (item.kind === "watch") {
@@ -261,6 +295,7 @@ export function MessageList({
                   onReply={onReply}
                   onEdit={onEdit && editable.has(m.id) ? onEdit : undefined}
                   onBranch={onBranch && branchable(m) ? onBranch : undefined}
+                  onBranchPrivately={onBranch && branchable(m) ? onBranchPrivately : undefined}
                   dimmed={dimFrom >= 0 && visible.indexOf(m) >= dimFrom}
                   ratings={ratings}
                 />
@@ -347,3 +382,43 @@ function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
   return item?.kind === "message" ? item.message : undefined;
 }
 
+/** The thread page's layout while the thread loads: a header line,
+ * transcript rows, and the composer, so the page does not jump when it fills.
+ * A panel draws its own header. */
+export function ThreadShell({ header = true }: { header?: boolean }) {
+  return <div role="status" aria-label="Opening the thread" className="flex min-h-0 flex-1 flex-col">
+    {header && <div className="h-12 shrink-0 border-b border-line px-4 py-3"><div className="h-4 w-48 rounded bg-ink-wash motion-safe:animate-pulse" /></div>}
+    <TranscriptPlaceholder />
+    <div className="mx-auto w-full max-w-[52rem] px-5 pb-4 sm:px-8"><div className="h-24 rounded-2xl border border-line" /></div>
+  </div>;
+}
+
+/** Rows in the shape of a transcript, while it loads. */
+export function TranscriptPlaceholder() {
+  return <div role="status" aria-label="Loading messages" className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-5 py-6 sm:px-8">
+    {[0.55, 0.85, 0.7].map((width, index) => <div key={index} className="space-y-2">
+      <div className="h-3 w-24 rounded bg-ink-wash motion-safe:animate-pulse" />
+      <div className="h-3 rounded bg-ink-wash motion-safe:animate-pulse" style={{ width: `${width * 100}%` }} />
+      <div className="h-3 w-1/2 rounded bg-ink-wash motion-safe:animate-pulse" />
+    </div>)}
+  </div>;
+}
+
+/** Loads older messages when the reader reaches the top, with a button for the same. */
+function ShowEarlier({ onShow, loading }: { onShow: () => void; loading: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onShow();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onShow]);
+  return <div ref={ref} className="flex justify-center px-5 py-1 sm:px-8">
+    <button type="button" disabled={loading} onClick={onShow} className="text-xs text-muted hover:text-ink disabled:opacity-60">
+      {loading ? "Loading earlier messages…" : "Show earlier messages"}
+    </button>
+  </div>;
+}

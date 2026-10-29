@@ -13,3 +13,12 @@ export {
   type SkillSpecViolation,
   type SkillSpecSeverity,
 } from "./spec.js";
+export {
+  isPlaybook,
+  PLAYBOOK_KIND,
+  playbookPlanItems,
+  playbookSeedNote,
+  readPlaybookSteps,
+  type PlaybookSeedResult,
+  type PlaybookSteps,
+} from "./playbook.js";

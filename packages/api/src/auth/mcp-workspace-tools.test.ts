@@ -4,13 +4,15 @@
  * uses two users so it proves the route ownership rules hold for MCP
  * callers, and one test proves an MCP agent cannot approve an approval gate.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { oauthAccessToken, orgMembers, orgs, skills, users } from "../schema/index.js";
+import { artifacts, oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, externalCalls } from "../schema/index.js";
+import { addArtifactComment } from "../services/artifacts.js";
 import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
@@ -57,7 +59,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
   const res = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: args } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { [name === "call_tool" ? "summary" : "intent"]: "Exercise this tool in the integration test.", ...args } } }),
   });
   expect(res.status).toBe(200);
   const { result, error } = (await res.json()) as { result?: { isError?: boolean; content: Array<{ text: string }> }; error?: unknown };
@@ -147,6 +149,10 @@ describe("MCP workspace tools", () => {
     });
     const ping = await createWorkflowDefinition(deps, owner, { name: "Ping", definition: definition("ping") });
     const risky = await createWorkflowDefinition(deps, owner, { name: "Risky", definition: definition("risky") });
+    await p.db.insert(teams).values({ id: "workflow-team", name: "Workflow team", orgId: ORG, createdAt: 1 });
+    await p.db.insert(teamMembers).values({ teamId: "workflow-team", userId: "alice", role: "admin" });
+    await p.db.update(workflowDefinitions).set({ ownerType: "team", ownerId: "workflow-team" }).where(eq(workflowDefinitions.id, risky.id));
+    await p.engineCredentials.save({ type: "team", id: "workflow-team" }, "demo", { type: "api_key", apiKey: "fixture-only" });
 
     const listed = await tool(testApi.baseUrl, alice, "list_workflows");
     expect((listed.data.workflows as Array<{ name: string }>).map((w) => w.name).sort()).toEqual(["Ping", "Risky"]);
@@ -157,6 +163,7 @@ describe("MCP workspace tools", () => {
 
     const parked = await tool(testApi.baseUrl, alice, "run_workflow", { workflow_id: risky.id, wait_seconds: 30 });
     expect(parked.data).toMatchObject({ pending_approvals: [expect.objectContaining({ kind: "policy_gate", action: "demo.risky" })] });
+    expect((await tool(testApi.baseUrl, alice, "get_workflow_run", { run_id: parked.data.run_id })).isError).toBe(false);
     const inbox = await tool(testApi.baseUrl, alice, "list_inbox");
     expect(inbox.data.workflow_approvals).toEqual([expect.objectContaining({ run_id: parked.data.run_id, workflow: "Risky", action: "demo.risky" })]);
     expect((await tool(testApi.baseUrl, bob, "list_inbox")).data.workflow_approvals).toEqual([]);
@@ -169,6 +176,13 @@ describe("MCP workspace tools", () => {
     const retried = await tool(testApi.baseUrl, alice, "retry_workflow_run", { run_id: parked.data.run_id, wait_seconds: 30 });
     expect(retried.isError).toBe(false);
     expect(retried.data).toMatchObject({ pending_approvals: [expect.objectContaining({ kind: "policy_gate", action: "demo.risky" })] });
+    await vi.waitFor(async () => {
+      const rows = await p.db.select().from(externalCalls);
+      for (const name of ["run_workflow", "get_workflow_run", "cancel_workflow_run", "retry_workflow_run"]) {
+        expect(rows.some(row => row.name === name && row.userId === "alice" && row.ownerType === "team" && row.ownerId === "workflow-team")).toBe(true);
+      }
+      expect(rows.filter(row => row.userId === "bob" && row.ownerType === "team")).toEqual([]);
+    });
   });
 
   it("lists a thread approval in the inbox but refuses to let an MCP agent approve it", async () => {
@@ -224,6 +238,17 @@ describe("MCP workspace tools", () => {
     const limited = await tool(testApi.baseUrl, alice, "list_artifacts", { limit: 1 });
     expect(limited.data.artifacts).toHaveLength(1);
     expect(limited.data.more).toContain("2 more artifacts match");
+  });
+
+  it("lists the comments on an artifact by its link", async () => {
+    const { testApi, alice } = await boot();
+    const published = await tool(testApi.baseUrl, alice, "publish_artifact", { key: "pages/plan", title: "Plan", content: "# Plan" });
+    const [page] = await testApi.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/plan"));
+    await addArtifactComment(testApi.providers.db, { artifactId: page!.id, version: 1, vdid: "a1b2c3d4", anchorLabel: "Plan", body: "Add dates", authorUserId: "bob" });
+
+    const read = await tool(testApi.baseUrl, alice, "list_artifact_comments", { artifact: published.data.url });
+    expect(read.data).toMatchObject({ artifact_id: page!.id, title: "Plan" });
+    expect(read.data.threads).toEqual([expect.objectContaining({ author: "User bob", on: 'element "Plan"', status: "open", body: "Add dates", replies: [] })]);
   });
 
   it("unpublishes an artifact only for the person who can manage it", async () => {

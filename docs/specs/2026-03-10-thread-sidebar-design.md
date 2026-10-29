@@ -119,7 +119,8 @@ ChatContainer (orchestrator)
 - Live activity updates loaded rows without refetching pages. An unloaded row gets one authorized fixed-row read per active activity-sorted list.
 - Promoted rows enter the first cached page without changing its cursor. Pending page reads are cancelled before insertion to prevent stale overwrites.
 - Supplemental placeholders contain only current pins, project assignments, approvals, and selection. Clearing selection removes its old supplemental row immediately.
-- Successful archiving cancels pending activity reads for that thread before refreshing lists. A late response cannot restore the archived row.
+- Archiving or restoring a chat moves its row at once. Pending list reads are cancelled first, so a late response cannot restore the row. If the server refuses, the row moves back. A refusal for background work opens the stop confirmation; any other refusal, such as a running turn, shows its message. Archiving the open chat leaves it at once, and a refusal returns to it unless the view moved on. The lists refresh after the last of several quick archives, so a row whose save still runs does not reappear.
+- Renaming a chat shows the new title at once and restores the old title if the save fails.
 - Completed turns and normal list invalidations still refresh the list. A failed activity read uses the existing list retry path.
 - Existing mutation updates support both single-page and infinite-query cache shapes.
 
@@ -187,7 +188,8 @@ If history markers reach their bound, the server closes legacy imports and compa
 A generation check rejects stale create operations after compaction. New operations use the current server generation.
 A browser whose legacy import is closed retains its original data and can download it; normal server folder controls remain available.
 
-The sidebar shows loading and saving states. A failed read or write keeps the last available folders visible and offers **Retry sync**.
+The sidebar shows a loading state and keeps the last available folders visible when a read or write fails, with **Retry sync**.
+A folder change shows at once: create, rename, fold, pin, move, and the grouping choice. The client applies the change's operations to the last server value with the server's own rules, and the save runs in the background with no saving state. If the save fails, the sidebar shows the saved state and the error. The project dialog closes on submit. Only a project deletion, which archives its chats first, shows a saving state.
 Offline requests fail visibly instead of remaining paused. A migration stops if its viewer or runtime changes before it sends the import.
 
 Requests allow at most 2 MiB, 500 operations, 200 folders, 5000 assignments, and 5000 pins.

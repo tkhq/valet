@@ -30,7 +30,13 @@ import {
   clearRepoPrebuildFlagsCache,
   resolveChangedFiles,
   fetchRepoFile,
+  healthReasonForError,
+  GitHubApiError,
+  AnonymousImageBakesDisabledError,
 } from "./source-service.js";
+import { RegistryCapacityError } from "./registry-health.js";
+import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
+import { lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -43,7 +49,7 @@ const RESOLVED_NPM_RECIPE = {
 };
 
 class FakeImageBuilder implements ImageBuilder {
-  readonly backend = "docker";
+  readonly backend: string = "docker";
   readonly specs: PrebuildSpec[] = [];
   readonly buildIds: string[] = [];
   private readonly states = new Map<string, BuildStatus>();
@@ -66,6 +72,17 @@ class FakeImageBuilder implements ImageBuilder {
   setState(buildId: string, status: BuildStatus): void {
     this.states.set(buildId, status);
   }
+}
+
+/** The scheduler's contract logic runs only on the kubernetes backend. */
+class K8sFakeImageBuilder extends FakeImageBuilder {
+  override readonly backend = "kubernetes";
+}
+
+/** Waits until a service's off-path fallback work (bake request or contract
+ * re-read) has settled. */
+async function fallbackSettled(svc: SourceService): Promise<void> {
+  await vi.waitFor(() => expect((svc as unknown as { fallbackWork: Map<string, unknown> }).fallbackWork.size).toBe(0));
 }
 
 class QueueImageBuilder extends FakeImageBuilder {
@@ -335,10 +352,20 @@ describe("SourceService", () => {
   // When true, expose a second lockfile so the resolved recipe changes (used to
   // move a repo's identity without moving its head sha).
   let lockfilePresent = false;
+  // When true, serve pnpm-lock.yaml the way GitHub serves files over 1 MB:
+  // `encoding: "none"`, empty content, a blob sha to follow.
+  let lockfileOversized = false;
+  let oversizedSha = "blob-sha-1";
+  let oversizedHasSha = true;
   // Repo-declared .valet/prebuild.yaml served by the fixture (null = absent).
   let prebuildYaml: string | null = null;
+  // When true, the repository lookup itself (GET /repos/:owner/:repo) 404s.
+  let repoMissing = false;
 
   function contentsFor(path: string): GithubFixtureResponse {
+    if (lockfileOversized && path === "pnpm-lock.yaml") {
+      return { body: { type: "file", encoding: "none", content: "", size: 1_985_703, ...(oversizedHasSha ? { sha: oversizedSha } : {}) } };
+    }
     if (path === "package-lock.json") return { body: { content: b64("{}"), encoding: "base64" } };
     if (lockfilePresent && path === "yarn.lock") return { body: { content: b64("{}"), encoding: "base64" } };
     if (prebuildYaml !== null && path === ".valet/prebuild.yaml") {
@@ -365,6 +392,7 @@ describe("SourceService", () => {
       githubTokenDeps: githubTokenDeps(),
       now: () => NOW,
       newId: () => `id${idSeq++}`,
+      contractReader: async () => ({ ok: true, version: MIN_IMAGE_CONTRACT }),
       retention: async (backend, imageRefs) => {
         retentionCalls.push({ backend, imageRefs });
         return true;
@@ -372,6 +400,280 @@ describe("SourceService", () => {
       ...overrides,
     });
   }
+
+  describe("handleImageFallback", () => {
+    // The handler acts only on the kubernetes backend.
+    beforeEach(() => {
+      builder = new K8sFakeImageBuilder();
+    });
+
+    it("marks the source incompatible/contract and starts one bake through the first-bake guards", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await svc.handleImageFallback(event); // second sweep of the same session
+      await svc.handleImageFallback({ ...event, sessionId: "s2" }); // another session on the same source
+      await fallbackSettled(svc);
+      await svc.handleImageFallback(event); // a later sweep sees the active bake
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(1);
+      const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(row.health).toBe("incompatible");
+      expect(row.healthReason).toBe("contract");
+      expect(row.healthDetail).toContain("bad");
+    });
+
+    it("does not rebake or rewrite health when the triggered bake failed", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(1);
+      builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
+      await svc.syncActiveBuilds();
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(1);
+      const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(row.health).toBe("failing");
+      expect(row.healthReason).toBe("bake_failed");
+    });
+
+    it("does not overwrite a failing diagnosis, and a bake request that throws inserts no row", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      await svc.setSourceHealth(src, "failing", "credentials", "no org credential");
+      t = NOW + 60_000;
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await svc.handleImageFallback(event);
+      await new Promise((r) => setImmediate(r));
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      const failing = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(failing).toMatchObject({ health: "failing", healthReason: "credentials", healthCheckedAt: NOW });
+
+      // An undiagnosed source requests the bake; startBake throws on the
+      // missing credential before inserting a row, off the caller's path.
+      await svc.setSourceHealth(src, "healthy", "ok", null);
+      await svc.handleImageFallback(event);
+      await svc.handleImageFallback(event);
+      await new Promise((r) => setImmediate(r));
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      expect((await db.select().from(bakes).where(eq(bakes.sourceId, src))).map((b) => b.id)).toEqual(["bad"]);
+      const marked = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(marked).toMatchObject({ health: "incompatible", healthReason: "contract" });
+    });
+
+    it("leaves stale/waiting_for_base and an existing incompatible detail untouched", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      await svc.setSourceHealth(src, "stale", "waiting_for_base", null);
+      const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "stale", healthReason: "waiting_for_base" });
+      await svc.setSourceHealth(src, "incompatible", "contract", "scheduler detail");
+      await svc.handleImageFallback(event);
+      await fallbackSettled(svc);
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "incompatible", healthDetail: "scheduler detail" });
+    });
+
+    it("re-reads a null contract on the newest pushed bake instead of baking (kubernetes)", async () => {
+      builder = new K8sFakeImageBuilder();
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "unread", contractVersion: null, contractSource: null });
+      let reads = 0;
+      const svc = makeService({ contractReader: async () => { reads++; return { ok: true, version: 3 }; } });
+      await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "unread", contract: null, repoFullName: "acme/widgets" });
+      await fallbackSettled(svc);
+      expect(reads).toBe(1);
+      expect(builder.specs).toHaveLength(0);
+      const stamped = (await db.select().from(bakes).where(eq(bakes.id, "unread")))[0];
+      expect(stamped).toMatchObject({ contractVersion: 3, contractSource: "label" });
+    });
+
+    it("is a no-op on the docker backend: no health write, no bake", async () => {
+      builder = new FakeImageBuilder();
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
+      const svc = makeService();
+      const before = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" });
+      await fallbackSettled(svc);
+      expect(builder.specs).toHaveLength(0);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after).toMatchObject({ health: before.health, healthReason: before.healthReason, healthCheckedAt: before.healthCheckedAt });
+    });
+
+    it("never throws when the source is gone or the builder is missing", async () => {
+      const svc = makeService({ builder: null });
+      await expect(svc.handleImageFallback({ sessionId: "s", sourceId: "src_missing", bakeId: "b", contract: 0, repoFullName: "x/y" })).resolves.toBeUndefined();
+    });
+  });
+
+  describe("source health", () => {
+    async function healthOf(id: string) {
+      const row = (await db.select().from(imageSources).where(eq(imageSources.id, id)))[0];
+      return { health: row.health, reason: row.healthReason, detail: row.healthDetail, checkedAt: row.healthCheckedAt };
+    }
+
+    it("a scheduler hit writes healthy/ok", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const identity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0], null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 3, contractSource: "label" });
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok" });
+    });
+
+    it("a repo with no pushed bake is unbaked after the pass starts its first bake", async () => {
+      const src = await seedRepoSource(db);
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "unbaked", reason: "ok" });
+    });
+
+    it("a repo whose head moved is stale when its current bake is compatible", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { commitSha: "old-sha", contractVersion: 3, contractSource: "label" });
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "ok" });
+    });
+
+    it("a repo deferring behind an unready base is stale/waiting_for_base", async () => {
+      const baseId = await seedBaseSource(db, ["echo base"]);
+      const src = await seedRepoSource(db, { parentId: baseId });
+      await makeService().runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "waiting_for_base" });
+    });
+
+    it("a thrown GitHub 404 on the repo path is failing/repo_unreachable, with the error text as detail", async () => {
+      const src = await seedRepoSource(db, { repoFullName: "acme/gone", name: "acme/gone" });
+      repoMissing = true;
+      await makeService().runSchedulerPass();
+      const h = await healthOf(src);
+      expect(h).toMatchObject({ health: "failing", reason: "repo_unreachable" });
+      expect(h.detail).toMatch(/404/);
+    });
+
+    it("a pushed bake with a compatible label makes the source healthy; a failed label read makes it stale/contract_unknown", async () => {
+      const src = await seedRepoSource(db);
+      const svcOk = makeService({ contractReader: async () => ({ ok: true, version: 3 }) });
+      await svcOk.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svcOk.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok" });
+
+      const svcBad = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+      await svcBad.startBake(src, "manual");
+      builder.setState(builder.buildIds[1], { state: "pushed" });
+      await svcBad.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "contract_unknown", detail: "registry 503" });
+    });
+
+    it("a rejecting contract reader is treated as a failed read", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService({ contractReader: async () => { throw new Error("reader exploded"); } });
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "contract_unknown", detail: "reader exploded" });
+    });
+
+    it("a credentials failure does not flap through a pending state: failing/credentials after every pass, checkedAt unchanged", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const src = await seedRepoSource(db);
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "credentials", checkedAt: NOW });
+      t = NOW + 60_000;
+      await svc.runSchedulerPass();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "credentials", checkedAt: NOW });
+    });
+
+    it("a source whose newest bake failed stays failing/bake_failed across a retry pass until the retry pushes compatibly", async () => {
+      builder = new K8sFakeImageBuilder(); // the contract-1 survivor counts as incompatible
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "old-pushed", contractVersion: 1, contractSource: "label", createdAt: NOW - 3000 });
+      await seedBake(db, src, { id: "newest-failed", status: "failed", error: "npm ci exploded", createdAt: NOW - 2000 });
+      let t = NOW;
+      const svc = makeService({ now: () => t, contractReader: async () => ({ ok: true, version: 3 }) });
+      await svc.setSourceHealth(src, "failing", "bake_failed", "npm ci exploded");
+      t = NOW + 60_000;
+      await svc.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(1);
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "bake_failed", detail: "npm ci exploded", checkedAt: NOW });
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok", detail: null, checkedAt: NOW + 60_000 });
+    });
+
+    it("a failed bake is stale/bake_failed when a compatible bake exists, else failing/bake_failed", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "failing", reason: "bake_failed", detail: "npm ci exploded" });
+
+      await seedBake(db, src, { id: "good", contractVersion: 3, contractSource: "label" });
+      await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[1], { state: "failed", error: "npm ci exploded again" });
+      await svc.syncActiveBuilds();
+      expect(await healthOf(src)).toMatchObject({ health: "stale", reason: "bake_failed" });
+    });
+
+    it("setSourceHealth truncates detail, stamps health_checked_at only on a transition, and reports the transition", async () => {
+      const src = await seedRepoSource(db);
+      let t = NOW;
+      const svc = makeService({ now: () => t });
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "x".repeat(5000))).toBe(true);
+      expect(await healthOf(src)).toMatchObject({ health: "failing", checkedAt: NOW });
+      expect((await healthOf(src)).detail).toHaveLength(2000);
+      t = NOW + 60_000;
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "new detail")).toBe(false);
+      expect(await healthOf(src)).toMatchObject({ detail: "new detail", checkedAt: NOW });
+      expect(await svc.setSourceHealth(src, "failing", "bake_failed", "new detail")).toBe(false);
+      t = NOW + 120_000;
+      expect(await svc.setSourceHealth(src, "healthy", "ok", null)).toBe(true);
+      expect(await healthOf(src)).toMatchObject({ health: "healthy", reason: "ok", detail: null, checkedAt: NOW + 120_000 });
+    });
+
+    it("healthReasonForError maps error classes", () => {
+      expect(healthReasonForError(new GitHubApiError(404, "/repos/acme/gone"))).toBe("repo_unreachable");
+      expect(healthReasonForError(new GitHubApiError(404, "/repos/acme/widgets/contents/pnpm-lock.yaml"))).toBe("resolve_failed");
+      expect(healthReasonForError(new GitHubApiError(500, "/repos/acme/widgets"))).toBe("resolve_failed");
+      expect(healthReasonForError(new AnonymousImageBakesDisabledError())).toBe("credentials");
+      expect(healthReasonForError(new RegistryCapacityError("full"))).toBe("registry_full");
+      expect(healthReasonForError(new Error("boom"))).toBe("bake_failed");
+    });
+
+    it("start() records a pass time when it arms the scheduler, before any pass", async () => {
+      const svc = makeService({ now: () => NOW + 7 });
+      try {
+        await svc.start();
+        expect(lastSchedulerPassAt()).toBe(NOW + 7);
+      } finally {
+        svc.stop();
+      }
+    });
+
+    it("runSchedulerPass records its completion time", async () => {
+      await makeService().runSchedulerPass();
+      expect(lastSchedulerPassAt()).toBe(NOW);
+    });
+  });
 
   describe("cache and registry health", () => {
     it("reports protected over-budget logical bytes separately from registry bytes", async () => {
@@ -446,10 +748,20 @@ describe("SourceService", () => {
     currentSha = "headsha1";
     idSeq = 0;
     lockfilePresent = false;
+    lockfileOversized = false;
+    oversizedHasSha = true;
     prebuildYaml = null;
+    repoMissing = false;
     fixture = startGithubFixture({
+      getRepo: (owner, repo) => repoMissing
+        ? { status: 404, body: { message: "Not Found" } }
+        : { body: { default_branch: "main", full_name: `${owner}/${repo}`, clone_url: `https://github.com/${owner}/${repo}.git` } },
       getCommit: () => ({ body: { sha: currentSha } }),
       getContents: (_owner, _repo, path) => contentsFor(path),
+      getBlob: (_owner, _repo, sha) =>
+        sha === oversizedSha
+          ? { body: { sha, encoding: "base64", content: b64("lockfileVersion: '9.0'\n") } }
+          : { status: 404, body: { message: "Not Found" } },
     });
     builder = new FakeImageBuilder();
     retentionCalls = [];
@@ -468,6 +780,42 @@ describe("SourceService", () => {
     await service.syncActiveBuilds();
     expect((await db.select().from(bakes).where(eq(bakes.id, row.id)))[0].status).toBe("pushed");
   }
+
+  describe("readGithubFile oversized lockfiles", () => {
+    it("falls back to the blobs API when the contents endpoint answers encoding none, and the scheduler bakes", async () => {
+      lockfileOversized = true;
+      const srcId = await seedRepoSource(db, { repoFullName: "acme/big-lock" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(1);
+      const paths = fixture.calls.map((c) => c.path);
+      expect(paths.some((p) => p.includes("/git/blobs/blob-sha-1"))).toBe(true);
+    });
+
+    it("still rejects a non-base64 contents response that is not encoding none", async () => {
+      fixture.close();
+      fixture = startGithubFixture({
+        getCommit: () => ({ body: { sha: currentSha } }),
+        getContents: (_o, _r, path) =>
+          path === "pnpm-lock.yaml"
+            ? { body: { type: "file", encoding: "utf-7", content: "???", sha: "x" } }
+            : contentsFor(path),
+      });
+      service = makeService();
+      await seedRepoSource(db, { repoFullName: "acme/odd-encoding" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(0);
+    });
+
+    it("throws the not-a-base64-file error when encoding none arrives without a sha (never calls blobs with undefined)", async () => {
+      lockfileOversized = true;
+      oversizedHasSha = false;
+      await seedRepoSource(db, { repoFullName: "acme/no-sha" });
+      await service.runSchedulerPass();
+      expect(builder.buildIds).toHaveLength(0);
+      const paths = fixture.calls.map((c) => c.path);
+      expect(paths.some((p) => p.includes("/git/blobs/"))).toBe(false);
+    });
+  });
 
   // ── identity hashing + chain ──────────────────────────────────────────
 
@@ -517,6 +865,10 @@ describe("SourceService", () => {
         schedule: "nightly",
         enabled: true,
         lastBoundAt: null,
+        health: "healthy",
+        healthReason: "ok",
+        healthDetail: null,
+        healthCheckedAt: null,
         createdAt: NOW,
         updatedAt: NOW,
       });
@@ -548,6 +900,10 @@ describe("SourceService", () => {
         schedule: "nightly",
         enabled: true,
         lastBoundAt: null,
+        health: "healthy",
+        healthReason: "ok",
+        healthDetail: null,
+        healthCheckedAt: null,
         createdAt: NOW,
         updatedAt: NOW,
       };
@@ -627,6 +983,7 @@ describe("SourceService", () => {
         commitSha: null,
         imageRef: "valet-prebuild/base/base:abc",
         identityHash: baseIdentity,
+        contractVersion: 3, contractSource: "label",
       });
       const srcId = await seedRepoSource(db, { parentId: baseId });
       const row = await service.startBake(srcId);
@@ -696,7 +1053,7 @@ describe("SourceService", () => {
       // Seed a pushed base bake whose identity matches the current computed one.
       const [base] = await db.select().from(imageSources).where(eq(imageSources.id, baseId));
       const identity = service.identityHash(base, null);
-      await seedBake(db, baseId, { id: "b1", commitSha: null, imageRef: "reg/base:1", identityHash: identity });
+      await seedBake(db, baseId, { id: "b1", commitSha: null, imageRef: "reg/base:1", identityHash: identity, contractVersion: 3, contractSource: "label" });
       await service.runSchedulerPass();
       expect(builder.specs).toHaveLength(0);
     });
@@ -716,6 +1073,153 @@ describe("SourceService", () => {
   });
 
   // ── parent-first defer + same-night cascade ───────────────────────────
+
+  describe("contract-driven rebakes", () => {
+    // The scheduler's contract logic applies only on the kubernetes backend.
+    beforeEach(() => {
+      builder = new K8sFakeImageBuilder();
+    });
+
+    it("on the docker backend, an identity-matching contract-0 bake is a hit and starts no bake", async () => {
+      builder = new FakeImageBuilder();
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const identity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0], null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 0, contractSource: "missing" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after).toMatchObject({ health: "healthy", healthReason: "ok" });
+    });
+
+    it("rebakes a repo whose current bake matches head and identity but is incompatible, on a fresh tag", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { id: "old", commitSha: currentSha, identityHash: identity, imageRef: "valet-prebuild/acme-widgets:head-abcdef", contractVersion: 0, contractSource: "missing" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      expect(builder.specs[0].imageRef).not.toBe("valet-prebuild/acme-widgets:head-abcdef");
+      const queued = (await db.select().from(bakes).where(eq(bakes.sourceId, src))).find((b) => b.status !== "pushed")!;
+      expect(queued.identityHash).toBe(identity);
+      const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      expect(after.health).toBe("incompatible");
+      expect(after.healthReason).toBe("contract");
+    });
+
+    it("does not rebake a compatible, up-to-date repo (identity skip still a hit)", async () => {
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: 3, contractSource: "label" });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+    });
+
+    it("rebakes an incompatible base and defers its repo children until the base is compatible", async () => {
+      const baseId = await seedBaseSource(db, []);
+      const svc = makeService();
+      const baseIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, baseId)))[0], null);
+      await seedBake(db, baseId, { id: "base-old", identityHash: baseIdentity, imageRef: "valet-prebuild/base:x", contractVersion: 0, contractSource: "missing" });
+      const repoId = await seedRepoSource(db, { parentId: baseId });
+      await svc.runSchedulerPass();
+      // One base bake started (contract rebake), the repo deferred.
+      expect(builder.specs.map((s) => s.kind)).toEqual(["base"]);
+      expect(builder.specs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      const repo = (await db.select().from(imageSources).where(eq(imageSources.id, repoId)))[0];
+      expect(repo.health).toBe("stale");
+      expect(repo.healthReason).toBe("waiting_for_base");
+    });
+
+    it("an override-image repo bake is never rebaked for contract", async () => {
+      prebuildYaml = "image: ghcr.io/acme/custom:1\n";
+      const src = await seedRepoSource(db);
+      const svc = makeService();
+      const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+      const identity = svc.identityHash(row0, null, { ...RESOLVED_NPM_RECIPE, image: "ghcr.io/acme/custom:1" });
+      await seedBake(db, src, { commitSha: currentSha, identityHash: identity, contractVersion: null, contractSource: "override", recipe: { recipe: [], setup: [], image: "ghcr.io/acme/custom:1" } });
+      await svc.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+    });
+
+    describe("fix round", () => {
+      async function pushLast(svc: SourceService): Promise<void> {
+        builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
+        await svc.syncActiveBuilds();
+      }
+
+      it("cascade starts an incompatible identity-matching child on a -c3 tag after its base pushes a -c3 rebake", async () => {
+        const baseId = await seedBaseSource(db, []);
+        const svc = makeService();
+        const baseIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, baseId)))[0], null);
+        await seedBake(db, baseId, { id: "base-old", identityHash: baseIdentity, imageRef: "valet-prebuild/base:x", contractVersion: 0, contractSource: "missing" });
+        const repoId = await seedRepoSource(db, { parentId: baseId });
+        const repoRow = (await db.select().from(imageSources).where(eq(imageSources.id, repoId)))[0];
+        const childIdentity = svc.identityHash(repoRow, baseIdentity, RESOLVED_NPM_RECIPE);
+        await seedBake(db, repoId, { id: "repo-old", commitSha: currentSha, identityHash: childIdentity, imageRef: "valet-prebuild/acme-widgets:old", contractVersion: 0, contractSource: "missing" });
+        await svc.runSchedulerPass();
+        expect(builder.specs.map((s) => s.kind)).toEqual(["base"]);
+        expect(builder.specs[0].imageRef).toMatch(/-c3$/);
+        await pushLast(svc);
+        const repoSpecs = builder.specs.filter((s) => s.kind !== "base");
+        expect(repoSpecs).toHaveLength(1);
+        expect(repoSpecs[0].imageRef).toMatch(new RegExp(`-c${MIN_IMAGE_CONTRACT}$`));
+      });
+
+      it("a pushed bake with null contract columns and a failing reader stays contract_unknown with no bake, then becomes a hit once the read succeeds", async () => {
+        const src = await seedRepoSource(db);
+        const probe = makeService();
+        const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        const identity = probe.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+        await seedBake(db, src, { commitSha: currentSha, identityHash: identity });
+        const failing = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+        await failing.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const mid = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(mid.health).toBe("stale");
+        expect(mid.healthReason).toBe("contract_unknown");
+        expect(mid.healthDetail).toContain("registry 503");
+        const ok = makeService({ contractReader: async () => ({ ok: true, version: 3 }) });
+        await ok.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(after.health).toBe("healthy");
+      });
+
+      it("a -c3 bake that is still incompatible is not rebaked again", async () => {
+        const src = await seedRepoSource(db);
+        const svc = makeService();
+        const row0 = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        const identity = svc.identityHash(row0, null, RESOLVED_NPM_RECIPE);
+        await seedBake(db, src, { commitSha: currentSha, identityHash: identity, imageRef: `valet-prebuild/acme-widgets:head-c${MIN_IMAGE_CONTRACT}`, contractVersion: null, contractSource: "missing" });
+        await svc.runSchedulerPass();
+        expect(builder.specs).toHaveLength(0);
+        const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
+        expect(after.health).toBe("incompatible");
+        expect(after.healthReason).toBe("contract");
+      });
+
+      it("a nested base defers behind an incompatible parent base, then the cascade bakes it FROM the new parent ref", async () => {
+        const defaultId = await seedBaseSource(db, []);
+        const svc = makeService();
+        const defaultIdentity = svc.identityHash((await db.select().from(imageSources).where(eq(imageSources.id, defaultId)))[0], null);
+        await seedBake(db, defaultId, { id: "def-old", identityHash: defaultIdentity, imageRef: "valet-prebuild/base:def", contractVersion: 0, contractSource: "missing" });
+        const synthId = await seedBaseSource(db, ["apt-get install -y jq"], { parentId: defaultId, name: "synthetic base", profile: "headless" });
+        await svc.runSchedulerPass();
+        expect(builder.specs.map((s) => s.configId)).toEqual([defaultId]);
+        const synth = (await db.select().from(imageSources).where(eq(imageSources.id, synthId)))[0];
+        expect(synth.healthReason).toBe("waiting_for_base");
+        await pushLast(svc);
+        expect(builder.specs).toHaveLength(2);
+        expect(builder.specs[1].configId).toBe(synthId);
+        expect(builder.specs[0].imageRef).toMatch(/-c3$/);
+        expect(builder.specs[1].baseImage).toBe(builder.specs[0].imageRef);
+      });
+    });
+  });
 
   describe("runSchedulerPass parent-first defer (derivation invariant)", () => {
     it("DEFERS the repo when its base parent has no pushed bake — only the base dispatches", async () => {
@@ -791,6 +1295,7 @@ describe("SourceService", () => {
         commitSha: null,
         imageRef: "reg/base:old",
         identityHash: oldIdentity,
+        contractVersion: 3, contractSource: "label",
       });
       await seedRepoSource(db, { id: "repo1", parentId: baseId });
       // Bake the repo FROM the old base ref and push it.
@@ -1441,6 +1946,80 @@ describe("SourceService", () => {
       expect(byId.get("done")?.status).toBe("pushed");
       expect(log).toHaveBeenCalledWith(expect.stringContaining('"event":"bake_failed"'));
       log.mockRestore();
+    });
+  });
+
+  describe("contract stamping and lineage", () => {
+    it("records parent_bake_id and base_image_ref on a repo bake chained on a base bake", async () => {
+      const baseId = await seedBaseSource(db, []);
+      const svc0 = makeService();
+      const baseIdentity = svc0.identityHash({ id: baseId, kind: "base", setupCommands: [] } as never, null);
+      await seedBake(db, baseId, { id: "base-1", identityHash: baseIdentity, imageRef: "valet-prebuild/base:abc", contractVersion: 3, contractSource: "label" });
+      const repoId = await seedRepoSource(db, { parentId: baseId });
+      const svc = makeService();
+      const row = await svc.startBake(repoId, "manual");
+      expect(row.parentBakeId).toBe("base-1");
+      expect(row.baseImageRef).toBe("valet-prebuild/base:abc");
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.parentBakeId).toBe("base-1");
+      expect(stored.baseImageRef).toBe("valet-prebuild/base:abc");
+    });
+
+    it("records base_image_ref = stock and a null parent on an unparented base bake", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const svc = makeService({ env: { VALET_FULL_BASE_IMAGE: "ghcr.io/tkhq/valet-sandbox:pin" } });
+      const row = await svc.startBake(baseId, "manual");
+      expect(row.parentBakeId).toBeNull();
+      expect(row.baseImageRef).toBe("ghcr.io/tkhq/valet-sandbox:pin");
+    });
+
+    it("stamps contract_version and contract_source=label when the pushed image carries the label", async () => {
+      const reads: string[] = [];
+      const svc = makeService({ contractReader: async (_backend, ref) => { reads.push(ref); return { ok: true, version: 3 }; } });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.status).toBe("pushed");
+      expect(stored.contractVersion).toBe(3);
+      expect(stored.contractSource).toBe("label");
+      expect(reads).toEqual([row.imageRef]);
+    });
+
+    it("stamps contract_source=missing with a null version when the image has no label", async () => {
+      const svc = makeService({ contractReader: async () => ({ ok: true, version: null }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.contractVersion).toBeNull();
+      expect(stored.contractSource).toBe("missing");
+    });
+
+    it("stamps contract_source=override for a bake whose recipe pins its own image, keeping the read value", async () => {
+      prebuildYaml = "image: ghcr.io/acme/custom:1\n";
+      const svc = makeService({ contractReader: async () => ({ ok: true, version: null }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.contractSource).toBe("override");
+      expect(stored.contractVersion).toBeNull();
+    });
+
+    it("leaves both contract columns null when the label read fails, and the push transition still lands", async () => {
+      const svc = makeService({ contractReader: async () => ({ ok: false, error: "registry 503" }) });
+      const src = await seedRepoSource(db);
+      const row = await svc.startBake(src, "manual");
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await svc.syncActiveBuilds();
+      const stored = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+      expect(stored.status).toBe("pushed");
+      expect(stored.contractVersion).toBeNull();
+      expect(stored.contractSource).toBeNull();
     });
   });
 

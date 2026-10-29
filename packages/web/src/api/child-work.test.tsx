@@ -41,3 +41,17 @@ it("dismisses through the explicit parent", async () => {
   await act(async () => { await result.current.mutateAsync("child"); });
   expect(dismiss).toHaveBeenCalledWith("team-runtime", "child");
 });
+
+it("hides a dismissed child at once and shows it again when the dismiss fails", async () => {
+  const child = { sessionId: "child", parentThreadId: "thread", title: "Work", createdAt: 1, status: "settled" as const };
+  vi.spyOn(api, "getChildWork").mockResolvedValue({ children: [child], nextCursor: null, runningCount: 0 });
+  let fail: (error: Error) => void = () => {};
+  vi.spyOn(api, "dismissChild").mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+  const { result } = renderHook(() => ({ work: useChildWork("team-runtime"), dismiss: useDismissChild("team-runtime") }), { wrapper: wrapper() });
+  await waitFor(() => expect(flattenChildWork(result.current.work.data)).toHaveLength(1));
+  let done: Promise<unknown> | undefined;
+  act(() => { done = result.current.dismiss.mutateAsync("child").catch(() => undefined); });
+  await waitFor(() => expect(flattenChildWork(result.current.work.data)).toEqual([]));
+  await act(async () => { fail(new Error("Offline. Reconnect and retry.")); await done; });
+  await waitFor(() => expect(flattenChildWork(result.current.work.data)).toEqual([child]));
+});

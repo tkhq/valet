@@ -5,7 +5,7 @@ export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
 export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
-export { boundEventDigest, cutUtf8 } from "./wakeups/digest.js";
+export { boundEventDigest, cutUtf8, stripNul } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
 // can type model handles and run side completions without their own pi-ai
 // dependency edge (which pnpm may peer-fork into a second instance with its
@@ -27,6 +27,8 @@ export {
   SandboxEvictedError,
   SandboxGoneError,
   SandboxStartupError,
+  type SandboxStartupKind,
+  SANDBOX_STARTUP_KINDS,
   SandboxPreparationError,
   SandboxConnectionError,
   formatSandboxErrorCause,
@@ -52,6 +54,13 @@ export {
   type SkillSpecOptions,
   type SkillSpecViolation,
   type SkillSpecSeverity,
+  isPlaybook,
+  PLAYBOOK_KIND,
+  playbookPlanItems,
+  playbookSeedNote,
+  readPlaybookSteps,
+  type PlaybookSeedResult,
+  type PlaybookSteps,
 } from "./roles-skills/index.js";
 export {
   deriveQueueState,
@@ -116,6 +125,8 @@ export {
   recordTurn,
   recordWakeupEnded,
   recordWakeupSignalLost,
+  recordChildTerminalSignalAbandoned,
+  recordChildResultRecovered,
   recordWakeupKillFailed,
   recordWakeupsActive,
   recordChildSettleOverDeadline,
@@ -129,6 +140,7 @@ export {
   recordWakeupSweepOk,
   recordJobLogsPruned,
   recordDockerJobOutputDropped,
+  initSandboxMetrics,
   type SandboxDestroyReason,
   type SandboxFlagKind,
   type WorkspaceGrowOutcome,
@@ -368,8 +380,8 @@ export {
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,
-  formatTransientRetryMessage,
   parseProviderRetryHintMs,
+  turnRetryWaitMs,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

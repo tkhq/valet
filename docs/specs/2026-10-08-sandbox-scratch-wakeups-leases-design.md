@@ -458,12 +458,13 @@ from the UI emits its terminal signal with `cause=cancelled`.
 | `deadline_at` | bigint | NOT NULL |
 | `released_at` | bigint null | |
 | `release_cause` | text null | `owner_ended` \| `cancelled` \| `deadline` |
+| `terminal_signal_expected` | boolean | default false; hold expiry sets it atomically with release |
 | `thread_id` | text null | the thread that created it; `lease.expired` goes there |
 | `origin_json` | text null | the channel origin of the creating turn |
 
-Store methods: `createLease`, `releaseLease(id, cause, releasedAt)` (CAS on
-`released_at IS NULL`), `getLease(id)` (released or not),
-`listActiveLeases(sessionId)`, `listAllActiveLeases()`,
+Store methods: `createLease`, `releaseLease(id, cause, releasedAt, opts?)` (CAS on
+`released_at IS NULL`; expiry sets `opts.terminalSignalExpected`), `getLease(id)` (released or not),
+`listLeases(sessionId)` (one snapshot of active and released rows), `listActiveLeases(sessionId)`, `listAllActiveLeases()`,
 `countActiveLeases(sessionId)`, and `setLeaseSandboxId(id, sandboxId)`
 (fills a missing sandbox id on an active lease).
 
@@ -474,6 +475,8 @@ Store methods: `createLease`, `releaseLease(id, cause, releasedAt)` (CAS on
   with `owner_ended`, `cancelled`, or `deadline`.
 - `hold_sandbox` creates a lease with no owner row. The WakeWatcher
   releases it at `deadline_at` with `deadline` and emits `lease.expired`.
+  Its release CAS records `terminalSignalExpected` and uses the clock at release, not pass start.
+  Silent releases do not promise a signal.
 - `deadline_at` MUST be at most `created_at + leaseMaxHours`.
 - Session delete ends the session's background work.
   `SessionStore.deleteSession` moves its `pending` and `running` wakeups
@@ -493,11 +496,32 @@ The in-memory `pendingJobCount` check stays for foreground job-mode bash.
 
 ### C4. Child settle
 
-A child session with an active lease is not settled. `ChildWatcher` MUST
-NOT emit `child.settled` while `countActiveLeases(childSessionId) > 0`.
-The child's 24h retention clock starts at its settle, as today. So the
-clock starts after the last lease releases and after the turn that handles
-the terminal signal ends.
+A child publishes `child.settled` when its turn ends.
+The event lists outstanding leases, timers, and event waiters.
+Background work does not delay parent notification.
+Each later signal turn publishes its own result.
+The event-wakeups spec, F3, defines the shared event delivery path.
+
+Parent notification and sandbox reclaim are separate decisions.
+`child_watches.settled` records the watched delegation's notification state.
+`child_status` reads the child's durable turn state.
+A child with an unsettled submission or outstanding background work keeps its sandbox.
+The retention sweep keeps its activity, lease, timer, and event-waiter guards.
+`settled_at` starts the retention clock after notification.
+Background work keeps the sandbox even when that clock expires.
+Boot retries do not reset `settled_at` or `sandbox_reclaimed_at`.
+`child_send` opens a new reclaim cycle.
+A reclaim stamp prevents another sandbox destroy or destroy metric for that cycle.
+
+Notification does not release child capacity.
+An unsettled child still counts toward child and org limits.
+Active leases, timers, and bounded event waits also consume capacity.
+A running sandbox consumes capacity even after notification.
+An idle parked or suspended sandbox does not consume child capacity.
+Retention can keep that sandbox without blocking another task.
+Capacity checks use bounded database reads instead of per-child engine-store queries.
+Reopening an idle child checks both limits before admission.
+The check excludes the reopened child from the existing population.
 
 ### C5. Pod eviction
 
@@ -665,7 +689,10 @@ UI: background work shows in three places, all read from one
   when the thread has no background work.
 - **Thread list line.** A thread row with an active timer shows one quiet
   line, `Waiting · next wakeup in 26m`, with the fire time on hover.
-  Processes, watches, and holds get no row line.
+  Processes, watches, and holds get no row line. The line is part of the
+  row element, under the title. The selected tint, the accent bar, and the
+  hover tint cover the title and the line together. The line refreshes its
+  relative time every 30 seconds.
 
 The query polls once a minute while one of these reads it. A
 `queue.state` frame and every cancel, pause, replace, or forced action
@@ -737,7 +764,7 @@ Unit (vitest):
   - running watch, over rate → `expired`, `rate`.
   - pending timer, due → `done`, `fired`.
   - pending timer before `fire_at` → `null`.
-- Idle sweeps (INV-2), `ChildWatcher` settle hold (C4), pod reconcile
+- Idle sweeps (INV-2), `ChildWatcher` reclaim guard (C4), pod reconcile
   (C5) against fakes.
 - `bash` background validation and the sleep refusal; every tool's
   refusal text.
@@ -779,7 +806,7 @@ A v1 implementation MUST NOT ship these under this spec's label.
 1. Engine: tables, store contract, conformance suite, `decideWakeup`,
    tools, `ToolContext.wakeups` seam. No behavior change until the host
    injects the seam.
-2. api: WakeWatcher, idle predicates, `ChildWatcher` settle hold,
+2. api: WakeWatcher, idle predicates, `ChildWatcher` reclaim guard,
    `resolveRepoPrebuildFlags` scratch, routes, `SCHEMA_REPAIRS`.
 3. sandbox-kubernetes: manifest, pod patch api, `execJob` uncapped.
    sandbox-docker: `/scratch` bind, uncapped job output.
@@ -872,10 +899,8 @@ Implementation gaps become errata to this file in the same PR.
   `[process_read]` and names the next step.
 - **Part D, agent cap off.** `VALET_SANDBOX_SCRATCH_AGENT_MAX="0"` sets no
   agent cap. Only the deploy cap then bounds `task.resources.scratch`.
-- **C4, child settle grace.** The WakeWatcher releases a lease before it
-  submits the terminal signal. After the last lease releases, `ChildWatcher`
-  waits a bounded grace window (`leaseSettleGraceMs`, default 90 seconds).
-  The engine then admits the signal turn before the child settles.
+- **C4, child notification.** Child notification uses the event pipeline.
+  Background work keeps the sandbox without delaying the notification.
 - **B5 and B6, watch log tail.** `watch` carries `logTail` across ticks,
   the same as `process`. The rate-expiry signal body names the limit that
   the watch exceeded.
@@ -897,10 +922,8 @@ Implementation gaps become errata to this file in the same PR.
 - **C2 and INV-6, session delete.** `deleteSession` releases leases with
   its own SQL inside the store. It does not call `releaseLease`. The INV-6
   grep test allows the stores for this reason.
-- **C4, settle result.** After a lease wait, `child.settled` carries the
-  result of the last turn the ChildWatcher awaited. That is the turn that
-  handled the terminal signal. A superseded turn does not replace the
-  result.
+- **C4, settle result.** Each `child.settled` event carries its own turn result.
+  Later signal turns publish new events.
 - **A4 and Part G, REST scratch refusal.** A REST session has no parent
   to receive a startup warning. When its `.valet/prebuild.yaml` scratch
   request is dropped, the host writes the warning once as a `system`
@@ -989,16 +1012,9 @@ with an earlier entry, the entry below wins.
   Crash windows occur in normal operation, so CLAUDE.md permits this
   repair. `valet.leases.orphan_released{owner_kind}` counts each release.
   C6 and INV-6 therefore name a third release path inside the WakeWatcher.
-- **C4, settle on facts.** `ChildWatcher` waits while a lease is active,
-  bounded at the latest lease deadline plus one poll. Past the bound it
-  logs, records `valet.leases.settle_over_deadline`, and settles. It also
-  waits while a timer is pending and fires inside the retention window
-  (24 hours when no window is set). Then it awaits the terminal signal
-  turn (`wakeup:<id>:terminal`) of each wakeup that ended after the
-  watched submission was admitted, whether or not a lease was ever seen.
-  It waits at most `leaseSettleGraceMs` after the wakeup ended for that
-  turn to be admitted. An agent cancel sends no signal and owes no turn.
-  This supersedes the "C4, child settle grace" entry.
+- **C4, settle on facts.** Parent notification and sandbox reclaim use separate checks.
+  Background work holds the sandbox.
+  It does not hold the parent notification.
 - **B5, watch rate.** The limit counts `watch.event` signals. A tick emits
   at most one, whatever its line count. `window_start_at` and `window_count` on the row
   hold the count. The window starts at the first signal after the
@@ -1242,12 +1258,65 @@ with an earlier entry, the entry below wins.
   pass start time was minutes old. The ChildWatcher awaits the terminal turn of a wakeup that ended
   after the watched submission was admitted or was created after it, and
   measures its admission grace from when it first saw the row ended. It
-  awaits a `cancelled` row's turn too, because a human cancel sends one;
-  an agent cancel sends none and costs one grace wait. The lease bound is
-  the latest deadline plus two WakeWatcher ticks plus one poll.
+  awaits a `cancelled` row's turn only when `terminalSignalExpected` is true.
+  A human cancel that delivers or defers a signal records this flag atomically.
+  An agent cancel or suppressed human cancel sends none and adds no grace wait.
+  The lease bound is the latest deadline plus two WakeWatcher ticks plus one poll.
 - **A3: child retention and leases.** The retention sweep skips a child
   while it holds an active lease or a pending timer, at both checks, and
   logs once per child (INV-8).
+  An ended wakeup without its terminal dispatch ID also keeps the child sandbox,
+  for at most four WakeWatcher ticks after `endedAt`.
+  The sweep filters historical expectations before reading dispatch IDs.
+  Before reporting an observed gap after this bound, it checks that dispatch ID again.
+  A durable, session-scoped loss claim permits one report for each terminal transition.
+  Its admission-clock comparison rejects stale claims after reactivation.
+  WakeWatcher and human cancellation use the same claim for known delivery failures.
+  A successful admission or a previously counted failure produces no additional loss report.
+  The terminal CAS sets `terminalSignalExpected` only if its decision emits a signal. Failed starts,
+  bad rows, and silent cancellation never count.
+  Released holds use the same bound from `releasedAt`.
+  Expiry expects `lease:<id>:expired`. Human cancellation expects `lease:<id>:released`.
+  Before a human signal send, `startTerminalSignalAdmission` persists `terminalSignalStartedAt` once per cancellation, without changing the terminal time.
+  Human admission grace starts at this timestamp, including after deferred replacement, profile change, or owner move.
+  A provisioning attachment also blocks reclaim, even when provisioning exceeds the initial grace.
+  Expectations and admission timestamps survive reboot. Silent agent cancellation sets neither field.
+  With warm retention off, recent human turns defer reclaim for the platform
+  idle timeout (`VALET_SANDBOX_IDLE_MINUTES`, default 30 minutes).
+  Unsettled submissions still block reclaim, and expired grace permits deferred reclaim.
+  Both eager and deferred reclaim stamp completion only after sandbox-token revocation succeeds.
+  Under cleanup, the engine session fences claims before destruction and rechecks durable submissions and active execution.
+  A running turn or an in-flight claim aborts reclaim. Each claim reserves execution across its store await and local ownership installation.
+  Admissions on a fenced session stay queued. No caller can start a turn on its retiring attachment.
+  The destroy caller owns eviction after the operation returns. A temporary release status does not evict during pending release.
+  If pending release fails, the cached owner remains. Failed destruction retains its durable handle for provider retry.
+  A terminal released owner stays fenced after eviction. Its admissions schedule recovery after cleanup, never awaited inside the barrier.
+  The host restores the durable queue on fresh compute. Web, signals, CLI, and child sends share this engine behavior.
+  Reclaim eviction refuses active execution. Config invalidation is not discarded when execution is active.
+  It fences new claims immediately and stores a token in `session_config_invalidations` before acknowledging the request.
+  A rebuilt owner replaces the cache immediately and shares the sandbox attachment while old execution drains.
+  The old owner reserves only threads with active execution or in-flight claims. Other threads claim with current configuration.
+  Every later turn on a reserved thread waits for its old run to finish, then claims once on the rebuilt owner.
+  A parked durable approval transfers to the rebuilt owner without withdrawing or resolving the gate.
+  Reclaim and teardown account for every generation sharing compute. Shutdown suspends all owners' timers.
+  Each builder captures a config generation. Claims from an obsolete build are refused, including during startup reconciliation.
+  A fresh build removes only the invalidation token it observed. A newer token survives that deletion.
+  Archive leaves queued work unclaimed. Shutdown fences and evicts every owner without deleting durable rows or destroying compute.
+  All session builders replace idle released entries; `liveSession()` is read-only.
+  Retries call the provider with that handle, not the released attachment.
+  Provider destroy must succeed and provider status must confirm `released` before either durable handle is cleared.
+  Both durable sandbox handles are cleared before revoke, conditional on the destroyed ID.
+  Final cleanup compares the current attachment, durable handle, watched item, and settlement timestamp with the destroyed cycle.
+  A replacement or newer cycle skips eviction, token revocation, and the reclaim stamp.
+  Both reclaim paths take the child delivery lock before the cleanup barrier, through provider destruction, status confirmation, and final writes.
+  New session resolutions wait for this barrier before using the cache.
+  Senders update subscriptions first, then resolve outside cleanup and validate cached identity inside cleanup before admission and watch repoint.
+  A changed identity retries resolution. Cleanup owners never acquire delivery, and senders do not hold delivery through admission.
+  Retries still call provider destroy, but do not count resources that status already reports absent.
+- **Claim lock order.** `claimSubmission` locks the thread row before the
+  item CAS, the same order steer admission uses, so claim and steer cannot
+  deadlock. A real-Postgres stress test races one claim against two steers
+  on 20 fresh threads and asserts zero deadlock retries.
 - **A3: job logs on scratch.** The seam caps a detached log at
   `min(jobLogMaxBytes, scratch / 4)` when the host passes `scratchBytes`.
   A capped kubernetes log ends with `[valet: log capped at <n> bytes;
@@ -1345,10 +1414,9 @@ with an earlier entry, the entry below wins.
   forced owner move or profile change selects the work again with the
   gate's own filter. Work set while the cancel ran returns 409 with the
   "background work started" text, and the deferred signals still go out.
-- **PR review 2, holds in child settlement.** The ChildWatcher remembers
-  the holds it saw active. Once one is released, it awaits the
-  `lease:<id>:expired` or `lease:<id>:released` turn under the same
-  admission grace as a wakeup's terminal turn.
+- **PR review 2, holds in child settlement.** A child reports active holds in its settlement event.
+  A hold release can start another turn.
+  That turn publishes a new settlement event.
 - **PR review 2, length-preserving decode.** The kubernetes job poll
   replaces each byte of ill-formed UTF-8 with one `?`. The decoded text
   then has the same byte length as the raw range `nextOffset`
@@ -1506,11 +1574,10 @@ with an earlier entry, the entry below wins.
   not offer a larger deadline when the deadline was `leaseMaxHours`. The
   child `wake_at` sentence uses the resolved
   `VALET_CHILD_SANDBOX_RETENTION_HOURS`, the bound the ChildWatcher holds.
-- **A4: child replace.** The ChildWatcher keeps waiting while the child's
-  attachment is `provisioning`, and `parkChildSandbox` leaves a
-  provisioning sandbox alone. A forced replace or profile change sends its
-  deferred signals only after the new sandbox is up. A settle during the
-  replace was stale, and it destroyed the sandbox the route was building.
+- **A4: child replace.** Notification does not wait for provisioning.
+  `parkChildSandbox` leaves a provisioning sandbox alone.
+  A forced replace or profile change defers its cancellation signals until replacement finishes.
+  Each later signal turn still notifies the parent.
 - **A4: kickoff prune.** The prune passes names through `find -exec`, so a
   workload-chosen name is never split or globbed. A job counts once, and
   only when its `.exit` and `.dead` are both gone after the `rm`.
@@ -1528,3 +1595,5 @@ with an earlier entry, the entry below wins.
   work that a turn starts or ends shows without the one-minute poll.
 
 - **A session without a wakeup seam offers no wakeup tools (2026-10-19).** `Session` leaves `watch`, `wake_at`, `hold_sandbox`, `process_read`, `wakeup_list`, and `wakeup_cancel` out of its builtin tools when `CreateSessionOptions.wakeups` is absent (a bare engine, a test). Each would only refuse, and six schemas widen every prompt. The api gives every session a seam.
+
+- **The thread list line is inside its row (2026-10-28).** The line was a sibling rendered after the row element, and the row element held the selected tint, the accent bar, and the hover tint. On the open thread the line hung below the tinted row and read as part of the next row. The row now wraps, and the line is a full-width item inside it. The wakeup data was correct: the listing reads only `pending` and `running` rows, and a fire or a cancel ends the row, so the line clears at the next `queue.state` refresh.

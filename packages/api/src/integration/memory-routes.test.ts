@@ -115,6 +115,25 @@ describe("api integration: memory routes", () => {
       const body = (await ok.json()) as { file: { ownerType: string; ownerId: string } };
       expect(body.file).toMatchObject({ ownerType: "team", ownerId: "team-mem" });
 
+      // A team principle reaches every member's assistant, so membership is
+      // not enough: it takes the team-admin check mem_copy_to_team makes.
+      const writePrinciple = () =>
+        fetch(`${api.baseUrl}/api/memory?teamId=team-mem`, {
+          method: "PUT",
+          headers: { ...headers, "x-valet-session-id": "sess-1", "x-valet-thread-id": "thread-1" },
+          body: JSON.stringify({ path: "principles/ship-small.md", content: "# Ship small\n" }),
+        });
+      const refused = await writePrinciple();
+      expect(refused.status).toBe(400);
+      expect(((await refused.json()) as { error: string }).error).toContain("Ask a team admin");
+      await db.update(teamMembers).set({ role: "admin" });
+      const admitted = await writePrinciple();
+      expect(admitted.status).toBe(200);
+      const read = await fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path: "team:team-mem/principles/ship-small.md" })}`, { headers });
+      const rendered = ((await read.json()) as { rendered: string }).rendered;
+      expect(rendered).toContain('source-session: "sess-1"');
+      expect(rendered).toContain('source-thread: "thread-1"');
+
       // Leaving the team stops the next write resolving, without a restart.
       await db.delete(teamMembers);
       expect((await write("team-mem")).status).toBe(404);

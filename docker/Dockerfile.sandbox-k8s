@@ -136,6 +136,13 @@ RUN pnpm --filter @valet/browser-runtime deploy --legacy --prod /out/browser
 # ─── Final image ────────────────────────────────────────────────────────
 FROM office-runtime
 
+# Image runtime contract (docs/plans/2026-10-26-image-pipeline-health-design.md,
+# section 5). Bump together with SANDBOX_IMAGE_CONTRACT in
+# packages/sandbox-kubernetes/src/manifest.ts whenever the pod spec starts
+# depending on something new in this image. Inherited by every bake that
+# FROMs this image.
+LABEL io.valet.sandbox.contract="3"
+
 # Package-manager shims for the SHIPPED image, not just build stages.
 # node:22 bundles corepack but leaves it disabled: without `corepack
 # enable` there is no `pnpm`/`yarn` on PATH, so any workspace-prep bake

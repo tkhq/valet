@@ -12,6 +12,7 @@ import type {
   LeaseOwnerKind,
   LeaseReleaseCause,
   MessageEntry,
+  QueueItem,
   SessionEntry,
   SettlePatchRef,
   Wakeup,
@@ -456,6 +457,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
 
 /** Raw column shape of a `SELECT * FROM engine_queue_items` row. */
 export interface QueueItemRow {
+  childResultDelivery: QueueItem["childResultDelivery"];
   id: string;
   sessionId: string;
   threadId: string;
@@ -487,7 +489,12 @@ export interface QueueItemRow {
 }
 
 export function rawToQueueItemRow(raw: Record<string, unknown>): QueueItemRow {
+  const delivery = raw.child_result_delivery;
+  if (delivery != null && delivery !== "pending" && delivery !== "delivered" && delivery !== "denied") {
+    throw new Error(`invalid child result delivery state: ${String(delivery)}`);
+  }
   return {
+    childResultDelivery: delivery ?? undefined,
     id: asString(raw.id, "id"),
     sessionId: asString(raw.session_id, "session_id"),
     threadId: asString(raw.thread_id, "thread_id"),
@@ -633,6 +640,7 @@ export interface GateRow {
   status: string;
   title: string;
   body: string | null;
+  agentReason: string | null;
   actions: string;
   origin: string | null;
   context: string | null;
@@ -654,6 +662,7 @@ export function rawToGateRow(raw: Record<string, unknown>): GateRow {
     status: asString(raw.status, "status"),
     title: asString(raw.title, "title"),
     body: asStringOrNull(raw.body, "body"),
+    agentReason: asStringOrNull(raw.agent_reason, "agent_reason"),
     actions: asString(raw.actions, "actions"),
     origin: asStringOrNull(raw.origin, "origin"),
     context: asStringOrNull(raw.context, "context"),
@@ -676,6 +685,7 @@ export function rowToGate(row: GateRow): DecisionGate {
     status: row.status as DecisionGate["status"],
     title: row.title,
     body: row.body ?? undefined,
+    agentReason: row.agentReason ?? undefined,
     actions: parseJson(row.actions) ?? [],
     origin: parseJson(row.origin),
     context: parseJson(row.context),
@@ -743,6 +753,10 @@ export interface WakeupRow {
   created_at: number;
   updated_at: number;
   ended_at: number | null;
+  terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
+  source_queue_item_id: string | null;
+  terminal_signal_loss_reported_at: number | null;
   origin_json: string | null;
   window_start_at: number | null;
   window_count: number | null;
@@ -804,6 +818,10 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     created_at: toNum(raw.created_at, "created_at"),
     updated_at: toNum(raw.updated_at, "updated_at"),
     ended_at: toNumOrNull(raw.ended_at, "ended_at"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
+    source_queue_item_id: asStringOrNull(raw.source_queue_item_id, "source_queue_item_id"),
+    terminal_signal_loss_reported_at: toNumOrNull(raw.terminal_signal_loss_reported_at, "terminal_signal_loss_reported_at"),
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
     window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
     window_count: toNumOrNull(raw.window_count, "window_count"),
@@ -895,6 +913,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     throw new Error(`${field}.primarySubject is not a string`);
   }
   return {
+    ...(typeof parsed.childSessionId === "string" ? { childSessionId: parsed.childSessionId } : {}),
     clauses: parsed.clauses.map((c, i) => toEventClause(c, `${field}.clauses[${i}]`)),
     once: parsed.once,
     self: parsed.self,
@@ -915,6 +934,9 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
     occurredAt: reqString(v, "occurredAt", field),
     dedupeKey: reqString(v, "dedupeKey", field),
   };
+  if (isRecord(v.refs) && Object.values(v.refs).every((value) => typeof value === "string")) {
+    out.refs = Object.fromEntries(Object.entries(v.refs).map(([key, value]) => [key, String(value)]));
+  }
   for (const key of optional) {
     const value = optString(v, key, field);
     if (value !== undefined) out[key] = value;
@@ -976,6 +998,10 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
+    ...(row.source_queue_item_id !== null ? { sourceQueueItemId: row.source_queue_item_id } : {}),
+    ...(row.terminal_signal_loss_reported_at !== null ? { terminalSignalLossReportedAt: row.terminal_signal_loss_reported_at } : {}),
     ...withOrigin(row.origin_json),
     ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
     ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
@@ -1006,6 +1032,10 @@ export interface LeaseRow {
   deadline_at: number;
   released_at: number | null;
   release_cause: string | null;
+  terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
+  source_queue_item_id: string | null;
+  terminal_signal_loss_reported_at: number | null;
   thread_id: string | null;
   origin_json: string | null;
 }
@@ -1022,6 +1052,10 @@ export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
     deadline_at: toNum(raw.deadline_at, "deadline_at"),
     released_at: toNumOrNull(raw.released_at, "released_at"),
     release_cause: asStringOrNull(raw.release_cause, "release_cause"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
+    source_queue_item_id: asStringOrNull(raw.source_queue_item_id, "source_queue_item_id"),
+    terminal_signal_loss_reported_at: toNumOrNull(raw.terminal_signal_loss_reported_at, "terminal_signal_loss_reported_at"),
     thread_id: asStringOrNull(raw.thread_id, "thread_id"),
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
   };
@@ -1055,5 +1089,9 @@ export function rowToLease(row: LeaseRow): Lease {
     deadlineAt: row.deadline_at,
     ...(row.released_at !== null ? { releasedAt: row.released_at } : {}),
     ...(row.release_cause !== null ? { releaseCause: row.release_cause } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
+    ...(row.source_queue_item_id !== null ? { sourceQueueItemId: row.source_queue_item_id } : {}),
+    ...(row.terminal_signal_loss_reported_at !== null ? { terminalSignalLossReportedAt: row.terminal_signal_loss_reported_at } : {}),
   };
 }

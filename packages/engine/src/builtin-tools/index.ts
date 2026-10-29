@@ -260,6 +260,7 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
 
 export const readTool = defineTool({
   name: "read",
+  intent: "exempt",
   description: "Read the contents of a file from the sandbox.",
   parameters: Type.Object({ path: Type.String() }),
   concurrencySafe: true,
@@ -273,6 +274,7 @@ export const readTool = defineTool({
 export const writeTool = defineTool({
   name: "write",
   sideEffect: "files",
+  intent: "exempt",
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
@@ -309,6 +311,7 @@ export const writeTool = defineTool({
 export const editTool = defineTool({
   name: "edit",
   sideEffect: "files",
+  intent: "exempt",
   description: "Replace exact text occurrences in a file.",
   parameters: Type.Object({
     path: Type.String(),
@@ -372,6 +375,7 @@ export async function runForegroundExec(ctx: ToolContext, command: string, opts:
 export const bashTool = defineTool({
   name: "bash",
   sideEffect: "files",
+  intent: "exempt",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
@@ -530,6 +534,7 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
     } else if (e.type === "decision_gate") {
       lines.push(`\n## [decision gate: ${e.gate.type} — ${e.gate.status}] ${e.gate.title}`);
       if (e.gate.body) lines.push(e.gate.body);
+      if (e.gate.agentReason) lines.push(`Agent's stated reason (model-authored): ${e.gate.agentReason}`);
     } else if (e.type === "branch_summary") {
       lines.push(`\n## [branch summary]`);
       lines.push(e.summary);
@@ -1079,6 +1084,9 @@ export const builtinTools: ToolDef[] = [
   childSendTool,
   childStatusTool,
 ];
+
+/** Built-in tools a child session does not get (`purpose: "child"`). */
+export const CHILD_EXCLUDED_TOOL_NAMES: ReadonlySet<string> = new Set([askQuestionTool.name]);
 
 /** The tools that need a session's wakeup seam (`CreateSessionOptions.wakeups`).
  * A session without the seam leaves them out (`session.ts`). */

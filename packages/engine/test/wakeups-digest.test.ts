@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundEventDigest, cutUtf8 } from "../src/wakeups/digest.js";
+import { boundEventDigest, cutUtf8, stripNul } from "../src/wakeups/digest.js";
 import { EVENT_DIGEST_TEXT_MAX_BYTES } from "../src/wakeups/types.js";
 
 describe("cutUtf8", () => {
@@ -40,9 +40,28 @@ describe("boundEventDigest", () => {
     const out = boundEventDigest({ ...base, key: "k\u0000", summary: "s\u0000um", subjects: ["a\u0000"], dedupeKey: "d\u0000", actor: "\u0000ada", text: "x\u0000y" });
     expect(out).toEqual({ ...base, key: "k", summary: "sum", subjects: ["a"], dedupeKey: "d", actor: "ada", text: "xy" });
   });
+  it("strips NUL from internal producer refs", () => {
+    expect(boundEventDigest({ ...base, refs: { "child_session_id\u0000": "child-1\u0000" } }).refs)
+      .toEqual({ child_session_id: "child-1" });
+  });
   it("cuts text to EVENT_DIGEST_TEXT_MAX_BYTES", () => {
     const out = boundEventDigest({ ...base, text: "a".repeat(EVENT_DIGEST_TEXT_MAX_BYTES + 10) });
     expect(out.text).toHaveLength(EVENT_DIGEST_TEXT_MAX_BYTES);
     expect(out.dedupeKey).toBe("d");
   });
+});
+
+describe("stripNul", () => {
+  it("copies nested event payloads and strips string values and keys without changing scalar types", () => {
+    const input = { "nul\u0000key": [null, true, 42, { reason: "watching\u0000build" }], text: "done\u0000" };
+    expect(stripNul(input)).toEqual({ nulkey: [null, true, 42, { reason: "watchingbuild" }], text: "done" });
+    expect(input.text).toBe("done\u0000");
+    expect(input["nul\u0000key"][3]).toEqual({ reason: "watching\u0000build" });
+    expect(stripNul("a\\u0000b")).toBe("a\\u0000b");
+  });
+});
+
+it("removes lone UTF-16 surrogates recursively but keeps whole astral characters", () => {
+  expect(stripNul({ "bad\ud800key": ["a\ud800b\udc00c", "😀"], text: "\u0000\udfff" }))
+    .toEqual({ badkey: ["abc", "😀"], text: "" });
 });

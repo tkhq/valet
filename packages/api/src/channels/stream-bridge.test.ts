@@ -36,7 +36,7 @@ interface AppendCall {
 
 class FakeStreamTransport implements ChannelTransport {
   readonly channelType = CHANNEL_TYPE;
-  started: Array<{ conversationKey: string; threadTs: string }> = [];
+  started: Array<{ conversationKey: string; threadTs: string; recipient?: { userId: string; teamId: string } }> = [];
   appends: AppendCall[] = [];
   stopped: Array<{ ref: StreamRef; final?: { markdown?: string } }> = [];
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
@@ -68,9 +68,9 @@ class FakeStreamTransport implements ChannelTransport {
   }
   async updateGatePrompt() {}
 
-  async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
+  async startStream(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef> {
     if (this.startFailure) throw this.startFailure;
-    this.started.push({ conversationKey, threadTs: ctx.threadTs });
+    this.started.push({ conversationKey, threadTs: ctx.threadTs, ...(ctx.recipient ? { recipient: ctx.recipient } : {}) });
     return { conversationKey, messageId: `ts${this.nextTs++}`, threadTs: ctx.threadTs };
   }
   async appendStream(ref: StreamRef, markdown: string): Promise<void> {
@@ -315,6 +315,66 @@ describe("the turn fails mid-stream", () => {
     expect(h.transport.stopped).toHaveLength(1);
     expect(h.transport.streamedText()).toContain("upstream refused");
     expect(h.streams.size()).toBe(0);
+  });
+
+  it("keeps the reply open when a model call fails and may be retried", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m1"));
+    h.delta("Working on it.\n");
+    await advance(FLUSH_INTERVAL_MS);
+
+    // The engine sends a model call's failure before it decides to retry.
+    await h.emit({ type: "error", threadId: THREAD_ID, code: "error", error: "overloaded_error: Overloaded", recoverable: false });
+    await h.emit({ type: "turn_retry", threadId: THREAD_ID, action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+    await advance(0);
+
+    expect(h.transport.stopped).toHaveLength(0);
+    expect(h.transport.streamedText()).not.toContain("This turn failed");
+    expect(h.streams.size()).toBe(1);
+  });
+
+  it("streams a retried model call's answer into the same reply", async () => {
+    // The engine's order for a failed call it retries: message_end (error),
+    // error, turn_end, turn_retry, then the retry's message_start.
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m1"));
+    await h.emit(messageEnd("m1", "error"));
+    await h.emit({ type: "error", threadId: THREAD_ID, code: "error", error: "overloaded_error: Overloaded", recoverable: false });
+    await h.emit({ type: "turn_end", threadId: THREAD_ID, reason: "error" });
+    await h.emit({ type: "turn_retry", threadId: THREAD_ID, action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+    await advance(2_000);
+    expect(h.transport.stopped).toHaveLength(0);
+
+    await h.emit(messageStart("m2"));
+    h.delta("The answer.\n");
+    await h.emit(messageEnd("m2", "end_turn"));
+    await advance(FLUSH_INTERVAL_MS);
+
+    expect(h.transport.started).toHaveLength(1);
+    expect(h.transport.stopped).toHaveLength(1);
+    expect(h.transport.streamedText()).toContain("The answer.");
+    expect(h.transport.streamedText()).not.toContain("This turn failed");
+    expect(h.bridge.isStreamed(SESSION_ID, "m2")).toBe(true);
+    expect(h.streams.size()).toBe(0);
+  });
+
+  it("closes a held reply with the failure note when no retry comes", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m1"), "q1");
+    await h.emit(messageEnd("m1", "error"), "q1");
+    await h.emit({ type: "turn_end", threadId: THREAD_ID, reason: "error" }, "q1");
+    await advance(0);
+    expect(h.transport.stopped).toHaveLength(0);
+
+    await h.emit({ type: "submission_settled", sessionId: SESSION_ID, threadId: THREAD_ID, queueItemId: "q1", outcome: { outcome: "failed" } }, "q1");
+    await advance(0);
+
+    expect(h.transport.stopped).toHaveLength(1);
+    expect(h.transport.streamedText()).toContain("This turn failed");
+    expect(h.bridge.isStreaming(SESSION_ID, THREAD_ID)).toBe(false);
   });
 
   it("still closes the stream when the final flush itself fails", async () => {
@@ -600,6 +660,13 @@ describe("the turn parks on an approval gate", () => {
     expect(h.streams.size()).toBe(0);
     expect(h.bridge.isStreaming(SESSION_ID, THREAD_ID)).toBe(false);
     expect(h.transport.statuses).toEqual([]);
+  });
+
+  it("opens a group turn's stream for that turn's recipient", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn({ ...h.turn, recipient: { userId: "U7", teamId: "T1" } });
+    await h.emit(messageStart("m1"));
+    expect(h.transport.started).toEqual([expect.objectContaining({ recipient: { userId: "U7", teamId: "T1" } })]);
   });
 
   it("opens a fresh stream for the resumed turn", async () => {

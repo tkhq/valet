@@ -168,9 +168,14 @@ Search and default actions stay in the catalog view. Desktop keeps its existing 
 
 ### Home delivery and routine preferences
 
-Home queues new turns as follow-ups across web and direct messages. Task reports never supersede active work.
+Home queues turns as follow-ups. Task reports never supersede active work.
+New Slack DM roots use separate engine threads. Replies use the saved conversation binding.
+Existing dedicated conversations keep their thread. Slack conversations already in Home continue there.
 A plain-text question reply from Slack must match the question submission's original conversation.
-DM edits record the correction in Home or their existing legacy thread without sending a reply.
+DM edits record the correction in the thread that holds the original conversation without sending a reply.
+Existing Home history remains in Home and stays accessible through the desktop Home row.
+The routing change does not move or delete that history. Existing Home gate cards and command replies retain their original Slack destination.
+See the [Slack conversation routing design](2026-10-23-slack-conversation-routing-design.md).
 The host marks a linked person's direct channel input separately from background signals.
 Only that verified input supplies an interactive actor; replay retains its original channel context.
 Workflow and child turns cannot inherit this authority.
@@ -181,7 +186,8 @@ If initial provisioning fails, Home remains available and logs the failure witho
 
 Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
 The web checks persisted widget specs with the same validator before rendering them.
-Desktop keeps its dashboard, but an explicit private Home thread link remains reachable through the chat route.
+Desktop keeps its dashboard. The web sidebar pins a Home row above the thread list in the person's own workspace, with the same unread, question, and work marks as a thread row. Home is never an ordinary row, but thread search finds it when its content matches.
+The API names the home thread Home in every thread response and never auto-titles it, so the web, the CLI, and agents show one name.
 
 The Home queue default persists before admission and survives engine restarts. Widgets use explicit elements; state-driven repeat expansion is rejected.
 

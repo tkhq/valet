@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type Context } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type Context } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 describe("preparation failure tool results", () => {

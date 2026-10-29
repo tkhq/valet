@@ -1,7 +1,7 @@
 /** Integration coverage for sandbox file upload, including attachment
  * readiness, extraction, limits, overwrite safety, and ref handling. */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -99,7 +99,9 @@ describe("POST /api/sessions/:id/files", () => {
     expect(provider.resumeCalls).toBe(1);
   });
 
-  it("recovers a provider-backed error on the next upload", async () => {
+  it("fails fast inside the startup backoff window, then recovers once it has elapsed", async () => {
+    // Mirrors STARTUP_BACKOFF_BASE_MS in the engine's sandbox/attachment.ts (not exported from the package).
+    const startupBackoffBaseMs = 15_000;
     const provider = new UploadSandboxProvider();
     provider.failNext = true;
     api = await bootTestApi({ sandboxProvider: provider });
@@ -108,21 +110,49 @@ describe("POST /api/sessions/:id/files", () => {
     const failed = await upload(api.baseUrl, sessionId, "failed.txt");
     expect(failed.status).toBe(500);
     expect(await failed.json()).toMatchObject({ error: "sandbox failed to start" });
-    expect((await upload(api.baseUrl, sessionId, "recovered.txt")).status).toBe(200);
-    expect(provider.createCalls).toBe(2);
+
+    // Inside the window the attachment rejects at once and does not re-create.
+    // The route's body is static, so the " (retry in Ns)" suffix is not surfaced here.
+    const blocked = await upload(api.baseUrl, sessionId, "blocked.txt");
+    expect(blocked.status).toBe(500);
+    expect(await blocked.json()).toMatchObject({ error: "sandbox failed to start" });
+    expect(provider.createCalls).toBe(1);
+
+    // Past the window. Fake Date only so the HTTP stack keeps its real timers.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + startupBackoffBaseMs + 1000);
+      expect((await upload(api.baseUrl, sessionId, "recovered.txt")).status).toBe(200);
+      expect(provider.createCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("does not try to restart a released attachment", async () => {
+  it("rebuilds a released cached session without restarting its terminal attachment", async () => {
     const provider = new UploadSandboxProvider();
     api = await bootTestApi({ sandboxProvider: provider });
     const sessionId = await createSession(api.baseUrl, "");
     expect((await upload(api.baseUrl, sessionId, "before.txt")).status).toBe(200);
-    await api.providers.engineHost.liveSession(sessionId)?.attachment.destroy();
+    const original = api.providers.engineHost.liveSession(sessionId);
+    if (!original) throw new Error("the upload session was not cached");
+    await original.attachment.destroy();
 
-    const released = await upload(api.baseUrl, sessionId, "after.txt");
-    expect(released.status).toBe(409);
-    expect(await released.json()).toMatchObject({ error: "sandbox was released" });
-    expect(provider.createCalls).toBe(1);
+    const recovered = await upload(api.baseUrl, sessionId, "after.txt");
+    expect(recovered.status).toBe(200);
+    const result = await recovered.json() as PostSessionFileUploadResponse;
+    const replacement = api.providers.engineHost.liveSession(sessionId);
+    expect(replacement).not.toBe(original);
+    if (!replacement) throw new Error("the replacement upload session was not cached");
+    expect(await replacement.sandbox.readFile(result.path)).toBe("after.txt");
+    expect(original.attachment.state).toBe("released");
+    await expect(original.attachment.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(provider.createCalls).toBe(2);
+
+    const deleted = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect((await upload(api.baseUrl, sessionId, "deleted.txt")).status).toBe(404);
+    expect(provider.createCalls).toBe(2);
   });
   it("accepts a plain text file and returns correct response shape", async () => {
     api = await bootTestApi();

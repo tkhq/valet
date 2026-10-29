@@ -13,6 +13,7 @@ import {
   DOCKER_WORKLOAD_FS_GROUP,
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
+  SANDBOX_CONTAINER_NAME,
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
   SCRATCH_MOUNT_PATH,
@@ -588,6 +589,24 @@ describe("buildSandboxManifest", () => {
     });
   });
 
+  describe("browser-enabled headless command", () => {
+    it("guards tini so an image without /usr/bin/tini still starts", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-browser", {
+        profile: "headless",
+        sessionId: "session-browser",
+        browser: { enabled: true, viewer: true },
+      });
+      const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+      // The first four entries are the valet-home-start wrapper; slice them
+      // off the way the scratch tests do.
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+  });
+
   describe("credsFiles", () => {
     it("adds the valet-creds volume and mount when credsFiles is provided", () => {
       const manifest = buildSandboxManifest(baseConfig, "sess-1", {
@@ -628,6 +647,12 @@ describe("buildSandboxManifest", () => {
       const alsoWithout = buildSandboxManifest(baseConfig, "sess-1", { ...opts });
       expect(without).toEqual(alsoWithout);
     });
+  });
+
+  it("asks the kubelet to copy the log tail into the termination message", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-tm", {});
+    const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+    expect(container?.terminationMessagePolicy).toBe("FallbackToLogsOnError");
   });
 });
 
@@ -873,5 +898,14 @@ describe("scratchSizeLimit (fix wave 4, security N2)", () => {
     for (const bad of ["200G", "1.5Ti", "2000000K", "1e12", "", " 200Gi", "200Gi; rm -rf /"]) {
       expect(() => scratchSizeLimit(bad), bad).toThrow("is not a supported quantity");
     }
+  });
+});
+
+describe("image runtime contract constants", () => {
+  it("pins the current and minimum contract", async () => {
+    const { SANDBOX_IMAGE_CONTRACT, MIN_IMAGE_CONTRACT } = await import("../src/index.js");
+    expect(SANDBOX_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBeLessThanOrEqual(SANDBOX_IMAGE_CONTRACT);
   });
 });

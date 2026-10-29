@@ -24,7 +24,7 @@ import {
   type RuntimeGrantRow,
 } from "../schema/index.js";
 import type { ToolPermissionSource, ToolPermissionWire } from "../wire/types.js";
-import { qualifiedActionId } from "../plugins/action-id.js";
+import { qualifiedActionId, type DynamicActionSource, type ListedAction } from "../plugins/action-id.js";
 import { type ParamMatcher } from "./matchers.js";
 import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
 import { loadPolicyRows } from "./service.js";
@@ -33,6 +33,18 @@ import { loadPolicyRows } from "./service.js";
  *  actionId's `service`/`riskLevel`/plugin default — same map shape as
  *  `Providers.actionPluginByService` (`providers/types.ts`). */
 export type ActionPluginByService = Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+
+/**
+ * The actions a policy write may name. The static manifest index, plus the
+ * tools each dynamic service listed for the policy's owner: the cached tool
+ * schema `ServiceProbes.listedActionsFor(owner)` serves. Without
+ * `dynamicActions`, a dynamic tool stays unverifiable and an `allow`
+ * override on it is refused, as before the cache existed.
+ */
+export interface PolicyCatalog {
+  actionPluginByService: ActionPluginByService;
+  dynamicActions?: DynamicActionSource;
+}
 
 /** One-of-three target shape shared by `action_policies` and
  *  `action_policy_overrides` — mirrors the DB CHECK constraint. */
@@ -238,26 +250,44 @@ async function loadLiveOrgPolicyDimensionRows(db: AppQueryable, orgId: string, n
     );
 }
 
-/** Looks up an actionId in the assembled plugin catalog (static `actions`
- *  list only — an action only reachable via a plugin's dynamic
- *  `resolveActions` seam is, by construction, unverifiable here and treated
- *  the same as "not found"). Returns the action's `service`/`riskLevel` plus
- *  its plugin's `defaultApprovalMode`, everything `resolveActionPolicy` needs
- *  to derive the same base decision (rungs 3-5) real invocation would. */
-function findCatalogAction(
-  actionPluginByService: ActionPluginByService,
-  actionId: string,
-): { service: string; riskLevel: RiskLevel; pluginDefault: ApprovalMode | undefined } | undefined {
-  for (const { actionPlugin } of actionPluginByService.values()) {
-    // Match raw `a.id` OR its fqid — the canonical policy-facing id is the
-    // fully-qualified `service.action` form (spec T6 #3), but a plugin may
-    // declare bare action ids.
-    const action = actionPlugin.actions.find(
-      (a) => a.id === actionId || (a.id.includes(".") ? a.id : `${actionPlugin.service}.${a.id}`) === actionId,
-    );
-    if (action) {
-      return { service: actionPlugin.service, riskLevel: action.riskLevel, pluginDefault: actionPlugin.defaultApprovalMode };
-    }
+/** An action's policy facts: everything `resolveActionPolicy` needs to
+ *  derive the same base decision (rungs 3-5) real invocation would. */
+interface CatalogAction {
+  service: string;
+  riskLevel: RiskLevel;
+  pluginDefault: ApprovalMode | undefined;
+}
+
+function catalogAction(actionPlugin: ActionPlugin, action: ListedAction): CatalogAction {
+  return { service: actionPlugin.service, riskLevel: action.riskLevel, pluginDefault: actionPlugin.defaultApprovalMode };
+}
+
+/** Match raw `a.id` OR its fqid — the canonical policy-facing id is the
+ *  fully-qualified `service.action` form (spec T6 #3), but a plugin may
+ *  declare bare action ids. */
+function namedAction(actionPlugin: ActionPlugin, actions: readonly ListedAction[], actionId: string): ListedAction | undefined {
+  return actions.find((a) => a.id === actionId || qualifiedActionId(actionPlugin.service, a) === actionId);
+}
+
+/**
+ * Looks up an actionId in the policy catalog: the static `actions` list of
+ * every plugin first, then the listed tools of each dynamic
+ * (`resolveActions`) service whose name prefixes the id, read through
+ * `catalog.dynamicActions`. An id neither names is unverifiable and
+ * answers `undefined`. The dynamic read is a per-owner, TTL-cached listing
+ * (`ServiceProbes`), live on a cold cache, so only prefix-matching services
+ * are asked.
+ */
+async function findCatalogAction(catalog: PolicyCatalog, actionId: string): Promise<CatalogAction | undefined> {
+  for (const { actionPlugin } of catalog.actionPluginByService.values()) {
+    const action = namedAction(actionPlugin, actionPlugin.actions, actionId);
+    if (action) return catalogAction(actionPlugin, action);
+  }
+  if (!catalog.dynamicActions) return undefined;
+  for (const [service, { actionPlugin }] of catalog.actionPluginByService) {
+    if (!actionPlugin.resolveActions || !actionId.startsWith(`${service}.`)) continue;
+    const action = namedAction(actionPlugin, await catalog.dynamicActions(service, actionPlugin), actionId);
+    if (action) return catalogAction(actionPlugin, action);
   }
   return undefined;
 }
@@ -281,12 +311,14 @@ function blockedByOrgPolicy(row: OrgPolicyDimensionRow): TargetValidation {
  * Blocks only when an ORG policy (not a plugin default or the engine's risk
  * default) resolves deny/require_approval — matching spec decision 3, which
  * bounds the override against the org's OWN policy, never against a mere
- * default. An actionId absent from the static plugin catalog fails CLOSED
- * (this also covers an action only reachable via a plugin's dynamic
- * `resolveActions` seam — intentional, same "unverifiable ⇒ refuse" logic,
- * not an oversight): with no way to know its real service/riskLevel, a
- * service- or riskLevel-scoped org policy could silently apply to it at
- * invocation time with nothing here to catch it.
+ * default. An actionId absent from the policy catalog fails CLOSED
+ * (intentional, "unverifiable ⇒ refuse", not an oversight): with no way to
+ * know its real service/riskLevel, a service- or riskLevel-scoped org
+ * policy could silently apply to it at invocation time with nothing here to
+ * catch it. A dynamic (`resolveActions`) tool is in the catalog once its
+ * service's listing for the policy's owner names it
+ * (`PolicyCatalog.dynamicActions`); while that listing is unknown, the tool
+ * is refused the same way.
  *
  * Matcher-blind resolution (finding C1): the bounds check resolves with
  * `params: undefined`, so an org policy carrying `paramMatchers` would
@@ -319,13 +351,13 @@ async function validateActionIdOverrideBounds(
   orgId: string,
   actionId: string,
   now: number,
-  actionPluginByService: ActionPluginByService,
+  catalog: PolicyCatalog,
 ): Promise<TargetValidation> {
-  const found = findCatalogAction(actionPluginByService, actionId);
+  const found = await findCatalogAction(catalog, actionId);
   if (!found) {
     return {
       ok: false,
-      error: `cannot set override mode "allow": action "${actionId}" is not in the plugin catalog and can't be verified against org policy`,
+      error: `cannot set override mode "allow": action "${actionId}" is not in the plugin catalog and can't be verified against org policy. For an MCP tool, connect the service and open its tool list first.`,
     };
   }
   // Org policy alone: no userId/sessionId scope, so `loadPolicyRows` returns
@@ -388,7 +420,7 @@ async function validateServiceOverrideBounds(
   orgId: string,
   service: string,
   now: number,
-  actionPluginByService: ActionPluginByService,
+  catalog: PolicyCatalog,
 ): Promise<TargetValidation> {
   const rows = await loadLiveOrgPolicyDimensionRows(db, orgId, now);
   for (const row of rows) {
@@ -398,7 +430,7 @@ async function validateServiceOverrideBounds(
       continue; // different service — provably disjoint
     }
     if (row.actionId !== null) {
-      const found = findCatalogAction(actionPluginByService, row.actionId);
+      const found = await findCatalogAction(catalog, row.actionId);
       if (!found || found.service === service) return blockedByOrgPolicy(row);
       continue; // catalog proves a different service — disjoint
     }
@@ -469,14 +501,14 @@ export async function validateOverrideBounds(
   target: PolicyTarget,
   mode: ApprovalMode,
   now: number,
-  actionPluginByService: ActionPluginByService,
+  catalog: PolicyCatalog,
 ): Promise<TargetValidation> {
   if (mode !== "allow") return { ok: true };
   if (target.actionId !== undefined) {
-    return validateActionIdOverrideBounds(db, orgId, target.actionId, now, actionPluginByService);
+    return validateActionIdOverrideBounds(db, orgId, target.actionId, now, catalog);
   }
   if (target.service !== undefined) {
-    return validateServiceOverrideBounds(db, orgId, target.service, now, actionPluginByService);
+    return validateServiceOverrideBounds(db, orgId, target.service, now, catalog);
   }
   if (target.riskLevel !== undefined) {
     return validateRiskLevelOverrideBounds(db, orgId, target.riskLevel, now);
@@ -496,9 +528,11 @@ const SOURCE: Record<PolicyProvenanceSource, ToolPermissionSource> = {
   override: "personal",
   runtime_grant: "grant",
   workflow_grant: "grant",
-  // The two below come from the session resolver only, never from the pure core.
+  // The three below come from the session resolver only, never from the pure core.
   resolver_error: "default",
   shared_account: "team",
+  // A thread setting, not a standing permission: the action keeps its mode.
+  thread_bypass: "default",
 };
 
 /**
@@ -509,16 +543,28 @@ const SOURCE: Record<PolicyProvenanceSource, ToolPermissionSource> = {
  * nothing but `deny` under an effective org deny, which no override
  * outranks. With `teamId`, the rows are the team's and no personal
  * override applies, so nothing is settable.
+ *
+ * A dynamic service's tools come from `dynamicActions` (the owner's cached
+ * listing) after its static actions; an unknown listing adds none.
  */
 export async function listToolPermissions(
   db: AppQueryable,
   scope: { orgId: string; userId: string; teamId?: string },
   actionPlugins: ActionPlugin[],
   now: number,
+  dynamicActions?: DynamicActionSource,
 ): Promise<ToolPermissionWire[]> {
   const rows = await loadPolicyRows(db, scope);
-  return actionPlugins.flatMap((actionPlugin) =>
-    actionPlugin.actions.map((action): ToolPermissionWire => {
+  const listed = await Promise.all(
+    actionPlugins.map(async (actionPlugin): Promise<readonly ListedAction[]> => {
+      if (!actionPlugin.resolveActions || !dynamicActions) return actionPlugin.actions;
+      const staticIds = new Set(actionPlugin.actions.map((action) => qualifiedActionId(actionPlugin.service, action)));
+      const dynamic = await dynamicActions(actionPlugin.service, actionPlugin);
+      return [...actionPlugin.actions, ...dynamic.filter((action) => !staticIds.has(qualifiedActionId(actionPlugin.service, action)))];
+    }),
+  );
+  return actionPlugins.flatMap((actionPlugin, index) =>
+    listed[index].map((action): ToolPermissionWire => {
       const target = {
         service: actionPlugin.service,
         actionId: qualifiedActionId(actionPlugin.service, action),
@@ -571,12 +617,12 @@ export async function upsertOverride(
   orgId: string,
   userId: string,
   input: UpsertOverrideInput,
-  actionPluginByService: ActionPluginByService,
+  catalog: PolicyCatalog,
 ): Promise<UpsertOverrideResult> {
   const targetCheck = validateTarget(input);
   if (!targetCheck.ok) return targetCheck;
 
-  const boundsCheck = await validateOverrideBounds(db, orgId, input, input.mode, input.now, actionPluginByService);
+  const boundsCheck = await validateOverrideBounds(db, orgId, input, input.mode, input.now, catalog);
   if (!boundsCheck.ok) return boundsCheck;
 
   const existing = await db

@@ -177,7 +177,7 @@ export async function messageHomeTask(deps: HomeDeps, user: HomeUser, threadId: 
     workspace: { key: ws?.key ?? row.ownerId, name: ws?.name ?? "Workspace" }, ...(receipt.queueItemId ? { queueItemId: receipt.queueItemId } : {}) };
 }
 
-async function sessionFor(deps: HomeDeps, row: { ownerType: string; ownerId: string; sessionId: string; orgId: string; userId: string }): Promise<Session> {
+export async function sessionFor(deps: HomeDeps, row: { ownerType: string; ownerId: string; sessionId: string; orgId: string; userId: string }): Promise<Session> {
   const owner: Principal = row.ownerType === "team" ? { type: "team", id: row.ownerId } : { type: "user", id: row.ownerId };
   const meta = { actorUserId: row.userId, orgId: row.orgId };
   const root = await ensureDefaultAssistantSession(deps, owner, meta);
@@ -477,7 +477,9 @@ export async function readHomeTask(deps: HomeDeps, user: HomeUser, threadId: str
     .where(and(eq(homeTasks.userId, user.id), eq(homeTasks.orgId, user.orgId), eq(homeTasks.threadId, threadId))).limit(1);
   if (!row) throw new Error("No task with that thread id. Call list_tasks to find the task.");
   if (!await canAccessTask(deps, user, row)) throw new Error("You no longer have access to that task.");
-  const entries = await deps.engineStore.getEntries(row.sessionId, row.threadId);
+  // The newest messages only: tool and system entries sit between them, so
+  // read a tail with room for them instead of the whole transcript.
+  const entries = await deps.engineStore.getEntries(row.sessionId, row.threadId, { limit: limit * 10 });
   const messages = entries.flatMap((entry) => entry.type === "message" && (entry.role === "user" || entry.role === "assistant") && entry.content
     ? [`## ${entry.role === "user" ? (entry.author?.name ?? "person") : "Valet"}\n${entry.content.slice(0, 2000)}`] : []);
   return [`# ${row.title}`, ...messages.slice(-limit)].join("\n\n");

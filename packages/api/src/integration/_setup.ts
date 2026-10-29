@@ -1,4 +1,3 @@
-import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -10,6 +9,10 @@ import { drainAttentionDeliveries } from "../events/attention-delivery.js";
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import { wireSessionOutcomeTagging } from "../tagging/session-outcome.js";
+import { taggingDrain } from "../tagging/worker.js";
+import { externalUsageRetention } from "../services/external-usage.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +38,7 @@ import {
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
+  wireChildGateReports,
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
@@ -275,6 +279,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+  // Same instance for `/api/plugins`, the policy routes, and the host's
+  // policy resolver, as in `providers/node.ts`.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
   const blobs = new FsBlobStore(blobsRoot);
 
   // Resolve callback URLs only after the server binds. Keeping port 0 bound
@@ -349,6 +356,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
+    serviceProbes,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -387,6 +395,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     namer: async () => "Test conversation",
   });
+  const stopOutcomeTagging = wireSessionOutcomeTagging(eventStream, db);
   autoTitleHost.start();
 
   const prebuildService = new SourceService({
@@ -395,10 +404,13 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubTokenDeps,
   });
 
+  engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
+
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
   const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children"), scratchCaps };
   const childWatcher = new ChildWatcher(childrenDeps);
+  const stopChildReports = wireChildGateReports(eventStream, childWatcher);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
@@ -425,6 +437,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
   // Behavior is tested in engine/wake-watcher.test.ts.
   const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
     db,
     engineStore,
     engineHost,
@@ -553,6 +566,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
@@ -620,7 +635,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     plugins,
     configMcpServers: opts.mcpServers ?? [],
     actionPluginByService,
-    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
     scratchCaps,
   };
@@ -652,7 +667,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       await server.close();
       await eventDispatcher.stop();
       await channelHost.stop();
+      stopChildReports();
+      await childWatcher.stopRetentionSweep();
       autoTitleHost.stop();
+      stopOutcomeTagging();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });

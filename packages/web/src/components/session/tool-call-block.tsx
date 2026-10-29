@@ -1,4 +1,5 @@
 import type { MessagePart } from "@valet/api/wire";
+import { useToolOutput } from "~/api/tool-output";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { showsLiveBody } from "./tool-renderers/types";
@@ -12,6 +13,17 @@ export type ToolCallPart = Extract<MessagePart, { kind: "tool_call" }>;
  * preview once the call completes.
  */
 export function ToolCallBlock({ part, readOnly = false }: { part: ToolCallPart; readOnly?: boolean }) {
+  return part.resultTrimmed ? <TrimmedToolCallBlock part={part} readOnly={readOnly} /> : <ToolCallCard part={part} readOnly={readOnly} />;
+}
+
+/** The transcript ships a large result trimmed. An open card loads all of it
+ * and shows the trimmed start and end until it arrives. */
+function TrimmedToolCallBlock({ part, readOnly }: { part: ToolCallPart; readOnly: boolean }) {
+  const full = useToolOutput(part.resultTrimmed, part.callId);
+  return <ToolCallCard part={full.data ? { ...part, result: full.data.result } : part} readOnly={readOnly} />;
+}
+
+function ToolCallCard({ part, readOnly }: { part: ToolCallPart; readOnly: boolean }) {
   const renderer = readOnly ? fallbackRenderer : pickRenderer(part.toolName, part.args);
   // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
   // formatTarget/formatSummary would compute from partial, jagged args

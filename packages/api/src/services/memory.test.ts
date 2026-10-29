@@ -411,4 +411,50 @@ describe("memory service", () => {
       await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
     });
   });
+
+  describe("team principles", () => {
+    it("lets a team member write team notes but only a team admin write team principles", async () => {
+      const team = await createTeam(db, { orgId, name: "Rules", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+      const member: MemoryScope = { owner: { type: "team", id: team.id }, actorUserId: "u2" };
+      const admin: MemoryScope = { ...member, actorUserId: "u1" };
+
+      await writeFile(db, member, { path: "notes/plan.md", content: "# Plan\n" });
+      const refused = /Ask a team admin to add the rule, or save it as a personal principle/;
+      await expect(writeFile(db, member, { path: "principles/ship-small.md", content: "# Ship small\n" })).rejects.toThrow(refused);
+      await expect(patchFile(db, member, { path: "principles/ship-small.md", oldString: "", newString: "# Ship small\n" })).rejects.toThrow(refused);
+      await expect(moveFile(db, member, { from: "notes/plan.md", to: "principles/plan.md" })).rejects.toThrow(refused);
+      const imported = await importFiles(db, member, { files: { "principles/ship-small.md": "# Ship small\n" }, trusted: false });
+      expect(imported.imported).toEqual([]);
+      expect(imported.skipped[0]?.reason).toMatch(refused);
+
+      await writeFile(db, admin, { path: "principles/ship-small.md", content: "# Ship small\n" });
+      await expect(removeFile(db, member, "principles/ship-small.md")).rejects.toThrow(refused);
+      await expect(moveFile(db, member, { from: "principles/ship-small.md", to: "notes/ship-small.md" })).rejects.toThrow(refused);
+      // Personal principles need no admin.
+      await writeFile(db, scopeFor("u2"), { path: "principles/mine.md", content: "# Mine\n" });
+    });
+
+    it("records the agent source as frontmatter on a principle, and only on a principle", async () => {
+      const scope = scopeFor("u1");
+      const source = { sessionId: "s1", threadId: "t1" };
+      await writeFile(db, scope, { path: "principles/prove-it.md", content: "# Prove it\n", source });
+      await writeFile(db, scope, { path: "notes/plain.md", content: "# Plain\n", source });
+
+      const principle = await readFile(db, scope, "principles/prove-it.md");
+      if (principle.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(principle.rendered).extras).toEqual({
+        "source-actor": "u1", "source-session": "s1", "source-thread": "t1",
+      });
+      const plain = await readFile(db, scope, "notes/plain.md");
+      if (plain.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(plain.rendered).extras).toEqual({});
+
+      // A later write from a session with no thread replaces the source.
+      await patchFile(db, scope, { path: "principles/prove-it.md", oldString: "Prove it", newString: "Prove it works", source: { sessionId: "s2" } });
+      const patched = await readFile(db, scope, "principles/prove-it.md");
+      if (patched.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(patched.rendered).extras).toEqual({ "source-actor": "u1", "source-session": "s2" });
+    });
+  });
 });

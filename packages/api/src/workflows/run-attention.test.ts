@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { DecisionGate } from "@valet/engine";
 import { InMemoryWorkflowStore, type NodeCheckpoint, type RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { childWatches, eventDropLog, assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -322,8 +322,16 @@ describe("buildRunThreadArchive", () => {
     // The settled run reported before it stopped: its turn is over, so the
     // thread has nothing left to show and the archive may take it.
     await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+    await engineStore.createWakeup({ id: "wk_child_events:run-child", sessionId: done.sessionId, threadId: done.threadId,
+      kind: "event", status: "running", reason: "Child updates", subjects: ["valet:session:run-child"],
+      eventMatch: { childSessionId: "run-child", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
 
+    await db.insert(childWatches).values({ childSessionId: "run-child", queueItemId: "owed-result", parentSessionId: done.sessionId,
+      parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, createdAt: 1 });
     await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
+    expect((await db.select().from(eventDropLog)).some(row => row.reason === "child_delivery_cancelled")).toBe(true);
+    expect((await engineStore.getWakeup("wk_child_events:run-child"))?.status).toBe("cancelled");
 
     const rows = await db.select().from(sessionThreads);
     expect(rows).toEqual([
@@ -366,6 +374,36 @@ describe("buildRunThreadArchive", () => {
     expect(await engineStore.getQueueItem(execution.sessionId, receipt.queueItemId)).toMatchObject({ status: "settled" });
     expect(await db.select().from(assistantExecutions)).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: execution.sessionId })]));
     expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining([expect.objectContaining({ id: thread.id, archivedAt: 5_000 })]));
+  });
+
+  it("archives each step's own thread with the run's, and evicts a team run execution that only steps used", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Step archive", creatorUserId: LOCAL_USER.id });
+    await db.insert(workflowDefinitions).values({ id: "wf_steps", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Step archive", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_steps", { workflowId: "wf_steps", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const entries = await Promise.all([0, 1].map(async (iteration) => {
+      const receipt = await deps.promptOrchestrator("check one", {
+        dispatchId: `workflow:run_steps:each${iteration > 0 ? `:${iteration}` : ""}`, queueMode: "followup",
+        ownerHint: { ownerType: "team", ownerId: team.id }, stepThread: { nodeId: "each", iteration },
+      });
+      await workflowStore.putIntent({ runId: "run_steps", nodeId: "each", iteration, status: "intent", attempt: 1, createdAt: Date.now(),
+        effects: { sessionId: receipt.sessionId, receipt: { threadId: receipt.threadId, queueItemId: receipt.queueItemId }, repairAttempted: false } });
+      await engineStore.forceSettle(receipt.sessionId, receipt.queueItemId, "aborted");
+      return receipt;
+    }));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).not.toBeNull();
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost })(settledRun("run_steps", "wf_steps"));
+
+    expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining(entries.map((entry) =>
+      expect.objectContaining({ id: entry.threadId, sessionId: entry.sessionId, archivedAt: 5_000 }))));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).toBeNull();
   });
 
   it("keeps the thread of a run that settled while its assistant turn is unsettled", async () => {

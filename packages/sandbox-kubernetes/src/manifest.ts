@@ -60,6 +60,24 @@ export const SCRATCH_PLACEHOLDER_COMMAND = [
   `set -eu\n${scratchStartScript()}exec tail -f /dev/null`,
 ];
 
+/**
+ * Image runtime contract (image-pipeline-health design, section 5). Names the
+ * set of things this pod spec assumes exist inside a sandbox image. Value 3
+ * is the image built from docker/Dockerfile.sandbox-k8s today: /usr/bin/tini,
+ * /start-headless.sh, /start-full.sh, /usr/local/bin/valet-browser-client,
+ * and HOME_LAYOUT_VERSION 2. The Dockerfile stamps the same number as
+ * `LABEL io.valet.sandbox.contract`.
+ *
+ * Maintainer rule: a change that makes this module or the start scripts
+ * depend on something new in the image bumps SANDBOX_IMAGE_CONTRACT and the
+ * Dockerfile label together. If old images cannot run the new pod spec at
+ * all, it also bumps MIN_IMAGE_CONTRACT, which invalidates every bake below
+ * it at once (sessions fall back until the cascade finishes).
+ */
+export const SANDBOX_IMAGE_CONTRACT = 3;
+/** The lowest contract the current pod spec can run. */
+export const MIN_IMAGE_CONTRACT = 3;
+
 export const SCRATCH_INIT_NAME = "valet-scratch-init";
 
 /** The scratch forms the api accepts (`validateScratchRequest`): whole
@@ -452,6 +470,7 @@ export function buildSandboxManifest(
 
   const container: SandboxContainer = {
     name: SANDBOX_CONTAINER_NAME,
+    terminationMessagePolicy: "FallbackToLogsOnError",
     image,
     // Non-terminating placeholder — mirrors sandbox-docker's
     // `sh -c "tail -f /dev/null"` idiom (packages/sandbox-docker/src/sandbox.ts).
@@ -516,7 +535,13 @@ export function buildSandboxManifest(
       { name: "VALET_BROWSER_UID", value: "1501" }, { name: "VALET_BROWSER_GID", value: "1501" },
       ...(!companion && opts.browser?.viewer ? [{ name: "VALET_BROWSER_VIEWER", value: "1" }] : [])];
     target.env = target.env.filter(entry => !["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(entry.name) && !entry.name.startsWith("LD_") && !entry.name.startsWith("BASH_FUNC_"));
-    if (!companion && !isFullProfile) container.command = ["/usr/bin/tini", "-g", "--", "/bin/bash", "/start-headless.sh"];
+    if (!companion && !isFullProfile) {
+      container.command = [
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ];
+    }
   }
   if (isFullProfile) {
     container.command = FULL_PROFILE_COMMAND;

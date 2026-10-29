@@ -117,7 +117,7 @@ export const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   session: ['toolScope', 'id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'maxModelCalls', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'reasoning', 'onError'],
-  orchestrator: ['toolScope', 'id', 'type', 'prompt', 'outputSchema', 'maxModelCalls', 'wait'],
+  orchestrator: ['toolScope', 'id', 'type', 'prompt', 'outputSchema', 'maxModelCalls', 'wait', 'thread'],
   // A tool node carries BOTH policies, and they answer different questions.
   // `onError` decides what a node FAILURE does to the rest of the run;
   // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
@@ -204,6 +204,8 @@ export const STOP_OUTCOMES: ReadonlySet<string> = new Set(['success', 'failure']
 export const WAIT_MODE = 'duration';
 /** The one `mode` a `session` step accepts. */
 export const SESSION_MODE = 'start';
+/** Where a Thread step runs (`ThreadNode.thread`). */
+export const THREAD_PLACEMENTS: ReadonlySet<string> = new Set(['run', 'step']);
 /** The range an `llm` step's `temperature` must be in. */
 export const LLM_TEMPERATURE_RANGE = { min: 0, max: 2 } as const;
 /** The most `foreach` entries that run at the same time. */
@@ -607,6 +609,9 @@ function validateNodeFields(
         checkTemplate(label, 'prompt', node.prompt, refCtx, errors);
       }
       checkModelCalls(label, 'orchestrator', node.maxModelCalls, errors);
+      if (node.thread !== undefined && !THREAD_PLACEMENTS.has(node.thread)) {
+        errors.push(`${label}: orchestrator.thread must be ${choiceList(THREAD_PLACEMENTS)}, got ${JSON.stringify(node.thread)}`);
+      }
       break;
     case 'tool':
       if (!isNonEmptyString(node.service)) {

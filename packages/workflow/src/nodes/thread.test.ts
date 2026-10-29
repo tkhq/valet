@@ -104,7 +104,7 @@ function makeEngine(
       throw new Error('llmComplete not exercised by this fixture');
     },
     promptOrchestrator: async (prompt, opts) => {
-      calls.push({ kind: 'promptOrchestrator', prompt, dispatchId: opts.dispatchId, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId, ownerHint: opts.ownerHint });
+      calls.push({ kind: 'promptOrchestrator', prompt, dispatchId: opts.dispatchId, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId, ownerHint: opts.ownerHint, stepThread: opts.stepThread });
       let receipt = receiptsByDispatch.get(opts.dispatchId);
       if (!receipt) {
         receiptCounter += 1;
@@ -433,6 +433,54 @@ describe('executeThread: iteration > 0', () => {
     expect(cp).toBeDefined();
     expect(cp?.status).toBe('completed');
     expect(checkpoints.some((c) => c.nodeId === 'o' && c.iteration === 0)).toBe(false);
+  });
+});
+
+// ─── Step placement ──────────────────────────────────────────────────────────
+
+describe('executeThread: thread "step"', () => {
+  it('sends the primary and the repair turn to the step\'s own thread', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const { engine, calls } = makeEngine({
+      isSettledQueue: [true],
+      awaitResultQueue: [{ outcome: 'completed', text: 'not json', error: 'result did not match schema: /answer: missing value' }],
+    });
+
+    await store.createRun('run-step', runParams(), threadDefinition({ outputSchema, thread: 'step' }), 'v1', OWNER);
+    await driveUntilPark('run-step', await claimAttempt(store, 'run-step'), { store, engine, clock: clock.now });
+    await driveUntilPark('run-step', await claimAttempt(store, 'run-step', 'owner-2'), { store, engine, clock: clock.now });
+
+    const dispatches = calls.filter((c) => c.kind === 'promptOrchestrator');
+    expect(dispatches.map((c) => c.dispatchId)).toEqual(['workflow:run-step:o', 'workflow:run-step:o:repair']);
+    for (const call of dispatches) expect(call.stepThread).toEqual({ nodeId: 'o', iteration: 0 });
+  });
+
+  it('names the foreach entry it runs', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+    const definition = threadDefinition({ wait: { mode: 'none' }, thread: 'step' });
+    await store.createRun('run-step-2', runParams(), definition, 'v1', OWNER);
+    const attempt = await claimAttempt(store, 'run-step-2');
+    const run = await store.getRun('run-step-2');
+    if (!run) throw new Error('run vanished');
+    const node = definition.nodes.find((n): n is ThreadNode => n.id === 'o')!;
+
+    await executeThread({ run, node, attempt, iteration: 2, templateContext: { trigger: undefined, nodes: {} }, store, clock: clock.now, engine });
+
+    expect(calls.find((c) => c.kind === 'promptOrchestrator')?.stepThread).toEqual({ nodeId: 'o', iteration: 2 });
+  });
+
+  it('leaves a step without the field on the run\'s thread', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+    await store.createRun('run-default', runParams(), threadDefinition(), 'v1', OWNER);
+    await driveUntilPark('run-default', await claimAttempt(store, 'run-default'), { store, engine, clock: clock.now });
+
+    expect(calls.find((c) => c.kind === 'promptOrchestrator')?.stepThread).toBeUndefined();
   });
 });
 

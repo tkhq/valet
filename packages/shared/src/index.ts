@@ -7,6 +7,7 @@ export * from './types/runner-protocol.js';
 export * from './action-params-label.js';
 export * from './artifact-page.js';
 export * from './errors.js';
+export * from './provider-failure.js';
 export * from './format-bytes.js';
 export * from './scope-key.js';
 export * from './schedule-run-id.js';
@@ -25,3 +26,5 @@ export * from './browser-policy.js';
 export * from './event-match.js';
 export * from './thread-projects.js';
 export * from './thread-recap.js';
+
+export * from "./tool-intent.js";

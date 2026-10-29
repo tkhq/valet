@@ -31,6 +31,7 @@ import {
   NODE_ERROR_POLICIES,
   SESSION_MODE,
   STOP_OUTCOMES,
+  THREAD_PLACEMENTS,
   TOOL_CREDENTIAL_MODES,
   WAIT_MODE,
 } from './validate.js';
@@ -104,6 +105,7 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
     maxModelCalls: { required: false, shape: `an integer from 1 to ${MAX_STEP_MODEL_CALLS}` },
     wait: { required: false, shape: WAIT },
     toolScope: { required: false, shape: TOOL_SCOPE },
+    thread: { required: false, shape: `${oneOf(THREAD_PLACEMENTS, "run")}; \`step\` gives the step, or each foreach entry, its own new thread that runs in parallel` },
   },
   tool: {
     service: { required: true, shape: 'the plugin service, such as "github"' },

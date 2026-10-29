@@ -15,6 +15,7 @@ import {
   numeric,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { NormalizedEvent } from "@valet/engine";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 
@@ -406,6 +407,9 @@ export const agentSessions = pgTable(
     // matching source/bake, or a `customImage: false` provider). Nullable
     // — the vast majority of sessions never resolve a bake.
     bakeId: text("bake_id"),
+    // Set when session start fell back from the repo image (spec 7.1);
+    // cleared by the spec provider once a compatible repo bake resolves.
+    imageFallback: jsonb("image_fallback").$type<ImageFallback>(),
     // Sandbox id recorded at hibernate time — the reaper's destroy handle
     // for sessions an api restart evicts from the host cache (same rationale
     // as child_watches.parked_sandbox_id).
@@ -447,6 +451,12 @@ export const sessionThreads = pgTable(
     // Who else in the org may open this personal thread by its link:
     // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
     shareMode: text("share_mode", { enum: ["view", "reply"] }),
+    // "Run without asking": the person who turned it on, and when. Null when
+    // it is off. Approvals that this person could stop for good themselves
+    // run without a card in this thread and the child agents it starts
+    // (`services/thread-approval-bypass.ts`).
+    approvalBypassBy: text("approval_bypass_by"),
+    approvalBypassAt: bigint("approval_bypass_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -617,6 +627,9 @@ export const childWatches = pgTable(
     parentThreadId: text("parent_thread_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
+    deliveryActive: boolean("delivery_active").notNull().default(false),
+    pendingCapIncident: text("pending_cap_incident"),
+    eventsStartedAt: bigint("events_started_at", { mode: "number" }),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     // The spawning submission's ChannelOrigin as JSON, inherited by the
@@ -632,14 +645,14 @@ export const childWatches = pgTable(
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
-    // Retention clock: stamped by markSettled, re-stamped on every settle.
+    // Retention starts once per delegated submission, not on boot retries.
     // The retention sweep destroys a parked sandbox once this is older
     // than the retention window.
     settledAt: bigint("settled_at", { mode: "number" }),
     // Set once the child's sandbox is actually destroyed (eagerly on a
     // non-hibernating backend, by the retention sweep on a hibernating
     // one). NULL on a settled row means a reclaim is still owed;
-    // markSettled clears it so a re-opened child starts a fresh cycle.
+    // child_send clears it when the child starts a fresh reclaim cycle.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     // Provider sandbox id recorded at park time. The retention sweep needs
     // it for a child evicted from the host cache (an api restart) — the
@@ -648,6 +661,7 @@ export const childWatches = pgTable(
     parkedSandboxId: text("parked_sandbox_id"),
   },
   (t) => [
+    index("child_watches_delivery").on(t.childSessionId).where(sql`${t.deliveryActive} = true OR ${t.settled} = false`),
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
     // Partial index for the retention sweep: rows are never deleted and
@@ -658,6 +672,20 @@ export const childWatches = pgTable(
       .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
+
+/** Durable config invalidations survive active turns and process restarts. */
+export const sessionConfigInvalidations = pgTable("session_config_invalidations", {
+  sessionId: text("session_id").primaryKey(),
+  token: text("token").notNull(),
+});
+
+/** Internal events waiting for ingestion or acknowledgement. This is not an org event receipt. */
+export const childEventOutbox = pgTable("child_event_outbox", {
+  id: text("id").primaryKey(),
+  childSessionId: text("child_session_id").notNull(),
+  event: jsonb("event").$type<NormalizedEvent>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [index("child_event_outbox_child").on(t.childSessionId, t.createdAt)]);
 
 // ─── Notifications + preferences ────────────────────────────────────────────
 
@@ -789,6 +817,21 @@ export const channelBindings = pgTable(
   (t) => [
     uniqueIndex("channel_bindings_conversation").on(t.orgId, t.channelType, t.conversationKey),
   ],
+);
+
+/** The first thread selected for one user's direct-channel conversation. */
+export const channelConversationBindings = pgTable(
+  "channel_conversation_bindings",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId, t.sessionId, t.channelType, t.conversationKey] })],
 );
 
 export const userIdentityLinks = pgTable(
@@ -1003,8 +1046,10 @@ export const artifactVersions = pgTable(
 
 // Element-anchored comments on a published page (artifact-pages design).
 // `vdid` is the content-hashed element id the viewer's comment runtime
-// computes (null = a page-level comment); `version` records what the
-// commenter was looking at. `parent_id` threads replies one level under a
+// computes (null = a page-level comment); `anchor_label` is that element's
+// leading text as the viewer showed it, so an agent reading the comment knows
+// what it points at; `version` records what the commenter was looking at.
+// `parent_id` threads replies one level under a
 // root. `sent_to_session` records delivery of the comment into the source
 // session's prompt queue — allowed only when the commenter passes
 // `canViewSession` there, so sending grants nothing that typing into the
@@ -1016,6 +1061,7 @@ export const artifactComments = pgTable(
     artifactId: text("artifact_id").notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
     vdid: text("vdid"),
+    anchorLabel: text("anchor_label"),
     parentId: text("parent_id"),
     body: text("body").notNull(),
     authorUserId: text("author_user_id").notNull(),
@@ -1764,7 +1810,7 @@ export const llmProxyRequests = pgTable(
     userId: text("user_id"),
     teamId: text("team_id"),
     apiKeyId: text("api_key_id").notNull(),
-    providerKind: text("provider_kind", { enum: ["anthropic", "openai"] }).notNull(),
+    providerKind: text("provider_kind", { enum: ["anthropic", "openai", "tagging"] }).notNull(),
     model: text("model"),
     harness: text("harness"),
     endpoint: text("endpoint").notNull(),
@@ -1912,6 +1958,21 @@ export const githubInstallations = pgTable(
 //   kind='external'/'base' sources may never bake. `commit_sha` is optional
 //   for the same reason.
 
+/** Spec 6.1: persisted source health, written by the scheduler. */
+export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
+export type SourceHealthReason =
+  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
+  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+/** Spec 5.2: where a bake's contract value came from. */
+export type ContractSource = "label" | "missing" | "override";
+/** Spec 7.1: why a session is not on its repo image. */
+export interface ImageFallback {
+  reason: "contract";
+  sourceId: string;
+  bakeId: string;
+  at: number;
+}
+
 export const imageSources = pgTable(
   "image_sources",
   {
@@ -1939,6 +2000,14 @@ export const imageSources = pgTable(
       .default("nightly"),
     enabled: boolean("enabled").notNull().default(true),
     lastBoundAt: bigint("last_bound_at", { mode: "number" }),
+    // Spec 6.1. Defaults are what a row looked like before health existed;
+    // the first scheduler pass after deploy overwrites them.
+    health: text("health", { enum: ["healthy", "stale", "incompatible", "failing", "unbaked"] }).notNull().default("healthy"),
+    healthReason: text("health_reason", {
+      enum: ["ok", "resolve_failed", "repo_unreachable", "credentials", "registry_full", "bake_failed", "contract", "contract_unknown", "waiting_for_base"],
+    }).notNull().default("ok"),
+    healthDetail: text("health_detail"),
+    healthCheckedAt: bigint("health_checked_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1971,6 +2040,15 @@ export const bakes = pgTable(
     startedAt: bigint("started_at", { mode: "number" }),
     finishedAt: bigint("finished_at", { mode: "number" }),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
+    // Image runtime contract (spec 5). `contractVersion` is the OCI label
+    // value read from the registry after push, or the backfilled lineage
+    // guess; null until read. `contractSource` says which.
+    contractVersion: integer("contract_version"),
+    contractSource: text("contract_source", { enum: ["label", "missing", "override"] }),
+    // Lineage (spec 5.2): the parent base bake this bake FROMed, and the
+    // exact FROM ref. Null on rows from before this column.
+    parentBakeId: text("parent_bake_id"),
+    baseImageRef: text("base_image_ref"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("bakes_source_status_created").on(t.sourceId, t.status, t.createdAt)],
@@ -2115,7 +2193,7 @@ export const workflowSchedules = pgTable(
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
-    /** Optional static payload delivered as `trigger.data.input`. */
+    /** Optional static input: copied to `trigger.data.<field>` and kept at `trigger.data.input` (`scheduledTriggerData`). */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
     /** Why the scheduler disabled this schedule: the pin text when its
@@ -2641,6 +2719,12 @@ export const cliDeviceRequests = pgTable("cli_device_requests", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
   lastPollAt: bigint("last_poll_at", { mode: "number" }),
+  /** `login` (`valet login`) or `proxy-key` (`valet proxy setup`). */
+  purpose: text("purpose").$type<"login" | "proxy-key">().notNull().default("login"),
+  /** The API key name a `proxy-key` request creates. */
+  keyName: text("key_name"),
+  /** The CLI's user on a `proxy-key` request. Only this user can approve it. */
+  requestedBy: text("requested_by").references(() => users.id, { onDelete: "cascade" }),
 }, (t) => [
   uniqueIndex("cli_device_requests_user_code").on(t.userCode),
   index("cli_device_requests_expires").on(t.expiresAt),
@@ -3077,3 +3161,84 @@ export const homeTasks = pgTable("home_tasks", {
   reportedAt: bigint("reported_at", { mode: "number" }),
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+// Hosted, MCP, and CLI usage facts. Never add arguments or results.
+export const externalCalls = pgTable("external_calls", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id"),
+  surface: text("surface", { enum: ["hosted", "mcp", "cli"] }).notNull(),
+  name: text("name").notNull(),
+  clientName: text("client_name"),
+  clientVersion: text("client_version"),
+  sessionId: text("session_id"),
+  persona: text("persona"),
+  threadId: text("thread_id"),
+  ownerType: text("owner_type", { enum: ["user", "team"] }).notNull(),
+  ownerId: text("owner_id").notNull(),
+  outcome: text("outcome", { enum: ["ok", "error", "denied", "pending-approval"] }).notNull(),
+  errorCode: text("error_code"),
+  durationMs: integer("duration_ms").notNull(),
+  intent: text("intent"),
+  intentClearedAt: bigint("intent_cleared_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  index("external_calls_intent_retention").on(t.createdAt).where(sql`${t.intent} IS NOT NULL`),
+  index("external_calls_org_created").on(t.orgId, t.createdAt, t.id),
+  index("external_calls_owner_created").on(t.orgId, t.ownerType, t.ownerId, t.createdAt),
+  index("external_calls_user_created").on(t.orgId, t.userId, t.createdAt),
+  check("external_calls_intent_length", sql`length(${t.intent}) <= 500`),
+]);
+
+// Stateless MCP requests recover initialize metadata without retaining a bearer token.
+export const mcpClientInfo = pgTable("mcp_client_info", {
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  clientId: text("client_id").notNull(),
+  name: text("name").notNull(),
+  version: text("version").notNull(),
+}, (t) => [primaryKey({ columns: [t.orgId, t.userId, t.clientId] })]);
+
+// Tag registries are organization-local. Subject text is supplied by callers.
+export const tagKeys = pgTable("tag_keys", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), key: text("key").notNull(),
+  label: text("label").notNull(), definition: text("definition").notNull(),
+  examples: jsonb("examples").$type<string[]>().notNull().default([]),
+  origin: text("origin", { enum: ["seed", "classifier", "admin"] }).notNull(),
+  status: text("status", { enum: ["provisional", "active", "merged"] }).notNull(),
+  editedAt: bigint("edited_at", { mode: "number" }), mergedInto: text("merged_into"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.key] }), check("tag_key_format", sql`${t.key} ~ '^[a-z][a-z0-9_]{0,31}$'`)]);
+
+export const tagLabels = pgTable("tag_labels", {
+  orgId: text("org_id").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  dimension: text("dimension").notNull(), key: text("key").notNull(),
+  mode: text("mode", { enum: ["single", "multi"] }).notNull(), confidence: doublePrecision("confidence").notNull(),
+  model: text("model").notNull(), inputHash: text("input_hash").notNull(), classifiedAt: bigint("classified_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.subjectType, t.subjectId, t.dimension, t.key] }),
+  uniqueIndex("tag_labels_single").on(t.orgId, t.subjectType, t.subjectId, t.dimension).where(sql`${t.mode} = 'single'`),
+  index("tag_labels_aggregate").on(t.orgId, t.dimension, t.key, t.classifiedAt),
+  check("tag_label_confidence", sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`)]);
+
+// A successful multi classification with no labels still has an input hash.
+export const tagSubjects = pgTable("tag_subjects", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  ownerType: text("owner_type"), ownerId: text("owner_id"),
+  retagDay: bigint("retag_day", { mode: "number" }).notNull().default(0), retagCount: integer("retag_count").notNull().default(0),
+  userId: text("user_id"), inputHash: text("input_hash").notNull(), otherRetried: boolean("other_retried").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] })]);
+
+export const tagJobs = pgTable("tag_jobs", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  version: integer("version").notNull().default(1), attempts: integer("attempts").notNull().default(0),
+  force: boolean("force").notNull().default(false), nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] }), index("tag_jobs_retry_due").on(t.nextAttemptAt).where(sql`${t.attempts} < 5`)]);
+
+// One serial classifier per org/dimension across API replicas.
+export const tagDimensionState = pgTable("tag_dimension_state", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  retryOther: boolean("retry_other").notNull().default(false),
+  keyLimit: integer("key_limit").notNull().default(100),
+  consolidationDue: boolean("consolidation_due").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension] })]);

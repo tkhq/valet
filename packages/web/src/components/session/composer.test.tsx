@@ -261,7 +261,7 @@ describe("Composer queued-message stack", () => {
     expect(cancelQueuedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", itemId: "q-2" });
   });
 
-  it("shows a queued item's text from the queue state after reload, with Send now and Cancel", () => {
+  it("shows a queued item's text from the queue state after reload, Send now only on the person's message", () => {
     queueStateRef.current = {
       ...queueState("followup"),
       pendingIds: ["q-1", "q-2"],
@@ -275,8 +275,29 @@ describe("Composer queued-message stack", () => {
     expect(screen.getByText("also check the deploy logs")).toBeTruthy();
     expect(screen.getByText("Wake-up")).toBeTruthy();
     expect(screen.queryByText("Queued message. It runs when the current turn ends.")).toBeNull();
-    fireEvent.click(screen.getAllByRole("button", { name: "Send now" })[0]!);
+    // The wake-up runs by itself, so only the person's message has Send now.
+    expect(screen.getAllByRole("button", { name: "Send now" })).toHaveLength(1);
+    expect(screen.getByText("Runs next")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
     expect(sendMutateAsync).toHaveBeenCalledWith({ text: "", threadId: "thread-1", promoteItemId: "q-1" });
+    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
+  });
+
+  it("shows a child's result or an event as running next, with Cancel and no Send now", () => {
+    queueStateRef.current = {
+      ...queueState("followup"),
+      pendingIds: ["q-1", "q-2"],
+      pending: [
+        { id: "q-1", text: "Found two defects.", signal: { type: "child.settled" }, midTurn: true },
+        { id: "q-2", text: "A new comment.", signal: { type: "event.matched" }, midTurn: true },
+      ],
+    };
+    renderComposer("streaming", [], 2);
+
+    expect(screen.getByText("Task result")).toBeTruthy();
+    expect(screen.getByText("Event")).toBeTruthy();
+    expect(screen.getAllByText("Runs next")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
   });
 

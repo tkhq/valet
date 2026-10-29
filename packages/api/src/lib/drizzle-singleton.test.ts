@@ -41,6 +41,98 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
   });
 
+  it("backfills active child subscriptions once without reactivating finished history", async () => {
+    await db.query(`INSERT INTO child_watches (child_session_id, queue_item_id, parent_session_id, parent_thread_id, actor_user_id, org_id, settled, created_at)
+      VALUES ('repair-child', 'q', 'parent', 't', 'u', 'o', true, 1), ('repair-done', 'q', 'parent', 't', 'u', 'o', true, 1)`);
+    await db.query(`INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, log_offset, log_tail, event_count, created_at, updated_at)
+      VALUES ('wk_child_events:repair-child', 'parent', 't', 'event', 'running', 'updates', 0, '', 0, 1, 1)`);
+    await db.query('ALTER TABLE child_watches DROP COLUMN delivery_active, DROP COLUMN pending_cap_incident');
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT child_session_id, delivery_active, pending_cap_incident FROM child_watches ORDER BY child_session_id")).rows).toEqual([
+      { child_session_id: "repair-child", delivery_active: true, pending_cap_incident: null },
+      { child_session_id: "repair-done", delivery_active: false, pending_cap_incident: null },
+    ]);
+    await db.query("UPDATE child_watches SET delivery_active = false WHERE child_session_id = 'repair-child'");
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT delivery_active FROM child_watches WHERE child_session_id = 'repair-child'")).rows).toEqual([{ delivery_active: false }]);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query("DELETE FROM engine_wakeups WHERE id = 'wk_child_events:repair-child'");
+    await db.query("DELETE FROM child_watches WHERE child_session_id IN ('repair-child', 'repair-done')");
+  });
+
+  it("repairs background work provenance without assigning legacy work to a turn", async () => {
+    for (const table of ["engine_leases", "engine_wakeups"]) await db.query(`ALTER TABLE ${table} DROP COLUMN source_queue_item_id`);
+    await db.query(`INSERT INTO engine_leases (id, session_id, owner_kind, reason, created_at, deadline_at)
+      VALUES ('legacy-work', 'child', 'hold', 'private legacy work', 1, 2)`);
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT source_queue_item_id FROM engine_leases WHERE id = 'legacy-work'")).rows)
+      .toEqual([{ source_queue_item_id: null }]);
+    await db.query("DELETE FROM engine_leases WHERE id = 'legacy-work'");
+  });
+
+  it("repairs hold terminal expectations without retaining legacy released leases", async () => {
+    await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_expected");
+    await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_started_at");
+    await db.query("ALTER TABLE engine_leases DROP COLUMN terminal_signal_loss_reported_at");
+    await db.query(`INSERT INTO engine_leases (id, session_id, owner_kind, reason, created_at, deadline_at, released_at, release_cause)
+      VALUES ('repair-hold', 'child', 'hold', 'silent release', 1, 2, 2, 'cancelled')`);
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at FROM engine_leases WHERE id = 'repair-hold'")).rows)
+      .toEqual([{ terminal_signal_expected: false, terminal_signal_started_at: null, terminal_signal_loss_reported_at: null }]);
+    await db.query("DELETE FROM engine_leases WHERE id = 'repair-hold'");
+  });
+
+  it("repairs terminal signal expectations without marking legacy ended rows as owed", async () => {
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_expected");
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_started_at");
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN terminal_signal_loss_reported_at");
+    await db.query(`INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, created_at, updated_at, ended_at)
+      VALUES ('repair-terminal', 'child', 't', 'process', 'lost', 'failed start', 1, 2, 2)`);
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at FROM engine_wakeups WHERE id = 'repair-terminal'")).rows)
+      .toEqual([{ terminal_signal_expected: false, terminal_signal_started_at: null, terminal_signal_loss_reported_at: null }]);
+    await db.query("DELETE FROM engine_wakeups WHERE id = 'repair-terminal'");
+  });
+
+  it("repairs durable child-result outcomes and their pending index on an existing database", async () => {
+    await db.query("ALTER TABLE engine_queue_items DROP COLUMN child_result_delivery");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'engine_queue_items' AND column_name = 'child_result_delivery'")).rows)
+      .toEqual([{ column_name: "child_result_delivery" }]);
+    expect((await db.query("SELECT indexname FROM pg_indexes WHERE indexname = 'engine_queue_items_child_delivery'")).rows)
+      .toEqual([{ indexname: "engine_queue_items_child_delivery" }]);
+  });
+
+  it("clears unwatched pending results without rewriting watched or resolved results on repeated repairs", async () => {
+    await db.query(`INSERT INTO child_watches (child_session_id, queue_item_id, parent_session_id, parent_thread_id, actor_user_id, org_id, settled, created_at)
+      VALUES ('repair-watched', 'repair-result-watched', 'p', 't', 'u', 'o', true, 1)`);
+    for (const [session, state] of [["watched", "pending"], ["conversation", "pending"], ["delivered", "delivered"], ["denied", "denied"]]) {
+      await db.query(`INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at, child_result_delivery)
+        VALUES ($1, $2, 't', 'settled', '{}', 1, 10, 100, 1, 1, $3)`, [`repair-result-${session}`, `repair-${session}`, state]);
+    }
+    try {
+      await applyAppMigrations(db);
+      await applyAppMigrations(db);
+      expect((await db.query("SELECT id, child_result_delivery FROM engine_queue_items WHERE id LIKE 'repair-result-%' ORDER BY id")).rows).toEqual([
+        { id: "repair-result-conversation", child_result_delivery: null },
+        { id: "repair-result-delivered", child_result_delivery: "delivered" },
+        { id: "repair-result-denied", child_result_delivery: "denied" },
+        { id: "repair-result-watched", child_result_delivery: "pending" },
+      ]);
+    } finally {
+      await db.query("DELETE FROM engine_queue_items WHERE id LIKE 'repair-result-%'");
+      await db.query("DELETE FROM child_watches WHERE child_session_id = 'repair-watched'");
+    }
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

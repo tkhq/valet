@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ActionPlugin, type PolicyInvocationRecord, type PolicyResolver } from "../src/index.js";
+import { toAgentTool } from "../src/tool-bridge.js";
 import { buildPluginCatalog } from "../src/plugin-catalog.js";
 import { ELIDED_TOOL_OUTPUT, walkTranscriptDag } from "../src/compaction.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_TOOL_PARAMS } from "../src/native-images.js";
@@ -63,6 +64,7 @@ it("captures every native result, deduplicates final output, and saves before th
   expect(write).toHaveBeenCalledTimes(2);
   for (const call of calls) {
     expect(call.name).toBe(NATIVE_IMAGE_RESULT_TOOL);
+    expect(call.arguments).not.toHaveProperty("intent");
     if (typeof call.arguments.path !== "string") throw new Error("missing path");
     expect(await sandbox.readBinary(call.arguments.path)).toEqual(new Uint8Array(png));
   }
@@ -128,7 +130,11 @@ it("recovers a persisted receipt with sandbox bytes after bridge restart", async
   const path = "generated-images/1234-abcd.png";
   await sandbox.writeBinary(path, png);
   const ctx = { sandbox, signal: new AbortController().signal } as ToolContext;
-  const result = await new NativeImageBridge().tool().execute({ path, image_id: "img_restored" }, ctx);
+  const receiptTool = new NativeImageBridge().tool();
+  expect(receiptTool.intent).toBe("exempt");
+  const replayed = await toAgentTool(receiptTool, () => ctx, true).execute("old-receipt", { path, image_id: "img_restored" });
+  expect(JSON.stringify(replayed.content)).toContain(path);
+  const result = await receiptTool.execute({ path, image_id: "img_restored" }, ctx);
   expect(result.text).toContain(path);
   expect(Buffer.from(result.attachments?.[0]?.data ?? []).equals(png)).toBe(true);
   await expect(new NativeImageBridge().tool().execute({ path: "../../secret.png", image_id: "img_restored" }, ctx)).rejects.toThrow("Invalid native image receipt");
@@ -377,7 +383,7 @@ it("reports a saved path even if the turn aborts immediately after its write", a
   if (!path) throw new Error("missing saved path in abort error");
   // The thread persists an aborted message's text, not its error. The path must be in the text.
   expect(final.content).toContainEqual({ type: "text", text: expect.stringContaining(path) });
-  expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path, image_id: "img_1" } }));
+  expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: NATIVE_IMAGE_RESULT_TOOL, arguments: expect.objectContaining({ path, image_id: "img_1" }) }));
   expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
   expect(bridge.savedInRequest).toBe(true);
   // Pi drops the aborted message from the next request. The saved path must still arrive.

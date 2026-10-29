@@ -1,7 +1,8 @@
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import type { Context } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
@@ -202,6 +203,18 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     expect((await restored.toData()).owner).toEqual({ type: "team", id: "team-9" });
 
     faux.unregister();
+  });
+
+  it("gives a child session no question tool, so its blocking questions go to its parent", async () => {
+    const { engine } = makeEngine();
+    const faux = registerFauxProvider({ provider: "svc-child-tools" });
+    const base = { userId: "u1", orgId: "o1", workspace: "/workspace", sandbox: {}, model: faux.getModel() };
+    const child = await engine.createSession({ ...base, id: "sess-child-tools", purpose: "child", parentSessionId: "p", parentThreadId: "t" });
+    const parent = await engine.createSession({ ...base, id: "sess-parent-tools" });
+    const names = (tools: { name: string }[]) => tools.map((tool) => tool.name);
+    expect(names(child.builtinTools)).not.toContain("ask_question");
+    expect(names(child.builtinTools)).toContain("ask_approval");
+    expect(names(parent.builtinTools)).toContain("ask_question");
   });
 
   it("parentSessionId/parentThreadId persist via toData and survive a restore that doesn't re-supply them", async () => {

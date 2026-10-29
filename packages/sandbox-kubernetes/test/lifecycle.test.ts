@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
-import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
+import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest, startupKindOf } from "../src/index.js";
 import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
   SANDBOX_KIND,
@@ -173,7 +173,7 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
 
 interface FakePod {
   name: string;
-  ownerReferences?: { kind: string; name: string; controller?: boolean }[];
+  ownerReferences?: { kind: string; name: string; uid?: string; controller?: boolean }[];
 }
 
 class FakePodsApi implements SandboxPodsApi {
@@ -299,6 +299,47 @@ describe("init container startup classification", () => {
 });
 
 describe("classifyPodFailure (pure)", () => {
+  it("treats the controller's ownership condition as still provisioning, not terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = {
+      type: "Ready", status: "False", reason: "PodFailed",
+      message: 'Error seen: PVC "workspace-a" is owned by Sandbox/a (UID: 8f3311cf), not by sandbox "a"',
+    };
+    expect(classifyPodFailure(pod, ready)).toBeNull();
+  });
+
+  it("still reports other PodFailed conditions as terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = { type: "Ready", status: "False", reason: "PodFailed", message: "node lost" };
+    expect(classifyPodFailure(pod, ready)).toBe("pod failed: node lost");
+  });
+
+  it("appends the last termination exit code and message to a crash loop", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{
+        name: "sandbox", image: "img", waitingReason: "CrashLoopBackOff",
+        lastTerminated: { exitCode: 127, reason: "Error", message: "valet-home-start: 14: exec: /usr/bin/tini: not found\n" },
+      }],
+    };
+    expect(classifyPodFailure(pod)).toBe(
+      "container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: 14: exec: /usr/bin/tini: not found",
+    );
+  });
+
+  it("falls back to the termination reason when the message is empty", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff", lastTerminated: { exitCode: 1, reason: "Error" } }],
+    };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff): exit 1: Error");
+  });
+
+  it("keeps the bare crash-loop text when there is no termination record", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }] };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
+  });
+
   it("returns null when the pod is absent (still provisioning, not error)", () => {
     expect(classifyPodFailure(null)).toBeNull();
   });
@@ -767,6 +808,22 @@ describe("applySandbox", () => {
 });
 
 describe("podStatusApiAdapter pod age and events (fix wave 2, B5)", () => {
+  it("carries lastState.terminated through the pod adapter", async () => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        spec: { containers: [{ name: "sandbox", image: "sandbox:v1" }] },
+        status: {
+          phase: "Running",
+          containerStatuses: [{ name: "sandbox", image: "sandbox:v1", imageID: "", ready: false, restartCount: 3,
+            state: { waiting: { reason: "CrashLoopBackOff" } },
+            lastState: { terminated: { exitCode: 127, reason: "Error", message: "boom\n" } } }],
+        },
+      }),
+    });
+    const pod = await adapter.getPodStatus("ns", "pod");
+    expect(pod?.containerStatuses?.[0]?.lastTerminated).toEqual({ exitCode: 127, reason: "Error", message: "boom\n" });
+  });
+
   it("reports the pod's creation time, ephemeral request, and events", async () => {
     let selector: string | undefined;
     const adapter = podStatusApiAdapter({
@@ -1078,7 +1135,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([
@@ -1119,7 +1176,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([["sess-1", { phase: "Running", containerStatuses: [{ name: "sandbox" }] }]]),
@@ -1232,7 +1289,7 @@ describe("resolvePodName", () => {
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
       { name: "unrelated-pod", ownerReferences: [{ kind: "ReplicaSet", name: "sess-1", controller: true }] },
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBe("sess-1");
   });
@@ -1250,9 +1307,35 @@ describe("resolvePodName", () => {
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: false }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: false }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBeNull();
+  });
+});
+
+describe("resolvePodName owner matching", () => {
+  it("prefers the pod whose ownerReference uid matches the live CR over a same-name predecessor", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    objectsApi.seed(toCRRead(manifest, { uid: "uid-new" }));
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-recovered", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb-recovered");
+  });
+
+  it("falls back to name matching when the CR has no uid", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    const cr = toCRRead(manifest);
+    delete cr.metadata.uid;
+    objectsApi.seed(cr);
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-2", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb");
   });
 });
 
@@ -1542,4 +1625,19 @@ it.each([[409, 3], [503, 1]])("bounds resume retries for HTTP %s to %s attempts"
   await expect(resumeWithPersistentHomes(api, cfg, "conflict")).rejects.toBe(failure);
   expect(api.attempts).toBe(expectedAttempts);
   expect(api.reads).toBe(expectedAttempts);
+});
+
+describe("startupKindOf", () => {
+  it.each([
+    ["container crash-looping (CrashLoopBackOff)", "crash_loop"],
+    ["container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: exec: /usr/bin/tini: not found", "crash_loop"],
+    ["image pull failed (ImagePullBackOff): ghcr.io/x/y:z", "image_pull"],
+    ["pod failed: Error seen: PVC \"workspace-a\" is owned by Sandbox/a (UID: 1), not by sandbox \"a\"", "ownership"],
+    ["pod failed: pod entered phase Failed", "pod_failed"],
+    ["pod unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["something else entirely", "other"],
+  ])("maps %j to %s", (reason, expected) => {
+    expect(startupKindOf(reason)).toBe(expected);
+  });
 });

@@ -132,6 +132,13 @@ interface WakeWatcherBaseDeps {
    * marked digest stays buffered until the waiter ends, and each tick logs it.
    */
   deriveEvent?: EventWaiterDerive;
+  /** Internal child subscriptions use the same buffer and delivery owner as external waits. */
+  childEvents?: {
+    active(row: Wakeup): Promise<boolean>;
+    deliver(row: Wakeup, digest: EventMatchDigest): Promise<void>;
+    close(row: Wakeup): Promise<void>;
+    finish(row: Wakeup, blocked: boolean): Promise<void>;
+  };
   /** Rows per `listDueWakeups` page. Defaults to `WAKE_WATCHER_BATCH`. */
   batchSize?: number;
   metrics?: Partial<WakeWatcherMetrics>;
@@ -438,6 +445,34 @@ export class WakeWatcher {
    * probe, lease, or kill.
    */
   private async decideEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    if (row.eventMatch?.childSessionId !== undefined) {
+      const childEvents = this.deps.childEvents;
+      if (!childEvents) throw new Error(`No child event delivery configured for ${row.id}`);
+      if (!(await childEvents.active(row))) {
+        await childEvents.close(row);
+        return;
+      }
+      let blocked = false;
+      for (const digest of [...(row.eventBuffer ?? [])].sort((a, b) => Number(b.key === "child.gate_opened") - Number(a.key === "child.gate_opened"))) {
+        const current = await this.deps.engineStore.getWakeup(row.id);
+        if (current?.status !== "running") return;
+        // Admission precedes removal. A retry uses the event's stable dispatch id.
+        try {
+          await childEvents.deliver(current, digest);
+        } catch (error) {
+          // One blocked result must not starve a later approval notification.
+          blocked = true;
+          console.error(`WakeWatcher: child digest ${digest.dedupeKey} stays buffered:`, error);
+          continue;
+        }
+        // Internal dispatch ids retain replay protection in the queue store.
+        // The bounded source history keeps a lifetime subscription's buffer small.
+        await this.deps.engineStore.removeEventMatches(row.id, [digest.dedupeKey], this.clock(), "source");
+      }
+      await childEvents.finish(row, blocked);
+      await childEvents.close(row);
+      return;
+    }
     const decision = decideEventWaiter(now, row, this.decideOptions);
     if (!decision) return;
     if (decision.badRow) {
@@ -528,7 +563,11 @@ export class WakeWatcher {
     // can run for minutes, and the ChildWatcher compares endedAt with
     // admission times (fix wave 3, concurrency M1).
     const at = this.clock();
-    const patch = decision.patch.endedAt !== undefined ? { ...decision.patch, endedAt: at } : decision.patch;
+    // Only decisions that emit a terminal signal hold child retention through admission.
+    // Failed starts and bad rows also end, but never promise a terminal signal.
+    const patch = decision.patch.endedAt !== undefined
+      ? { ...decision.patch, endedAt: at, terminalSignalExpected: decision.signals.length > 0 }
+      : decision.patch;
     // The CAS and the lease release are one store write (fix wave 2, B2).
     // Null means another sweep or wakeup_cancel won the CAS (INV-5).
     const updated =
@@ -565,7 +604,10 @@ export class WakeWatcher {
       } catch (err) {
         // The row is already terminal or advanced, so this signal is lost.
         // The counter and the log line are the only record (spec Deviations).
-        this.metrics.signalLost(updated.kind);
+        if (signal.dispatchId !== `wakeup:${row.id}:terminal`
+          || await this.deps.engineStore.claimTerminalSignalLoss(updated.sessionId, updated.id, Math.max(updated.terminalSignalStartedAt ?? 0, at))) {
+          this.metrics.signalLost(updated.kind);
+        }
         console.error(`WakeWatcher: delivery of ${signal.signalType} for wakeup ${row.id} failed; the signal is lost:`, err);
       }
     }
@@ -736,7 +778,7 @@ export class WakeWatcher {
       if (this.stopping) return;
       if (lease.ownerKind === "hold") {
         if (lease.deadlineAt > now) continue;
-        await this.expireHold(now, lease);
+        await this.expireHold(lease);
         continue;
       }
       try {
@@ -779,10 +821,12 @@ export class WakeWatcher {
     return updated !== null;
   }
 
-  private async expireHold(now: number, lease: Lease): Promise<void> {
+  private async expireHold(lease: Lease): Promise<void> {
+    // A pass can take minutes. Start terminal-admission grace at release, not pass start.
+    const now = this.clock();
     let released: Lease | null;
     try {
-      released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now);
+      released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now, { terminalSignalExpected: true });
     } catch (err) {
       console.error(`WakeWatcher: release of hold lease ${lease.id} failed; it stays due for the next tick:`, err);
       return;
@@ -792,7 +836,7 @@ export class WakeWatcher {
       await this.deliver(lease.sessionId, lease.threadId, holdExpiredSignal(lease, now), lease.origin);
     } catch (err) {
       // The lease is already released, so this signal is lost (spec Deviations).
-      this.metrics.signalLost("hold");
+      if (await this.deps.engineStore.claimTerminalSignalLoss(lease.sessionId, lease.id, now)) this.metrics.signalLost("hold");
       console.error(`WakeWatcher: delivery of lease.expired for lease ${lease.id} failed; the signal is lost:`, err);
     }
   }

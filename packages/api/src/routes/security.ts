@@ -53,6 +53,7 @@
  * The persona routes never take the user path; M6 adds the human review
  * surface separately.
  */
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import type { Principal } from "@valet/engine";
 import { readToolScope } from "@valet/shared";
 import type { PlanCell } from "@valet/plugin-security";
@@ -1635,6 +1636,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
           .update(agentSessions)
           .set({ status: "deleted", updatedAt: Date.now() })
           .where(eq(agentSessions.id, replacedChildSessionId));
+        await cancelChildDelivery(teardownDb, c.var.providers.engineStore, replacedChildSessionId, "The security child was replaced.");
       } catch (err) {
         console.error(
           `security dispatch: replaced child ${replacedChildSessionId} teardown failed:`,
@@ -2502,6 +2504,7 @@ securityRouter.post("/:id/security/cancel", async (c) => {
         .update(agentSessions)
         .set({ status: "deleted", updatedAt: Date.now() })
         .where(eq(agentSessions.id, childId));
+      await cancelChildDelivery(db, c.var.providers.engineStore, childId, "The security child was cancelled.");
     } catch (err) {
       console.error(`security cancel: child ${childId} teardown failed:`, err);
     }

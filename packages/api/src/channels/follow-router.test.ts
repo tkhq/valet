@@ -1,5 +1,7 @@
+import { CONTINUATION_SOURCE_ITEM_KEY } from "@valet/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -125,10 +127,15 @@ describe("handleFollowedMessage", () => {
       ["presence-cleared", { [MID_TURN_DELIVERY_KEY]: true }],
     ] as const) {
       const dispatchId = `slack:follow:${eventId}`;
+      // Claim adds continuation provenance. Wait for it before checking the complete persisted shape.
+      await vi.waitFor(async () => {
+        const row = await testDb.pgdb.query("SELECT status FROM engine_queue_items WHERE dispatch_id = $1", [dispatchId]);
+        expect(row.rows[0]?.status).toBe("settled");
+      });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       expect(result.rows).toHaveLength(1);
       const metadata = result.rows[0]!.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(expected);
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual({ ...expected, [CONTINUATION_SOURCE_ITEM_KEY]: null });
     }
   });
 

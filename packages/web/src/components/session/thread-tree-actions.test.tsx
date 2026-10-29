@@ -8,7 +8,7 @@
  * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { screen, within, fireEvent, act } from "@testing-library/react";
+import { screen, within, fireEvent, act, waitFor } from "@testing-library/react";
 import { renderWithThreadProjects as render } from "~/test/thread-projects-client";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -132,6 +132,13 @@ vi.mock("~/api/workspace-runtime", () => ({
 
 }));
 
+// The person's home conversation, which the web sidebar pins above the list.
+let homeConversation: { sessionId: string; threadId: string } | undefined;
+vi.mock("~/api/home", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/home")>(),
+  useHomeConversation: () => ({ data: homeConversation, isError: false, error: null, refetch: vi.fn() }),
+}));
+
 // Applies the component's real selectors against a minimal store shape:
 // `pendingGates` drives the response-required bell, `queueByThread` the children
 // live-update hook, and the absent `setPendingGates` is never called
@@ -225,6 +232,68 @@ beforeEach(() => {
   artifacts = [];
   listReads.length = 0;
   mobile = false;
+  homeConversation = undefined;
+});
+
+describe("ThreadTree — Home row", () => {
+  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastAgentActivityAt: Date.now() + 1 });
+
+  it("pins Home above the list in the person's own workspace and keeps it out of Recents", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    const section = screen.getByRole("region", { name: "Home" });
+    // The router Link mock renders a bare anchor, so query it by tag.
+    const link = section.querySelector("a");
+    expect(link?.textContent).toContain("Home");
+    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(within(section).getByLabelText("Unread")).toBeTruthy();
+    // One Home, above everything else in the list.
+    expect(screen.getAllByText("Home")).toHaveLength(1);
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).queryByText("Home")).toBeNull();
+    expect(section.compareDocumentPosition(recents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps existing Slack conversations visible alongside saved Home history", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
+    renderTree();
+    const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
+    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
+    expect(within(recents).queryByText("Home")).toBeNull();
+  });
+
+  it("shows no Home row on a phone, where Home is the first screen", () => {
+    mobile = true;
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+    expect(screen.queryByText("Home")).toBeNull();
+  });
+
+  it("shows no Home row in another workspace's sidebar", () => {
+    homeConversation = { sessionId: "orchestrator:someone-else", threadId: "home-9" };
+    threads = [thread()];
+    renderTree();
+    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+  });
+
+  it("finds Home in search when its content matches", async () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    searchMatches = [home()];
+    renderTree();
+    fireEvent.click(screen.getByRole("button", { name: "Search threads" }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "deploy" } });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+    fireEvent.click(screen.getByRole("option", { name: "Home" }));
+    const navigateOptions = navigate.mock.calls.at(-1)?.[0];
+    expect(navigateOptions.search({})).toMatchObject({ thread: "home-1" });
+  });
 });
 
 describe("ThreadTree progressive loading", () => {
@@ -405,11 +474,28 @@ describe("ThreadTree: background work blocks archive and replace (fix wave 3, H1
 
     const dialog = await screen.findByRole("dialog", { name: "Stop background work and archive?" });
     expect(within(dialog).getByText("full proof build")).toBeTruthy();
-    // Nothing left the list yet, so the view stays on the thread.
-    expect(navigate).not.toHaveBeenCalled();
+    // The view leaves the thread when the archive starts, not after the save.
+    expect(navigate).toHaveBeenCalledTimes(1);
     await user.click(within(dialog).getByRole("button", { name: "Stop background work and archive" }));
     expect(setArchivedMutateAsync).toHaveBeenLastCalledWith({ threadId: "thread-1", archived: true, force: true });
     expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a running turn refuses the archive with its message, no stop confirm, and the view returns", async () => {
+    const busy = "A turn is running in this thread. Wait for it to finish, then archive.";
+    setArchivedMutateAsync.mockRejectedValueOnce(new ApiError(409, "PATCH → 409", { error: busy }));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
+
+    expect(await screen.findByText(busy)).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Stop background work and archive?" })).toBeNull();
+    // The view left the thread when the archive started and comes back after the refusal.
+    expect(navigate).toHaveBeenCalledTimes(2);
+    const back = navigate.mock.calls[1]?.[0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(back.search({})).toEqual({ thread: "thread-1" });
   });
 
   it("the A hotkey path asks the same way", async () => {
@@ -766,6 +852,17 @@ describe("ThreadTree — thread rename", () => {
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
     expect(screen.getByRole("menuitem", { name: /rename thread/i })).toBeTruthy();
   });
+
+  it("keeps focus in the title field after Rename thread closes the menu", async () => {
+    const user = userEvent.setup();
+    renderTree();
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /rename thread/i }));
+    const input = await screen.findByRole("textbox", { name: /rename thread/i });
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    await user.keyboard("Renamed{Enter}");
+    expect(renameMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ title: "Renamed" }));
+  });
 });
 
 describe("ThreadTree — sort preference", () => {
@@ -911,6 +1008,21 @@ describe("ThreadTree: timer wait line", () => {
     // The line sits under its own thread's row.
     const row = screen.getByText("Plan the launch").closest("a")?.parentElement?.parentElement;
     expect(row?.contains(lines[0] ?? null)).toBe(true);
+  });
+
+  it("keeps the line inside the open row's highlight", () => {
+    // With no `thread` search param, the only thread is the open one.
+    threads = [thread({ id: "thread-1", title: "Plan the launch" })];
+    const now = Date.now();
+    wakeups = {
+      wakeups: [{ id: "wk_1", threadId: "thread-1", kind: "timer", status: "pending", reason: "check CI", fireAt: now + 5 * 60_000, createdAt: now }],
+      leases: [],
+    };
+    renderTree();
+    // The selected tint and accent bar sit on one element that holds the
+    // title and the line, so the line does not hang below the row.
+    const highlighted = screen.getByText("Plan the launch").closest(".bg-moss-wash-strong");
+    expect(highlighted?.contains(screen.getByText("Waiting · next wakeup in 5m"))).toBe(true);
   });
 
   it("shows no line without timers", () => {

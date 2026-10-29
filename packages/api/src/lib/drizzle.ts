@@ -25,7 +25,7 @@ import { normalizeLegacyDefinition } from "@valet/workflow";
 import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
 import { prepareAuxUsageRollups, prepareSkillCompanionUsage, SKILL_COMPANION_USAGE_SQL, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
-import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
+import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql, taggingAccountingPublishSql } from "./usage-analytics-migration.js";
 import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
@@ -130,6 +130,11 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  // Earlier claims treated every parent-linked conversation as a task child.
+  // The partial index bounds this repeat-safe cleanup to pending results.
+  await db.query(`UPDATE engine_queue_items q SET child_result_delivery = NULL
+    WHERE q.child_result_delivery = 'pending'
+      AND NOT EXISTS (SELECT 1 FROM child_watches w WHERE w.child_session_id = q.session_id)`);
   await classifyLegacyRuntimes(db);
   await restoreSharedTeamMemory(db);
   await expandLegacySlackWildcards(db);
@@ -396,7 +401,39 @@ END $cost_view$`;
  * statement then stops its boot. Do not rename or drop here.
  */
 
+/** Spec 5.4: first stock image containing tini (2026-09-18T20:31:00Z,
+ * commit 56edb1bd9). Base bakes created at or after it are contract 3. */
+const TINI_EPOCH_MS = 1789763460000;
+
+/** Spec 5.4 backfill as ONE statement: base bakes by age, repo bakes by the
+ * parent base's newest pushed bake created at or before them, else 0. The
+ * sub-select reads the pre-statement snapshot, which is fine: it derives the
+ * parent's contract from created_at, not from the column being written. */
+const CONTRACT_BACKFILL_SQL = `WITH base AS (
+  UPDATE bakes b SET contract_version = CASE WHEN b.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END, contract_source = 'missing'
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'base' AND b.contract_version IS NULL
+  RETURNING b.id
+), repo AS (
+  UPDATE bakes b SET contract_version = COALESCE((
+      SELECT CASE WHEN pb.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END
+      FROM bakes pb JOIN image_sources ps ON ps.id = pb.source_id
+      WHERE ps.kind = 'base' AND ps.id = s.parent_id AND pb.status = 'pushed' AND pb.created_at <= b.created_at
+      ORDER BY pb.created_at DESC LIMIT 1), 0),
+    contract_source = CASE WHEN b.recipe->>'image' IS NOT NULL THEN 'override' ELSE 'missing' END
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'repo' AND b.contract_version IS NULL
+  RETURNING b.id
+)
+SELECT id FROM base UNION ALL SELECT id FROM repo`;
+
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
+    sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
+  { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (
+    "org_id" text NOT NULL, "user_id" text NOT NULL, "session_id" text NOT NULL,
+    "channel_type" text NOT NULL, "conversation_key" text NOT NULL, "thread_id" text NOT NULL,
+    "created_at" bigint NOT NULL,
+    PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+  )` },
   { describe: "skill_sources.skill_walk_cache column", probe: { kind: "column", table: "skill_sources", column: "skill_walk_cache" }, sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "skill_walk_cache" jsonb NOT NULL DEFAULT '{}'::jsonb` },
   { describe: "skills.upstream_blob_sha column", probe: { kind: "column", table: "skills", column: "upstream_blob_sha" }, sql: 'ALTER TABLE "skills" ADD COLUMN IF NOT EXISTS "upstream_blob_sha" text' },
   { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
@@ -408,6 +445,97 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "bytes" bytea NOT NULL,
   PRIMARY KEY ("skill_id", "path")
 );` },
+  { describe: "engine_decision_gates.agent_reason", probe: { kind: "column", table: "engine_decision_gates", column: "agent_reason" }, sql: `ALTER TABLE engine_decision_gates ADD COLUMN IF NOT EXISTS agent_reason text` },
+  { describe: "tag_keys", probe: { kind: "table", table: "tag_keys" }, sql: `CREATE TABLE IF NOT EXISTS tag_keys (
+ org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
+ label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
+ origin text NOT NULL, status text NOT NULL, edited_at bigint, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, key)
+)` },
+  { describe: "tag_keys.edited_at and example privacy", probe: { kind: "column", table: "tag_keys", column: "edited_at" },
+    sql: `DO $repair$ BEGIN ALTER TABLE tag_keys ADD COLUMN IF NOT EXISTS edited_at bigint; UPDATE tag_keys SET examples = '[]'::jsonb, edited_at = CASE WHEN origin = 'seed' AND updated_at <> created_at THEN updated_at END; END $repair$` },
+  { describe: "tag_labels", probe: { kind: "table", table: "tag_labels" }, sql: `CREATE TABLE IF NOT EXISTS tag_labels (
+ org_id text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, dimension text NOT NULL, key text NOT NULL,
+ mode text NOT NULL, confidence float8 NOT NULL CHECK (confidence >= 0 AND confidence <= 1), model text NOT NULL,
+ input_hash text NOT NULL, classified_at bigint NOT NULL,
+ PRIMARY KEY (org_id, subject_type, subject_id, dimension, key)
+)` },
+  { describe: "tag_labels_single", probe: { kind: "index", index: "tag_labels_single" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single'` },
+  { describe: "tag_labels_aggregate", probe: { kind: "index", index: "tag_labels_aggregate" }, sql: `CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at)` },
+  { describe: "tag_subjects", probe: { kind: "table", table: "tag_subjects" }, sql: `CREATE TABLE IF NOT EXISTS tag_subjects (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+)` },
+  { describe: "tag_subjects.retag_count", probe: { kind: "column", table: "tag_subjects", column: "retag_count" },
+    sql: `DO $repair$ BEGIN ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_day bigint NOT NULL DEFAULT 0;
+      ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS retag_count integer NOT NULL DEFAULT 0; END $repair$` },
+  { describe: "tag_subjects.owner_type", probe: { kind: "column", table: "tag_subjects", column: "owner_type" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_type text` },
+  { describe: "tag_subjects.owner_id", probe: { kind: "column", table: "tag_subjects", column: "owner_id" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS owner_id text` },
+  { describe: "tag_jobs", probe: { kind: "table", table: "tag_jobs" }, sql: `CREATE TABLE IF NOT EXISTS tag_jobs (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
+ version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+)` },
+  { describe: "tag_subjects.session_id", probe: { kind: "column", table: "tag_subjects", column: "session_id" }, sql: `ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS session_id text` },
+  { describe: "tag_subjects.thread_id", probe: { kind: "column", table: "tag_subjects", column: "thread_id" }, sql: `DO $repair$ BEGIN
+    ALTER TABLE tag_subjects ADD COLUMN IF NOT EXISTS thread_id text;
+    UPDATE tag_subjects target SET session_id = source.session_id, thread_id = source.thread_id FROM (
+      SELECT s.org_id, t.session_id || ':' || t.id AS ref, min(t.session_id) AS session_id, min(t.id) AS thread_id
+      FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
+      GROUP BY s.org_id, t.session_id || ':' || t.id HAVING count(*) = 1
+    ) source WHERE target.org_id = source.org_id AND target.subject_id = source.ref
+      AND target.dimension = 'session_outcome' AND target.subject_type = 'session_thread' AND target.session_id IS NULL;
+    END $repair$` },
+  { describe: "tag_jobs.session_id", probe: { kind: "column", table: "tag_jobs", column: "session_id" }, sql: `ALTER TABLE tag_jobs ADD COLUMN IF NOT EXISTS session_id text` },
+  { describe: "tag_jobs.thread_id", probe: { kind: "column", table: "tag_jobs", column: "thread_id" }, sql: `DO $repair$ BEGIN
+    ALTER TABLE tag_jobs ADD COLUMN IF NOT EXISTS thread_id text;
+    UPDATE tag_jobs target SET session_id = source.session_id, thread_id = source.thread_id FROM (
+      SELECT s.org_id, t.session_id || ':' || t.id AS ref, min(t.session_id) AS session_id, min(t.id) AS thread_id
+      FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
+      GROUP BY s.org_id, t.session_id || ':' || t.id HAVING count(*) = 1
+    ) source WHERE target.org_id = source.org_id AND target.subject_id = source.ref
+      AND target.dimension = 'session_outcome' AND target.subject_type = 'session_thread' AND target.session_id IS NULL;
+    END $repair$` },
+  { describe: "tag_jobs_retry_due", probe: { kind: "index", index: "tag_jobs_retry_due" }, sql: `DO $repair$ BEGIN DROP INDEX IF EXISTS tag_jobs_due; CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5; END $repair$` },
+  { describe: "tag_dimension_state", probe: { kind: "table", table: "tag_dimension_state" }, sql: `CREATE TABLE IF NOT EXISTS tag_dimension_state (
+ org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
+ retry_other boolean NOT NULL DEFAULT false, key_limit integer NOT NULL DEFAULT 100, consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+)` },
+  { describe: "tag_dimension_state.key_limit", probe: { kind: "column", table: "tag_dimension_state", column: "key_limit" }, sql: `ALTER TABLE tag_dimension_state ADD COLUMN IF NOT EXISTS key_limit integer NOT NULL DEFAULT 100` },
+  { describe: "tag_dimension_state.retry_other", probe: { kind: "column", table: "tag_dimension_state", column: "retry_other" }, sql: `ALTER TABLE tag_dimension_state ADD COLUMN IF NOT EXISTS retry_other boolean NOT NULL DEFAULT false` },
+  { describe: "tag resolved labels", probe: { kind: "table", table: "tag_resolved_labels" }, sql: `CREATE OR REPLACE VIEW tag_resolved_labels AS
+WITH RECURSIVE resolved AS (
+ SELECT org_id, dimension, key AS original_key, key, status, merged_into, 0 AS depth FROM tag_keys
+ UNION ALL
+ SELECT r.org_id, r.dimension, r.original_key, k.key, k.status, k.merged_into, r.depth + 1
+ FROM resolved r JOIN tag_keys k ON k.org_id = r.org_id AND k.dimension = r.dimension AND k.key = r.merged_into
+ WHERE r.status = 'merged' AND r.depth < 1000
+)
+SELECT DISTINCT ON (l.org_id, l.subject_type, l.subject_id, l.dimension, r.key) l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.key AS original_key,
+ l.confidence, l.model, l.input_hash, l.classified_at
+FROM tag_labels l JOIN resolved r ON r.org_id = l.org_id AND r.dimension = l.dimension AND r.original_key = l.key
+WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.classified_at DESC, l.confidence DESC` },
+  { describe: "external_calls", probe: { kind: "table", table: "external_calls" }, sql: `CREATE TABLE IF NOT EXISTS "external_calls" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text,
+  "surface" text NOT NULL, "name" text NOT NULL, "client_name" text, "client_version" text,
+  "session_id" text, "persona" text, "thread_id" text, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "outcome" text NOT NULL, "error_code" text, "duration_ms" integer NOT NULL,
+  "intent" text, "created_at" bigint NOT NULL,
+  CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
+)` },
+  { describe: "external_calls_owner_created", probe: { kind: "index", index: "external_calls_owner_created" }, before: `ALTER TABLE external_calls ALTER COLUMN user_id DROP NOT NULL`, sql: `CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_id, owner_type, owner_id, created_at)` },
+  { describe: "external_calls.intent_cleared_at", probe: { kind: "column", table: "external_calls", column: "intent_cleared_at" }, sql: `ALTER TABLE external_calls ADD COLUMN IF NOT EXISTS intent_cleared_at bigint` },
+  { describe: "external_calls_intent_retention", probe: { kind: "index", index: "external_calls_intent_retention" }, sql: `CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL` },
+  { describe: "external_calls_org_created", probe: { kind: "index", index: "external_calls_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id")` },
+  { describe: "external_calls_user_created", probe: { kind: "index", index: "external_calls_user_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at")` },
+  { describe: "mcp_client_info", probe: { kind: "table", table: "mcp_client_info" }, sql: `CREATE TABLE IF NOT EXISTS "mcp_client_info" (
+  "org_id" text NOT NULL, "user_id" text NOT NULL, "client_id" text NOT NULL,
+  "name" text NOT NULL, "version" text NOT NULL, PRIMARY KEY ("org_id", "user_id", "client_id")
+)` },
+
   { describe: "attention channel grace", probe: { kind: "column", table: "user_notification_preferences", column: "channel_grace_seconds" }, sql: 'ALTER TABLE user_notification_preferences ADD COLUMN channel_grace_seconds integer' },
   { describe: "personal attention outbox", probe: { kind: "table", table: "pending_channel_deliveries" }, sql: `CREATE TABLE pending_channel_deliveries (
     id text PRIMARY KEY NOT NULL, user_id text NOT NULL, tier_id text NOT NULL, notification_id text,
@@ -647,6 +775,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
   },
   {
+    describe: "session_threads.approval_bypass_by column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_by" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_by" text',
+  },
+  {
+    describe: "session_threads.approval_bypass_at column",
+    probe: { kind: "column", table: "session_threads", column: "approval_bypass_at" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "approval_bypass_at" bigint',
+  },
+  {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
     sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',
@@ -685,6 +823,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "cli_tokens.prev_refresh_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_refresh_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_refresh_hash" text' },
   { describe: "cli_tokens.rotated_at column", probe: { kind: "column", table: "cli_tokens", column: "rotated_at" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "rotated_at" bigint' },
   { describe: "cli_device_requests_expires", probe: { kind: "index", index: "cli_device_requests_expires" }, sql: 'CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");' },
+  { describe: "cli_device_requests.purpose column", probe: { kind: "column", table: "cli_device_requests", column: "purpose" }, sql: `ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "purpose" text NOT NULL DEFAULT 'login'` },
+  { describe: "cli_device_requests.key_name column", probe: { kind: "column", table: "cli_device_requests", column: "key_name" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "key_name" text' },
+  { describe: "cli_device_requests.requested_by column", probe: { kind: "column", table: "cli_device_requests", column: "requested_by" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "requested_by" text REFERENCES "user"("id") ON DELETE cascade' },
 
   {
     describe: "action_invocations.thread_id column",
@@ -844,6 +985,40 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "workflow_versions.source_commit column",
     probe: { kind: "column", table: "workflow_versions", column: "source_commit" },
     sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
+  },
+  {
+    describe: "child_watches.delivery_active column",
+    probe: { kind: "column", table: "child_watches", column: "delivery_active" },
+    sql: `DO $$ BEGIN
+      ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "delivery_active" boolean NOT NULL DEFAULT false;
+      UPDATE "child_watches" c SET "delivery_active" = true WHERE EXISTS
+        (SELECT 1 FROM engine_wakeups w WHERE w.id = 'wk_child_events:' || c.child_session_id AND w.status = 'running');
+      END $$`,
+  },
+  {
+    describe: "child_watches.pending_cap_incident column",
+    probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',
+  },
+  {
+    describe: "child_watches_delivery index",
+    probe: { kind: "index", index: "child_watches_delivery" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false',
+  },
+  {
+    describe: "child_event_outbox table",
+    probe: { kind: "table", table: "child_event_outbox" },
+    sql: 'CREATE TABLE IF NOT EXISTS "child_event_outbox" ("id" text PRIMARY KEY NOT NULL, "child_session_id" text NOT NULL, "event" jsonb NOT NULL, "created_at" bigint NOT NULL)',
+  },
+  {
+    describe: "child_event_outbox_child index",
+    probe: { kind: "index", index: "child_event_outbox_child" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at")',
+  },
+  {
+    describe: "child_watches.events_started_at column",
+    probe: { kind: "column", table: "child_watches", column: "events_started_at" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "events_started_at" bigint',
   },
   {
     // The spawning submission's channel origin, inherited by child.settled
@@ -1107,6 +1282,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       "artifact_id" text NOT NULL,
       "version" bigint NOT NULL,
       "vdid" text,
+      "anchor_label" text,
       "parent_id" text,
       "body" text NOT NULL,
       "author_user_id" text NOT NULL,
@@ -1121,6 +1297,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "index", index: "artifact_comments_artifact" },
     sql: 'CREATE INDEX IF NOT EXISTS "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")',
   },
+  { describe: "artifact_comments.anchor_label column", probe: { kind: "column", table: "artifact_comments", column: "anchor_label" }, sql: 'ALTER TABLE "artifact_comments" ADD COLUMN IF NOT EXISTS "anchor_label" text' },
   {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
     // the model catalog to the bundled compile-time list, so a deployment
@@ -1849,6 +2026,56 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_buffer" text',
   },
   {
+    describe: "engine_queue_items.child_result_delivery column",
+    probe: { kind: "column", table: "engine_queue_items", column: "child_result_delivery" },
+    sql: 'ALTER TABLE "engine_queue_items" ADD COLUMN IF NOT EXISTS "child_result_delivery" text',
+  },
+  {
+    describe: "engine_queue_items_child_delivery index",
+    probe: { kind: "index", index: "engine_queue_items_child_delivery" },
+    sql: `CREATE INDEX IF NOT EXISTS "engine_queue_items_child_delivery" ON "engine_queue_items" ("session_id") WHERE "child_result_delivery" = 'pending'`,
+  },
+  {
+    describe: "engine_leases.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_leases", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
+    describe: "engine_wakeups.source_queue_item_id column",
+    probe: { kind: "column", table: "engine_wakeups", column: "source_queue_item_id" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "source_queue_item_id" text',
+  },
+  {
+    describe: "engine_leases.terminal_signal_loss_reported_at column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_loss_reported_at" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_loss_reported_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_loss_reported_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_loss_reported_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_loss_reported_at" bigint',
+  },
+  {
+    describe: "engine_leases.terminal_signal_started_at column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_started_at" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_started_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_started_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_started_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_started_at" bigint',
+  },
+  {
+    describe: "engine_leases.terminal_signal_expected column",
+    probe: { kind: "column", table: "engine_leases", column: "terminal_signal_expected" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "terminal_signal_expected" boolean NOT NULL DEFAULT false',
+  },
+  {
+    describe: "engine_wakeups.terminal_signal_expected column",
+    probe: { kind: "column", table: "engine_wakeups", column: "terminal_signal_expected" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "terminal_signal_expected" boolean NOT NULL DEFAULT false',
+  },
+  {
     describe: "engine_wakeups.event_source_seen column",
     probe: { kind: "column", table: "engine_wakeups", column: "event_source_seen" },
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_source_seen" text',
@@ -1867,6 +2094,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "engine_wakeups_due index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_due" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    describe: "engine_wakeups_event_buffer_due index",
+    probe: { kind: "index", index: "engine_wakeups_event_buffer_due" },
+    sql: `CREATE INDEX IF NOT EXISTS "engine_wakeups_event_buffer_due" ON "engine_wakeups" ("created_at", "id") WHERE "kind" = 'event' AND "status" = 'running' AND COALESCE("event_buffer", '[]') <> '[]'`,
   },
   {
     // After the subjects column repair, which it indexes (spec 2026-10-15, Part C).
@@ -2085,6 +2317,33 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'CREATE INDEX IF NOT EXISTS "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at")',
   },
 
+  { describe: "tagging accounting use case", probe: { kind: "table", table: "tagging_accounting_ready" },
+    sql: `DO $repair$ BEGIN ${taggingAccountingPublishSql} END $repair$` },
+
+  {
+    describe: "bakes contract and lineage columns",
+    probe: { kind: "column", table: "bakes", column: "contract_version" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_version integer;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_source text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS parent_bake_id text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS base_image_ref text; END $repair$`,
+    backfill: CONTRACT_BACKFILL_SQL,
+  },
+  {
+    describe: "image_sources health columns",
+    probe: { kind: "column", table: "image_sources", column: "health" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health text NOT NULL DEFAULT 'healthy';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_reason text NOT NULL DEFAULT 'ok';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_detail text;
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_checked_at bigint; END $repair$`,
+  },
+  {
+    describe: "agent_sessions.image_fallback column",
+    probe: { kind: "column", table: "agent_sessions", column: "image_fallback" },
+    sql: `ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS image_fallback jsonb`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

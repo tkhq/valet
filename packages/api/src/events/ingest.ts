@@ -288,6 +288,12 @@ export async function ingestEvent(
   args: { orgId: string; service: string; event: NormalizedEvent; receiptId?: string },
 ): Promise<IngestResult> {
   const { orgId, service, event } = args;
+  if (service === "valet") {
+    if (!deps.waiters) throw new Error("Internal event matching is not configured.");
+    const candidates = await evaluateWaiterCandidates(deps.waiters, orgId, service, event);
+    await appendWaiterDigests(deps.waiters, service, candidates);
+    return { eventId: event.dedupeKey, duplicate: false, deliveries: 0, skipped: true };
+  }
   const receiptId = args.receiptId ?? await createEventReceipt(deps.db, { orgId, service, externalId: event.dedupeKey });
   if (!args.receiptId) await appendReceiptStage(deps.db, receiptId, { stage: "receipt", outcome: "received", detail: "An event reached normalized ingestion. Verification is handled by the source adapter." });
   const place = receiptPlace(deps.plugins, service, event);

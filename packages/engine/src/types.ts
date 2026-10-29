@@ -1,10 +1,11 @@
+import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
+import type { PlaybookSeedResult } from "./roles-skills/playbook.js";
 import type {
   EventMatchDigest,
   Lease,
@@ -249,6 +250,8 @@ export interface QueueItem {
   /** Role name to apply for this one prompt (system-prompt overlay + optional model override). */
   role?: string;
   metadata?: Record<string, unknown>;
+  /** Host delivery state for a claimed signal or delegation in a purpose=child task session, not every parent-linked conversation. */
+  childResultDelivery?: "pending" | "delivered" | "denied";
   // Durable execution lifecycle
   status: SubmissionStatus;
   outcome?: SubmissionOutcome;
@@ -716,6 +719,8 @@ export interface PluginStore {
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ToolDef<TParams extends TSchema = TSchema> {
+  /** Sandbox primitives opt out. Broker tools reuse summary without adding intent. */
+  intent?: "exempt" | "summary" | "passthrough";
   /** Integration action behind a direct tool. Scope checks use its canonical ID. */
   scopeAction?: string;
   name: string;
@@ -757,6 +762,7 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
+  usageOutcome?: { outcome: "ok" | "error" | "denied" | "pending-approval"; errorCode: string | null; name?: string };
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
@@ -769,6 +775,9 @@ export interface ToolResult {
    * successful call from a completed-but-failed one read this value.
    */
   ok?: boolean;
+  /** "automatic" when the action needed approval and ran without a card
+   * because the thread runs without asking. The UI names it on the step. */
+  approval?: "automatic";
 }
 
 export type ToolAttachment =
@@ -788,6 +797,8 @@ export interface ToolContext {
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
+  seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -1104,6 +1115,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
@@ -1127,6 +1140,8 @@ export interface DecisionGateRequest {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions?: DecisionAction[];
   expiresAt?: number;
   context?: Record<string, unknown>;
@@ -1244,7 +1259,10 @@ export type PolicyProvenanceSource =
   | "risk_default"
   | "resolver_error"
   /** The action would use another member's shared account (`PolicyDecision.approver`). */
-  | "shared_account";
+  | "shared_account"
+  /** The thread runs without asking, and this approval was one its person
+   * could stop for good themselves, so no gate opened. */
+  | "thread_bypass";
 
 /**
  * The host's decision for one action invocation. `mode` drives `call_tool`:
@@ -1918,8 +1936,19 @@ export type EngineEvent =
    * earlier version. `noteEntryId` is the branch note at the new leaf. */
   | { type: "branch_switched"; threadId: string; noteEntryId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
-  | { type: "status"; threadId: string; status: EngineEventStatus }
+  /** `turnStartedAt` is when the running submission was claimed. A turn can
+   * end and go idle between model steps of one submission, and a replay
+   * delivers old frames at the replay time, so a client reads the start
+   * from here rather than from when a frame arrives. */
+  | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
+  /** A failed model call that this turn retries. It is progress, not an
+   * error: a client shows it on the working line and keeps the turn open.
+   * `retry` calls `provider` again after `waitMs` (attempt `attempt` of
+   * `maxAttempts`). `fallback` continues the turn on `toProvider`. The turn
+   * fails only when the retries run out, as a failed assistant message. */
+  | { type: "turn_retry"; threadId: string; action: "retry" | "fallback"; provider: string; reason: ProviderFailureKind;
+      attempt?: number; maxAttempts?: number; waitMs?: number; toProvider?: string }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }
   | { type: "decision_gate_expired"; threadId: string; gateId: string }
@@ -2087,11 +2116,28 @@ export interface SubmissionAdmissionOptions {
 
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
+  /** Forget a destroyed sandbox only if the session still names that handle. */
+  clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
   /** Read a thread row and its entries from one coherent store snapshot. */
   getThreadSnapshot(
     sessionId: string,
     threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
+  /**
+   * The snapshot that rebuilds an agent transcript. Same thread and entry
+   * order as `getThreadSnapshot`, but an entry covered by the newest
+   * compaction on the active branch comes back as a stub: ids, links, type,
+   * role and queue item, without content, parts or other payload. The
+   * transcript never reads a covered entry's payload, except the task-source
+   * prompt, which `keepQueueItemId` keeps whole. On a long, compacted thread
+   * this reads the live context instead of the whole history. Optional: a
+   * store without it serves the full snapshot.
+   */
+  getTranscriptSnapshot?(
+    sessionId: string,
+    threadId: string,
+    opts?: { keepQueueItemId?: string },
   ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
@@ -2197,6 +2243,8 @@ export interface SessionStore {
    * thread continuation ceilings/focuses into metadata.toolScope atomically.
    */
   claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
+  /** Resolves a child result without changing its execution outcome or activity clock. First resolution wins. */
+  resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void>;
   /** CAS: install a new attempt on a running/blocked item whose lease expired. Null when the CAS loses. */
   replaceSubmissionAttempt(
     sessionId: string,
@@ -2221,6 +2269,8 @@ export interface SessionStore {
   listSessionIdsWithUnsettledSubmissions(): Promise<string[]>;
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
+  /** Indexed runtime repair candidates; excludes delivered history and active submissions. */
+  listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Resolve idempotent admission after a caller loses the returned receipt. */
   getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
@@ -2357,6 +2407,9 @@ export interface SessionStore {
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
   listThreads(sessionId: string): Promise<ThreadData[]>;
+  /** The threads of every listed session, in one read. A workspace lists
+   * its history across one session per conversation. */
+  listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]>;
   getEntries(
     sessionId: string,
     threadId: string,
@@ -2454,6 +2507,8 @@ export interface SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    /** Prevents an idle close from hiding a concurrent event append. */
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null>;
   /**
    * `transitionWakeup`, and when the CAS matches, the release of the row's
@@ -2468,9 +2523,13 @@ export interface SessionStore {
     updatedAt: number,
     releaseCause: LeaseReleaseCause,
   ): Promise<Wakeup | null>;
+  /** Starts human terminal admission grace once per cancellation, only for this session's expected signal. */
+  startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void>;
+  /** Claims loss reporting once for this terminal transition, checked against its admission clock. Stale, foreign, and silent rows cannot claim. */
+  claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean>;
   createLease(lease: Lease): Promise<void>;
-  /** CAS release: succeeds only when the lease is not already released. Null when already released. */
-  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
+  /** CAS release: commits any terminal signal expectation with the release. Null when already released. */
+  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null>;
   /** The lease with `id`, released or not, or null for an unknown or unreadable row. */
   getLease(id: string): Promise<Lease | null>;
   /**
@@ -2479,6 +2538,8 @@ export interface SessionStore {
    * removes only what that create wrote, never the session's other rows.
    */
   deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void>;
+  /** One snapshot of active and released leases, including terminal admission expectations. */
+  listLeases(sessionId: string): Promise<Lease[]>;
   listActiveLeases(sessionId: string): Promise<Lease[]>;
   listAllActiveLeases(): Promise<Lease[]>;
   countActiveLeases(sessionId: string): Promise<number>;
@@ -2706,6 +2767,8 @@ export interface CreateSessionOptions {
   toolScope?: ToolScope;
   initialToolFocus?: (thread: { key: string }) => ToolScope | undefined;
   /** Retain history without admitting or resuming execution. */
+  /** Synchronous host config-generation fence, checked before reserving any execution claim. */
+  isExecutionCurrent?: () => boolean;
   readOnlyReason?: string;
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
@@ -2830,6 +2893,7 @@ export interface CreateSessionOptions {
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
   skillTelemetry?: SkillTelemetrySink;
+  recordToolUsage?: (fact: ToolUsageFact) => void;
   /**
    * Optional host-provided org-policy resolver. Absent === the engine's
    * built-in fallback: `call_tool` derives approval from each action's
@@ -2871,6 +2935,9 @@ export interface CreateSessionOptions {
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
+  /** How long a tool may keep running after its turn is stopped, in ms
+   * (default `TOOL_STOP_GRACE_MS`). See `toAgentTool`. */
+  toolStopGraceMs?: number;
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
@@ -2885,7 +2952,9 @@ export interface CreateSessionOptions {
    */
   turnRetry?: {
     maxAttempts?: number;
-    /** Backoff before each retry, in ms; the last entry repeats. */
+    /** Backoff before each retry, in ms; the last entry repeats. Each wait
+     * moves by up to ±25% (`turnRetryWaitMs`), and `turn_retry.waitMs`
+     * carries the wait the engine actually uses. */
     backoffMs?: number[];
     /**
      * The longest provider-requested wait ("try again in 6s") a retry honors,
@@ -3260,6 +3329,8 @@ export type ChildSender = (
  * creation options across restarts.
  */
 export interface RestoreSessionOptions {
+  /** Same-process configuration handoff: share compute and reserve active threads on their existing owner. */
+  predecessor?: Session;
   sessionId: string;
   options: Omit<CreateSessionOptions, "id">;
 }

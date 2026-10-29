@@ -3,8 +3,9 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -27,6 +28,7 @@ import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   DecisionGateExpiredError,
+  DecisionGateHandoffError,
   DecisionGateWithdrawnError,
   findStickyTerminalGate,
   fromRequest,
@@ -39,7 +41,7 @@ import {
   UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
-import { renderTemplate } from "./roles-skills/index.js";
+import { isPlaybook, playbookPlanItems, readPlaybookSteps, renderTemplate, type PlaybookSeedResult } from "./roles-skills/index.js";
 import {
   buildOverheardDigest,
   completedSubmissionOutcome,
@@ -273,12 +275,17 @@ const TURN_STREAM_TIMEOUT_MS = 600_000;
  * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
  * wait up to the max hint; a longer hint ends the retries.
  */
-const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
-const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
-const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
-const INTERACTIVE_TURN_RETRY_ATTEMPTS = 2;
-const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 8_000];
-const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 20_000;
+// A person's prompt gets four tries over about 30s, the order of what Claude
+// Code (10 tries) and Codex (4 request + 5 stream retries) allow, so a
+// passing outage does not cost a resend. An unattended turn has nobody
+// waiting on it, so it rides out a longer outage: six tries over about 13
+// minutes, each wait capped at 5 minutes.
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 6;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 240_000, 300_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 300_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 4;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 30_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -389,34 +396,6 @@ const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
-/**
- * Build the user-facing text for a `turn_transient_retry` event (TKAI-325).
- * The old text embedded the raw provider error blob and read as an internal
- * Valet judgment. This version names the upstream cause, tells the reader
- * what to do if retries fail, and keeps the raw JSON out — the request ID
- * (when the error carries one) is enough for a support escalation. Exported
- * so tests can pin the copy without spinning up a whole retry loop.
- */
-export function formatTransientRetryMessage(args: {
-  provider: string;
-  errorMessage: string | undefined;
-  waitMs: number;
-  attempt: number;
-  maxAttempts: number;
-}): string {
-  const providerLabel = args.provider
-    ? args.provider.charAt(0).toUpperCase() + args.provider.slice(1)
-    : "The upstream provider";
-  const requestId = args.errorMessage?.match(/request_id["':\s]+"?([A-Za-z0-9_-]+)"?/)?.[1];
-  const seconds = Math.round(args.waitMs / 1000);
-  const primary = `${providerLabel}'s API is unavailable or overloaded. The turn will retry automatically in ${seconds}s (attempt ${args.attempt}/${args.maxAttempts}).`;
-  const detail = requestId
-    ? ` If retries fail, switch to a different model or contact support (request ID: ${requestId}).`
-    : " If retries fail, switch to a different model.";
-  return primary + detail;
-}
-
-
 const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
   [/^(?:ms|milliseconds?)$/i, 1],
   [/^(?:h|hours?)$/i, 3_600_000],
@@ -443,6 +422,24 @@ export function parseProviderRetryHintMs(errorMessage: string | undefined): numb
     total += Number(part[1]) * scale;
   }
   return total > 0 ? Math.ceil(total) : undefined;
+}
+
+/**
+ * Each retry wait moves by up to this fraction either way. Threads that share
+ * one provider key fail together in an outage. Without jitter they all retry
+ * at the same moment and fail together again.
+ */
+const TURN_RETRY_JITTER = 0.25;
+
+/**
+ * The wait before one retry: the backoff, raised to the provider's hint, then
+ * moved by up to ±25%. The hint stays a floor, so jitter never retries
+ * sooner than the provider asked. Exported for tests.
+ */
+export function turnRetryWaitMs(backoffMs: number, hintMs: number | undefined, random: () => number = Math.random): number {
+  const base = Math.max(backoffMs, hintMs ?? 0);
+  const jittered = Math.round(base * (1 - TURN_RETRY_JITTER + 2 * TURN_RETRY_JITTER * random()));
+  return Math.max(jittered, hintMs ?? 0);
 }
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
@@ -473,6 +470,8 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  private gateHandedOff = false;
+  private rearmedGate = false;
   /**
    * The most recent `status` event this instance emitted. In-memory only —
    * feeds `currentAgentStatus` so a client that connects mid-turn can seed
@@ -552,6 +551,41 @@ export class Thread {
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private thinkingTiming = new ThinkingTiming();
+  private usageToolDef(name: string): ToolDef | undefined {
+    return [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].find(tool => tool.name === name);
+  }
+
+  private startToolUsage(callId: string, name: string, args: Record<string, unknown>): void {
+    const def = this.usageToolDef(name);
+    if (!def || def.intent === "exempt") return;
+    let intent: string | null = null;
+    try { intent = stripToolIntent(def, args).intent; } catch { /* Invalid calls still count. */ }
+    const actionId = def.scopeAction ?? (name === "call_tool" ? "unknown" : name);
+    this.toolUsageStarts.set(callId, { createdAt: Date.now(), waitMs: 0, intent, name: actionId.slice(0, 200) });
+  }
+
+  private finishToolUsage(callId: string, details: unknown, isError: boolean): void {
+    const usage = this.toolUsageStarts.get(callId);
+    this.toolUsageStarts.delete(callId);
+    if (!usage) return;
+    const { waitMs, ...base } = usage;
+    if (details && typeof details === "object" && "usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object" && "name" in details.usageOutcome && typeof details.usageOutcome.name === "string") {
+      base.name = details.usageOutcome.name.slice(0, 200);
+    }
+    const owner = this.session.owner;
+    const actor = this.runningItem?.author?.id ?? this.defaultActorId();
+    const fact: ToolUsageFact = {
+      ...base, ...readToolUsageOutcome(details, isError), id: `${this.session.id}:${callId}`,
+      orgId: this.session.options.orgId, userId: actor.startsWith("team:") ? null : actor,
+      sessionId: this.session.id, threadId: this.id,
+      ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
+      durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
+    };
+    try { this.session.options.recordToolUsage?.(fact); }
+    catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+  }
+
+  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -709,6 +743,10 @@ export class Thread {
   private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
+  /** When a turn, gate reconcile or compaction last loaded or used the agent transcript. */
+  private transcriptUsedAt = 0;
+  /** Background drives (resume drives, gate replays) in flight. */
+  private backgroundDrives = 0;
 
   constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
     this.transcriptPending = opts.restoreTranscript ?? false;
@@ -807,7 +845,8 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const requestedMode = opts.queueMode ?? this.mode;
+    // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
+    const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
     // An `inject` prompt is stored as a followup with a flag, so a turn
     // boundary can deliver it into the running turn
@@ -824,7 +863,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect") {
+    if (effectiveMode === "collect" && !this.session.isThreadExecutionFenced(this.id)) {
       return this.submitCollect(content, opts);
     }
 
@@ -866,9 +905,18 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
+    // A slash-invoked playbook sets the plan before its turn starts, so the
+    // turn's plan overlay already shows the steps. An outside author cannot
+    // change the plan, the same rule as `update_plan` (`refuseOutsideAuthors`).
+    const owner = this.session.options.owner;
+    const outsideAuthor = opts.author?.externalSender === true ||
+      (owner?.type === "user" && opts.author !== undefined && opts.author.id !== owner.id);
+    if (wasAdmitted && !outsideAuthor && opts.skillInvocation && isPlaybook(opts.skillInvocation.skill)) {
+      await this.seedPlaybookPlan(opts.skillInvocation.skill);
+    }
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
@@ -1087,9 +1135,12 @@ export class Thread {
     for (const g of this.pendingDecisionGates()) {
       this.withdrawDecision(g.id, "steer");
     }
+    // A claimed item (the running turn) is not settled here. It settles, and
+    // emits, when its turn ends. Emitting now told clients a turn had ended
+    // while it was still running.
     for (const id of supersededItemIds) {
-      await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
-      await this.emitSettled(id, { outcome: "superseded" });
+      const settled = await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+      if (settled) await this.emitSettled(id, { outcome: "superseded" });
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
@@ -1128,6 +1179,7 @@ export class Thread {
       item,
     );
     await this.emitQueueState();
+    this.session.notifyReclaimAdmission();
     if (wasAdmitted) {
       this.armCollectTimer(
         typeof admittedItem.metadata?.collectDeadline === "number"
@@ -1528,6 +1580,7 @@ export class Thread {
 
   async abort(): Promise<void> {
     this.aborted = true;
+    this.toolUsageStarts.clear();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -1606,6 +1659,9 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
+    this.rearmedGate = false;
+    // The replay appends to the live transcript, so it must be loaded.
+    await this.ensureTranscript();
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -1623,14 +1679,15 @@ export class Thread {
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.
     const priorActive = this.runningItem;
+    const original = await this.session.providers.store.getQueueItem(this.session.id, suspended.queueItemId);
     this.runningItem = {
       id: suspended.queueItemId,
-      metadata: priorActive?.metadata,
-      author: priorActive?.author,
-      channel: priorActive?.channel,
-      replyTarget: priorActive?.replyTarget,
+      metadata: original?.metadata,
+      author: original?.author,
+      channel: original?.channel,
+      replyTarget: original?.replyTarget,
       threadId: this.id,
-      content: priorActive?.content ?? "",
+      content: original?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1640,6 +1697,7 @@ export class Thread {
     };
     const fakeAbort = new AbortController();
     let toolResult;
+    this.startToolUsage(suspended.toolCallId, suspended.toolName, suspended.toolArgs);
     try {
       await this.persistContinuationToolScope();
       toolResult = await tool.execute(
@@ -1648,6 +1706,7 @@ export class Thread {
         fakeAbort.signal,
       );
     } catch (err) {
+      this.finishToolUsage(suspended.toolCallId, undefined, true);
       this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
@@ -1655,6 +1714,7 @@ export class Thread {
       );
       return;
     }
+    this.finishToolUsage(suspended.toolCallId, toolResult.details, false);
     this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
@@ -1797,12 +1857,27 @@ export class Thread {
     }
   }
 
+  /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
+  handoffParkedGate(): void {
+    if (!this.blockedGateId || !this.gates.isPending(this.blockedGateId)) return;
+    this.gateHandedOff = true;
+    this.agent.abort();
+    this.gates.handoff(this.blockedGateId);
+    if (this.rearmedGate) {
+      this.runningItem = null;
+      this.fence = undefined;
+      this.blockedGateId = undefined;
+      this.session.notifyExecutionIdle();
+    }
+  }
+
   /**
    * Re-arm the GateManager for a still-pending gate after restart, so a
    * future resolveDecision triggers replay.
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
+    this.rearmedGate = true;
     this.gates
       .register(gate, () => {
         // Terminalization is driven off the promise rejection below (which the
@@ -1814,6 +1889,7 @@ export class Thread {
         );
       })
       .catch((err) => {
+        if (err instanceof DecisionGateHandoffError) return;
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
         // state as the live path: persist the gate's terminal status, flip the
         // durable block back to running, clear the suspended checkpoint, and
@@ -1835,6 +1911,7 @@ export class Thread {
           err instanceof Error ? err.message : String(err),
         );
       });
+    if (this.session.isExecutionFenced) this.handoffParkedGate();
   }
 
   /**
@@ -2115,11 +2192,7 @@ export class Thread {
       }
       this.lastEmittedStatus = "blocked_on_decision_gate";
       await this.fencedEmit(
-        {
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        },
+        this.statusEvent("blocked_on_decision_gate"),
         { queueItemId: runningItemId },
       );
       await session.emit(
@@ -2135,7 +2208,7 @@ export class Thread {
     }
 
     try {
-      const rawResolution = await this.gates.register(gate, async (gateId) => {
+      const waiting = this.gates.register(gate, async (gateId) => {
         await session.providers.store.updateDecisionGateEntry(
           session.id,
           this.id,
@@ -2147,6 +2220,8 @@ export class Thread {
           { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
         );
       });
+      if (this.session.isExecutionFenced) this.handoffParkedGate();
+      const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
       // call_tool's policy audit) needs this to distinguish a
@@ -2175,6 +2250,7 @@ export class Thread {
       );
       return { ...resolution, gateContext: gate.context ?? {} };
     } catch (err) {
+      if (err instanceof DecisionGateHandoffError) throw err;
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
       await persistTerminalGate(
@@ -2419,7 +2495,9 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, steerScope: "active" },
+      this.session.isThreadExecutionFenced(this.id)
+        ? { maxPending: this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD }
+        : { steer: true, steerScope: "active" },
     );
     // The stopped turn can take a while to wind down (a tool waiting on the
     // sandbox), and the person who sent the edit must not wait for it. The
@@ -2500,6 +2578,16 @@ export class Thread {
    * leaves, so the person can return again.
    */
   async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    const result = await this.session.claimExecution(() => this.returnToBranchInner(noteEntryId, actor, choices), this.id);
+    if (!result) throw new ValidationError("The session configuration or sandbox is changing. Reload the thread and try again.");
+    return result;
+  }
+
+  private async returnToBranchInner(
     noteEntryId: string,
     actor: { id: string },
     choices: { restoreFiles?: boolean } = {},
@@ -2968,11 +3056,20 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(
-      this.session.id,
-      this.id,
-    );
+  /** Every entry, payloads included. Compaction prunes, selects its cut point
+   * and rebuilds from all path entries, so it must not see stubs. */
+  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
+  private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const store = this.session.providers.store;
+    const snapshot = store.getTranscriptSnapshot
+      ? await store.getTranscriptSnapshot(this.session.id, this.id, keepQueueItemId === undefined ? undefined : { keepQueueItemId })
+      : await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) throw new Error(`thread not found: ${this.id}`);
     this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
     return snapshot;
@@ -2980,13 +3077,17 @@ export class Thread {
 
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
+    // Every caller is about to use the transcript, so mark it used even when
+    // it is already loaded: a gate reconcile awaits store calls before it sets
+    // `runningItem`, and the idle release must not land in that gap.
+    this.transcriptUsedAt = Date.now();
     if (!this.transcriptPending) return;
     if (!this.transcriptLoad) {
       this.transcriptLoad = withSpan(
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const snapshot = await this.transcriptSnapshot();
+          const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
           span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
           this.rehydrateTranscript(snapshot.entries);
         },
@@ -2995,6 +3096,24 @@ export class Thread {
       });
     }
     await this.transcriptLoad;
+    this.transcriptUsedAt = Date.now();
+  }
+
+  /**
+   * Drop the in-memory agent transcript of a thread that has not used it
+   * since `idleSince`, and return whether it did. The store keeps the
+   * history: the next turn, gate reconcile or compaction reloads it through
+   * `ensureTranscript`, as after a restart. Without this, a cached assistant
+   * session holds every transcript it loaded until the process exits.
+   */
+  releaseIdleTranscript(idleSince: number): boolean {
+    if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
+      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+    this.replaceAgentMessages([]);
+    this.transcriptPending = true;
+    // Mid-turn ids only matter while their turn runs.
+    this.midTurnAppended.clear();
+    return true;
   }
 
   /**
@@ -3503,6 +3622,16 @@ export class Thread {
     return this.lastEmittedStatus;
   }
 
+  /** When the running turn started, for a subscriber that connects mid-turn. */
+  get currentTurnStartedAt(): number | undefined {
+    return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
+  private statusEvent(status: EngineEventStatus): EngineEvent {
+    const turnStartedAt = this.currentTurnStartedAt;
+    return { type: "status", threadId: this.id, status, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
+  }
+
   /**
    * The claim loop. Drives the thread's durable queue: repeatedly claim the
    * thread's runnable head from the store, run the turn under a write fence,
@@ -3532,6 +3661,7 @@ export class Thread {
     drive: () => Promise<void>,
   ): void {
     registerBackgroundDrive(itemId);
+    this.backgroundDrives += 1;
     const p = drive()
       .catch((err: unknown) => {
         this.emitError(errorCode, err instanceof Error ? err.message : String(err));
@@ -3541,12 +3671,15 @@ export class Thread {
         }
       })
       .finally(() => {
+        this.backgroundDrives -= 1;
         unregisterBackgroundDrive(itemId);
+        this.session.notifyExecutionIdle();
       });
     this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
   }
 
   async kick(): Promise<void> {
+    if (this.session.isExecutionFenced) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -3557,6 +3690,7 @@ export class Thread {
       })
       .finally(() => {
         this.kicking = false;
+        this.session.notifyExecutionIdle();
       });
     return this.kickTail;
   }
@@ -3565,7 +3699,7 @@ export class Thread {
     if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused) return;
+      if (this.paused || this.session.isExecutionFenced) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -3591,17 +3725,17 @@ export class Thread {
       }
 
       const attemptId = uid("att");
-      const claimed = await store.claimSubmission({
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: head.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      });
-      if (!claimed) return; // lost the race or head is not actually claimable
-
-      await store.insertAttemptMarker(claimed.id, attemptId);
-      this.runningItem = claimed;
+      const claimed = await this.session.claimExecution(async () => {
+        const item = await store.claimSubmission({
+          sessionId: this.session.id, threadId: this.id, itemId: head.id,
+          attemptId, ownerId: this.session.ownerId,
+        });
+        if (!item) return null;
+        await store.insertAttemptMarker(item.id, attemptId);
+        this.runningItem = item;
+        return item;
+      }, this.id);
+      if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
       // no repair path can leak one turn's escalation into the next.
@@ -3906,6 +4040,7 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    if (this.gateHandedOff) return;
     return this.inSubmissionContext(() =>
       withSpan(
         "submission.settle",
@@ -4058,7 +4193,7 @@ export class Thread {
     errorText: string = "interrupted",
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant") continue;
       if (e.queueItemId !== item.id) continue;
@@ -4207,7 +4342,7 @@ export class Thread {
     await this.ensureTranscript();
     const taskSource = this.taskSourceFor(item);
     if (taskSource) {
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(taskSource);
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
@@ -4217,22 +4352,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -4243,6 +4382,7 @@ export class Thread {
       // Gate vanished between the decision and here — nothing to re-arm.
       this.runningItem = null;
       this.fence = undefined;
+      this.session.notifyExecutionIdle();
       return;
     }
 
@@ -4258,6 +4398,7 @@ export class Thread {
         this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
         this.runningItem = null;
         this.fence = undefined;
+        this.session.notifyExecutionIdle();
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
@@ -4292,22 +4433,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -4329,6 +4474,7 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    await this.ensureTranscript();
     return withSpan(
       "agent.turn",
       {
@@ -4386,7 +4532,7 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
       const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
@@ -4562,7 +4708,7 @@ export class Thread {
     // or a second cap pass) must not duplicate it. Return the persisted
     // entry's attachments (the authoritative on-disk shape) so a retried
     // attempt still feeds the model the same image blocks.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     const existingUserEntry = existing.find(
       (e): e is MessageEntry =>
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
@@ -4716,6 +4862,7 @@ export class Thread {
           try {
             await this.runItemInner(item);
           } finally {
+            this.transcriptUsedAt = Date.now();
             this.turnSpan = undefined;
             this.llmSpan?.end();
             this.llmSpan = undefined;
@@ -4859,7 +5006,8 @@ export class Thread {
     // Retire an injected contract before an unrelated submission runs.
     const taskSource = this.taskSourceFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
-      const snapshot = await this.transcriptSnapshot();
+      // Keep the task's covered prompt whole: the rebuild below restores it.
+      const snapshot = await this.transcriptSnapshot(taskSource);
       const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
       const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
       const checkpoint = findMostRecentCompaction(activeEntries);
@@ -5244,8 +5392,8 @@ export class Thread {
       const error = last.errorMessage ?? "";
       // Provider capacity cannot override authentication, input, policy, or
       // application budget failures, even when their text also mentions 429.
-      if (/authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?key|request|input|argument)|permission[_ -]denied|\b(?:40[013]|422)\b|content[_ -]?(?:policy|filter)|policy[_ -]?(?:violation|denied)|\bbudget\b|context[_ -]?(?:length|window)|aborted|cancelled/i.test(error)) return;
-      const quota = /\bquota\b|insufficient_quota|payment_required|\b402\b|billing[_ -](?:error|limit|hard_limit)|credit balance.*(?:low|insufficient|exhausted)|(?:insufficient|exhausted)[_ -]credits|(?:monthly|spend(?:ing)?)[_ -]limit|quota[_ -](?:exceeded|exhausted)/i.test(error);
+      if (isNonRetryableProviderFailure(error)) return;
+      const quota = isUsageLimitFailure(error);
       const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
       if (!quota && !transient) return;
       if (!(await this.canRunCurrentSubmission())) return;
@@ -5275,10 +5423,7 @@ export class Thread {
         this.agent.state.model = fallback.model;
         this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
         if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
-        this.emitError(
-          "turn_provider_fallback",
-          `${previousProvider} is unavailable. Continuing this turn with ${fallback.model.provider}.`,
-        );
+        this.emitTurnRetry({ action: "fallback", provider: previousProvider, reason: classifyProviderFailure(error), toProvider: fallback.model.provider });
       } else {
         if (!transient || sameProviderAttempts >= maxAttempts) return;
         // A provider that asks for a longer wait than this turn allows gets
@@ -5286,14 +5431,11 @@ export class Thread {
         const hintMs = parseProviderRetryHintMs(last.errorMessage);
         if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
-        this.emitError("turn_transient_retry", formatTransientRetryMessage({
-          provider: this.agent.state.model.provider,
-          errorMessage: last.errorMessage,
-          waitMs,
-          attempt: sameProviderAttempts,
-          maxAttempts,
-        }));
+        const waitMs = turnRetryWaitMs(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs);
+        this.emitTurnRetry({
+          action: "retry", provider: this.agent.state.model.provider, reason: classifyProviderFailure(error),
+          attempt: sameProviderAttempts, maxAttempts, waitMs,
+        });
         if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
       }
       if (!(await this.canRunCurrentSubmission())) return;
@@ -5640,7 +5782,7 @@ export class Thread {
 
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.transcriptSnapshot();
+    const snapshot = await this.fullSnapshot();
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
@@ -5974,7 +6116,7 @@ export class Thread {
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.transcriptSnapshot();
+      const updatedSnapshot = await this.fullSnapshot();
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
@@ -6453,7 +6595,9 @@ export class Thread {
 
   /** Whether the transcript already holds the user entry of queue item `itemId`. */
   private async hasUserEntry(itemId: string): Promise<boolean> {
-    const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+    // Only this item's entries: a whole-thread read here ran once per queued
+    // message that joined a running turn.
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: itemId });
     return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
   }
 
@@ -6496,16 +6640,19 @@ export class Thread {
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
-      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
-        this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
+      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
+        this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
+        this.session.options.toolStopGraceMs,
       ),
     );
   }
 
   private async persistContinuationToolScope(): Promise<void> {
     const scope = this.toolScopeCeiling();
-    if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
-    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+    const source = this.runningItem?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY];
+    if (!scope && source === undefined && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {},
+      ...(source !== undefined ? { [CONTINUATION_SOURCE_ITEM_KEY]: source } : {}) }), "after-save");
   }
 
   /**
@@ -6594,11 +6741,30 @@ export class Thread {
     return added;
   }
 
+  /** Set `metadata[key]` to a JSON value and persist it, such as the thread a fork came from. */
+  async setMetadataValue(key: string, value: unknown): Promise<void> {
+    await this.patchThreadMetadata((current) => ({ ...current, [key]: value }), "before-save");
+  }
+
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
   async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
     const plan: ThreadPlan = { items, updatedAt: Date.now() };
     await this.patchThreadMetadata((current) => ({ ...current, [THREAD_PLAN_KEY]: plan }), "after-save");
     return plan;
+  }
+
+  /**
+   * Seed the plan from a playbook's steps, so the model spends no tokens to
+   * write it. An open plan (an item not `done`) stays: the person or the
+   * model made it, and a playbook load must not erase it.
+   */
+  async seedPlaybookPlan(skill: SkillSource): Promise<PlaybookSeedResult> {
+    const read = readPlaybookSteps(skill.content);
+    if (read.kind === "invalid") return read;
+    const current = readThreadPlan(this.threadMetadata);
+    if (current?.items.some((item) => item.status !== "done")) return { kind: "kept", steps: read.steps };
+    await this.setPlan(playbookPlanItems(read.steps));
+    return { kind: "seeded", steps: read.steps };
   }
 
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
@@ -6613,8 +6779,9 @@ export class Thread {
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
+    toolIntent?: string;
   }): ToolContext {
-    const { signal, toolCallId, toolName, toolArgs } = args;
+    const { signal, toolCallId, toolName, toolArgs, toolIntent } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
     const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
@@ -6630,6 +6797,7 @@ export class Thread {
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
       setThreadPlan: (items) => this.setPlan(items),
+      seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
@@ -6680,6 +6848,7 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (toolIntent && req.type === "approval" && toolName !== "ask_question" && toolName !== "ask_approval") req = { ...req, agentReason: toolIntent };
         // A channel sender with no Valet account may not put an approval or a
         // question in front of a teammate: the request is refused here, before
         // any gate opens, so a newcomer cannot flood the team with requests.
@@ -6731,6 +6900,7 @@ export class Thread {
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the
         // durable blocked toggle (TKAI-238).
+        const waitStarted = Date.now();
         const prevCycle = this.gateCycleTail;
         let releaseCycle!: () => void;
         this.gateCycleTail = new Promise<void>((r) => {
@@ -6738,9 +6908,12 @@ export class Thread {
         });
         await prevCycle;
         try {
-          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName,
+            toolArgs: toolIntent && toolName !== "call_tool" && !this.usageToolDef(toolName)?.scopeAction ? { ...toolArgs, intent: toolIntent } : toolArgs });
         } finally {
           releaseCycle();
+          const usage = this.toolUsageStarts.get(toolCallId);
+          if (usage) usage.waitMs += Date.now() - waitStarted;
         }
       },
       // The same lookup slash commands use: a key, or a thread id (a pasted
@@ -6778,7 +6951,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "thinking" },
+          this.statusEvent("thinking"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7001,6 +7174,7 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
+        this.startToolUsage(event.toolCallId, event.toolName, event.args ?? {});
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
@@ -7015,11 +7189,12 @@ export class Thread {
         );
         this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "tool_calling" },
+          this.statusEvent("tool_calling"),
           { queueItemId: this.runningItem?.id },
         );
         break;
       case "tool_execution_end": {
+        this.finishToolUsage(event.toolCallId, event.result?.details, event.isError);
         const part = this.currentToolCalls.get(event.toolCallId);
         const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
@@ -7070,6 +7245,7 @@ export class Thread {
         break;
       }
       case "turn_end": {
+        this.toolUsageStarts.clear();
         const stopReason =
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
@@ -7212,7 +7388,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "idle";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "idle" },
+          this.statusEvent("idle"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -7363,6 +7539,13 @@ export class Thread {
     }
   }
 
+  /** Progress for a failed model call this turn retries. Not an error: see
+   * the `turn_retry` event. Logged too, as `emitError` is. */
+  private emitTurnRetry(retry: Omit<Extract<EngineEvent, { type: "turn_retry" }>, "type" | "threadId">): void {
+    console.warn(`[engine] thread retry session=${this.session.id} thread=${this.id} ${retry.action} ${retry.provider} ${retry.reason}${retry.attempt ? ` ${retry.attempt}/${retry.maxAttempts}` : ""}${retry.toProvider ? ` -> ${retry.toProvider}` : ""}`);
+    void this.session.emit({ type: "turn_retry", threadId: this.id, ...retry });
+  }
+
   private emitError(code: string, message: string): void {
     // Event delivery is best-effort (a dead WS drops it silently), so also
     // log to stderr — otherwise a failing turn (bad key, exhausted credits,
@@ -7434,7 +7617,8 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
+    // Every reader below looks at this submission only.
+    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
     const text =
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)
@@ -7826,6 +8010,14 @@ export function userContentBlocks(
  */
 export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
   if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  // Another agent's signal, such as a child's result, joins only a turn that
+  // runs another signal from the same owner. It never joins a person's own
+  // turn, where its text would act with that person's authority.
+  const stamp = readSignalStamp(item.metadata);
+  if (stamp) {
+    const runningStamp = readSignalStamp(running.metadata);
+    if (!runningStamp || runningStamp.senderOwner.type !== stamp.senderOwner.type || runningStamp.senderOwner.id !== stamp.senderOwner.id) return false;
+  }
   if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
   if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
   if (item.author?.externalSender || running.author?.externalSender) return false;
@@ -8184,4 +8376,17 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
 function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
   const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
   return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
+}
+
+function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsageFact, "outcome" | "errorCode"> {
+  if (details && typeof details === "object") {
+    if ("usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object") {
+      const status = details.usageOutcome;
+      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied" || status.outcome === "pending-approval")) {
+        return { outcome: status.outcome, errorCode: "errorCode" in status && typeof status.errorCode === "string" ? status.errorCode : null };
+      }
+    }
+    if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
+  }
+  return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
 }
