@@ -90,18 +90,29 @@ describe('browser lifecycle persistence', () => {
     expect(exported.truncated).toBe(false);
   });
 
-  it('fails closed when stopped state has neither a reader nor verified audit export', async () => {
+  it('deletes stopped state without listing the fleet when the provider has no retained-audit reader', async () => {
     const f = await fixture();
-    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');
+    const list = vi.fn(async () => { throw new Error('fleet listing must not run'); });
+    f.provider.list = list;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(list).not.toHaveBeenCalled();
+    expect(f.data.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toMatch(/no retained-audit reader; skipping the audit export check/);
   });
 
   it('allows cold suspended deletion only while the export checkpoint remains valid', async () => {
     const f = await fixture();
     f.provider.status = async () => ({ id: f.sandbox.id, state: 'idle' });
+    const read = vi.fn(async () => { throw new Error('reader must not run while the checkpoint is valid'); });
+    f.provider.readBrowserAudit = read;
     const hooks = browserSessionHooks('session', f.sessions, f.blobs, f.store);
     await hooks.sandboxLifecycle?.beforeStop(f.sandbox, 'suspend');
     await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
     await hooks.sandboxLifecycle?.afterReady?.(f.sandbox);
+    f.provider.readBrowserAudit = async () => ({ entries: [], total: 1 });
     await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');
   });
 
@@ -117,13 +128,17 @@ describe('browser lifecycle persistence', () => {
     const f = await fixture();
     f.provider.capabilities = () => ({ snapshot: 'none', persistentWorkspace: true, tunnels: false, warmPool: false, hibernation: false, customImage: false, coldStartEstimateMs: 0, browserAutomation: false });
     f.provider.list = async () => [{ id: f.sandbox.id, sessionId: 'session', createdAtMs: 0, browserEnabled: true }];
+    f.provider.readBrowserAudit = async () => ({ entries: [], total: 1 });
     await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');
   });
 
   it('skips audit checks for sandboxes recorded without browser state', async () => {
     const f = await fixture();
     f.provider.list = async () => [{ id: f.sandbox.id, sessionId: 'session', createdAtMs: 0, browserEnabled: false }];
+    const read = vi.fn(async () => { throw new Error('reader must not run for a sandbox without browser state'); });
+    f.provider.readBrowserAudit = read;
     await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
     expect(f.data.size).toBe(0);
   });
 });

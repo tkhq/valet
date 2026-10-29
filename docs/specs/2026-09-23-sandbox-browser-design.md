@@ -1291,7 +1291,11 @@ If compute is absent, the next attachment drains that cleanup without an earlier
 Final deletion waits for pending execution release and verifies retained-state audit export.
 An export failure preserves engine history and returns an actionable retry error.
 The Docker provider can read a stopped runtime's journal with a network-disabled helper.
-An unsupported retained-state reader fails closed when no verified suspension checkpoint exists.
+A provider without a retained-state reader deletes stopped state without an export and logs the skipped export.
+It checks the sandbox status before any fleet listing, so the delete costs one object read.
+The Kubernetes provider has no retained-state reader today.
+Until it does, a stopped browser sandbox on Kubernetes loses its audit journal at final deletion.
+This replaced a fail-closed rule on 2026-10-29: every stopped browser sandbox failed deletion forever, the retention sweeps retried that backlog nonstop, and the api event loop stalled.
 
 ### Browser dogfood corrections (2026-09-24)
 
