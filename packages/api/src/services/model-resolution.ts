@@ -64,10 +64,29 @@ import { TIER_SET, resolveTier } from "./model-tiers.js";
  * lookup + canonical-id round-trip both hold. Resolution deliberately
  * accepts ANY registry model — the curated selection on openrouter rows
  * (`services/openrouter.ts`) governs catalog/picker visibility only. */
-type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
+export type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
 function isKnownKindNamespace(ns: string): ns is KnownKind {
-  return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter";
+  return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter" || ns === "amazon-bedrock";
+}
+
+/** pi-ai reports a provider whose credentials live outside pi (today: Amazon
+ * Bedrock on the AWS credential chain) with this marker instead of a key. */
+const ENV_AUTHENTICATED_MARKER = "<authenticated>";
+
+/**
+ * The deployment-env credential for a known kind, as the resolver needs it.
+ * `present` says whether the env can authenticate at all; `apiKey` is what to
+ * hand pi-ai. For key-based providers both derive from the env var. For
+ * Amazon Bedrock pi-ai returns the `<authenticated>` marker when ANY AWS
+ * credential source exists (profile, static keys, IRSA token, bearer token);
+ * that marker must never be sent as a key — `apiKey: undefined` lets pi-ai
+ * fall through to the AWS SDK default chain.
+ */
+export function envCredentialFor(kind: KnownKind): { present: boolean; apiKey: string | undefined } {
+  const value = getEnvApiKey(kind);
+  if (value === ENV_AUTHENTICATED_MARKER) return { present: true, apiKey: undefined };
+  return { present: value !== undefined && value !== "", apiKey: value || undefined };
 }
 
 /** Shared no-key message for the two registry-model credential-throw sites. */
@@ -252,14 +271,15 @@ async function resolveConcreteSpec(
         registryModel(kind, modelId) ??
         (kind === "openrouter" ? synthesizeOpenrouterModel(row, modelId) : null);
       if (!model) return null;
-      const apiKey = (await orgKey(credentials, orgId, row.id)) ?? getEnvApiKey(kind);
-      if (apiKey === undefined) {
+      const org = await orgKey(credentials, orgId, row.id);
+      const env = envCredentialFor(kind);
+      if (org === undefined && !env.present) {
         throw new NoCredentialsError(
           noKeyMessage(canonicalId),
           registryModelWithCanonicalId(kind, modelId, canonicalId) ?? model,
         );
       }
-      return { model, apiKey, canonicalId };
+      return { model, apiKey: org ?? env.apiKey, canonicalId };
     }
     // Custom (openai_compatible): org key only, no env fallback.
     const model = synthesizeCustomModel(row, modelId);
@@ -277,14 +297,14 @@ async function resolveConcreteSpec(
     // it instead of burning the turn on a keyless model call.
     const model = registryModel(namespace, modelId);
     if (!model) return null;
-    const apiKey = getEnvApiKey(namespace);
-    if (apiKey === undefined) {
+    const env = envCredentialFor(namespace);
+    if (!env.present) {
       throw new NoCredentialsError(
         noKeyMessage(canonicalId),
         registryModelWithCanonicalId(namespace, modelId, canonicalId) ?? model,
       );
     }
-    return { model, apiKey, canonicalId };
+    return { model, apiKey: env.apiKey, canonicalId };
   }
 
   // A non-known namespace with no matching row is a deleted/unknown custom
