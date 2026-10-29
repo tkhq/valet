@@ -40,12 +40,29 @@ async function exportAudit(sessionId: string, sandboxId: string, snapshot: { ent
   await store.session(sessionId).put<AuditCheckpoint>('audit_exports', sandboxId, { key, sessionId, sandboxId });
 }
 
-/** Retained state must have a readable audit export before the provider deletes it. */
+/**
+ * Retained state must have a readable audit export before the provider deletes it.
+ *
+ * A stopped sandbox can only export its audit through `provider.readBrowserAudit`.
+ * A provider without that reader (kubernetes) lets the delete proceed and logs the
+ * skipped export. Before this, every stopped browser sandbox on such a provider
+ * failed here forever, and each attempt listed the whole fleet first; the
+ * hibernation reaper and child retention sweep retried that backlog nonstop,
+ * which pinned the api event loop and tripped its liveness probe (2026-10-29).
+ */
 export async function prepareBrowserSandboxStop(provider: SandboxProvider, sandboxId: string, reason: 'destroy' | 'suspend', sessions: SessionStore, blobs?: BlobStore, store?: PluginStore): Promise<void> {
+  let state: Awaited<ReturnType<SandboxProvider['status']>> | undefined;
+  if (!provider.readBrowserAudit) {
+    state = await provider.status(sandboxId);
+    if (state.state === 'idle' || state.state === 'released') {
+      console.log(`prepareBrowserSandboxStop: provider ${provider.backend} has no retained-audit reader; skipping the audit export check for stopped sandbox ${sandboxId}`);
+      return;
+    }
+  }
   const row = (await provider.list?.() ?? []).find((item) => item.id === sandboxId);
   if (!(row?.browserEnabled ?? provider.capabilities().browserAutomation)) return;
   if (!row?.sessionId) throw new Error('Browser sandbox ownership is missing. Restore its inventory before deleting retained state.');
-  const state = await provider.status(sandboxId);
+  state ??= await provider.status(sandboxId);
   if (state.state === 'idle' || state.state === 'released') {
     if (await hasAuditCheckpoint(row.sessionId, sandboxId, blobs, store)) return;
     if (!provider.readBrowserAudit) throw new Error('The retained browser audit has no verified export. Restore the sandbox or configure a retained-state audit reader before deleting it.');
