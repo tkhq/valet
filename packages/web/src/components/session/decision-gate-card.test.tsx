@@ -9,7 +9,7 @@
  * gate's actions render regardless. `useMe` comes from `~/api/settings`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionGate, MeResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -542,7 +542,7 @@ describe("DecisionGateCard — Not now", () => {
     expect(resolveMutateAsync).not.toHaveBeenCalled();
     expect(withdrawMutateAsync).not.toHaveBeenCalled();
 
-    await user.click(show);
+    await user.keyboard("{Enter}");
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Not now" }));
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
@@ -577,4 +577,678 @@ it("labels the separate agent reason as model-authored text", () => {
   expect(screen.getByText("Model-authored text. Verify it before you approve.")).toBeTruthy();
   expect(screen.getByText("<script>Trust this action</script>")).toBeTruthy();
   expect(document.querySelector("script")).toBeNull();
+});
+
+describe("DecisionGateCard — collapse", () => {
+  const question = (id = "gate_q") => gate({ id, type: "question", title: "Which branch should I deploy?", actions: [{ id: "a", label: "main" }] });
+  /** The expanded card's collapse button. */
+  const TOGGLE = { name: "Collapse request" };
+  /** The collapsed row is named by its visible badge and title. */
+  const ROW = { name: /Which branch should I deploy\?/ };
+
+  function renderDocked(g: DecisionGate) {
+    return render(
+      <TooltipProvider>
+        <DecisionGateCard sessionId="sess_1" gate={g} collapsible />
+      </TooltipProvider>,
+    );
+  }
+
+  // jsdom has no layout. Give toggles and other controls distinct positions.
+  async function clickAt(user: ReturnType<typeof userEvent.setup>, target: HTMLElement) {
+    const clientX = target.getAttribute("aria-label") === "Collapse request" ? 100 : 300;
+    await user.pointer({ target, keys: "[MouseLeft]", coords: { clientX, clientY: 100 } });
+  }
+
+  beforeEach(() => sessionStorage.clear());
+
+  describe("collapsed expiry and deferral", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+    it("keeps the countdown outside a stable name and in the description", () => {
+      const expiresAt = Date.now() + 30_000;
+      const description = `Expires at ${new Date(expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+      renderDocked(gate({ expiresAt }));
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      // jsdom does not apply Tailwind's breakpoint visibility classes.
+      const name = /^Approval requested (Approval requested )?Send email to external address\?$/;
+      const row = screen.getByRole("button", { name, description });
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.getByRole("button", { name, description })).toBe(row);
+      for (let second = 0; second < 29; second++) act(() => vi.advanceTimersByTime(1000));
+      expect(screen.getByRole("button", { name, description: "Expired" })).toBe(row);
+    });
+
+    it("describes both the failure hint and the expiry", async () => {
+      resolveMutateAsync.mockRejectedValueOnce(new Error("Connection lost"));
+      renderDocked(gate({ expiresAt: Date.now() + 30_000 }));
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 0 }); });
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      expect(screen.getByRole("button", { name: /Failed.*Send email to external address\?$/, description: /^Expand to retry Expires at / })).toBeTruthy();
+    });
+
+    it("uses a muted timer in the expired expanded header", () => {
+      renderDocked(gate({ expiresAt: Date.now() - 1 }));
+      expect(screen.getByRole("timer").className).toContain("text-muted");
+      expect(screen.getByRole("timer").className).not.toContain("text-amber");
+    });
+
+    it("shows the last-30-seconds timer and expires without moving focus", () => {
+      renderDocked(gate({ expiresAt: Date.now() + 30_000 }));
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      const row = screen.getByRole("button", { name: /Send email to external address/ });
+      expect(document.activeElement).toBe(row);
+      expect(screen.getByTestId("gate-collapsed").querySelector('[role="timer"]')?.textContent).toContain("Expires in 30 s");
+      expect(screen.queryByRole("timer")).toBeNull();
+      expect(screen.getByTestId("gate-collapsed").querySelector('[role="timer"]')?.className).toContain("text-amber-600");
+      expect(screen.getByTestId("gate-collapsed").querySelector(".animate-pulse")).toBeTruthy();
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.getByTestId("gate-collapsed").querySelector('[role="timer"]')?.textContent).toContain("Expires in 29 s");
+      expect(document.activeElement).toBe(row);
+      for (let second = 0; second < 29; second++) act(() => vi.advanceTimersByTime(1000));
+      expect(screen.getByTestId("gate-collapsed").querySelector('[role="timer"]')?.textContent).toContain("Expired");
+      expect(screen.getByTestId("gate-collapsed").querySelector(".animate-pulse")).toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it("shows an already-expired collapsed gate without a pulse", () => {
+      renderDocked(gate({ expiresAt: Date.now() - 1 }));
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      expect(screen.getByTestId("gate-collapsed").querySelector('[role="timer"]')?.textContent).toContain("Expired");
+      expect(screen.getByTestId("gate-collapsed").querySelector(".animate-pulse")).toBeNull();
+      expect(screen.getByTestId("gate-collapsed").querySelector(".bg-neutral-400")).toBeTruthy();
+    });
+
+    it("collapses an expiry reached while expanded with a muted dot", () => {
+      renderDocked(gate({ expiresAt: Date.now() + 1000 }));
+      act(() => vi.advanceTimersByTime(2000));
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      expect(screen.getByTestId("gate-collapsed").querySelector(".animate-pulse")).toBeNull();
+      expect(screen.getByRole("button", { name: /Send email/, description: "Expired" })).toBeTruthy();
+    });
+
+    it("swallows the second Show click when it lands on Cancel", () => {
+      renderDocked(gate());
+      fireEvent.click(screen.getByRole("button", { name: "Not now" }), { detail: 0 });
+      fireEvent.click(screen.getByRole("button", { name: "Show" }), { detail: 1, clientX: 300, clientY: 100 });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel and dismiss" }), { detail: 2, clientX: 300, clientY: 100 });
+      expect(withdrawMutateAsync).not.toHaveBeenCalled();
+    });
+  });
+
+  it("keeps Not now/Show separate from the persisted collapse preference", async () => {
+    const user = userEvent.setup();
+    renderDocked(gate());
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("button", TOGGLE)).toBeNull();
+    await user.keyboard("{Enter}");
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(screen.getByTestId("gate-collapsed")).toBeTruthy();
+    await clickAt(user, screen.getByRole("button", { name: /Send email to external address/ }));
+    expect(screen.getByRole("button", { name: "Not now" })).toBeTruthy();
+    expect(resolveMutateAsync).not.toHaveBeenCalled();
+    expect(withdrawMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("restores the upstream payload preview after collapse and expand", async () => {
+    const user = userEvent.setup();
+    renderDocked(gate({ body: 'Post it\n\ntool_id=slack.send_message\nargs={}', tool: { id: "slack.send_message", args: { channel: "#eng", text: "Hello" } } }));
+    expect(screen.getByRole("group", { name: "Preview" })).toBeTruthy();
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(screen.queryByRole("group", { name: "Preview" })).toBeNull();
+    await clickAt(user, screen.getByRole("button", { name: /Send email to external address/ }));
+    expect(screen.getByRole("group", { name: "Preview" }).textContent).toContain("#eng");
+  });
+
+  it("collapses to a compact bar and expands again", async () => {
+    const user = userEvent.setup();
+    renderDocked(question());
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(screen.queryByRole("textbox", { name: "Your answer" })).toBeNull();
+    const bar = screen.getByRole("button", ROW);
+    expect(bar.getAttribute("aria-expanded")).toBe("false");
+    expect(document.getElementById(bar.getAttribute("aria-controls")!)).toBeTruthy();
+    expect(bar.textContent).toContain("Question");
+    expect(bar.querySelector("[title]")?.getAttribute("title")).toBe(question().title);
+    expect(screen.getByText("Question")).toBeTruthy();
+    await clickAt(user, bar);
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeTruthy();
+    const toggle = screen.getByRole("button", TOGGLE);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toBeTruthy();
+  });
+
+  it("moves focus to the counterpart button after each toggle", async () => {
+    const user = userEvent.setup();
+    renderDocked(question());
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(document.activeElement).toBe(screen.getByRole("button", ROW));
+    expect(screen.getByRole("button", ROW).getAttribute("aria-expanded")).toBe("false");
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(screen.getByRole("button", TOGGLE));
+    expect(screen.getByRole("button", TOGGLE).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps the typed draft across collapse and expand without resolving", async () => {
+    const user = userEvent.setup();
+    renderDocked(question());
+    await user.type(screen.getByRole("textbox", { name: "Your answer" }), "use staging");
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    await clickAt(user, screen.getByRole("button", ROW));
+    expect((screen.getByRole("textbox", { name: "Your answer" }) as HTMLTextAreaElement).value).toBe("use staging");
+    expect(resolveMutateAsync).not.toHaveBeenCalled();
+    expect(withdrawMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("keeps attached images across collapse and expand", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("FileReader", class {
+      result = "data:image/png;base64,AAAA";
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+    });
+    renderDocked(question());
+    const input = screen.getByLabelText("Attach images to answer") as HTMLInputElement;
+    await user.upload(input, new File(["x"], "shot.png", { type: "image/png" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /remove/i }).length).toBeGreaterThan(0));
+    const before = screen.getAllByRole("button", { name: /remove/i }).length;
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    await clickAt(user, screen.getByRole("button", ROW));
+    expect(screen.getAllByRole("button", { name: /remove/i }).length).toBe(before);
+    const remove = screen.getAllByRole("button", { name: /remove/i })[0]!;
+    fireEvent.mouseDown(remove, { detail: 2 });
+    fireEvent.click(remove, { detail: 2 });
+    expect(screen.getAllByRole("button", { name: /remove/i }).length).toBe(before);
+    fireEvent.click(remove, { detail: 1 });
+    expect(screen.queryByRole("button", { name: /remove/i })).toBeNull();
+  });
+
+  it("restores the collapsed state from sessionStorage on remount", async () => {
+    const user = userEvent.setup();
+    const first = renderDocked(question("gate_r"));
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    first.unmount();
+    renderDocked(question("gate_r"));
+    expect(screen.queryByRole("textbox", { name: "Your answer" })).toBeNull();
+    expect(screen.getByRole("button", ROW).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("starts a new gate expanded even if another gate was collapsed", async () => {
+    const user = userEvent.setup();
+    const first = renderDocked(question("gate_1"));
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    first.unmount();
+    renderDocked(question("gate_2"));
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeTruthy();
+  });
+
+  it("caps persistence at the 50 most recently collapsed gates", () => {
+    const ids = Array.from({ length: 50 }, (_, i) => `old_${i}`);
+    sessionStorage.setItem("valet:collapsed-gates", JSON.stringify(ids));
+    const view = renderDocked(question("new_gate"));
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    expect(JSON.parse(sessionStorage.getItem("valet:collapsed-gates")!)).toEqual([...ids.slice(1), "new_gate"]);
+    view.unmount();
+    renderDocked(question("old_0"));
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeTruthy();
+  });
+
+  it("removes an expanded gate from persistence", () => {
+    renderDocked(question());
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    fireEvent.click(screen.getByRole("button", ROW));
+    expect(sessionStorage.getItem("valet:collapsed-gates")).toBe("[]");
+  });
+
+  it.each(["not json", "{}", '[null, 1]'])("ignores invalid persisted data: %s", (stored) => {
+    sessionStorage.setItem("valet:collapsed-gates", stored);
+    renderDocked(question());
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeTruthy();
+  });
+
+  it("syncs collapsible changes without losing the draft or stored preference", () => {
+    const g = question();
+    const view = render(<DecisionGateCard sessionId="sess_1" gate={g} collapsible />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "keep this" } });
+    fireEvent.click(screen.getByRole("button", TOGGLE));
+    view.rerender(<DecisionGateCard sessionId="sess_1" gate={g} collapsible={false} />);
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toHaveProperty("value", "keep this");
+    expect(screen.queryByRole("button", TOGGLE)).toBeNull();
+    view.rerender(<DecisionGateCard sessionId="sess_1" gate={g} collapsible />);
+    expect(screen.getByRole("button", ROW)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", ROW));
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toHaveProperty("value", "keep this");
+  });
+
+  it("disables the collapse button while busy", () => {
+    resolvePending = true;
+    renderDocked(question());
+    expect(screen.getByRole("button", TOGGLE).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("does not crash when sessionStorage throws", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    renderDocked(question());
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(screen.getByRole("button", ROW).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("collapses approval gates", async () => {
+    const user = userEvent.setup();
+    renderDocked(gate());
+    await clickAt(user, screen.getByRole("button", TOGGLE));
+    expect(screen.getByText("Approval requested")).toBeTruthy();
+    expect(screen.getByText("Send email to external address?")).toBeTruthy();
+  });
+
+  describe("repeat clicks and timing", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      resolveMutateAsync.mockClear();
+      withdrawMutateAsync.mockClear();
+    });
+    afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+    function expandApproval() {
+      renderDocked(gate());
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 1, clientX: 100, clientY: 100 });
+      fireEvent.click(screen.getByRole("button", { name: /Send email to external address\?/ }), { detail: 1, clientX: 300, clientY: 100 });
+    }
+    const wait = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+
+    it("honours a deliberate detail-1 tap immediately after expand", () => {
+      expandApproval();
+      fireEvent.click(screen.getByRole("button", { name: "Approve once" }), { detail: 1 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([300, 700])("handles a separate click at the old chevron after %ims", (elapsed) => {
+      expandApproval();
+      wait(elapsed);
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 1, clientX: 310, clientY: 110 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(elapsed < 600 ? 0 : 1);
+    });
+
+    it("keeps a mousedown at 500ms swallowed through release at 650ms", () => {
+      expandApproval();
+      const deny = screen.getByRole("button", { name: "Deny" });
+      const press = { detail: 1, clientX: 300, clientY: 100 };
+      wait(500);
+      fireEvent.mouseDown(deny, press);
+      wait(150);
+      fireEvent.mouseUp(deny, press);
+      fireEvent.click(deny, press);
+      fireEvent.doubleClick(deny, press);
+      expect(resolveMutateAsync).not.toHaveBeenCalled();
+      // A new press after the window is deliberate, even at the same point.
+      fireEvent.mouseDown(deny, press);
+      fireEvent.mouseUp(deny, press);
+      fireEvent.click(deny, press);
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    function pointerPress(target: HTMLElement, type: string, pointerType: string, clientX = 300) {
+      // jsdom has no PointerEvent, so add pointerType to the shared mouse fields.
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 100 });
+      Object.defineProperty(event, "pointerType", { value: pointerType });
+      return fireEvent(target, event);
+    }
+
+    it.each(["mouse", "touch"])("latches a %s pointer press at 450ms through release at 700ms", (pointerType) => {
+      expandApproval();
+      const deny = screen.getByRole("button", { name: "Deny" });
+      const press = { detail: 1, clientX: 300, clientY: 100 };
+      const hit = vi.fn();
+      for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick"]) {
+        deny.addEventListener(type, hit);
+      }
+      wait(450);
+      expect(pointerPress(deny, "pointerdown", pointerType)).toBe(true);
+      // Touch compatibility mousedown arrives after pointerup, not pointerdown.
+      if (pointerType === "mouse") fireEvent.mouseDown(deny, press);
+      wait(250);
+      expect(pointerPress(deny, "pointerup", pointerType)).toBe(true);
+      if (pointerType === "touch") fireEvent.mouseDown(deny, press);
+      fireEvent.mouseUp(deny, press);
+      fireEvent.click(deny, press);
+      fireEvent.doubleClick(deny, press);
+      expect(hit).not.toHaveBeenCalled();
+      expect(resolveMutateAsync).not.toHaveBeenCalled();
+    });
+
+    it.each(["mouse", "touch"])("uses the %s radius for a separate press with 30px drift", (pointerType) => {
+      expandApproval();
+      const deny = screen.getByRole("button", { name: "Deny" });
+      const press = { detail: 1, clientX: 330, clientY: 100 };
+      wait(150);
+      pointerPress(deny, "pointerdown", pointerType, 330);
+      pointerPress(deny, "pointerup", pointerType, 330);
+      fireEvent.mouseDown(deny, press);
+      fireEvent.mouseUp(deny, press);
+      fireEvent.click(deny, press);
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(pointerType === "touch" ? 0 : 1);
+    });
+
+    it("allows Approve at a different point after 100ms", () => {
+      expandApproval();
+      wait(100);
+      fireEvent.click(screen.getByRole("button", { name: "Approve once" }), { detail: 1, clientX: 200, clientY: 100 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["positional", "repeat"])("stops the full %s press without cancelling pointer defaults", (mode) => {
+      expandApproval();
+      const target = screen.getByRole("button", { name: "Deny" });
+      const hit = vi.fn();
+      const types = ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick"];
+      for (const type of types) target.addEventListener(type, hit);
+      wait(mode === "repeat" ? 1000 : 300);
+      for (const type of types) {
+        // jsdom lacks PointerEvent. MouseEvent supplies the shared fields.
+        const pointer = type.startsWith("pointer");
+        const event = new MouseEvent(type, { bubbles: true, cancelable: true,
+          detail: mode === "repeat" ? 2 : pointer ? 0 : 1, clientX: 300, clientY: 100 });
+        expect(fireEvent(target, event)).toBe(pointer);
+      }
+      expect(hit).not.toHaveBeenCalled();
+      expect(resolveMutateAsync).not.toHaveBeenCalled();
+    });
+
+    it("does not re-collapse on the second click over the chevron", () => {
+      expandApproval();
+      fireEvent.mouseDown(screen.getByRole("button", TOGGLE), { detail: 2 });
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 2 });
+      fireEvent.doubleClick(screen.getByRole("button", TOGGLE), { detail: 2 });
+      expect(screen.getByRole("dialog")).toBeTruthy();
+      expect(document.activeElement).toBe(screen.getByRole("button", TOGGLE));
+    });
+
+    it("swallows a repeat over Show more but permits a new tap", () => {
+      vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(200);
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(68);
+      expandApproval();
+      const showMore = screen.getByRole("button", { name: "Show more" });
+      fireEvent.mouseDown(showMore, { detail: 2 });
+      fireEvent.click(showMore, { detail: 2 });
+      expect(showMore.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(showMore, { detail: 1 });
+      expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("does not arm for keyboard expand", () => {
+      renderDocked(gate());
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      fireEvent.click(screen.getByRole("button", { name: /Send email/ }), { detail: 0 });
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 2 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it("removes the expand listeners on unmount", () => {
+      expandApproval();
+      cleanup();
+      const hit = vi.fn();
+      const target = document.createElement("button");
+      target.addEventListener("click", hit);
+      document.body.append(target);
+      fireEvent.click(target, { detail: 2 });
+      expect(hit).toHaveBeenCalledTimes(1);
+      target.remove();
+    });
+
+    it("resolves a keyboard Deny right after a keyboard expand", () => {
+      renderDocked(gate());
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      fireEvent.click(screen.getByRole("button", { name: /Send email to external address\?/ }), { detail: 0 });
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 0 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it("resolves a keyboard Deny right after a pointer expand", () => {
+      expandApproval();
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 0 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it("submits with Cmd+Enter right after a pointer expand", () => {
+      renderDocked(question());
+      fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "kept draft" } });
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 1, clientX: 100, clientY: 100 });
+      fireEvent.click(screen.getByRole("button", ROW), { detail: 1, clientX: 300, clientY: 100 });
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Your answer" }), { key: "Enter", metaKey: true });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+      expect(resolveMutateAsync.mock.calls[0]?.[0].body.value).toBe("kept draft");
+    });
+
+    it("swallows repeat Deny, Approve and Cancel clicks after one second", () => {
+      expandApproval();
+      wait(1000);
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 2 });
+      fireEvent.click(screen.getByRole("button", { name: "Approve once" }), { detail: 3 });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel and dismiss" }), { detail: 2 });
+      expect(resolveMutateAsync).not.toHaveBeenCalled();
+      expect(withdrawMutateAsync).not.toHaveBeenCalled();
+    });
+
+    it("honours a new pointer gesture and a keyboard activation", () => {
+      expandApproval();
+      fireEvent.click(screen.getByRole("button", { name: "Deny" }), { detail: 1 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "Approve once" }), { detail: 0 });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(2);
+    });
+
+    it("guards Submit, option buttons and Attach images the same way", () => {
+      const pick = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+      renderDocked(question());
+      fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "x" } });
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 1, clientX: 100, clientY: 100 });
+      fireEvent.click(screen.getByRole("button", ROW), { detail: 1, clientX: 300, clientY: 100 });
+      wait(1000);
+      fireEvent.click(screen.getByRole("button", { name: "Attach images" }), { detail: 2 });
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }), { detail: 2 });
+      fireEvent.click(screen.getByRole("button", { name: "main" }), { detail: 2 });
+      expect(pick).not.toHaveBeenCalled();
+      expect(resolveMutateAsync).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Attach images" }), { detail: 1 });
+      expect(pick).toHaveBeenCalledTimes(1);
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Your answer" }), { key: "Enter", ctrlKey: true });
+      expect(resolveMutateAsync).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("with an error showing", () => {
+    const FAILED = /Failed/;
+
+    it("allows collapse, shows the failed state in the row's name, and expands to the alert", async () => {
+      const user = userEvent.setup();
+      resolveMutateAsync.mockRejectedValueOnce(new Error("Connection lost"));
+      renderDocked(gate());
+      await clickAt(user, screen.getByRole("button", { name: "Deny" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("Connection lost");
+      await clickAt(user, screen.getByRole("button", TOGGLE));
+      const row = screen.getByTestId("gate-collapsed");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(row.textContent).toMatch(FAILED);
+      expect(row.querySelector(".bg-danger-500")).toBeTruthy();
+      expect(row.querySelector(".animate-pulse")).toBeNull();
+      const button = screen.getByRole("button", { name: FAILED });
+      expect(button.getAttribute("aria-expanded")).toBe("false");
+      expect(button.textContent).toContain("Send email to external address?");
+      await clickAt(user, button);
+      expect((await screen.findByRole("alert")).textContent).toContain("Connection lost");
+    });
+
+    it("shows no failed text on a collapsed row without an error", async () => {
+      const user = userEvent.setup();
+      renderDocked(gate());
+      await clickAt(user, screen.getByRole("button", TOGGLE));
+      expect(screen.getByTestId("gate-collapsed").textContent).not.toMatch(FAILED);
+    });
+
+    it("keeps collapse available after a failing retry", async () => {
+      const user = userEvent.setup();
+      resolveMutateAsync.mockRejectedValueOnce(new Error("first")).mockRejectedValueOnce(new Error("second"));
+      renderDocked(gate());
+      await clickAt(user, screen.getByRole("button", { name: "Deny" }));
+      await screen.findByText(/first/);
+      await clickAt(user, screen.getByRole("button", { name: "Approve once" }));
+      await screen.findByText(/second/);
+      const toggle = screen.getByRole("button", TOGGLE) as HTMLButtonElement;
+      expect(toggle.disabled).toBe(false);
+      await clickAt(user, toggle);
+      expect(screen.getByRole("button", { name: FAILED })).toBeTruthy();
+    });
+
+    it("keeps collapse available after a rejected image", async () => {
+      const user = userEvent.setup({ applyAccept: false });
+      renderDocked(question());
+      await user.upload(screen.getByLabelText("Attach images to answer"), new File(["x"], "notes.txt", { type: "text/plain" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("notes.txt is not a supported image");
+      const toggle = screen.getByRole("button", TOGGLE) as HTMLButtonElement;
+      expect(toggle.disabled).toBe(false);
+      await clickAt(user, toggle);
+      expect(screen.getByRole("button", { name: /Attachment rejected/ })).toBeTruthy();
+    });
+
+    it("switches from the attachment wording to Failed once an action then fails", async () => {
+      const user = userEvent.setup({ applyAccept: false });
+      resolveMutateAsync.mockRejectedValueOnce(new Error("Connection lost"));
+      renderDocked(question());
+      await user.upload(screen.getByLabelText("Attach images to answer"), new File(["x"], "notes.txt", { type: "text/plain" }));
+      await screen.findByText(/notes.txt is not a supported image/);
+      await clickAt(user, screen.getByRole("button", { name: "main" }));
+      await screen.findByText(/Connection lost/);
+      await clickAt(user, screen.getByRole("button", TOGGLE));
+      expect(screen.getByRole("button", { name: FAILED })).toBeTruthy();
+      expect(screen.getByTestId("gate-collapsed").textContent).not.toMatch(/Attachment rejected/);
+    });
+
+    it("says an attachment was rejected, not that there is something to retry", async () => {
+      const user = userEvent.setup({ applyAccept: false });
+      renderDocked(question());
+      await user.upload(screen.getByLabelText("Attach images to answer"), new File(["x"], "notes.txt", { type: "text/plain" }));
+      await screen.findByRole("alert");
+      await clickAt(user, screen.getByRole("button", TOGGLE));
+      const row = screen.getByTestId("gate-collapsed");
+      expect(row.querySelector(".bg-danger-500")).toBeTruthy();
+      expect(row.textContent).not.toMatch(FAILED);
+      expect(screen.getByRole("button", { name: /Attachment rejected/ })).toBeTruthy();
+    });
+  });
+
+  describe("stray click after collapsing", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+    /** A page element under the pointer after the layout shift. */
+    function addTarget() {
+      const hit = vi.fn();
+      const target = document.createElement("button");
+      target.addEventListener("click", hit);
+      document.body.append(target);
+      return { hit, target };
+    }
+    const wait = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+    const collapseByPointer = () => fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 1, clientX: 100, clientY: 100 });
+
+    it.each(["button", "a"])("swallows double- and triple-click repeats over a transcript %s", (tag) => {
+      const hit = vi.fn();
+      const target = document.createElement(tag);
+      target.addEventListener("click", hit);
+      document.body.append(target);
+      renderDocked(gate());
+      collapseByPointer();
+      fireEvent.click(target, { detail: 2 });
+      fireEvent.click(target, { detail: 3 });
+      expect(hit).not.toHaveBeenCalled();
+      target.remove();
+    });
+
+    it("lets keyboard (detail 0) and single (detail 1) clicks through immediately", () => {
+      const { hit, target } = addTarget();
+      renderDocked(gate());
+      collapseByPointer();
+      wait(100);
+      fireEvent.click(target, { detail: 0 });
+      expect(hit).toHaveBeenCalledTimes(1);
+      cleanup();
+      renderDocked(gate({ id: "gate_2" }));
+      collapseByPointer();
+      fireEvent.click(target, { detail: 1 });
+      expect(hit).toHaveBeenCalledTimes(2);
+      target.remove();
+    });
+
+    it("stops swallowing once a single click starts a new gesture", () => {
+      const { hit, target } = addTarget();
+      renderDocked(gate());
+      collapseByPointer();
+      fireEvent.click(target, { detail: 1 });
+      fireEvent.click(target, { detail: 2 });
+      expect(hit).toHaveBeenCalledTimes(2);
+      target.remove();
+    });
+
+    it("cancels a repeat mousedown, so focus stays on the expand row, and swallows dblclick", () => {
+      const { hit, target } = addTarget();
+      renderDocked(gate());
+      collapseByPointer();
+      const row = screen.getByRole("button", { name: /Send email to external address\?/ });
+      expect(document.activeElement).toBe(row);
+      expect(fireEvent.mouseDown(target, { detail: 2 })).toBe(false);
+      const dbl = vi.fn();
+      target.addEventListener("dblclick", dbl);
+      fireEvent.doubleClick(target, { detail: 2 });
+      expect(dbl).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(row);
+      // A first mousedown (detail 1) is a new gesture: it passes and disarms.
+      expect(fireEvent.mouseDown(target, { detail: 1 })).toBe(true);
+      fireEvent.click(target, { detail: 2 });
+      expect(hit).toHaveBeenCalledTimes(1);
+      target.remove();
+    });
+
+    it("swallows slow repeats without a timer", () => {
+      const { hit, target } = addTarget();
+      renderDocked(gate());
+      collapseByPointer();
+      wait(1000);
+      fireEvent.click(target, { detail: 2 });
+      wait(1000);
+      fireEvent.click(target, { detail: 3 });
+      expect(hit).not.toHaveBeenCalled();
+      target.remove();
+    });
+
+    it("does not arm for a keyboard collapse (detail 0)", () => {
+      const { hit, target } = addTarget();
+      renderDocked(gate());
+      fireEvent.click(screen.getByRole("button", TOGGLE), { detail: 0 });
+      fireEvent.click(target, { detail: 2 });
+      expect(hit).toHaveBeenCalledTimes(1);
+      target.remove();
+    });
+
+    it("removes the listener on unmount", () => {
+      const { hit, target } = addTarget();
+      const view = renderDocked(gate());
+      collapseByPointer();
+      view.unmount();
+      fireEvent.click(target, { detail: 2 });
+      expect(hit).toHaveBeenCalledTimes(1);
+      target.remove();
+    });
+  });
+
+  it("has no collapse toggle in the default placement or the notification popover", () => {
+    renderCard(gate());
+    expect(screen.queryByRole("button", TOGGLE)).toBeNull();
+    cleanup();
+    renderCard(gate(), "notification");
+    expect(screen.queryByRole("button", TOGGLE)).toBeNull();
+  });
 });

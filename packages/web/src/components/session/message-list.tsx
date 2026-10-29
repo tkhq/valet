@@ -115,10 +115,11 @@ export function MessageList({
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const observedHeightRef = useRef<number | null>(null);
   const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
-  // effect reads it in the same tick a message lands. This mirror exists
-  // only so the button can render, and it flips at the same threshold.
+  // effect reads it in the same tick a message lands. Latest follows the real
+  // position, which a resize can change without changing the reader's pin.
   const [scrolledAway, setScrolledAway] = useState(false);
 
   const visible = useMemo(() => {
@@ -158,18 +159,27 @@ export function MessageList({
     }
   }, [visible, scrollHeader.syncPosition]);
 
-  // A reader at the bottom stays at the bottom when the list gets shorter (a
-  // card opens above the composer) or its content grows without a new
-  // message (a running tool card expands, an image loads). Otherwise the next
-  // scroll event reads the gap as the reader scrolling away.
+  // Pinned readers intentionally follow every resize. The browser handles
+  // unpinned positions; a collapse that reaches the end can pin the reader.
   const hasContent = visible.length > 0;
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (!stickToBottomRef.current) return;
-      el.scrollTop = el.scrollHeight;
-      scrollHeader.syncPosition();
+    const observer = new ResizeObserver((entries) => {
+      if (
+        !el.clientHeight ||
+        entries.some((entry) => entry.target === el && !entry.contentRect.height)
+      ) {
+        return;
+      }
+      observedHeightRef.current = el.clientHeight;
+      if (stickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+        scrollHeader.syncPosition();
+      }
+      // Content grows on every streamed chunk; keep the state when the side did not flip.
+      const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 80;
+      setScrolledAway((prev) => (prev === away ? prev : away));
     });
     observer.observe(el);
     if (contentRef.current) observer.observe(contentRef.current);
@@ -178,11 +188,21 @@ export function MessageList({
 
   function onScroll() {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el?.clientHeight) return;
     scrollHeader.onScroll();
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     const nearBottom = distanceFromBottom < 80; // "near bottom"
-    stickToBottomRef.current = nearBottom;
+    const oldHeight = observedHeightRef.current;
+    if (
+      stickToBottomRef.current && oldHeight !== null &&
+      Math.abs(el.clientHeight - oldHeight) > 2
+    ) {
+      // Anchoring stays near the end at the old or new height. A same-frame
+      // reader scroll can leave both, and must unpin before the resize report.
+      stickToBottomRef.current = nearBottom || el.scrollHeight - el.scrollTop - oldHeight < 80;
+    } else {
+      stickToBottomRef.current = nearBottom;
+    }
     // Return `prev` unchanged when the side did not flip. Scroll fires on
     // every wheel tick, and React skips the re-render on an equal value.
     setScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));

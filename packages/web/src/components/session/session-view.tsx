@@ -484,7 +484,7 @@ export function SessionView({
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           <PinnedPlan threadId={effectiveThreadId} />
           {pendingGate && (
-            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
           <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
