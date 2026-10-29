@@ -48,7 +48,7 @@ import {
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
-import type { CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
+import type { CompactionConfig, CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
 import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
 import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
@@ -903,6 +903,8 @@ export class EngineHost {
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
   private configWrites = new Map<string, Promise<void>>();
+  /** Each org's compaction window in this process: a token count, or null for the engine default. */
+  private orgCompactionWindows = new Map<string, number | null>();
   private draining = new Map<string, Session>();
   private shuttingDown = false;
   /** Repo keys whose conservative resource-withholding warning is active. */
@@ -1421,6 +1423,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
+            compaction: await this.orgCompaction(meta.orgId),
             systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1460,6 +1463,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
+          compaction: await this.orgCompaction(meta.orgId),
           systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -3287,6 +3291,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(meta.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
       sampling: { reasoning },
+      compaction: await this.orgCompaction(meta.orgId),
       ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
       ...(principal.type === "team" && !execution && !legacyRuntime ? {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
@@ -3849,6 +3854,37 @@ export class EngineHost {
   private makeResolveFallbackModel(orgId: string) {
     return (request: Parameters<typeof resolveModelFallback>[3]) =>
       resolveModelFallback(this.opts.db, this.opts.engineCredentials, orgId, request);
+  }
+
+  /**
+   * The compaction config for an org's sessions. `contextBudgetTokens` is a
+   * getter over this process's per-org window, so a change in Settings →
+   * Models applies to loaded sessions at their next check, with no rebuild.
+   * Null (never set) leaves the engine default.
+   */
+  private async orgCompaction(orgId: string): Promise<CompactionConfig> {
+    const windows = this.orgCompactionWindows;
+    if (!windows.has(orgId)) windows.set(orgId, await this.readOrgCompactionWindow(orgId));
+    return {
+      get contextBudgetTokens() {
+        return windows.get(orgId) ?? undefined;
+      },
+    };
+  }
+
+  private async readOrgCompactionWindow(orgId: string): Promise<number | null> {
+    if (!this.opts.db) return null;
+    const rows = await this.opts.db
+      .select({ window: orgs.compactionWindowTokens })
+      .from(orgs)
+      .where(eq(orgs.id, orgId))
+      .limit(1);
+    return rows[0]?.window ?? null;
+  }
+
+  /** Apply a changed org compaction window to this process's loaded sessions. */
+  setOrgCompactionWindow(orgId: string, window: number | null): void {
+    this.orgCompactionWindows.set(orgId, window);
   }
 
   private makeResolveModel(orgId: string): (spec: string) => Promise<ResolvedModel | null> {
@@ -4533,6 +4569,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
+      compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -4733,6 +4770,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
+      compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one

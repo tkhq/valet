@@ -1,0 +1,40 @@
+# Compaction recall: exact numbers from the first turn must survive
+# compaction. Summaries tend to round or drop figures. The expected total
+# is the script-computed sum 412+388+455+301+517+362 = 2435.
+id: compaction-recall-figures
+description: Exact figures survive compaction.
+context_budget_tokens: 1500
+# No tools: recall must come from the summary and the verbatim tail, not
+# from memory writes or files the agent saved earlier.
+tools: []
+turns:
+  - role: user
+    content: >-
+      Log these benchmark latencies for later, in milliseconds: alpha
+      412, bravo 388, charlie 455, delta 301, echo 517, foxtrot 362.
+      Reply in one line.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words on how garbage collectors decide
+      when to run.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words on consistent hashing.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words on the CAP theorem in practice.
+  - role: user
+    content: >-
+      From the benchmark latencies I logged: which variant was fastest,
+      which was slowest, and what is the total of all six? Answer in one
+      line with the numbers.
+timeout_ms: 300000
+checks:
+  - type: min_compactions
+    value: 1
+  - type: output_contains
+    pattern: '[Dd]elta'
+  - type: output_contains
+    pattern: '[Ee]cho'
+  - type: output_contains
+    pattern: '2,?435'

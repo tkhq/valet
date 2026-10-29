@@ -68,6 +68,12 @@ export const orgs = pgTable("orgs", {
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
   /** Allow members to install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
+  /**
+   * Context size, in tokens, that threads compact to stay under (the engine's
+   * `compaction.contextBudgetTokens`). Null: the Valet default (200k). 0: no
+   * cap, so threads compact only near the model's context limit.
+   */
+  compactionWindowTokens: integer("compaction_window_tokens"),
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),

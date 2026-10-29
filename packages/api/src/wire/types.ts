@@ -1076,7 +1076,7 @@ export interface ThreadContextResponse {
   context: {
     /** Estimated tokens the next model request sends. */
     tokens: number;
-    /** Usable budget: the context window minus the output reserve. */
+    /** Compaction budget: the usable context (window minus output reserve), capped by `compaction.contextBudgetTokens`. */
     limit: number;
     /** The model's full context window. */
     contextWindow: number;
@@ -4104,6 +4104,12 @@ export interface OrgSettingsResponse {
   allowAnonymousImageBakes?: boolean;
   /** Whether members can install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean;
+  /**
+   * Context size, in tokens, that threads compact to stay under. Null: the
+   * Valet default (200k). 0: no cap; threads compact only near the model's
+   * context limit. Absent on older APIs.
+   */
+  compactionWindowTokens?: number | null;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
@@ -4112,6 +4118,8 @@ export interface PatchOrgSettingsRequest {
   allowPublicArtifacts?: boolean;
   allowAnonymousImageBakes?: boolean;
   allowPersonalInstallations?: boolean;
+  /** A token count from 50,000 to 1,000,000, 0 for no cap, or null for the Valet default. */
+  compactionWindowTokens?: number | null;
 }
 
 // ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──
@@ -4654,6 +4662,12 @@ export interface OrgResponse {
   allowAnonymousImageBakes?: boolean;
   /** Absent on older APIs. Defaults to true. */
   allowPersonalInstallations?: boolean;
+  /**
+   * Context size, in tokens, that threads compact to stay under. Null: the
+   * Valet default (200k). 0: no cap; threads compact only near the model's
+   * context limit. Absent on older APIs.
+   */
+  compactionWindowTokens?: number | null;
   /**
    * The gateable plugins on this deployment, with this org's entitlement and
    * this caller's effective access (plugin-entitlements design). A plugin's

@@ -1,0 +1,39 @@
+# Compaction recall: a standing instruction from the first turn must still
+# shape answers after compaction. Forgotten preferences are the usual way a
+# summary makes the agent worse.
+id: compaction-standing-instructions
+description: A standing format rule survives compaction.
+context_budget_tokens: 1500
+# No tools: recall must come from the summary and the verbatim tail, not
+# from memory writes or files the agent saved earlier.
+tools: []
+turns:
+  - role: user
+    content: >-
+      For this whole conversation, end every answer with the exact line
+      "-- Ops desk", and never use the word "leverage". Reply "ok".
+  - role: user
+    content: >-
+      Write about 500 words on how DNS resolution works, from the stub
+      resolver to the authoritative server.
+  - role: user
+    content: >-
+      Write about 500 words on why teams adopt feature flags and the
+      risks they add.
+  - role: user
+    content: >-
+      Write about 500 words on how to run a blameless incident review.
+  - role: user
+    content: >-
+      Write a three-sentence note to the team that announces Friday's
+      maintenance window from 22:00 to 23:30 UTC.
+timeout_ms: 300000
+checks:
+  - type: min_compactions
+    value: 1
+  - type: output_contains
+    pattern: '-- Ops desk\s*$'
+  - type: output_not_contains
+    pattern: '[Ll]everag'
+  - type: output_contains
+    value: "22:00"

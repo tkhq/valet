@@ -2,7 +2,7 @@ import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
-import type { CompactionConfig, SessionEntry } from "./types.js";
+import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
 
 /**
  * Compaction primitives — all pure functions. Orchestration that calls an
@@ -23,6 +23,7 @@ const DEFAULTS = {
   pruneProtectTokens: 40_000,
   pruneMinimumTokens: 20_000,
   toolOutputMaxChars: 2_000,
+  contextBudgetCap: 200_000,
 } as const;
 
 /** Fraction of the usable context kept verbatim as the tail at a compaction. */
@@ -203,6 +204,44 @@ export function usableTokens(model: Model<any>, cfg?: CompactionConfig): number 
   const reserve =
     cfg?.reserveTokens ?? Math.min(DEFAULTS.reserveCap, model.maxTokens ?? DEFAULTS.reserveCap);
   return Math.max(0, context - reserve);
+}
+
+/**
+ * Context size that compaction keeps a thread under between turns, and the
+ * base of the tail budget. It is the usable context, capped at
+ * `cfg.contextBudgetTokens` (default 200k; `0` removes the cap).
+ *
+ * Without the cap, a 1M-token model compacted only near 980k. Every request
+ * then re-sent the whole thread, and each reply after the prompt cache
+ * expired re-wrote it at the cache-write rate. Production usage showed $4 to
+ * $7 for a short reply at 800k. Hard overflow still uses `usableTokens`.
+ */
+export function compactionBudget(model: Model<any>, cfg?: CompactionConfig): number {
+  const usable = usableTokens(model, cfg);
+  const cap = cfg?.contextBudgetTokens ?? DEFAULTS.contextBudgetCap;
+  return cap > 0 ? Math.min(usable, cap) : usable;
+}
+
+/** Idle delays that beat each prompt-cache retention to its expiry (1h and 5m). */
+const IDLE_COMPACTION_LONG_MS = 55 * 60_000;
+const IDLE_COMPACTION_SHORT_MS = 4 * 60_000;
+
+/**
+ * How long an interactive thread over its compaction budget waits idle
+ * before it compacts. `cfg.idleCompactionMs` overrides it, and `0` means
+ * "compact at turn end". By default the delay ends shortly before the
+ * thread's prompt cache expires, so the person keeps a warm cache while
+ * they work and the next reply after a break re-writes only the compacted
+ * context. A session without a prompt cache compacts at turn end.
+ */
+export function idleCompactionDelayMs(
+  options: Pick<CreateSessionOptions, "compaction" | "cacheRetention" | "purpose">,
+): number {
+  const configured = options.compaction?.idleCompactionMs;
+  if (configured !== undefined) return Math.max(0, configured);
+  const retention = options.cacheRetention ?? (options.purpose === "orchestrator" ? "long" : "short");
+  if (retention === "none") return 0;
+  return retention === "long" ? IDLE_COMPACTION_LONG_MS : IDLE_COMPACTION_SHORT_MS;
 }
 
 /** Fraction of usable context above which one inbound message spills to a file. */
@@ -456,7 +495,7 @@ export interface SelectCutPointOptions {
  * Pick a cut point so the tail (kept verbatim) fits within the tail budget
  * derived from the model's usable context. Mirrors OpenCode's select():
  *
- * - Compute tail budget from `usable * 0.25` clamped to [min, max].
+ * - Compute tail budget from `compactionBudget * 0.25` clamped to [min, max].
  * - Take the last `tailTurns` turns and walk them oldest → newest from the end,
  *   accumulating size. Keep adding whole turns until the next one would
  *   overflow. If the very next (older) turn alone is too large to fit, split
@@ -475,9 +514,10 @@ export function selectCutPoint(opts: SelectCutPointOptions): CutPoint {
   }
 
   const usable = usableTokens(model, cfg);
+  const tail = tailBudget(compactionBudget(model, cfg), cfg);
   const budget = opts.reservedTokens
-    ? Math.max(0, Math.min(tailBudget(usable, cfg), usable - opts.reservedTokens))
-    : tailBudget(usable, cfg);
+    ? Math.max(0, Math.min(tail, usable - opts.reservedTokens))
+    : tail;
   const allTurns = turns(entries);
   if (allTurns.length === 0) {
     return { cutIndex: entries.length, tailStartId: undefined, fallbackToFloor: false };

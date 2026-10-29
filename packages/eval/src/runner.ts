@@ -292,6 +292,11 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
+    ...(evalCase.context_budget_tokens !== undefined
+      // Idle delay 0: a case's turns arrive back to back, so it compacts at
+      // each turn end instead of waiting for an idle thread.
+      ? { compaction: { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 } }
+      : {}),
     ...(evalCase.temperature !== undefined || evalCase.reasoning !== undefined || opts.reasoning !== undefined
       ? {
           sampling: {

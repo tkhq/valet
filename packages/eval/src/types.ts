@@ -116,6 +116,8 @@ export interface Trajectory {
   durationMs: number;
   /** Stop reason of the final assistant message. */
   stopReason?: string;
+  /** Compaction checkpoints the thread wrote. */
+  compactions?: number;
   metadata?: Record<string, unknown>;
   /**
    * Child trajectories for orchestrator cases — one per child session the
@@ -182,6 +184,12 @@ export type DeterministicCheck =
       per_submission?: boolean;
     }
   | { type: "max_tokens"; value: number }
+  /**
+   * The thread wrote at least `value` compaction checkpoints. Pair it with
+   * `context_budget_tokens` so a recall case fails when compaction never
+   * ran, instead of passing on the uncompacted transcript.
+   */
+  | { type: "min_compactions"; value: number }
   | { type: "max_cost"; value: number }
   | { type: "max_duration"; value: number }
   | {
@@ -292,6 +300,7 @@ export const CHECK_TYPES = [
   "no_errors",
   "max_turns",
   "max_tokens",
+  "min_compactions",
   "max_cost",
   "max_duration",
   "verify_command",
@@ -386,6 +395,13 @@ export interface EvalCase {
   tools?: string[];
   /** `orchestrator` sets up the full orchestrator environment. */
   session_type?: "default" | "orchestrator";
+  /**
+   * Compaction budget for the case session (`compaction.contextBudgetTokens`).
+   * A small value makes a short case compact at each turn end (the runner
+   * sets the idle delay to 0), so a recall check scores what survives a
+   * compaction. Engine drive only.
+   */
+  context_budget_tokens?: number;
   /**
    * How the case is driven. `engine` (default): in-process engine with
    * eval stand-ins — fast, cheap, lab conditions. `product`: boots the

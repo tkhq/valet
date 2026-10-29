@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ApprovedModelsSection } from "~/components/settings/approved-models-section";
+import { CompactionSection } from "~/components/settings/compaction-section";
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
 import { ModelTiersSection } from "~/components/settings/model-tiers-section";
 import { ReasoningSection } from "~/components/settings/reasoning-section";
@@ -9,8 +10,8 @@ import { ReasoningSection } from "~/components/settings/reasoning-section";
  * design, plan Task 7; tier map/approved models/reasoning added by
  * model-selector-overhaul, Task 13). Provider CRUD/keys, the size-tier map
  * (the org's fallback chain — org model preferences are gone), the
- * approved-model restriction, and org-wide reasoning defaults, in that
- * order. Renders inside `/settings/organization`'s `OrgRouteGuard` — no
+ * approved-model restriction, org-wide reasoning defaults, and the
+ * compaction window, in that order. Renders inside `/settings/organization`'s `OrgRouteGuard` — no
  * per-page admin re-check.
  */
 export const Route = createFileRoute("/settings/organization/models")({
@@ -24,6 +25,7 @@ export function OrganizationModelsPage() {
       <ModelTiersSection />
       <ApprovedModelsSection />
       <ReasoningSection />
+      <CompactionSection />
     </div>
   );
 }

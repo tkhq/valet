@@ -141,6 +141,8 @@ import {
   selectCutPoint,
   summarize,
   SummarizeOverflowError,
+  compactionBudget,
+  idleCompactionDelayMs,
   usableTokens,
   walkTranscriptDag,
   renderBranchNote,
@@ -359,6 +361,13 @@ export type CompactionOutcome =
   | "coverage_gap";
 
 /**
+ * Why a proactive pass runs. "overflow": the next request would not fit the
+ * model. "budget": it fits, but the context exceeds the compaction budget.
+ * A budget pass never continues the turn and a budget noop is not a failure.
+ */
+type ProactiveCompactionTrigger = "overflow" | "budget";
+
+/**
  * Metadata key stamped on a user entry whose oversized text was spilled to a
  * sandbox file. Its value is the file path. Presence flags the entry so a
  * replayed turn returns the pointer, not the original paste.
@@ -510,6 +519,8 @@ export class Thread {
   private backgroundDriveTail: Promise<void> = Promise.resolve();
   /** In-process collect-window flush timer; armed by the first item of a window. */
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Idle compaction for an interactive thread over the compaction budget (`armIdleCompaction`). */
+  private idleCompactionTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
@@ -1581,6 +1592,7 @@ export class Thread {
   async abort(): Promise<void> {
     this.aborted = true;
     this.toolUsageStarts.clear();
+    this.clearIdleCompaction();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -4840,6 +4852,7 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    this.clearIdleCompaction();
     await this.persistContinuationToolScope();
     await this.ensureTranscript();
     return this.inSubmissionContext(() =>
@@ -4996,8 +5009,12 @@ export class Thread {
     // runAgent — the model would see the prompt twice.
     if (this.rehydratedCheckPending) {
       this.rehydratedCheckPending = false;
-      if (this.shouldCompactProactive()) {
-        await this.runProactiveCompaction(false);
+      const trigger = this.proactiveCompactionTrigger();
+      // A budget pass here stands in for an idle pass the restart lost: run
+      // it only when the thread has been idle past the idle delay, so its
+      // prompt cache has expired anyway.
+      if (trigger === "overflow" || (trigger === "budget" && this.idleLongerThan(idleCompactionDelayMs(this.session.options)))) {
+        await this.runProactiveCompaction(trigger, false);
       }
     }
 
@@ -5091,9 +5108,18 @@ export class Thread {
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
-      // A submission stopped at its model call limit gets no continuation.
-      if (this.modelCallLimitReached === undefined && this.shouldCompactProactive() && await this.canRunCurrentSubmission()) {
-        await this.runProactiveCompaction();
+      // A submission stopped at its model call limit gets no continuation,
+      // so it runs only a budget pass, which never continues the turn.
+      const proactive = this.proactiveCompactionTrigger();
+      let trigger = this.modelCallLimitReached === undefined || proactive === "budget" ? proactive : undefined;
+      // A budget pass at turn end runs only for a turn nobody watches live
+      // (unattended work, a channel such as Slack) and only when no message
+      // waits: a waiting message reruns this check when its turn ends. An
+      // interactive thread compacts when it goes idle instead, so a person
+      // working in it keeps the full context and a warm prompt cache.
+      if (trigger === "budget" && !(await this.budgetPassAtTurnEnd())) trigger = undefined;
+      if (trigger && await this.canRunCurrentSubmission()) {
+        await this.runProactiveCompaction(trigger);
       }
     } finally {
       // The end-of-turn snapshot lands before the next claim, so an edit
@@ -5512,17 +5538,26 @@ export class Thread {
 
   /**
    * Shared handling for both proactive compaction passes (pre-turn
-   * rehydration and post-turn). A thrown compaction counts as a failure; a
-   * "noop" outcome ALSO counts — the trigger fired but nothing was
+   * rehydration and post-turn). A thrown compaction counts as a failure; an
+   * overflow pass's "noop" outcome ALSO counts — the trigger fired but nothing was
    * reclaimable (context dominated by system overhead the estimate cannot
    * reduce), and without the breaker that repeats silently on every turn.
    */
-  private async runProactiveCompaction(autoContinue?: false): Promise<void> {
+  private async runProactiveCompaction(
+    trigger: ProactiveCompactionTrigger,
+    continueTurn?: false,
+    turnModel?: ResolvedModel,
+  ): Promise<void> {
+    // A budget pass runs after the turn finished its work, so it never
+    // continues the turn. The next submission reads the compacted context.
+    const autoContinue = trigger === "budget" ? false : continueTurn;
     let outcome: CompactionOutcome;
     try {
-      outcome = await this.compactThread(
-        autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
-      );
+      outcome = await this.compactThread({
+        mode: "proactive",
+        ...(autoContinue === false ? { autoContinue } : {}),
+        ...(turnModel ? { turnModel } : {}),
+      });
     } catch (err) {
       this.recordProactiveCompactionFailure(
         "compaction_failed",
@@ -5531,6 +5566,12 @@ export class Thread {
       return;
     }
 
+    if (outcome === "noop" && trigger === "budget") {
+      // The context still fits the model. A budget pass that finds nothing
+      // to reclaim is expected (one large recent turn, history a checkpoint
+      // already covers), so it must not open the breaker that guards overflow.
+      return;
+    }
     if (outcome === "noop") {
       this.recordProactiveCompactionFailure(
         "compaction_noop",
@@ -5582,25 +5623,30 @@ export class Thread {
     await this.runAgent(prompt);
   }
 
-  private shouldCompactProactive(): boolean {
+  /**
+   * Which proactive pass the context needs: "overflow" when the next request
+   * would not fit the model, "budget" when it fits but exceeds the
+   * compaction budget (`compactionBudget`), else undefined.
+   */
+  private proactiveCompactionTrigger(): ProactiveCompactionTrigger | undefined {
     const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return false;
+    if (cfg?.enabled === false) return undefined;
     // A compaction pass in this turn already reported that it cannot help
     // this transcript. Running the proactive pass now repeats that report
     // for one failure and advances the breaker twice.
-    if (this.turnCompactionBlocked) return false;
+    if (this.turnCompactionBlocked) return undefined;
     // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
     // failing must not hammer the summarizer on every turn. A successful
     // compaction (including manual /compact) closes the breaker again.
     if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) {
-      return false;
+      return undefined;
     }
     // Budget against the turn's effective model (spec decision 4):
-    // shouldCompactProactive only runs from runItem's try block, before the
+    // proactiveCompactionTrigger only runs from runItem's try block, before the
     // finally restores the baseline, so `agent.state.model` is the resolved
     // turn model — including resolver-only specs `resolveModelId` can't see.
     const usable = usableTokens(this.agent.state.model, cfg);
-    if (usable === 0) return false;
+    if (usable === 0) return undefined;
     // Trigger on the usage-anchored estimate (TKAI-306): the last real
     // response's reported total is the exact context of that request
     // (system prompt and tool definitions included), and only messages
@@ -5611,20 +5657,112 @@ export class Thread {
       this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
       this.agent.state.messages.filter(isLlmMessage),
     );
-    return estimated >= usable;
+    if (estimated >= usable) return "overflow";
+    if (estimated >= compactionBudget(this.agent.state.model, cfg)) return "budget";
+    return undefined;
+  }
+
+  /**
+   * Decide the turn-end budget pass. Unattended and channel turns run it
+   * now unless another message waits. An interactive turn arms the idle
+   * timer instead, unless the idle delay is 0, which means "at turn end".
+   */
+  private async budgetPassAtTurnEnd(): Promise<boolean> {
+    const delay = idleCompactionDelayMs(this.session.options);
+    const channelType = this.runningItem?.channel?.channelType;
+    const unwatched = delay === 0 || this.isUnattendedTurn() || (channelType !== undefined && channelType !== "web");
+    if (!unwatched) {
+      this.armIdleCompaction(delay);
+      return false;
+    }
+    const running = this.runningItem?.id;
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return !items.some((i) => i.threadId === this.id && i.id !== running && i.status === "queued");
+  }
+
+  /** True when the newest message in the live transcript is older than `ms`. */
+  private idleLongerThan(ms: number): boolean {
+    const messages = this.agent.state.messages;
+    const last = messages[messages.length - 1];
+    const at = last && "timestamp" in last && typeof last.timestamp === "number" ? last.timestamp : undefined;
+    return at === undefined || Date.now() - at >= ms;
+  }
+
+  private armIdleCompaction(delay: number): void {
+    this.clearIdleCompaction();
+    const timer = setTimeout(() => {
+      this.idleCompactionTimer = null;
+      void this.runIdleCompaction();
+    }, delay);
+    timer.unref?.();
+    this.idleCompactionTimer = timer;
+  }
+
+  private clearIdleCompaction(): void {
+    if (this.idleCompactionTimer) {
+      clearTimeout(this.idleCompactionTimer);
+      this.idleCompactionTimer = null;
+    }
+  }
+
+  /**
+   * Compact an idle interactive thread over its compaction budget, before
+   * its prompt cache expires. It holds the drive lock (`kicking`) so no turn
+   * claims while it runs, and kicks afterwards so a message that arrived
+   * meanwhile runs on the compacted context.
+   */
+  private runIdleCompaction(): Promise<void> {
+    if (this.kicking || this.runningItem || this.aborted || this.paused) return Promise.resolve();
+    if (!this.session.timersActive || this.session.isExecutionFenced || this.session.options.readOnlyReason) {
+      return Promise.resolve();
+    }
+    this.kicking = true;
+    this.kickTail = (async () => {
+      if (await this.unsettledHead()) return;
+      if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) return;
+      const usage = await this.contextUsage();
+      if (!usage?.autoCompact || usage.tokens < usage.limit) return;
+      // The turn cleared its resolver key in its finally. Resolve the model
+      // and key again, as a turn does, so the summarizer does not run on
+      // ambient credentials.
+      await this.runProactiveCompaction("budget", false, await this.resolveIdleCompactionModel());
+    })()
+      .catch((err: unknown) => {
+        this.emitError("compaction_failed", err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        this.kicking = false;
+        void this.kick();
+      });
+    return this.kickTail;
+  }
+
+  /**
+   * The model and key for an idle pass, from the host `resolveModel` seam.
+   * Undefined without a resolver: the pass then uses the thread's model and
+   * no key, as a resolver-less turn does. Like `applyResolvedKeyForResume`,
+   * it fails closed: `NoCredentialsError` and an unknown spec throw.
+   */
+  private async resolveIdleCompactionModel(): Promise<ResolvedModel | undefined> {
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) return undefined;
+    const spec = this.turnModelSpec();
+    const resolved = await resolver(spec);
+    if (resolved === null) throw new Error(`unknown model id: ${spec}`);
+    return resolved;
   }
 
   /**
    * How full the model context is, for display. It measures like
-   * `shouldCompactProactive`: the usage-anchored estimate of the next request
-   * against the usable budget of the thread's model. A thread that has not
+   * `proactiveCompactionTrigger`: the usage-anchored estimate of the next request
+   * against the compaction budget of the thread's model. A thread that has not
    * loaded its transcript is read from the store and stays unloaded.
    * Undefined when the model reports no context window.
    */
   async contextUsage(): Promise<ThreadContextUsage | undefined> {
     const cfg = this.session.options.compaction;
     const model = await this.budgetModel();
-    const limit = usableTokens(model, cfg);
+    const limit = compactionBudget(model, cfg);
     if (limit === 0) return undefined;
     let messages: readonly AgentMessage[] = this.agent.state.messages;
     if (this.transcriptPending) {
@@ -5738,6 +5876,11 @@ export class Thread {
      * synthetic continuation would duplicate work.
      */
     autoContinue?: false;
+    /**
+     * The resolved model and key for a pass outside a claimed turn (the idle
+     * pass). Inside a turn the pass uses the turn's model and key.
+     */
+    turnModel?: ResolvedModel;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -5763,6 +5906,7 @@ export class Thread {
       instructions?: string;
       signal?: AbortSignal;
       autoContinue?: false;
+      turnModel?: ResolvedModel;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -5774,10 +5918,11 @@ export class Thread {
     // `agent.state.model` is the resolved turn model — exact, including
     // role overlays and resolver-only specs. A manual `/compact` can run
     // outside a claim, where `agent.state.model` still holds the session
-    // baseline — resolve the pin leniently there instead.
-    const effectiveModel = this.runningItem
+    // baseline — resolve the pin leniently there instead. The idle pass
+    // brings its own resolution (`turnModel`).
+    const effectiveModel = opts.turnModel?.model ?? (this.runningItem
       ? this.agent.state.model
-      : this.effectiveModelLenient();
+      : this.effectiveModelLenient());
     const model = cfg?.summarizerModel ?? effectiveModel;
 
     // Load the full DAG, then follow the active leaf to the root. Other
@@ -6011,7 +6156,8 @@ export class Thread {
             // whose only key comes from the host `resolveModel` seam would fail
             // the summarizer completion on first context overflow. Undefined
             // when no resolver is wired (env-fallback path) — behavior unchanged.
-            apiKey: this.turnApiKey,
+            // The idle pass runs after that finally and passes its own key.
+            apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
           });
           break;
         } catch (err) {

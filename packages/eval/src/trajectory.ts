@@ -138,9 +138,14 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
   let finalOutput = "";
   let stopReason: string | undefined;
   let toolIndex = 0;
+  let compactions = 0;
 
   const userTurns: TrajectoryUserTurn[] = [];
   for (const entry of input.entries) {
+    if (entry.type === "compaction") {
+      compactions++;
+      continue;
+    }
     if (entry.type === "message" && entry.role === "user") {
       userTurns.push({
         index: userTurns.length,
@@ -198,6 +203,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
     ...(anyCost ? { cost } : {}),
     durationMs: input.durationMs,
     ...(stopReason !== undefined ? { stopReason } : {}),
+    ...(compactions > 0 ? { compactions } : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     ...(input.children !== undefined && input.children.length > 0 ? { children: input.children } : {}),
   };

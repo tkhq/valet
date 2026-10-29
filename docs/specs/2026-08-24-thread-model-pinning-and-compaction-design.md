@@ -107,9 +107,54 @@ Compaction always runs inside a claimed turn (proactive after `runAgent`,
 reactive inside it, manual via the in-turn command path), so
 `agent.state.model` holds the resolved effective model — including
 resolver-only specs the internal registry cannot resolve. All five budget
-sites switch to it: the proactive trigger (`shouldCompactProactive`), the
+sites switch to it: the proactive trigger (`proactiveCompactionTrigger`), the
 reactive overflow check (`isContextOverflow`), the summarizer fallback model,
 cut-point selection, and the post-compaction transcript rebuild.
+
+Added 2026-10-28: the compaction budget. `compactionBudget` is the usable
+context capped at `compaction.contextBudgetTokens` (default 200k; `0`
+removes the cap). An org admin sets the cap in Settings, Models, Context
+(`orgs.compaction_window_tokens`, `PATCH /api/org/settings`
+`compactionWindowTokens`). The host hands each session a config whose
+`contextBudgetTokens` reads the org value live, so a change reaches loaded
+sessions in that process without a rebuild.
+
+The proactive trigger has two levels. "overflow" means the next request does
+not fit the usable context, and the pass behaves as before. "budget" means
+the request fits but exceeds the budget. A budget pass never continues the
+turn, and a budget pass that finds nothing to reclaim does not count toward
+the circuit breaker. When it runs depends on who watches the thread:
+
+- An unattended turn (workflow work, a delivery nobody watches) or a channel
+  turn (Slack, Telegram) runs it at turn end. It skips the pass when another
+  message waits; that message's turn end checks again. A submission stopped
+  at its model call limit still runs it.
+- An interactive turn arms an idle timer instead
+  (`compaction.idleCompactionMs`). The default ends shortly before the
+  thread's prompt cache expires: 55 minutes with the long cache, 4 minutes
+  with the short one, 0 with no cache. The pass holds the drive lock, so no
+  turn claims while it runs, and kicks the queue after. A new turn cancels
+  the timer. `0` compacts every thread at turn end. The turn's resolver key
+  is gone by then, so the pass resolves the model and key through
+  `resolveModel` again. Like a turn, it fails closed: an unknown spec or a
+  missing credential stops the pass, and no ambient key is used.
+- The first turn after a reload stands in for a timer the restart lost: it
+  runs a budget pass first only when the newest message is older than the
+  idle delay.
+
+The tail budget (25%) scales from the compaction budget, so a 1M-token model
+keeps about 50k tokens verbatim, not about 245k. The reactive and
+pre-request overflow paths still use the usable context, so a long turn is
+never compacted in the middle at the budget. The context meter reports the
+budget as its limit.
+
+Reason: a 1M-token model compacted only near 980k. In production, one Slack
+thread on such a model grew to 833k tokens. Each reply after the 1h prompt
+cache expired re-wrote the whole context, at $4 to $7 per reply. Claude Code
+compacts an idle conversation over 200k before its cache expires, and Codex
+can compact after a turn when no input waits; this design follows both. The
+compaction recall evals in `evals/cases/compaction/` guard recall after a
+compaction.
 
 ### 5. The proactive trigger rehydrates from the DAG
 
@@ -167,8 +212,9 @@ summarizer prompt.
 - Added 2026-10-20: the composer shows a context meter beside the send
   button. `Thread.contextUsage` measures like the proactive trigger: the
   usage-anchored estimate (`estimateLiveContextTokens`) against
-  `usableTokens` of the thread's model, so a full meter means the next turn
-  compacts first. A thread that has not loaded its transcript is read from
+  `compactionBudget` of the thread's model, so a full meter means the
+  thread compacts when it goes idle or after its next unattended or channel
+  turn. A thread that has not loaded its transcript is read from
   the store with `entriesToAgentMessages` and stays unloaded, so the read
   never wakes a sandbox. Outside a turn, the budget model comes from the
   host resolver for the thread's spec on every read, also when the spec is
