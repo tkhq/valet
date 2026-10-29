@@ -26,8 +26,38 @@ This design stores them in Turnkey Secrets instead.
 - **What this does not do.** It does not hide a secret from the process that
   receives it.
 
-This spec covers the Turnkey side: the organizations, who is root, and how
-secrets are named. How the Valet API calls Turnkey is a follow-up.
+This spec covers the Turnkey side in detail and the Valet side at a high
+level. The Valet implementation is a follow-up.
+
+## Valet architecture
+
+```
+Sandbox                         Valet API                          Turnkey
+valet-secrets run               sandbox secret broker
+  --env X=turnkey://NAME          │                                  │
+  -- cmd                          │                                  │
+   │── resolve, sandbox token ───►│ who is asking: user, session     │
+   │                              │ may this session read NAME?      │
+   │                              │ which org: parent or user's      │
+   │                              │   sub-org (created if missing)   │
+   │                              │── export, request_context ──────►│ decrypt to a
+   │                              │◄──────── encrypted value ────────│ one-time key
+   │◄────────── value ────────────│ decrypt in memory                │
+   │ put X in cmd's environment,                                     │
+   │ drop the sandbox token, run cmd                                 │
+```
+
+- **Sandbox.** Runs agent code and holds only its sandbox token, which is
+  scoped to one session and expires. `valet-secrets run` already works this
+  way for 1Password references. It gains `turnkey://` references.
+- **Valet API.** The sandbox secret broker authenticates the sandbox token,
+  decides access, picks the organization, and is the only component that holds
+  the broker key and talks to Turnkey.
+- **Valet database.** Maps each Valet user to their sub-organization. It holds
+  no secret values.
+- **Personal secret entry.** In the Valet UI, the browser encrypts the value to
+  a Turnkey enclave key, so plaintext never reaches the Valet API. The API
+  submits the import into the user's sub-organization.
 
 ## Organizations
 
@@ -108,10 +138,10 @@ Against a test parent with synthetic values:
 
 ## Follow-up
 
-Valet-side work, specified separately: the access rules per scope, resolving
-`turnkey://` references, lazy sub-organization creation and the table mapping
-users to sub-organizations, personal secret entry, the broker key's
-deployment configuration, and tests.
+Valet-side detail, specified separately: the access rules per scope, the
+reference grammar and routing, the user-to-sub-organization table, the
+personal secret entry flow and routes, the broker key's deployment
+configuration, and tests.
 
 ## References
 
