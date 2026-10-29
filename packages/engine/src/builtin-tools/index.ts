@@ -10,7 +10,7 @@ import {
   ScratchRequestError,
 } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
-import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "../decision-gate.js";
+import { isDecisionGateExpired, isDecisionGateWithdrawn, isUnattendedWorkflowRefusal } from "../decision-gate.js";
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
@@ -885,6 +885,13 @@ export const askQuestionTool = defineTool({
             "say what was missing. Continue with the rest of the work, and say what you assumed.",
         };
       }
+      if (isDecisionGateWithdrawn(err) && err.reason === "message") {
+        return {
+          text:
+            `The person wrote a message instead of answering "${args.question}". It follows this result. ` +
+            "Reply to it first. If you still need the answer, ask the question again after your reply.",
+        };
+      }
       throw err;
     }
     if (isUnattendedWorkflowRefusal(resolution)) {
@@ -907,7 +914,12 @@ export const askQuestionTool = defineTool({
       }
     }
     const answer = typed || picked || (attachments.length ? "See the attached images." : undefined);
-    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.`,
+    // A typed reply can be a question back, such as what an option means.
+    // Say so, or the model reads it as an off-list choice and asks again.
+    const typedNote = typed && options.length > 0 && !options.includes(typed)
+      ? " The person typed this instead of picking an option. If it asks you something, reply to it first, then ask again if you still need a choice."
+      : "";
+    return { text: answer ? `answer to "${args.question}": ${answer}${typedNote}` : `the question "${args.question}" was closed without an answer.`,
       ...(attachments.length ? { attachments } : {}) };
   },
 });

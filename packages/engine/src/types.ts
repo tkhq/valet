@@ -1074,7 +1074,7 @@ export interface CredentialStore {
 
 export type DecisionGateType = "approval" | "question" | "credential_request";
 export type DecisionGateStatus = "pending" | "resolved" | "expired" | "withdrawn";
-export type DecisionWithdrawReason = "steer" | "abort" | "cancel";
+export type DecisionWithdrawReason = "steer" | "abort" | "cancel" | "message";
 
 export interface DecisionAction {
   id: string;
