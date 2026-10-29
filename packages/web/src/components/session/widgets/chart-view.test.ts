@@ -10,4 +10,8 @@ describe("niceTicks", () => {
     expect(niceTicks(-30, 45)).toEqual([-40, -20, 0, 20, 40, 60]);
     expect(niceTicks(0, 0)).toEqual([0, 1]);
   });
+  it("ends for values near Number.MAX_VALUE", () => {
+    expect(niceTicks(1, Number.MAX_VALUE)).toEqual([0, Number.MAX_VALUE]);
+    expect(niceTicks(-Number.MAX_VALUE, 0)).toEqual([-Number.MAX_VALUE, 0]);
+  });
 });

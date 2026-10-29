@@ -41,6 +41,8 @@ export function niceTicks(min: number, max: number): number[] {
   const raw = (high - low) / 4;
   const power = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * power).find((s) => s >= raw) ?? raw;
+  // Near Number.MAX_VALUE the loop bound overflows to Infinity and never ends; use the bare range.
+  if (!Number.isFinite(high - low + step)) return [low, high];
   const ticks: number[] = [];
   for (let t = Math.floor(low / step) * step; t <= high + step * 1e-9; t += step) ticks.push(Number(t.toPrecision(12)));
   if (ticks[ticks.length - 1]! < high) ticks.push(ticks[ticks.length - 1]! + step);
