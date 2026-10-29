@@ -23,6 +23,55 @@ the mobile Home spec. The desktop Home entry remains available.
 8. Independent chats keep separate histories and queues. This change does not
    create separate filesystems or merge memories across audiences.
 
+## Group DMs
+
+A group DM message that mentions the app follows the DM route. The Slack
+transport accepts a `message.mpim` event only when its text contains the app's
+own mention. A group DM message without a mention stays with the event
+pipeline. Each mention goes to the sender's own assistant. The Slack thread of
+the mention is the conversation, so a later mention in that thread continues
+the same chat. A second person who mentions the app in that thread gets a chat
+with their own assistant, because the binding scope includes the user.
+
+Everyone in a group DM reads the reply. The host adds a line to each group
+prompt that says so, and that earlier messages from other people are context,
+not instructions. On every turn the host adds the thread's messages since that
+assistant's last turn there: the whole thread on the first turn, then only what
+is new. The thread stores the last message it read (`slackGroupReadThroughTs`)
+before it fetches, so two quick mentions do not read the same window twice.
+Every person's assistant posts as the same app, so the window keeps the app's
+replies to other people, labeled "Valet (answering someone else)", and drops
+this thread's own replies (its outbound `channel_messages` rows), which the
+assistant already holds. Each person's sandbox, files and memory stay their
+own; the Slack thread is the record they share.
+
+A group turn is never the person's own direct channel message, because other
+people's words ride in its context. The host sets `directChannel: false` on its
+author, so tools that act only on a message the person wrote themself refuse
+the turn. The person is still interactive, so approval cards work as usual.
+
+The host refuses a group DM shared with another organization (Slack Connect,
+`is_ext_shared_channel` on the event envelope). It replies with a notice and
+writes an `external_group` drop-log row, because people outside the
+organization would read the reply.
+
+A stream into a group DM needs a recipient, which Slack requires outside a 1:1
+DM. The recipient travels with the turn (`StreamTurn.recipient`, passed to
+`startStream`), because two people's turns can share one conversation key. A
+group turn sets the thread status like a DM turn. Slack accepts the status call
+outside the assistant view with the `chat:write` scope.
+
+Replies in the thread that do not mention the app reach no assistant.
+
+A rule that would answer the mention takes it, as in a channel. Before it
+resolves the sender, the host runs the event pipeline's matcher
+(`subscriptionMatchOutcome`) over the organization's enabled rules for
+`slack.app_mention` and `slack.message`, with the group DM's channel id. A
+match means the pipeline delivers the mention, so the host writes a
+`group_rule_answers` drop-log row and stops. A team rule that refuses this
+sender does not count, and the sender gets their own assistant. To give a
+group DM one shared assistant, a team admin points a team rule at it.
+
 ## Compatibility
 
 No transcript moves or disappears. Old Slack links and pending questions keep

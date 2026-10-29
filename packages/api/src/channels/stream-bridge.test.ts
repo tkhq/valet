@@ -36,7 +36,7 @@ interface AppendCall {
 
 class FakeStreamTransport implements ChannelTransport {
   readonly channelType = CHANNEL_TYPE;
-  started: Array<{ conversationKey: string; threadTs: string }> = [];
+  started: Array<{ conversationKey: string; threadTs: string; recipient?: { userId: string; teamId: string } }> = [];
   appends: AppendCall[] = [];
   stopped: Array<{ ref: StreamRef; final?: { markdown?: string } }> = [];
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
@@ -68,9 +68,9 @@ class FakeStreamTransport implements ChannelTransport {
   }
   async updateGatePrompt() {}
 
-  async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
+  async startStream(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef> {
     if (this.startFailure) throw this.startFailure;
-    this.started.push({ conversationKey, threadTs: ctx.threadTs });
+    this.started.push({ conversationKey, threadTs: ctx.threadTs, ...(ctx.recipient ? { recipient: ctx.recipient } : {}) });
     return { conversationKey, messageId: `ts${this.nextTs++}`, threadTs: ctx.threadTs };
   }
   async appendStream(ref: StreamRef, markdown: string): Promise<void> {
@@ -660,6 +660,13 @@ describe("the turn parks on an approval gate", () => {
     expect(h.streams.size()).toBe(0);
     expect(h.bridge.isStreaming(SESSION_ID, THREAD_ID)).toBe(false);
     expect(h.transport.statuses).toEqual([]);
+  });
+
+  it("opens a group turn's stream for that turn's recipient", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn({ ...h.turn, recipient: { userId: "U7", teamId: "T1" } });
+    await h.emit(messageStart("m1"));
+    expect(h.transport.started).toEqual([expect.objectContaining({ recipient: { userId: "U7", teamId: "T1" } })]);
   });
 
   it("opens a fresh stream for the resumed turn", async () => {

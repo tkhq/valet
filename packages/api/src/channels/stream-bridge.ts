@@ -112,6 +112,9 @@ export interface StreamTurn {
   threadId: string;
   /** Provider reply anchor for this turn (Slack `thread_ts`). */
   threadTs: string;
+  /** The person this turn's stream is for, in provider ids. Set for a group
+   * conversation, where Slack requires a recipient. */
+  recipient?: { userId: string; teamId: string };
   orgId: string;
   /**
    * The admitted submission this registration belongs to, bound by the host
@@ -517,6 +520,7 @@ export class ChannelStreamBridge {
     try {
       const ref = await transport.startStream(stream.turn.conversationKey, {
         threadTs: stream.turn.threadTs,
+        ...(stream.turn.recipient ? { recipient: stream.turn.recipient } : {}),
       });
       stream.ref = ref;
       await this.deps.streams.insert(this.recordFor(stream));
@@ -719,6 +723,7 @@ export class ChannelStreamBridge {
     try {
       stream.ref = await transport.startStream(stream.turn.conversationKey, {
         threadTs: stream.turn.threadTs,
+        ...(stream.turn.recipient ? { recipient: stream.turn.recipient } : {}),
       });
       stream.sentChars = 0;
       await this.deps.streams.insert(this.recordFor(stream));
