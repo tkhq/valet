@@ -31,7 +31,8 @@ import {
   useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
-import { useMe, useOrg, useTeams } from "~/api/settings";
+import { useMe, useOrg, usePatchMe, usePatchTeam, useTeams } from "~/api/settings";
+import { carriedFields, defaultSaveBody, useThreadDefaults } from "~/api/thread-defaults";
 import {
   Badge,
   Button,
@@ -66,7 +67,7 @@ import {
 } from "~/stores/stream";
 import { canAdministerSession } from "./use-can-administer-session";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
-import { ModelPicker } from "./model-picker";
+import { ModelPicker, type NewThreadDefault } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import type { SandboxTabId } from "./sandbox-tabs";
 import { ShareThreadDialog } from "./share-thread-dialog";
@@ -234,6 +235,11 @@ export function SessionHeader({
   const me = useMe();
   const org = useOrg();
   const teams = useTeams();
+  // A workspace conversation starts new threads from a default. The picker
+  // shows it and can save the thread's choice as that default.
+  const threadDefaults = useThreadDefaults(session.id, session.isWorkspaceRuntime === true);
+  const patchMe = usePatchMe();
+  const patchTeam = usePatchTeam();
   // One error slot for the header actions that fire straight from their
   // control: pause, replace, and rename. Delete and the Terminal/VS Code
   // switch confirm first, and their modal covers this row, so each reports
@@ -263,6 +269,7 @@ export function SessionHeader({
   const [moving, setMoving] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [confirmBypass, setConfirmBypass] = useState(false);
+  const [confirmTeamDefault, setConfirmTeamDefault] = useState(false);
   const bypass = useSetThreadApprovalBypass(session.id);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
@@ -378,6 +385,31 @@ export function SessionHeader({
   const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
   const isWorkspaceRuntime = session.isWorkspaceRuntime === true;
+  // The server says where each saved field goes; a field the assistant
+  // carries outranks both defaults, so a save never offers it.
+  const defaults = threadDefaults.data;
+  const saveBody = defaults ? defaultSaveBody(defaults, { model: configuredModel, reasoning: configuredReasoning }) : undefined;
+  const saveTo = defaults?.scope ?? defaults?.reasoningScope ?? null;
+  // A team default changes new threads for every member, so it confirms first.
+  const makeDefault = saveBody && saveTo ? () => {
+    if (saveTo === "personal") patchMe.mutate(saveBody);
+    else if (owner.type === "team") {
+      patchTeam.reset();
+      setConfirmTeamDefault(true);
+    }
+  } : undefined;
+  const carried = defaults && !makeDefault ? carriedFields(defaults, { model: configuredModel, reasoning: configuredReasoning }) : [];
+  const newThreadDefault: NewThreadDefault | undefined = defaults ? {
+    model: defaults.model,
+    reasoning: defaults.reasoning,
+    ...(makeDefault ? { onMakeDefault: makeDefault } : {}),
+    ...(saveTo ? { scope: saveTo } : {}),
+    saving: patchMe.isPending || patchTeam.isPending,
+    ...(carried.length > 0
+      ? { blockedReason: `The assistant's own ${carried.join(" and ")} setting outranks defaults, so new threads keep it.` }
+      : {}),
+  } : undefined;
+
   const title = activeThread?.title || (isWorkspaceRuntime ? "New thread" : session.title || "Untitled thread");
 
   // Lifecycle controls (model, pause, delete) act on a session the whole
@@ -465,6 +497,7 @@ export function SessionHeader({
             setReasoning.mutate(level);
           }}
           disabled={pickerDisabled}
+          newThreadDefault={newThreadDefault}
         />
     </span>
   ) : null;
@@ -743,6 +776,22 @@ export function SessionHeader({
       >
         <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from this menu at any time.</p>
       </ConfirmDialog>
+      {owner.type === "team" && (
+        <ConfirmDialog
+          open={confirmTeamDefault}
+          onOpenChange={setConfirmTeamDefault}
+          title="Change the team default?"
+          description={`New threads for every member of ${team?.name ?? "this team"} start with this thread's model and reasoning.`}
+          confirmLabel="Make team default"
+          pendingLabel="Saving…"
+          confirmVariant="primary"
+          pending={patchTeam.isPending}
+          error={patchTeam.error ? extractActionError(patchTeam.error, "Could not save the team default. Try again.") : undefined}
+          onConfirm={() => {
+            if (saveBody) patchTeam.mutate({ id: owner.id, body: saveBody }, { onSuccess: () => setConfirmTeamDefault(false) });
+          }}
+        />
+      )}
       {mobile && canAdminister && <Dialog open={modelSettings.open} onOpenChange={modelSettings.setOpen}>
         <DialogContent ref={modelDialog} data-mobile-model-settings title="Model and thinking" description="Choose the model and thinking level for this thread."
           onOpenAutoFocus={(event) => {

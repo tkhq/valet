@@ -87,6 +87,8 @@ Add optional `sourceThreadId` to `CreateThreadRequest`. `POST /api/sessions/:id/
 
 The host exposes a focused new-thread-default resolver. It reuses the existing model and reasoning cascade helpers without weakening restore-no-clobber behavior for existing sessions.
 
+`GET /api/sessions/:id/thread-defaults` (2026-10-22) returns what a new thread in the session gets now: `model`, `reasoning`, `scope`, and `reasoningScope`. `scope` names where a saved model default goes: `personal` (the session owner's) or `team`. It is null when the assistant's carried model still resolves, because that model outranks both defaults. `reasoningScope` is the same for reasoning, and is null whenever the assistant carries a reasoning level. The route needs view access to the session and never builds the session or wakes the sandbox.
+
 ## Web changes
 
 The thread tree creates a source-less request for sidebar **New thread**. The server resolves current defaults for that top-level conversation.
@@ -94,6 +96,8 @@ The thread tree creates a source-less request for sidebar **New thread**. The se
 Centralize selected tier label resolution in `packages/web/src/lib/model-tiers.ts`. Both `ModelPicker` and `ModelCombobox` use the helper.
 
 `ModelPicker` reads the approved-models setting. If the restriction is active, it removes the full-catalog reveal and limits the list to approved entries.
+
+In a workspace conversation, the picker footer shows "New threads:" with the model and reasoning from `thread-defaults` (2026-10-22). When a save would change what new threads get, a button saves the differing fields the defaults control (`defaultSaveBody`): `PATCH /api/me` for `personal`, `PATCH /api/teams/:id` for `team`. The button names whose default changes: **Make my default** for `personal`, **Make team default** for `team`. A team change applies to every member, so the menu closes and a `ConfirmDialog` asks first. The picker only renders for a person who may change the session, so a team thread offers the button to team admins. If the thread differs from the default only in fields that the assistant's own setting outranks (`carriedFields`), the footer shows that reason instead of a button. Every personal or team default change refreshes the footer.
 
 ## Error handling
 

@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -623,4 +623,57 @@ it("only offers supported thinking levels on a phone, within the organization li
   const select = screen.getByRole("combobox", { name: "Thinking level" });
   expect(select).toHaveProperty("value", "medium");
   expect(Array.from(select.querySelectorAll("option"), o => o.value)).toEqual(["", "low", "medium", "high"]);
+});
+
+describe("ModelPicker — new-thread default", () => {
+  it("shows the default and saves the current choice as the default when they differ", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
+
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3 · Medium/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+  });
+
+  it("names a team default, and closes the menu so the confirmation can open", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", scope: "team", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make team default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/New threads:/)).toBeNull();
+  });
+
+  it("says why no save is offered when the assistant's own setting outranks defaults", async () => {
+    const user = userEvent.setup();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", blockedReason: "The assistant's own model setting outranks defaults, so new threads keep it." } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/own model setting outranks defaults/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+  });
+
+  it("offers no save without a save handler", async () => {
+    const user = userEvent.setup();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+  });
+
+  it("saves the default on Enter instead of picking the highlighted model", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMakeDefault = vi.fn();
+    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    // The menu focuses its search box on the next frame; move focus after that.
+    await waitFor(() => expect(document.activeElement?.tagName).toBe("INPUT"));
+    screen.getByRole("button", { name: "Make my default" }).focus();
+    await user.keyboard("{Enter}");
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });
