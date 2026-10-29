@@ -5543,15 +5543,21 @@ export class Thread {
    * reclaimable (context dominated by system overhead the estimate cannot
    * reduce), and without the breaker that repeats silently on every turn.
    */
-  private async runProactiveCompaction(trigger: ProactiveCompactionTrigger, continueTurn?: false): Promise<void> {
+  private async runProactiveCompaction(
+    trigger: ProactiveCompactionTrigger,
+    continueTurn?: false,
+    turnModel?: ResolvedModel,
+  ): Promise<void> {
     // A budget pass runs after the turn finished its work, so it never
     // continues the turn. The next submission reads the compacted context.
     const autoContinue = trigger === "budget" ? false : continueTurn;
     let outcome: CompactionOutcome;
     try {
-      outcome = await this.compactThread(
-        autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
-      );
+      outcome = await this.compactThread({
+        mode: "proactive",
+        ...(autoContinue === false ? { autoContinue } : {}),
+        ...(turnModel ? { turnModel } : {}),
+      });
     } catch (err) {
       this.recordProactiveCompactionFailure(
         "compaction_failed",
@@ -5716,7 +5722,10 @@ export class Thread {
       if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) return;
       const usage = await this.contextUsage();
       if (!usage?.autoCompact || usage.tokens < usage.limit) return;
-      await this.runProactiveCompaction("budget", false);
+      // The turn cleared its resolver key in its finally. Resolve the model
+      // and key again, as a turn does, so the summarizer does not run on
+      // ambient credentials.
+      await this.runProactiveCompaction("budget", false, await this.resolveIdleCompactionModel());
     })()
       .catch((err: unknown) => {
         this.emitError("compaction_failed", err instanceof Error ? err.message : String(err));
@@ -5726,6 +5735,21 @@ export class Thread {
         void this.kick();
       });
     return this.kickTail;
+  }
+
+  /**
+   * The model and key for an idle pass, from the host `resolveModel` seam.
+   * Undefined without a resolver: the pass then uses the thread's model and
+   * no key, as a resolver-less turn does. Like `applyResolvedKeyForResume`,
+   * it fails closed: `NoCredentialsError` and an unknown spec throw.
+   */
+  private async resolveIdleCompactionModel(): Promise<ResolvedModel | undefined> {
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) return undefined;
+    const spec = this.turnModelSpec();
+    const resolved = await resolver(spec);
+    if (resolved === null) throw new Error(`unknown model id: ${spec}`);
+    return resolved;
   }
 
   /**
@@ -5852,6 +5876,11 @@ export class Thread {
      * synthetic continuation would duplicate work.
      */
     autoContinue?: false;
+    /**
+     * The resolved model and key for a pass outside a claimed turn (the idle
+     * pass). Inside a turn the pass uses the turn's model and key.
+     */
+    turnModel?: ResolvedModel;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -5877,6 +5906,7 @@ export class Thread {
       instructions?: string;
       signal?: AbortSignal;
       autoContinue?: false;
+      turnModel?: ResolvedModel;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -5888,10 +5918,11 @@ export class Thread {
     // `agent.state.model` is the resolved turn model — exact, including
     // role overlays and resolver-only specs. A manual `/compact` can run
     // outside a claim, where `agent.state.model` still holds the session
-    // baseline — resolve the pin leniently there instead.
-    const effectiveModel = this.runningItem
+    // baseline — resolve the pin leniently there instead. The idle pass
+    // brings its own resolution (`turnModel`).
+    const effectiveModel = opts.turnModel?.model ?? (this.runningItem
       ? this.agent.state.model
-      : this.effectiveModelLenient();
+      : this.effectiveModelLenient());
     const model = cfg?.summarizerModel ?? effectiveModel;
 
     // Load the full DAG, then follow the active leaf to the root. Other
@@ -6125,7 +6156,8 @@ export class Thread {
             // whose only key comes from the host `resolveModel` seam would fail
             // the summarizer completion on first context overflow. Undefined
             // when no resolver is wired (env-fallback path) — behavior unchanged.
-            apiKey: this.turnApiKey,
+            // The idle pass runs after that finally and passes its own key.
+            apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
           });
           break;
         } catch (err) {

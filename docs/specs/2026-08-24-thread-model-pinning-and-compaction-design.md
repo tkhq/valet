@@ -134,7 +134,10 @@ the circuit breaker. When it runs depends on who watches the thread:
   thread's prompt cache expires: 55 minutes with the long cache, 4 minutes
   with the short one, 0 with no cache. The pass holds the drive lock, so no
   turn claims while it runs, and kicks the queue after. A new turn cancels
-  the timer. `0` compacts every thread at turn end.
+  the timer. `0` compacts every thread at turn end. The turn's resolver key
+  is gone by then, so the pass resolves the model and key through
+  `resolveModel` again. Like a turn, it fails closed: an unknown spec or a
+  missing credential stops the pass, and no ambient key is used.
 - The first turn after a reload stands in for a timer the restart lost: it
   runs a budget pass first only when the newest message is older than the
   idle delay.

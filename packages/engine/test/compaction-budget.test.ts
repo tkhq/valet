@@ -18,6 +18,7 @@ import {
   type BusEvent,
   type CompactionConfig,
   type CreateSessionOptions,
+  type ResolvedModel,
   type SessionEntry,
   type ToolDef,
 } from "../src/index.js";
@@ -286,6 +287,34 @@ describe("compaction budget: when an interactive thread compacts", () => {
     expect(entries.filter((e) => e.type === "compaction")).toHaveLength(1);
     expect(calls).toBe(2);
     expect(entries.some((e) => e.type === "message" && e.metadata?.compaction_continue === true)).toBe(false);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("runs the idle pass with the key the model resolver supplies", async () => {
+    // The turn clears its resolver key when it ends. The idle pass must
+    // resolve the key again, or a session whose only key comes from the
+    // resolver summarizes on ambient credentials.
+    const seenKeys: Array<string | undefined> = [];
+    const { faux, store, events, session, thread } = await bigWindowSession(
+      "budget-idle-resolver-key",
+      { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 50 },
+      {
+        resolveModel: async (): Promise<ResolvedModel | null> => ({ model: faux.getModel("big")!, apiKey: "org-key-idle" }),
+      },
+    );
+    faux.setResponses([
+      (_context, opts) => { seenKeys.push(opts?.apiKey); return fauxAssistantMessage("third response " + "y".repeat(16_000)); },
+      (_context, opts) => { seenKeys.push(opts?.apiKey); return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt");
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.kick();
+
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(seenKeys).toEqual(["org-key-idle", "org-key-idle"]);
     expect(errorCodes(events)).toEqual([]);
     faux.unregister();
   });
