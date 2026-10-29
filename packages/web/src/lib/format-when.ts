@@ -14,6 +14,20 @@ export function formatDateTime(ts: number, { locale, timeZone }: { locale?: stri
   return new Date(ts).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short", ...(timeZone !== undefined ? { timeZone } : {}) });
 }
 
+/** Request-log timestamp with seconds and a year only when it is not current. */
+export function formatRequestDateTime(ts: number): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "Unknown date";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}),
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 /** Date-only variant for created-at rows: "Aug 11, 2026". */
 export function formatDate(ts: number | Date): string {
   return new Date(ts).toLocaleDateString(undefined, {
