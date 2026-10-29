@@ -20,6 +20,7 @@ export function usePendingGatesSeed(sessionId: string): void {
     setPendingGates(
       sessionId,
       decisionsQ.data.gates.filter((g) => g.status === "pending"),
+      decisionsQ.dataUpdatedAt,
     );
-  }, [sessionId, decisionsQ.data, setPendingGates]);
+  }, [sessionId, decisionsQ.data, decisionsQ.dataUpdatedAt, setPendingGates]);
 }

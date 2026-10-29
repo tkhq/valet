@@ -138,6 +138,11 @@ export interface SessionStreamState {
    */
   pendingGates: Record<string, DecisionGate>;
   /**
+   * When a wire frame last opened or closed each gate (client clock). A REST
+   * snapshot fetched before that frame does not override it.
+   */
+  gateFrameAt: Record<string, number>;
+  /**
    * Per-thread submission queue state, mirroring the wire `queue.state`
    * frame. Drives the composer's "N queued" / paused indicator.
    */
@@ -269,9 +274,11 @@ export interface StreamStore {
   ): void;
   /**
    * Seed pending gates from REST (the bootstrap path on session detail
-   * mount). Replaces the current pending-gates map for the session.
+   * mount). Replaces the current pending-gates map for the session, except
+   * gates that a wire frame opened or closed after `snapshotAt`: a cached or
+   * slow snapshot must not remove a card that just arrived.
    */
-  setPendingGates(sessionId: string, gates: DecisionGate[]): void;
+  setPendingGates(sessionId: string, gates: DecisionGate[], snapshotAt?: number): void;
   reset(sessionId: string): void;
   remove(sessionId: string): void;
 }
@@ -283,6 +290,7 @@ const EMPTY: SessionStreamState = {
   errorByThread: {},
   messages: [],
   pendingGates: {},
+  gateFrameAt: {},
   queueByThread: {},
   activeModelByThread: {},
   modelSwitchNonce: 0,
@@ -668,6 +676,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // approval/question/credential card scoped to the originating
       // thread.
       next.pendingGates = { ...slice.pendingGates, [ev.gate.id]: ev.gate };
+      next.gateFrameAt = { ...slice.gateFrameAt, [ev.gate.id]: Date.now() };
       return next;
     }
 
@@ -677,6 +686,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // Whichever way a gate leaves the pending state, drop it from
       // local state. The engine will emit a status change back to
       // running/idle on its own.
+      next.gateFrameAt = { ...slice.gateFrameAt, [ev.gateId]: Date.now() };
       if (!slice.pendingGates[ev.gateId]) return next;
       const { [ev.gateId]: _, ...rest } = slice.pendingGates;
       next.pendingGates = rest;
@@ -1153,9 +1163,16 @@ export const useStreamStore = create<StreamStore>((set) => ({
       };
     }),
 
-  setPendingGates: (sessionId, gates) =>
+  setPendingGates: (sessionId, snapshot, snapshotAt) =>
     set((state) => {
       const slice = ensure(state, sessionId);
+      // For a gate with a frame newer than the snapshot, local state is the
+      // truth: keep the local copy if the frame opened it, drop it if closed.
+      const newer = (id: string) => snapshotAt !== undefined && (slice.gateFrameAt[id] ?? 0) > snapshotAt;
+      const gates = [
+        ...snapshot.filter((g) => !newer(g.id)),
+        ...Object.values(slice.pendingGates).filter((g) => newer(g.id)),
+      ];
       // Identity guard: seeding is idempotent, and more than one surface
       // seeds (SessionView and ThreadTree both call usePendingGatesSeed).
       // Rebuilding the record for equal content would re-render every

@@ -51,8 +51,8 @@ export function SharedThreadView({ address, guest }: {
   const decisionsQ = useQuery({ queryKey: ["thread-decisions", threadId], queryFn: () => api.listThreadDecisions(threadId) });
   const setPendingGates = useStreamStore((s) => s.setPendingGates);
   useEffect(() => {
-    if (decisionsQ.data) setPendingGates(sessionId, decisionsQ.data.gates.filter((gate) => gate.status === "pending"));
-  }, [sessionId, decisionsQ.data, setPendingGates]);
+    if (decisionsQ.data) setPendingGates(sessionId, decisionsQ.data.gates.filter((gate) => gate.status === "pending"), decisionsQ.dataUpdatedAt);
+  }, [sessionId, decisionsQ.data, decisionsQ.dataUpdatedAt, setPendingGates]);
 
   // A guest who may reply may edit their own messages, under the same rule
   // as the owner. A fork would create a thread in the owner's workspace.

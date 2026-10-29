@@ -8,7 +8,7 @@
  */
 import { createElement, type PropsWithChildren } from "react";
 import type { ListThreadsResponse } from "@valet/api/wire";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "./client";
 import { useSidebarThreads } from "./queries";
@@ -234,6 +234,33 @@ describe("useSessionWebSocket", () => {
     expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
     expect(useStreamStore.getState().bySession.s1).toBeDefined();
     expect(queryClient.getQueryState(["sessions", "root", "threads"])?.isInvalidated).toBe(true);
+    unmount();
+  });
+
+  it.each([
+    ["the session's decisions", undefined, ["sessions", "s1", "decisions"]],
+    ["a shared thread's decisions", "t1", ["thread-decisions", "t1"]],
+  ])("refetches %s when a gate frame arrives during the first read", async (_name, sharedThreadId, queryKey) => {
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: PropsWithChildren) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    // The first read starts before the gate opens and answers after the frame.
+    const reads: Array<(gates: string[]) => void> = [];
+    const queryFn = () => new Promise<string[]>((resolve) => { reads.push(resolve); });
+    const { result, unmount } = renderHook(() => {
+      useSessionWebSocket("s1", sharedThreadId);
+      return useQuery({ queryKey, queryFn });
+    }, { wrapper });
+    await waitFor(() => expect(reads).toHaveLength(1));
+    act(() => FakeWebSocket.instances[0]?.onmessage?.({ data: JSON.stringify({
+      seq: 1, ts: 1, threadId: "t1", offset: "0000000000000001", type: "decision_gate",
+      gate: { id: "g1", sessionId: "s1", threadId: "t1", type: "approval", title: "Approve?", actions: [], status: "pending", createdAt: 1, updatedAt: 1 },
+    }) }));
+    act(() => reads[0]?.([]));
+    await waitFor(() => expect(reads).toHaveLength(2));
+    expect(result.current.data).toBeUndefined();
+    act(() => reads[1]?.(["g1"]));
+    await waitFor(() => expect(result.current.data).toEqual(["g1"]));
     unmount();
   });
 

@@ -289,6 +289,17 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           void qc.invalidateQueries({ queryKey: ["settings"] });
           void qc.invalidateQueries({ queryKey: qk.notificationPreferences() });
         }
+        // A gate frame changes the session's decisions. Refetch them, so a
+        // later seed from REST (stores/stream.ts setPendingGates) is current.
+        // A shared-thread viewer seeds from its own query
+        // (components/session/shared-thread-view.tsx). Cancel first: an
+        // invalidation joins a first load that is still in flight, and that
+        // load can answer from before the frame.
+        if (wire.type === "decision_gate" || wire.type === "decision_gate_resolved" ||
+          wire.type === "decision_gate_expired" || wire.type === "decision_gate_withdrawn") {
+          const keys = sharedThreadId ? [qk.decisions(sessionId), ["thread-decisions", sharedThreadId]] : [qk.decisions(sessionId)];
+          for (const queryKey of keys) void qc.cancelQueries({ queryKey }).then(() => qc.invalidateQueries({ queryKey }));
+        }
         // Only `update_plan` changes a thread's plan.
         if (wire.type === "tool_end" && wire.toolName === "update_plan" && !wire.isError) {
           void qc.invalidateQueries({ queryKey: qkThreadPlan(wire.threadId) });
