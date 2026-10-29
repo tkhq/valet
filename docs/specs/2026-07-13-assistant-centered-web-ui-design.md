@@ -78,6 +78,51 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
    Amended 2026-09-20: Pending user messages render in admission order as a compact stack above the composer, not in the transcript. Each hydrated item has a **Send now** button that aborts the active turn and runs that item next while preserving every other queued message. Amended 2026-10-21: the `queue.state` frame carries each pending item's text (`WireQueueState.pending`, cut to 2,000 characters, with an attachment count and never the files). After a reload, in another tab, and for a wake-up, the stack therefore shows the text, and every row except a guest's has **Send now** and **Cancel**. A wake-up reads "Wake-up" before its text. Amended 2026-10-26: a signal row (an event, a wake-up, a child's result) shows "Runs next" and **Cancel**, with no **Send now**. A signal is not the person's message: it joins the running turn or runs after it, and Send now would only stop that turn. Send now stays on the person's own queued messages. A child's result reads "Task result" before its text. The queued item's wire `signal.type` is the signal's tag when the tag names a kind (such as `wakeup`); for the engine's default tag `signal` it is the `signalType`, such as `child.settled`. A mid-turn Enter sends `queueMode: "inject"`: the message joins the running turn at its next step, after the current tool calls, like a message typed into a coding agent while it works. It never aborts the turn. If it cannot join, or the turn ends first, it runs next. **Send now** and a second empty Enter still stop the turn and run the message at once. The empty-Enter promotion shortcut remains available. Amended 2026-10-20: every queued item, including one with no text after a reload, has its own row with **Cancel**. Cancel calls `POST /api/threads/:threadId/queue/:itemId/cancel`. `Thread.cancelQueuedItem` settles a `queued` item `aborted` in one store CAS (`settleUnclaimed` with `onlyIfUnsuperseded`) only while it is unclaimed and no Send now superseded it. It runs on the thread's overheard-digest chain, so it never lands between a digest's admission and the merge of its constituents. It also refuses an item that an unsettled digest lists in `constituentIds`, because that item can still read `queued` after a failed merge settlement. It leaves the other queued messages and the running turn alone. If a claim or a Send now wins, the route answers 409 and the composer shows the server's corrective text: use Stop for a started message. Guests of a shared thread see no Cancel, and the route refuses them. A row without text reads "Queued message. It runs when the current turn ends." The count line stays only for a view without the live queue state. The stream store badges a message only by its queue item id. A settlement that arrives before `POST /messages` links the message waits in `unmatchedSettlements` and applies when the link lands.
 
+#### Collapsible docked requests
+
+Question, approval, and credential request cards can collapse only when docked above the composer.
+Inline cards and notification cards do not have this toggle.
+The collapsed row shows the request type and title. Expanding restores the controls.
+When a deadline exists, the collapsed row keeps its countdown outside the button, with an absolute, locale-formatted expiry time linked through aria-describedby alongside any error hint.
+Same-day deadlines use time only; other deadlines include the date. Focus and return to a visible page refresh the countdown after sleep.
+The description does not tick; at expiry it changes to "Expired". The visual countdown is aria-hidden to prevent duplicate reading.
+The timer is not part of the button name. Phones omit the visible "Expires in" prefix; at expiry, the timer and dot become muted and the dot stops pulsing.
+Both toggles report their expanded state and control the card region. Focus moves to the other toggle after each change.
+
+One sessionStorage entry keeps the 50 most recently collapsed gate IDs for the current browser tab.
+Expanding removes that gate ID. A new gate starts expanded unless its ID is in this entry.
+Unavailable storage does not block the toggle.
+Collapse does not answer or dismiss a request. Unanswered requests remain pending, and the mounted card keeps its draft and images.
+
+After a failed action, the collapsed row shows a red dot and a Failed label.
+After an attachment rejection, the label shows Attachment rejected (Rejected on phones).
+One hidden description asks the user to expand and retry, or expand and fix the attachment.
+Expanding shows the full error. The error label uses at most half the row; the title gets the remaining width.
+On phones, rows with an error or timer hide the visible type badge but keep the type before the title in the accessible name.
+Error rows show Failed or Rejected without truncation.
+The accessible name includes the visible label and title as one phrase. A hidden description gives the corrective action without adding a separate reading-order item. The title has a full-text tooltip.
+
+A pointer expand, collapse, Not now, or Show records the click position and time, then arms document capture listeners.
+They cover pointerdown, pointerup, mousedown, mouseup, click, and dblclick.
+They swallow repeat events with detail greater than 1, including events over attachments, other controls, and the transcript.
+For 600ms, they also swallow separate presses near the old toggle position: within 24px for mouse and 48px for touch.
+A deliberate tap there is ignored by design, so a moved decision cannot receive it. A tap elsewhere works immediately.
+The guard decides at pointerdown or mousedown, then keeps that decision through pointerup, mouseup, click, and dblclick.
+A swallowed press stays swallowed even if release is after 600ms. A new press resets the decision.
+Pointer events stop propagation but keep their default behavior, so compatibility mouse events still reach the guard.
+A new mouse press outside that radius or after 600ms removes the listeners and passes through.
+A keyboard click also removes them and passes through. Unmount removes them too.
+OS repeat clicks have no time limit, and keyboard toggles do not arm the listeners.
+
+Each scroll sets the pin from the current distance to the end, using the existing 80-pixel threshold.
+Reveal, focus, find-in-page, keyboard, and scrollbar movement follow the same rule. No input timer gates the pin.
+During a pending viewport height change greater than two pixels, a pinned reader stays pinned if near the old or new end.
+A same-frame scroll away from both ends unpins before the resize report.
+Pinned readers stay at the bottom through viewport and content resizes. This trade-off applies to every container resize, not only gate toggles.
+A collapse scroll that brings a reader near the end pins them. On expansion they stay at the bottom, rather than returning to the pre-collapse offset.
+Otherwise the browser keeps an unpinned reader's place. The transcript does not write that reader's scroll position.
+The Latest button uses the actual distance from the end. A hidden mounted transcript ignores zero-height resize reports and scroll events.
+
 ### `/memory` and `/memory/$` — memory explorer
 
 Two panes. The Files/Graph tabs keep their width; long workspace names truncate to one line, with the full name in the existing tooltip.

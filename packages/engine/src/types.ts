@@ -1,10 +1,11 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
+import type { PlaybookSeedResult } from "./roles-skills/playbook.js";
 import type {
   EventMatchDigest,
   Lease,
@@ -796,6 +797,8 @@ export interface ToolContext {
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
+  seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -1939,6 +1942,13 @@ export type EngineEvent =
    * from here rather than from when a frame arrives. */
   | { type: "status"; threadId: string; status: EngineEventStatus; turnStartedAt?: number }
   | { type: "error"; threadId?: string; code: string; error: string; recoverable: boolean }
+  /** A failed model call that this turn retries. It is progress, not an
+   * error: a client shows it on the working line and keeps the turn open.
+   * `retry` calls `provider` again after `waitMs` (attempt `attempt` of
+   * `maxAttempts`). `fallback` continues the turn on `toProvider`. The turn
+   * fails only when the retries run out, as a failed assistant message. */
+  | { type: "turn_retry"; threadId: string; action: "retry" | "fallback"; provider: string; reason: ProviderFailureKind;
+      attempt?: number; maxAttempts?: number; waitMs?: number; toProvider?: string }
   | { type: "decision_gate"; threadId: string; gate: DecisionGate }
   | { type: "decision_gate_resolved"; threadId: string; gateId: string; resolution: DecisionResolution }
   | { type: "decision_gate_expired"; threadId: string; gateId: string }
@@ -2113,6 +2123,21 @@ export interface SessionStore {
   getThreadSnapshot(
     sessionId: string,
     threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
+  /**
+   * The snapshot that rebuilds an agent transcript. Same thread and entry
+   * order as `getThreadSnapshot`, but an entry covered by the newest
+   * compaction on the active branch comes back as a stub: ids, links, type,
+   * role and queue item, without content, parts or other payload. The
+   * transcript never reads a covered entry's payload, except the task-source
+   * prompt, which `keepQueueItemId` keeps whole. On a long, compacted thread
+   * this reads the live context instead of the whole history. Optional: a
+   * store without it serves the full snapshot.
+   */
+  getTranscriptSnapshot?(
+    sessionId: string,
+    threadId: string,
+    opts?: { keepQueueItemId?: string },
   ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
@@ -2910,6 +2935,9 @@ export interface CreateSessionOptions {
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
+  /** How long a tool may keep running after its turn is stopped, in ms
+   * (default `TOOL_STOP_GRACE_MS`). See `toAgentTool`. */
+  toolStopGraceMs?: number;
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
@@ -2924,7 +2952,9 @@ export interface CreateSessionOptions {
    */
   turnRetry?: {
     maxAttempts?: number;
-    /** Backoff before each retry, in ms; the last entry repeats. */
+    /** Backoff before each retry, in ms; the last entry repeats. Each wait
+     * moves by up to ±25% (`turnRetryWaitMs`), and `turn_retry.waitMs`
+     * carries the wait the engine actually uses. */
     backoffMs?: number[];
     /**
      * The longest provider-requested wait ("try again in 6s") a retry honors,

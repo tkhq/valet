@@ -87,6 +87,24 @@ describe("fetchThreadTranscript", () => {
     expect(out).toBe("Conner: missed while down\nDeploybot: shipped v2");
   });
 
+  it("windowed: keeps the app's replies to other people and drops the listed ones", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "the earlier mention", ts: "1.0" },
+        { user: "UBOT", text: "my own reply", ts: "1.5" },
+        { user: "U2", text: "can you check the tests?", ts: "2.0" },
+        { bot_id: "BBOT", text: "The tests pass.", ts: "2.5" },
+        { user: "U1", text: "the new mention", ts: "3.0" },
+      ],
+      { U1: "Brian", U2: "Conner" },
+    );
+    const out = await fetchThreadTranscript(api, {
+      channelId: "C1", threadTs: "1.0", selfUserId: "UBOT", selfBotId: "BBOT",
+      afterTs: "1.0", beforeTs: "3.0", keepAppPostsExcept: ["1.5"],
+    });
+    expect(out).toBe("Conner: can you check the tests?\nValet (answering someone else): The tests pass.");
+  });
+
   it("windowed: returns null when nothing falls inside the window", async () => {
     const api = fakeApi([
       { user: "U1", text: "old", ts: "1.0" },

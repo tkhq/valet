@@ -10,7 +10,8 @@ import type { SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { ResolveSnapshot } from "./sandbox-spec.js";
 import type { SessionMeta } from "./host.js";
-import { resolvePrebuildImage } from "../prebuilds/resolve.js";
+import { compatible } from "../prebuilds/image-contract.js";
+import { resolvePrebuildImage, contractGateApplies, type OnIncompatibleImage } from "../prebuilds/resolve.js";
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { imageSources, bakes } from "../schema/index.js";
 
@@ -21,6 +22,8 @@ export interface ResolveSnapshotDeps {
   apiUrl: string;
   stockImage: string;
   preflight?: PrebuildPreflightOpts;
+  /** Called (best-effort) when the repo bake fails the runtime contract gate. */
+  onIncompatible?: OnIncompatibleImage;
 }
 
 /**
@@ -72,6 +75,14 @@ async function resolveBaseImage(
     const bake = bakeRows[0];
     if (!bake) return null;
 
+    // Spec 7.1 item 2: the org base must pass the same contract test; a
+    // failing base degrades to the stock image, which is compatible by
+    // construction (pinned with the API).
+    if (contractGateApplies(provider) && !compatible(bake)) {
+      console.warn(`base bake image ${bake.imageRef} is below the runtime contract (contract ${bake.contractVersion ?? "missing"}) — falling back to stock image`);
+      return null;
+    }
+
     // Pull preflight (kubernetes only) — mirrors the repo-bake preflight in
     // `resolvePrebuildImage`. A down/slow registry or pruned image degrades to
     // null (stock), never blocks provisioning.
@@ -108,7 +119,7 @@ async function resolveBaseImage(
  * bricks provisioning.
  */
 export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<ResolveSnapshot> {
-  const { db, provider, meta, apiUrl, stockImage, preflight } = deps;
+  const { db, provider, meta, apiUrl, stockImage, preflight, onIncompatible } = deps;
 
   const repos = meta.repos ?? [];
 
@@ -116,7 +127,7 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
   // (prebuilds) are safe for EVERY session shape — docker and full-profile
   // included — and the base lookup needs no per-session profile.
   const [prebuild, baseBake] = await Promise.all([
-    resolvePrebuildImage(db, meta, provider, preflight),
+    resolvePrebuildImage(db, meta, provider, preflight, onIncompatible),
     db ? resolveBaseImage(db, meta.orgId, provider, preflight) : Promise.resolve(null),
   ]);
 

@@ -17,6 +17,7 @@
  * rendered names.
  */
 import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
+import { SANDBOX_STARTUP_KINDS, type SandboxStartupKind } from "./errors.js";
 import type { LeaseOwnerKind, WakeupCause, WakeupKind } from "./wakeups/types.js";
 
 const METER_NAME = "@valet/engine";
@@ -73,10 +74,12 @@ interface Instruments {
   sandboxCreated: Counter;
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
+  sandboxStartupFailed: Counter;
   sandboxCapacityWait: Histogram;
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
+  toolStopTimeouts: Counter;
   wakeupsTotal: Counter;
   wakeupSignalsLost: Counter;
   wakeupKillsFailed: Counter;
@@ -158,6 +161,10 @@ function inst(): Instruments {
       description:
         "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
     }),
+    sandboxStartupFailed: meter.createCounter("valet.sandbox.startup_failed", {
+      description:
+        "Terminal sandbox startup failures by bounded kind (crash_loop/image_pull/unschedulable/pod_failed/ownership/other). A failure here reached the attachment as a SandboxStartupError; retries are counted again.",
+    }),
     sandboxCapacityWait: meter.createHistogram("valet.sandbox.capacity_wait", {
       unit: "ms",
       description:
@@ -174,6 +181,10 @@ function inst(): Instruments {
     compactionCoverageGaps: meter.createCounter("valet.compaction.coverage_gap", {
       description:
         "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
+    }),
+    toolStopTimeouts: meter.createCounter("valet.tool.stop_timeouts", {
+      description:
+        "Tool calls still running after their turn was stopped and the grace period ended. The turn stopped waiting and the call kept running detached. Any rate means a tool ignores its abort signal: fix that tool.",
     }),
     wakeupsTotal: meter.createCounter("valet.wakeups.total", {
       description:
@@ -266,6 +277,9 @@ function inst(): Instruments {
   observeGauge(instruments.leasesUnannotated, leasesUnannotatedState);
   observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
   observeGauge(instruments.wakeupSweepOkAt, wakeupSweepOkState);
+  // Zero-initialize every kind so increase() sees the first failure after a
+  // process start (a series that appears at 1 has no increase).
+  for (const kind of SANDBOX_STARTUP_KINDS) instruments.sandboxStartupFailed.add(0, { kind });
   return instruments;
 }
 
@@ -302,6 +316,12 @@ export function recordSettlement(outcome: string, queueWaitMs?: number): void {
 
 export function recordToolExecution(tool: string, durationMs: number, ok: boolean): void {
   inst().toolDuration.record(durationMs, { tool, ok });
+}
+
+/** A tool that ignored its abort signal past the stop grace period. Alert on
+ * any rate: the call keeps running after its turn ended. */
+export function recordToolStopTimeout(tool: string): void {
+  inst().toolStopTimeouts.add(1, { tool });
 }
 
 export function recordCacheBreak(cause: string, model?: string): void {
@@ -376,6 +396,19 @@ export type WorkspaceGrowOutcome = "grown" | "refused" | "pending" | "error";
  * pre-read. */
 export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
   inst().sandboxWorkspaceGrow.add(1, { outcome });
+}
+
+/** Creates the engine instruments at boot, so zero-initialized series
+ * (`valet.sandbox.startup_failed` per kind) exist before the first event. */
+export function initSandboxMetrics(): void {
+  inst();
+}
+
+/** A terminal startup failure. Called once per SandboxStartupError the
+ * attachment observes, so a crash-loop that is retried three times counts
+ * three. */
+export function recordSandboxStartupFailure(kind: SandboxStartupKind): void {
+  inst().sandboxStartupFailed.add(1, { kind });
 }
 
 /** A create's wait at the per-org capacity gate. Recorded only when the

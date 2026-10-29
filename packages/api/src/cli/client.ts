@@ -29,6 +29,8 @@ import type {
   ListThreadsResponse,
   GetMeResponse,
   PostSessionFileUploadResponse,
+  ProxyKeyStatusResponse,
+  ProxySettingsResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -158,6 +160,23 @@ export class InstanceClient {
    * cookie with the user. */
   me(): Promise<GetMeResponse> {
     return this.request<GetMeResponse>("GET", "/api/me");
+  }
+
+  // ── LLM proxy (`valet proxy`) ──────────────────────────────────────────
+
+  /** `GET /api/proxy/settings` — whether the org's gateway is on, and its credential mode. */
+  proxySettings(): Promise<ProxySettingsResponse> {
+    return this.request<ProxySettingsResponse>("GET", "/api/proxy/settings");
+  }
+
+  /** `GET /api/proxy/keys/:id` — a stored proxy key that still works. Throws `ApiError` 404 when it is revoked or gone. */
+  proxyKeyStatus(id: string): Promise<ProxyKeyStatusResponse> {
+    return this.request<ProxyKeyStatusResponse>("GET", `/api/proxy/keys/${encodeURIComponent(id)}`);
+  }
+
+  /** `DELETE /api/proxy/keys/:id` — revoke a proxy key from `valet proxy setup`. */
+  deleteProxyKey(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/proxy/keys/${encodeURIComponent(id)}`);
   }
 
   // ── orchestrator ───────────────────────────────────────────────────────

@@ -1,3 +1,5 @@
+import { workflowRunIdFromThreadKey } from "./run-conversations.js";
+
 /** The editor conversation key for one viewer of one workflow. The route that
  * opens the conversation and the context resolver below both use it, so the
  * key shape cannot drift between them. */
@@ -32,10 +34,11 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
 }
 
 /** A run with no conversation origin reports on its own thread
- * (`workflowRunThreadKey`). A run started from a conversation reports there,
- * so its key never matches. */
+ * (`workflowRunThreadKey`), and a `thread: "step"` step runs on a thread of
+ * its own (`workflowStepThreadKey`) in any run. A run started from a
+ * conversation reports there, so that key never matches. */
 export function isWorkflowRunThread(thread: { key: string }): boolean {
-  return /^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key);
+  return workflowRunIdFromThreadKey(thread.key) !== undefined;
 }
 
 /** Nobody answers questions during a run. The engine refuses every decision on

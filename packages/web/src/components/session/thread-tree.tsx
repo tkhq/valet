@@ -1,6 +1,6 @@
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
-import { RowFaces } from "./viewer-faces";
+import { RowFaces, ViewerNames } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useHomeConversation } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
@@ -131,6 +131,8 @@ const THREAD_DRAG_TYPE = "application/x-valet-thread";
 
 /** A list action a phone leaves out: the drawer is for opening threads. */
 const PHONE_HIDDEN = "max-md:hidden";
+/** A thread row's wait line: a full-width item of the row's flex wrap, under the title. The row's 2px left border sits before it, so it pads 2px less. */
+const WAIT_LINE_CLASS = "basis-full -mt-1.5 pb-1.5 pl-[calc(2.25rem-2px)]";
 /** A sub-conversation row action: left out on a phone, shown on hover or focus on a wider screen (`group/child`). */
 const CHILD_HOVER_ACTION = "max-md:hidden opacity-0 group-hover/child:opacity-100 group-focus-within/child:opacity-100 focus-visible:opacity-100";
 const THREAD_SORT_STORAGE_KEY = "valet:thread-sort";
@@ -1191,10 +1193,12 @@ function ThreadNode({
   return (
     <div>
       {/* Row = link + context menu side by side; nesting the menu button
-          inside the Link would make it part of the navigation target. */}
+          inside the Link would make it part of the navigation target. A
+          wait line wraps onto its own line inside the row, so the selected
+          tint, accent bar, and hover cover it too. */}
       <div
         className={cn(
-          "group flex items-center pr-2 transition-colors",
+          "group flex flex-wrap items-center pr-2 transition-colors",
           active
             ? "bg-moss-wash-strong border-l-2 border-moss"
             : "hover:bg-ink-wash/60 border-l-2 border-transparent",
@@ -1222,7 +1226,7 @@ function ThreadNode({
             />
           </div>
         ) : (
-          <Tooltip content={label} delayDuration={600}>
+          <Tooltip content={<>{label}<span className="text-muted"><ViewerNames viewers={viewers} /></span></>} delayDuration={600}>
             <Link
               to="/chat"
               search={(prev) => ({
@@ -1342,9 +1346,9 @@ function ThreadNode({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className={WAIT_LINE_CLASS} />}
+        {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className={WAIT_LINE_CLASS} />}
       </div>
-      {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className="-mt-1.5 pb-1.5 pl-9 pr-2" />}
-      {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className="-mt-1.5 pb-1.5 pl-9 pr-2" />}
       {childSessions.length > 0 && !collapsed && (
         <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
           {childSessions.map((c) => (

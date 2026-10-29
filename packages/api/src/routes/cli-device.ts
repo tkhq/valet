@@ -16,16 +16,24 @@
  * The CLI polls with its device code and receives a CLI token
  * (`auth/cli-tokens.ts`), not an API key. The device code is stored only as
  * a hash, and works once.
+ *
+ * Purpose `proxy-key` (`valet proxy setup`,
+ * `docs/specs/2026-10-27-cli-proxy-setup-design.md`) uses the same routes.
+ * The CLI starts it with its CLI token, only that token's user can approve
+ * it, and the approved poll returns a proxy-scoped API key instead of a CLI
+ * token. A CLI token cannot create a credential alone (`AGENT_WRITES`).
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { and, asc, count, eq, gt, inArray, lt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, lt, or } from "drizzle-orm";
 import { Hono, type Context } from "hono";
-import { mintCliToken, refreshCliToken, revokeCliToken } from "../auth/cli-tokens.js";
+import type { ValetAuth } from "../auth/index.js";
+import { mintCliToken, refreshCliToken, revokeCliToken, verifyCliAccessToken } from "../auth/cli-tokens.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { PROXY_KEY_SCOPE } from "../lib/request-principal.js";
 import { cliDeviceRequests } from "../schema/index.js";
-import type { CliDeviceCodeResponse, CliDeviceInfo } from "../wire/types.js";
+import type { CliDeviceCodeResponse, CliDeviceInfo, CliDevicePurpose, CliProxyKeyResponse } from "../wire/types.js";
 import { trustedRequestOrigins } from "./oauth-consent.js";
 
 /** How long a person has to enter the code. */
@@ -54,10 +62,36 @@ const CLI_ACCESS = [
 /** What a CLI token cannot do, shown below the access list. */
 const CLI_LIMITS = ["It cannot approve requests, change policies, or administer your organization or teams. You do those in the browser."];
 
+/** What a proxy key can do, shown on the web page for a `proxy-key` request. */
+const PROXY_KEY_ACCESS = [
+  "Send model calls from coding tools on that computer, such as Claude Code, through the Valet proxy",
+  "Record those calls and their cost under your account",
+];
+
+const PROXY_KEY_LIMITS = [
+  "The key works only at the Valet proxy. It cannot call the Valet API or act as you in Valet.",
+  "It works until you revoke it in Settings > API keys, or run `valet proxy remove`. Disconnecting the CLI does not revoke it.",
+];
+
+const MAX_KEY_NAME_LENGTH = 120;
+
 /** The computer name the CLI reports, trimmed to printable text. The CLI chooses it, so it proves nothing. */
 export function deviceLabel(raw: unknown): string {
-  const text = typeof raw === "string" ? raw.replace(/[^\x20-\x7e]/g, "").trim() : "";
-  return text.slice(0, MAX_DEVICE_LENGTH) || "unknown computer";
+  return printable(raw).slice(0, MAX_DEVICE_LENGTH) || "unknown computer";
+}
+
+/** The key name a `proxy-key` request asks for, trimmed to printable text; undefined when empty. */
+export function keyNameLabel(raw: unknown): string | undefined {
+  return printable(raw).slice(0, MAX_KEY_NAME_LENGTH) || undefined;
+}
+
+function printable(raw: unknown): string {
+  return typeof raw === "string" ? raw.replace(/[^\x20-\x7e]/g, "").trim() : "";
+}
+
+function purposeOf(raw: unknown): CliDevicePurpose | undefined {
+  if (raw === undefined || raw === "login") return "login";
+  return raw === "proxy-key" ? "proxy-key" : undefined;
 }
 
 /** `bcdf-ghjk`, `BCDFGHJK`, or `BCDF GHJK` → `BCDF-GHJK`; anything else → undefined. */
@@ -151,15 +185,28 @@ function deviceError(c: Context<AppEnv>, error: "authorization_pending" | "slow_
 }
 
 /** Public routes, mounted before the auth middleware: the CLI has no credential yet. */
-export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
+export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
 
   router.post("/device/code", async (c) => {
     const now = Date.now();
     if (!allowStart(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), now)) {
-      return c.json({ error: "slow_down", error_description: "Too many sign-ins started from this computer. Wait a minute, then run `valet login` again." }, 429);
+      return c.json({ error: "slow_down", error_description: "Too many requests started from this computer. Wait a minute, then run the command again." }, 429);
     }
     const body = await readOptionalJsonObject(c);
+    const purpose = purposeOf(body?.purpose);
+    if (!purpose) return c.json({ error: "invalid_request", error_description: "Send purpose \"login\" or \"proxy-key\"." }, 400);
+    let proxyKey: { keyName: string; requestedBy: string } | undefined;
+    if (purpose === "proxy-key") {
+      // A proxy key goes only to the account whose CLI asks for it, so a
+      // code someone sends to another person cannot get a key for that person.
+      const credential = c.req.header("x-api-key");
+      const token = credential ? await verifyCliAccessToken(db, credential, now) : undefined;
+      if (!token) return c.json({ error: "invalid_client", error_description: "Sign in first. Run `valet login <url>`, then run `valet proxy setup` again." }, 401);
+      const keyName = keyNameLabel(body?.key_name);
+      if (!keyName) return c.json({ error: "invalid_request", error_description: "Send key_name for a proxy-key request." }, 400);
+      proxyKey = { keyName, requestedBy: token.userId };
+    }
     // Requests nobody finished are useless after they expire.
     await db.delete(cliDeviceRequests).where(lt(cliDeviceRequests.expiresAt, now));
     const [{ waiting }] = await db.select({ waiting: count() }).from(cliDeviceRequests);
@@ -177,17 +224,18 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
       const candidate = newUserCode();
       const inserted = await db.insert(cliDeviceRequests).values({
         deviceCodeHash: hashCode(deviceCode), userCode: candidate, device: deviceLabel(body?.device),
-        createdAt: now, expiresAt: now + REQUEST_TTL_MS,
+        createdAt: now, expiresAt: now + REQUEST_TTL_MS, purpose, ...proxyKey,
       }).onConflictDoNothing().returning({ userCode: cliDeviceRequests.userCode });
       if (inserted.length > 0) userCode = candidate;
     }
-    if (userCode === "") return c.json({ error: "temporarily_unavailable", error_description: "Valet could not start a sign-in. Run `valet login` again." }, 503);
+    if (userCode === "") return c.json({ error: "temporarily_unavailable", error_description: "Valet could not start the request. Run the command again." }, 503);
     return c.json({
       device_code: deviceCode,
       user_code: userCode,
       verification_path: "/cli/device",
       expires_in: REQUEST_TTL_MS / 1000,
       interval: POLL_INTERVAL_S,
+      purpose,
     } satisfies CliDeviceCodeResponse);
   });
 
@@ -198,7 +246,7 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
     const hash = hashCode(deviceCode);
     const now = Date.now();
     const [request] = await db.select().from(cliDeviceRequests).where(eq(cliDeviceRequests.deviceCodeHash, hash)).limit(1);
-    if (!request || request.expiresAt <= now) return deviceError(c, "expired_token", "The sign-in code expired. Run `valet login` again.");
+    if (!request || request.expiresAt <= now) return deviceError(c, "expired_token", "The code expired.");
     if (request.status === "denied") {
       await db.delete(cliDeviceRequests).where(eq(cliDeviceRequests.deviceCodeHash, hash));
       return deviceError(c, "access_denied", "The sign-in was denied in the browser.");
@@ -213,8 +261,18 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
     // Approved: take the request once, so two polls cannot both get a token.
     const [taken] = await db.delete(cliDeviceRequests)
       .where(and(eq(cliDeviceRequests.deviceCodeHash, hash), eq(cliDeviceRequests.status, "approved")))
-      .returning({ userId: cliDeviceRequests.userId, device: cliDeviceRequests.device });
-    if (!taken?.userId) return deviceError(c, "expired_token", "The sign-in code was already used. Run `valet login` again.");
+      .returning({ userId: cliDeviceRequests.userId, device: cliDeviceRequests.device, purpose: cliDeviceRequests.purpose, keyName: cliDeviceRequests.keyName });
+    if (!taken?.userId) return deviceError(c, "expired_token", "The code was already used.");
+    if (taken.purpose === "proxy-key") {
+      // Server-side call with metadata: the scope keeps the key off the Valet API.
+      const created = await auth.api.createApiKey({
+        body: { name: taken.keyName ?? `proxy@${taken.device}`, userId: taken.userId, metadata: { scope: PROXY_KEY_SCOPE } },
+      });
+      if (!created?.key) return c.json({ error: "server_error", error_description: "Valet could not create the proxy key. Run `valet proxy setup` again." }, 500);
+      return c.json({
+        proxy_key: { id: created.id, key: created.key, name: created.name ?? "", created_at: new Date(created.createdAt).getTime() },
+      } satisfies CliProxyKeyResponse);
+    }
     return c.json(await mintCliToken(db, taken.userId, taken.device, now));
   });
 
@@ -244,22 +302,31 @@ function sessionOnly(c: Context<AppEnv>): Response | undefined {
   return c.json({ error: "Sign in to Valet in your browser to approve a CLI sign-in. API keys and app tokens cannot approve it." }, 403);
 }
 
-async function pendingRequest(db: AppDb, userCode: string) {
-  const [request] = await db.select().from(cliDeviceRequests)
-    .where(and(eq(cliDeviceRequests.userCode, userCode), eq(cliDeviceRequests.status, "pending"), gt(cliDeviceRequests.expiresAt, Date.now())))
-    .limit(1);
-  return request;
+/** A waiting request this person may decide: any login, or a proxy-key
+ * request their own CLI started. */
+function decidable(userCode: string, userId: string) {
+  return and(
+    eq(cliDeviceRequests.userCode, userCode),
+    eq(cliDeviceRequests.status, "pending"),
+    gt(cliDeviceRequests.expiresAt, Date.now()),
+    or(eq(cliDeviceRequests.purpose, "login"), eq(cliDeviceRequests.requestedBy, userId)),
+  );
 }
 
-const NOT_FOUND = "No sign-in is waiting for this code. Check the code in your terminal, or run `valet login` again.";
+const NOT_FOUND = "Nothing is waiting for this code. Check the code in your terminal, or run the command again. For `valet proxy setup`, sign in here with the account your CLI uses.";
 
 cliDeviceRouter.get("/", async (c) => {
   const refused = sessionOnly(c);
   if (refused) return refused;
   const userCode = normalizeUserCode(c.req.query("user_code"));
-  const request = userCode ? await pendingRequest(c.var.providers.db, userCode) : undefined;
+  const [request] = userCode
+    ? await c.var.providers.db.select().from(cliDeviceRequests).where(decidable(userCode, c.var.user.id)).limit(1)
+    : [];
   if (!userCode || !request) return c.json({ error: NOT_FOUND }, 404);
-  return c.json({ account: c.var.user.email, device: request.device, user_code: userCode, access: CLI_ACCESS, limits: CLI_LIMITS } satisfies CliDeviceInfo);
+  const info: CliDeviceInfo = request.purpose === "proxy-key"
+    ? { account: c.var.user.email, device: request.device, user_code: userCode, purpose: "proxy-key", key_name: request.keyName ?? undefined, access: PROXY_KEY_ACCESS, limits: PROXY_KEY_LIMITS }
+    : { account: c.var.user.email, device: request.device, user_code: userCode, purpose: "login", access: CLI_ACCESS, limits: CLI_LIMITS };
+  return c.json(info);
 });
 
 cliDeviceRouter.post("/", async (c) => {
@@ -274,7 +341,7 @@ cliDeviceRouter.post("/", async (c) => {
   if (!body || !userCode || typeof body.accept !== "boolean") return c.json({ error: "Send { user_code, accept: true | false }." }, 400);
   const [decided] = await c.var.providers.db.update(cliDeviceRequests)
     .set(body.accept ? { status: "approved", userId: c.var.user.id } : { status: "denied" })
-    .where(and(eq(cliDeviceRequests.userCode, userCode), eq(cliDeviceRequests.status, "pending"), gt(cliDeviceRequests.expiresAt, Date.now())))
+    .where(decidable(userCode, c.var.user.id))
     .returning({ device: cliDeviceRequests.device });
   if (!decided) return c.json({ error: NOT_FOUND }, 404);
   return c.json({ ok: true });

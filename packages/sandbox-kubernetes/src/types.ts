@@ -190,6 +190,10 @@ export interface SandboxContainer {
    * lost on pod recreate — caught live by the conformance suite's
    * "workspace survives destroy + recreate" case). */
   workingDir?: string;
+  /** `FallbackToLogsOnError` makes the kubelet copy the log tail into
+   * `lastState.terminated.message` when a container exits non-zero with no
+   * termination file, which is how crash-loop errors learn the last line. */
+  terminationMessagePolicy?: "File" | "FallbackToLogsOnError";
 }
 
 /** `corev1.PodSecurityContext` subset — pod-level fields the manifest
@@ -383,6 +387,7 @@ export interface SandboxCRRead {
 export interface PodOwnerReference {
   kind: string;
   name: string;
+  uid?: string;
   controller?: boolean;
 }
 

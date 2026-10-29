@@ -97,4 +97,53 @@ describe("buildSkillTool", () => {
       expect(result.text).toContain("deploy");
     });
   });
+
+  describe("playbooks", () => {
+    const sandbox: Partial<Sandbox> & { id: string } = { id: "sb-1" };
+    const base: ToolContext = {
+      userId: "u1",
+      orgId: "o1",
+      sessionId: "s1",
+      threadId: "t1",
+      credentials: { get: async () => null, request: async () => Promise.reject(new Error("unused")) },
+      sandbox: sandbox as Sandbox,
+      requestDecision: async () => Promise.reject(new Error("unused")),
+      signal: new AbortController().signal,
+      threadRead: async () => [],
+      listThreads: async () => [],
+      setModel: async ({ model }) => ({ fromModel: model, toModel: model }),
+    };
+    const playbook: SkillSource = {
+      ...skill("bug-fix", "Fix one bug.\n\n## Steps\n\n1. Reproduce it\n2. Fix it\n"),
+      metadata: { kind: "playbook" },
+    };
+
+    it("marks playbooks in the description", () => {
+      const tool = buildSkillTool([playbook, skill("deploy", "Deploy.")]);
+      expect(tool?.description).toContain("- bug-fix (playbook) — Does bug-fix.");
+      expect(tool?.description).toContain("- deploy — Does deploy.");
+    });
+
+    it("seeds the plan on a body read and says so", async () => {
+      const seed = vi.fn(async () => ({ kind: "seeded" as const, steps: ["Reproduce it", "Fix it"] }));
+      const tool = buildSkillTool([playbook]);
+      const result = await tool!.execute({ name: "bug-fix" }, { ...base, seedPlaybookPlan: seed });
+      expect(seed).toHaveBeenCalledWith(playbook);
+      expect(result.text).toContain("Fix one bug.");
+      expect(result.text).toContain('Your plan now holds the 2 steps of "bug-fix"');
+    });
+
+    it("does not seed on a path read or for a plain skill", async () => {
+      const seed = vi.fn(async () => ({ kind: "seeded" as const, steps: [] }));
+      const tool = buildSkillTool([playbook, skill("deploy", "Deploy.")]);
+      await tool!.execute({ name: "deploy" }, { ...base, seedPlaybookPlan: seed });
+      await tool!.execute({ name: "bug-fix", path: "missing.md" }, { ...base, seedPlaybookPlan: seed });
+      expect(seed).not.toHaveBeenCalled();
+    });
+
+    it("tells the model to follow the steps when the context cannot keep a plan", async () => {
+      const result = await buildSkillTool([playbook])!.execute({ name: "bug-fix" }, base);
+      expect(result.text).toContain("This session cannot keep a plan.");
+    });
+  });
 });

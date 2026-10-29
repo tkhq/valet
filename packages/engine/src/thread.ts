@@ -5,6 +5,7 @@ import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -40,7 +41,7 @@ import {
   UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
-import { renderTemplate } from "./roles-skills/index.js";
+import { isPlaybook, playbookPlanItems, readPlaybookSteps, renderTemplate, type PlaybookSeedResult } from "./roles-skills/index.js";
 import {
   buildOverheardDigest,
   completedSubmissionOutcome,
@@ -276,12 +277,17 @@ const TURN_STREAM_TIMEOUT_MS = 600_000;
  * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
  * wait up to the max hint; a longer hint ends the retries.
  */
-const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
-const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
-const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
-const INTERACTIVE_TURN_RETRY_ATTEMPTS = 2;
-const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 8_000];
-const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 20_000;
+// A person's prompt gets four tries over about 30s, the order of what Claude
+// Code (10 tries) and Codex (4 request + 5 stream retries) allow, so a
+// passing outage does not cost a resend. An unattended turn has nobody
+// waiting on it, so it rides out a longer outage: six tries over about 13
+// minutes, each wait capped at 5 minutes.
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 6;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 240_000, 300_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 300_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 4;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 30_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -399,34 +405,6 @@ const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
-/**
- * Build the user-facing text for a `turn_transient_retry` event (TKAI-325).
- * The old text embedded the raw provider error blob and read as an internal
- * Valet judgment. This version names the upstream cause, tells the reader
- * what to do if retries fail, and keeps the raw JSON out — the request ID
- * (when the error carries one) is enough for a support escalation. Exported
- * so tests can pin the copy without spinning up a whole retry loop.
- */
-export function formatTransientRetryMessage(args: {
-  provider: string;
-  errorMessage: string | undefined;
-  waitMs: number;
-  attempt: number;
-  maxAttempts: number;
-}): string {
-  const providerLabel = args.provider
-    ? args.provider.charAt(0).toUpperCase() + args.provider.slice(1)
-    : "The upstream provider";
-  const requestId = args.errorMessage?.match(/request_id["':\s]+"?([A-Za-z0-9_-]+)"?/)?.[1];
-  const seconds = Math.round(args.waitMs / 1000);
-  const primary = `${providerLabel}'s API is unavailable or overloaded. The turn will retry automatically in ${seconds}s (attempt ${args.attempt}/${args.maxAttempts}).`;
-  const detail = requestId
-    ? ` If retries fail, switch to a different model or contact support (request ID: ${requestId}).`
-    : " If retries fail, switch to a different model.";
-  return primary + detail;
-}
-
-
 const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
   [/^(?:ms|milliseconds?)$/i, 1],
   [/^(?:h|hours?)$/i, 3_600_000],
@@ -453,6 +431,24 @@ export function parseProviderRetryHintMs(errorMessage: string | undefined): numb
     total += Number(part[1]) * scale;
   }
   return total > 0 ? Math.ceil(total) : undefined;
+}
+
+/**
+ * Each retry wait moves by up to this fraction either way. Threads that share
+ * one provider key fail together in an outage. Without jitter they all retry
+ * at the same moment and fail together again.
+ */
+const TURN_RETRY_JITTER = 0.25;
+
+/**
+ * The wait before one retry: the backoff, raised to the provider's hint, then
+ * moved by up to ±25%. The hint stays a floor, so jitter never retries
+ * sooner than the provider asked. Exported for tests.
+ */
+export function turnRetryWaitMs(backoffMs: number, hintMs: number | undefined, random: () => number = Math.random): number {
+  const base = Math.max(backoffMs, hintMs ?? 0);
+  const jittered = Math.round(base * (1 - TURN_RETRY_JITTER + 2 * TURN_RETRY_JITTER * random()));
+  return Math.max(jittered, hintMs ?? 0);
 }
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
@@ -758,6 +754,10 @@ export class Thread {
   private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
+  /** When a turn, gate reconcile or compaction last loaded or used the agent transcript. */
+  private transcriptUsedAt = 0;
+  /** Background drives (resume drives, gate replays) in flight. */
+  private backgroundDrives = 0;
 
   constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
     this.transcriptPending = opts.restoreTranscript ?? false;
@@ -919,6 +919,15 @@ export class Thread {
       effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
+    // A slash-invoked playbook sets the plan before its turn starts, so the
+    // turn's plan overlay already shows the steps. An outside author cannot
+    // change the plan, the same rule as `update_plan` (`refuseOutsideAuthors`).
+    const owner = this.session.options.owner;
+    const outsideAuthor = opts.author?.externalSender === true ||
+      (owner?.type === "user" && opts.author !== undefined && opts.author.id !== owner.id);
+    if (wasAdmitted && !outsideAuthor && opts.skillInvocation && isPlaybook(opts.skillInvocation.skill)) {
+      await this.seedPlaybookPlan(opts.skillInvocation.skill);
+    }
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
@@ -1137,9 +1146,12 @@ export class Thread {
     for (const g of this.pendingDecisionGates()) {
       this.withdrawDecision(g.id, "steer");
     }
+    // A claimed item (the running turn) is not settled here. It settles, and
+    // emits, when its turn ends. Emitting now told clients a turn had ended
+    // while it was still running.
     for (const id of supersededItemIds) {
-      await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
-      await this.emitSettled(id, { outcome: "superseded" });
+      const settled = await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+      if (settled) await this.emitSettled(id, { outcome: "superseded" });
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
@@ -1660,6 +1672,8 @@ export class Thread {
   }): Promise<void> {
     const { suspended, resolution } = args;
     this.rearmedGate = false;
+    // The replay appends to the live transcript, so it must be loaded.
+    await this.ensureTranscript();
     const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -3054,11 +3068,20 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(
-      this.session.id,
-      this.id,
-    );
+  /** Every entry, payloads included. Compaction prunes, selects its cut point
+   * and rebuilds from all path entries, so it must not see stubs. */
+  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
+  private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const store = this.session.providers.store;
+    const snapshot = store.getTranscriptSnapshot
+      ? await store.getTranscriptSnapshot(this.session.id, this.id, keepQueueItemId === undefined ? undefined : { keepQueueItemId })
+      : await store.getThreadSnapshot(this.session.id, this.id);
     if (!snapshot) throw new Error(`thread not found: ${this.id}`);
     this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
     return snapshot;
@@ -3066,13 +3089,17 @@ export class Thread {
 
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
+    // Every caller is about to use the transcript, so mark it used even when
+    // it is already loaded: a gate reconcile awaits store calls before it sets
+    // `runningItem`, and the idle release must not land in that gap.
+    this.transcriptUsedAt = Date.now();
     if (!this.transcriptPending) return;
     if (!this.transcriptLoad) {
       this.transcriptLoad = withSpan(
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const snapshot = await this.transcriptSnapshot();
+          const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
           span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
           this.rehydrateTranscript(snapshot.entries);
         },
@@ -3081,6 +3108,24 @@ export class Thread {
       });
     }
     await this.transcriptLoad;
+    this.transcriptUsedAt = Date.now();
+  }
+
+  /**
+   * Drop the in-memory agent transcript of a thread that has not used it
+   * since `idleSince`, and return whether it did. The store keeps the
+   * history: the next turn, gate reconcile or compaction reloads it through
+   * `ensureTranscript`, as after a restart. Without this, a cached assistant
+   * session holds every transcript it loaded until the process exits.
+   */
+  releaseIdleTranscript(idleSince: number): boolean {
+    if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
+      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+    this.replaceAgentMessages([]);
+    this.transcriptPending = true;
+    // Mid-turn ids only matter while their turn runs.
+    this.midTurnAppended.clear();
+    return true;
   }
 
   /**
@@ -3628,6 +3673,7 @@ export class Thread {
     drive: () => Promise<void>,
   ): void {
     registerBackgroundDrive(itemId);
+    this.backgroundDrives += 1;
     const p = drive()
       .catch((err: unknown) => {
         this.emitError(errorCode, err instanceof Error ? err.message : String(err));
@@ -3637,6 +3683,7 @@ export class Thread {
         }
       })
       .finally(() => {
+        this.backgroundDrives -= 1;
         unregisterBackgroundDrive(itemId);
         this.session.notifyExecutionIdle();
       });
@@ -4158,7 +4205,7 @@ export class Thread {
     errorText: string = "interrupted",
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant") continue;
       if (e.queueItemId !== item.id) continue;
@@ -4307,7 +4354,7 @@ export class Thread {
     await this.ensureTranscript();
     const taskSource = this.taskSourceFor(item);
     if (taskSource) {
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(taskSource);
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
@@ -4439,6 +4486,7 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    await this.ensureTranscript();
     return withSpan(
       "agent.turn",
       {
@@ -4496,7 +4544,7 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const snapshot = await this.transcriptSnapshot();
+      const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
       const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
@@ -4672,7 +4720,7 @@ export class Thread {
     // or a second cap pass) must not duplicate it. Return the persisted
     // entry's attachments (the authoritative on-disk shape) so a retried
     // attempt still feeds the model the same image blocks.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     const existingUserEntry = existing.find(
       (e): e is MessageEntry =>
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
@@ -4827,6 +4875,7 @@ export class Thread {
           try {
             await this.runItemInner(item);
           } finally {
+            this.transcriptUsedAt = Date.now();
             this.turnSpan = undefined;
             this.llmSpan?.end();
             this.llmSpan = undefined;
@@ -4974,7 +5023,8 @@ export class Thread {
     // Retire an injected contract before an unrelated submission runs.
     const taskSource = this.taskSourceFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
-      const snapshot = await this.transcriptSnapshot();
+      // Keep the task's covered prompt whole: the rebuild below restores it.
+      const snapshot = await this.transcriptSnapshot(taskSource);
       const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
       const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
       const checkpoint = findMostRecentCompaction(activeEntries);
@@ -5368,8 +5418,8 @@ export class Thread {
       const error = last.errorMessage ?? "";
       // Provider capacity cannot override authentication, input, policy, or
       // application budget failures, even when their text also mentions 429.
-      if (/authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?key|request|input|argument)|permission[_ -]denied|\b(?:40[013]|422)\b|content[_ -]?(?:policy|filter)|policy[_ -]?(?:violation|denied)|\bbudget\b|context[_ -]?(?:length|window)|aborted|cancelled/i.test(error)) return;
-      const quota = /\bquota\b|insufficient_quota|payment_required|\b402\b|billing[_ -](?:error|limit|hard_limit)|credit balance.*(?:low|insufficient|exhausted)|(?:insufficient|exhausted)[_ -]credits|(?:monthly|spend(?:ing)?)[_ -]limit|quota[_ -](?:exceeded|exhausted)/i.test(error);
+      if (isNonRetryableProviderFailure(error)) return;
+      const quota = isUsageLimitFailure(error);
       const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
       if (!quota && !transient) return;
       if (!(await this.canRunCurrentSubmission())) return;
@@ -5399,10 +5449,7 @@ export class Thread {
         this.agent.state.model = fallback.model;
         this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
         if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
-        this.emitError(
-          "turn_provider_fallback",
-          `${previousProvider} is unavailable. Continuing this turn with ${fallback.model.provider}.`,
-        );
+        this.emitTurnRetry({ action: "fallback", provider: previousProvider, reason: classifyProviderFailure(error), toProvider: fallback.model.provider });
       } else {
         if (!transient || sameProviderAttempts >= maxAttempts) return;
         // A provider that asks for a longer wait than this turn allows gets
@@ -5410,14 +5457,11 @@ export class Thread {
         const hintMs = parseProviderRetryHintMs(last.errorMessage);
         if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
-        this.emitError("turn_transient_retry", formatTransientRetryMessage({
-          provider: this.agent.state.model.provider,
-          errorMessage: last.errorMessage,
-          waitMs,
-          attempt: sameProviderAttempts,
-          maxAttempts,
-        }));
+        const waitMs = turnRetryWaitMs(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs);
+        this.emitTurnRetry({
+          action: "retry", provider: this.agent.state.model.provider, reason: classifyProviderFailure(error),
+          attempt: sameProviderAttempts, maxAttempts, waitMs,
+        });
         if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
       }
       if (!(await this.canRunCurrentSubmission())) return;
@@ -5852,7 +5896,7 @@ export class Thread {
 
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.transcriptSnapshot();
+    const snapshot = await this.fullSnapshot();
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
@@ -6186,7 +6230,7 @@ export class Thread {
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.transcriptSnapshot();
+      const updatedSnapshot = await this.fullSnapshot();
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
@@ -6665,7 +6709,9 @@ export class Thread {
 
   /** Whether the transcript already holds the user entry of queue item `itemId`. */
   private async hasUserEntry(itemId: string): Promise<boolean> {
-    const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+    // Only this item's entries: a whole-thread read here ran once per queued
+    // message that joined a running turn.
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: itemId });
     return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
   }
 
@@ -6710,6 +6756,7 @@ export class Thread {
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
+        this.session.options.toolStopGraceMs,
       ),
     );
   }
@@ -6820,6 +6867,20 @@ export class Thread {
     return plan;
   }
 
+  /**
+   * Seed the plan from a playbook's steps, so the model spends no tokens to
+   * write it. An open plan (an item not `done`) stays: the person or the
+   * model made it, and a playbook load must not erase it.
+   */
+  async seedPlaybookPlan(skill: SkillSource): Promise<PlaybookSeedResult> {
+    const read = readPlaybookSteps(skill.content);
+    if (read.kind === "invalid") return read;
+    const current = readThreadPlan(this.threadMetadata);
+    if (current?.items.some((item) => item.status !== "done")) return { kind: "kept", steps: read.steps };
+    await this.setPlan(playbookPlanItems(read.steps));
+    return { kind: "seeded", steps: read.steps };
+  }
+
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
     await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
@@ -6850,6 +6911,7 @@ export class Thread {
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
       setThreadPlan: (items) => this.setPlan(items),
+      seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
@@ -7591,6 +7653,13 @@ export class Thread {
     }
   }
 
+  /** Progress for a failed model call this turn retries. Not an error: see
+   * the `turn_retry` event. Logged too, as `emitError` is. */
+  private emitTurnRetry(retry: Omit<Extract<EngineEvent, { type: "turn_retry" }>, "type" | "threadId">): void {
+    console.warn(`[engine] thread retry session=${this.session.id} thread=${this.id} ${retry.action} ${retry.provider} ${retry.reason}${retry.attempt ? ` ${retry.attempt}/${retry.maxAttempts}` : ""}${retry.toProvider ? ` -> ${retry.toProvider}` : ""}`);
+    void this.session.emit({ type: "turn_retry", threadId: this.id, ...retry });
+  }
+
   private emitError(code: string, message: string): void {
     // Event delivery is best-effort (a dead WS drops it silently), so also
     // log to stderr — otherwise a failing turn (bad key, exhausted credits,
@@ -7662,7 +7731,8 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
+    // Every reader below looks at this submission only.
+    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
     const text =
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)

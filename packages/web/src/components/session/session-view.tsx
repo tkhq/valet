@@ -23,6 +23,7 @@ import {
   useQueueStateForThread,
   useThreadLiveStatus,
   useErrorForThread,
+  useRetryForThread,
   useCompactingForThread,
   type StreamMessage,
 } from "~/stores/stream";
@@ -260,6 +261,7 @@ export function SessionView({
     ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
   // Quick replies are a phone affordance: tap an answer instead of typing it.
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
+  const threadRetry = useRetryForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
@@ -482,7 +484,7 @@ export function SessionView({
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           <PinnedPlan threadId={effectiveThreadId} />
           {pendingGate && (
-            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
           <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
@@ -491,7 +493,7 @@ export function SessionView({
           {composerAccessory}
           <TypingLine viewers={viewers} />
           <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
-            activity={currentStep} startedAt={threadStatus.turnStartedAt} />
+            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

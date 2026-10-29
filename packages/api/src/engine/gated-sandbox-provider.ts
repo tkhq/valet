@@ -108,6 +108,7 @@ export function withSandboxCapacityGate(
             `org sandbox ceiling reached (${opts.ceiling} concurrent). ` +
               `Waited ${Math.round((Date.now() - startedAt) / 1000)}s for capacity. ` +
               "Finish or pause other sessions, or raise VALET_ORG_SANDBOX_CEILING.",
+            "capacity",
           );
         }
         if (!waited) {

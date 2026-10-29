@@ -7,6 +7,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { loadAccountSettings, patchAccountSettings, validateModelDefaults, type SettingsActor } from "./account-settings.js";
 import { getOrgDefaultTier } from "./model-tiers.js";
+import { listNotificationPreferences, NOTIFICATION_KINDS, parseNotificationPreference, saveNotificationPreference } from "./notification-preferences.js";
 import { patchOrganizationSettings } from "./organization-settings.js";
 import { isOrgAdmin } from "./org.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg } from "./teams.js";
@@ -33,6 +34,10 @@ async function actorFor(db: AppDb, ctx: PluginActionContext): Promise<SettingsAc
   return { ...row, orgId: ctx.orgId };
 }
 
+async function notificationsView(db: AppDb, actor: SettingsActor) {
+  return { preferences: await listNotificationPreferences(db, actor.id), url: "/settings/notifications" };
+}
+
 function accountView(row: { name: string | null; timezone?: string | null; defaultModel: string | null; defaultReasoning: string | null }) {
   return { name: row.name, timezone: row.timezone ?? null, defaultModel: row.defaultModel, defaultReasoning: row.defaultReasoning,
     url: "/settings/profile", preferencesUrl: "/settings/preferences" };
@@ -52,17 +57,19 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
       canEdit: await isOrgAdmin(db, actor.orgId, actor.id), url: "/settings/organization", modelsUrl: "/settings/organization/models" } };
   }
   const read = action(Type.Object({
-    scope: Type.Union([Type.Literal("account"), Type.Literal("team"), Type.Literal("organization")]),
+    scope: Type.Optional(Type.Union([Type.Literal("account"), Type.Literal("notifications"), Type.Literal("team"), Type.Literal("organization")])),
     team_id: Type.Optional(Type.String()),
   }, { additionalProperties: false }), {
     id: "settings.get_settings", name: "Read Valet settings", riskLevel: "low",
-    description: "Read safe account, team, or organization settings before a requested change. Team scope requires team_id. Returns current values and Settings links, never credentials. Account settings always belong to the person typing. Browser theme, palette, density and sound are device-local; explain their Settings controls instead.",
-    execute: async ({ scope, team_id }, ctx) => {
+    description: "Read safe account (the default scope), notification, team, or organization settings before a requested change. Team scope reads team_id, or the current team workspace when team_id is omitted. Returns current values and Settings links, never credentials. Account and notification settings always belong to the person typing. Browser theme, palette, density and sound are device-local; explain their Settings controls instead.",
+    execute: async ({ scope = "account", team_id }, ctx) => {
       const actor = await actorFor(db, ctx);
       if (!actor) return refused;
       if (scope === "organization") return organizationView(actor);
+      if (scope === "notifications") return { success: true, data: await notificationsView(db, actor) };
       if (scope === "team") {
-        const team = team_id ? await teamFor(ctx, actor, team_id, false) : undefined;
+        const id = team_id ?? (ctx.owner?.type === "team" ? ctx.owner.id : undefined);
+        const team = id ? await teamFor(ctx, actor, id, false) : undefined;
         return team ? { success: true, data: { teamId: team.id, name: team.name, defaultModel: team.defaultModel,
           defaultReasoning: team.defaultReasoning, url: `/settings/teams/${encodeURIComponent(team.id)}` } }
           : { success: false, error: "Team not found. Select that team workspace and try again." };
@@ -79,6 +86,24 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
       if (!actor) return refused;
       const row = await patchAccountSettings(db, credentials(), actor, args);
       return "error" in row ? { success: false, error: row.error } : { success: true, data: accountView(row) };
+    },
+  });
+  const notifications = action(Type.Object({
+    kind: Type.Union(NOTIFICATION_KINDS.map((kind) => Type.Literal(kind))),
+    web: Type.Optional(Type.Boolean()),
+    teamDm: Type.Optional(Type.Boolean()),
+    channelGraceSeconds: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: 86_400 }), Type.Null()])),
+  }, { additionalProperties: false, minProperties: 2 }), {
+    id: "settings.update_notifications", name: "Change your notification settings", riskLevel: "high", approvalScope: "actor",
+    description: "Change the signed-in person's delivery for one notification kind, only when requested. Read the notifications scope first. web turns in-app delivery on or off; teamDm turns personal direct-message copies of team attention on or off; channelGraceSeconds is the direct-message delay (0 sends at once, null restores the default). Omitted fields keep their saved values. Does not change approval permissions or device sound.",
+    execute: async ({ kind, ...change }, ctx) => {
+      const actor = await actorFor(db, ctx);
+      if (!actor) return refused;
+      const current = (await listNotificationPreferences(db, actor.id)).find((pref) => pref.kind === kind);
+      const pref = parseNotificationPreference({ kind, web: change.web ?? current?.web ?? true, ...change });
+      if ("error" in pref) return { success: false, error: pref.error };
+      await saveNotificationPreference(db, actor.id, pref);
+      return { success: true, data: await notificationsView(db, actor) };
     },
   });
   const team = action(Type.Object({ team_id: Type.String(), ...defaults }, { additionalProperties: false, minProperties: 2 }), {
@@ -108,5 +133,5 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
       return organizationView(actor);
     },
   });
-  return { service: "settings", displayName: "Valet settings", actions: [read, account, team, organization] };
+  return { service: "settings", displayName: "Valet settings", actions: [read, account, notifications, team, organization] };
 }

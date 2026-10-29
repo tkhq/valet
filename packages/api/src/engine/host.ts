@@ -12,7 +12,7 @@ import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -93,6 +93,9 @@ import {
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import { repoBakeCompatibility, type ImageFallbackEvent } from "../prebuilds/resolve.js";
+import { recordImageFallback } from "../observability/image-fallback-metrics.js";
+import { recordTranscriptsReleased } from "../observability/transcript-metrics.js";
 import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
   applySandboxResourceOverrides,
@@ -137,6 +140,7 @@ import {
   sessionRepos,
   teams,
   users,
+  type ImageFallback,
   type SecurityCellRow,
 } from "../schema/index.js";
 import {
@@ -559,6 +563,16 @@ export function scratchWarningPrompt(warning: string | undefined): string {
   return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
 }
 
+/** Spec 7.2. Appended to the system prompt at build time when the eager
+ * compatibility check says the repo image is incompatible, so it repeats on
+ * every turn of that build; a note that disappears mid-task is worse than
+ * one that repeats. */
+export function imageFallbackPrompt(repoFullName: string | undefined): string {
+  return repoFullName
+    ? `\n\n## Startup warning\n\nPrebuilt dependencies for \`${repoFullName}\` are unavailable right now because the repo image is being rebuilt. The workspace is checked out; install what you need.`
+    : "";
+}
+
 export interface SessionMeta {
   userId: string;
   orgId: string;
@@ -819,6 +833,13 @@ export async function verifyFileInSandbox(
  * same Session.
  */
 export class EngineHost {
+  /** Spec 7.1 callback target; attached after construction because the
+   * SourceService is built after the host (providers/node.ts). */
+  private imageFallbackHandler?: (event: ImageFallbackEvent) => Promise<void>;
+  setImageFallbackHandler(handler: (event: ImageFallbackEvent) => Promise<void>): void {
+    this.imageFallbackHandler = handler;
+  }
+
   private cache = new Map<string, CacheEntry>();
   /**
    * Single-flight gate for `sessionFor`. Two concurrent requests for the
@@ -953,6 +974,10 @@ export class EngineHost {
     const now = Date.now();
     for (const [sessionId, entry] of this.cache) {
       try {
+        // Assistant sessions stay cached while idle (only executions are
+        // evicted below), so drop their idle threads' transcripts. The next
+        // turn reloads one from the store.
+        recordTranscriptsReleased(entry.session.releaseIdleTranscripts(now - idleMs));
         await this.maybeSuspendIdleSession(sessionId, entry.session, now, idleMs);
       } catch (err) {
         console.error(`EngineHost: idle sweep failed for session ${sessionId}:`, err);
@@ -1245,6 +1270,7 @@ export class EngineHost {
     // SandboxCreateOpts (caps/mounts/exec identity), never which image is
     // resolved.
     const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const dockerFlag = meta.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
@@ -1305,7 +1331,7 @@ export class EngineHost {
     // services START). The specProvider closure may resolve a bake image
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
-    const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    const image = this.stockImage();
     // Authorized-scope egress allowlist env (M-P4b): a live persona child
     // carries VALET_SECURITY_AUTHORIZED_SCOPE so its live tools bound egress to
     // the human-declared scope. Merged over the mint env; empty otherwise, so a
@@ -1398,7 +1424,7 @@ export class EngineHost {
             resolveFallbackModel,
             sampling: { reasoning },
             compaction: await this.orgCompaction(meta.orgId),
-            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1438,7 +1464,7 @@ export class EngineHost {
           resolveFallbackModel,
           sampling: { reasoning },
           compaction: await this.orgCompaction(meta.orgId),
-          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags) }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1473,6 +1499,13 @@ export class EngineHost {
     // triggered the build. The system prompt carries it for the model.
     if (repoFlags.scratchWarning) {
       await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
+    }
+    if (fallbackRepo) {
+      await this.noteSessionWarning(
+        session,
+        `Running on the stock image: the \`${fallbackRepo}\` image failed its compatibility check and is being rebuilt. Prebuilt dependencies are unavailable until then.`,
+        meta.warningThreadKey ?? "web:default",
+      );
     }
 
     extras.bindSession(session);
@@ -1798,10 +1831,7 @@ export class EngineHost {
     // agree with the create-opts image in `buildSession`/`buildChild` or the
     // `spec.image !== stockImage` comparison below misreports the stock
     // case as an override.
-    const stockImage =
-      this.opts.defaultImages?.full ??
-      this.opts.defaultImage ??
-      "";
+    const stockImage = this.stockImage() ?? "";
 
     return async () => {
       const snap = await resolveSnapshot({
@@ -1811,6 +1841,12 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        onIncompatible: async (info) => {
+          // Count and stamp once per (session, bake), not once per sweep.
+          const changed = await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
+          if (changed) recordImageFallback("contract");
+          await host.imageFallbackHandler?.({ ...info, sessionId });
+        },
       });
       // The repo's own command-to-credential declarations, resolved on the
       // same best-effort footing as the docker flag: read failures yield no
@@ -1827,6 +1863,7 @@ export class EngineHost {
       // Best-effort prebuild-id recording — same as the old eager path.
       if (snap.repoBake) {
         await host.recordPrebuildId(sessionId, snap.repoBake.bakeId);
+        await host.recordImageFallback(sessionId, null);
       }
 
       const spec = computeSpec(snap);
@@ -1888,6 +1925,35 @@ export class EngineHost {
         .where(eq(agentSessions.id, sessionId));
     } catch (err) {
       console.error(`EngineHost: recording bake_id for session ${sessionId} failed:`, err);
+    }
+  }
+
+  /** Best-effort write of `agent_sessions.image_fallback` (spec 7.1). A null
+   * clears it. Both writes are conditional (set only when absent or for a
+   * different bake; clear only when set) so a steady-state session costs no
+   * row write per reconcile. Returns whether a row changed. */
+  private async recordImageFallback(sessionId: string, fallback: ImageFallback | null): Promise<boolean> {
+    if (!this.opts.db) return false;
+    try {
+      if (fallback) {
+        const rows = await this.opts.db.update(agentSessions).set({ imageFallback: fallback })
+          .where(and(
+            eq(agentSessions.id, sessionId),
+            or(
+              isNull(agentSessions.imageFallback),
+              sql`${agentSessions.imageFallback}->>'bakeId' IS DISTINCT FROM ${fallback.bakeId}`,
+            ),
+          ))
+          .returning({ id: agentSessions.id });
+        return rows.length > 0;
+      }
+      const rows = await this.opts.db.update(agentSessions).set({ imageFallback: null })
+        .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.imageFallback)))
+        .returning({ id: agentSessions.id });
+      return rows.length > 0;
+    } catch (err) {
+      console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
+      return false;
     }
   }
 
@@ -2343,6 +2409,14 @@ export class EngineHost {
       console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
       return [];
     }
+  }
+
+  /** The primary repo's full name when its newest pushed bake would fail the
+   * contract gate (one DB read), else undefined. Never throws. */
+  private async repoImageFallbackRepo(meta: SessionMeta): Promise<string | undefined> {
+    if (!meta.repos?.length) return undefined;
+    const check = await repoBakeCompatibility(this.opts.db, meta, this.opts.sandboxProvider);
+    return check && !check.compatible ? check.info.repoFullName : undefined;
   }
 
   /**
@@ -3207,7 +3281,7 @@ export class EngineHost {
         // session and a child both use. This path pinned `defaultImage`,
         // which is the wrong image for a `full` assistant: `/start-full.sh`
         // is baked into the full lineage only.
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -3501,6 +3575,15 @@ export class EngineHost {
     }
     this.draining.clear();
     this.clearSweepInterval();
+  }
+
+  /** The one stock image every session shape boots when no bake applies.
+   * `buildSpecProvider` compares the resolved spec against this same value
+   * (`spec.image !== stockImage` means an override), so every create site
+   * must use it; a site that pins `defaultImage` alone boots the headless
+   * image under a kubernetes deployment that only ships the full lineage. */
+  private stockImage(): string | undefined {
+    return this.opts.defaultImages?.full ?? this.opts.defaultImage;
   }
 
   /** Shared by `evictAll()`/`destroyAll()` — both are terminal, whole-host
@@ -4191,7 +4274,7 @@ export class EngineHost {
       provider: this.opts.sandboxProvider,
       meta,
       apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-      stockImage: this.opts.defaultImages?.full ?? this.opts.defaultImage ?? "",
+      stockImage: this.stockImage() ?? "",
       preflight: this.opts.prebuildPreflight,
     });
     // Use startup's repo -> base -> stock fallback, including its pull preflight.
@@ -4405,6 +4488,7 @@ export class EngineHost {
     // claim while REST sessions honored the declaration. Best-effort: any
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     if (repoFlags.outcome === "error") {
       opts.startupWarnings?.push(
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
@@ -4457,7 +4541,7 @@ export class EngineHost {
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
-        image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
+        image: this.stockImage(),
         // Authorized-scope egress allowlist env (M-P4b): a live persona child
         // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
         // so the env stays byte-identical.
@@ -4486,7 +4570,7 @@ export class EngineHost {
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4631,6 +4715,7 @@ export class EngineHost {
       ownerId: opts.owner.id,
     };
     const meta: SessionMeta = this.opts.db ? await loadSessionMeta(this.opts.db, metaSource) : metaSource;
+    const fallbackRepo = await this.repoImageFallbackRepo(meta);
     const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
@@ -4675,7 +4760,7 @@ export class EngineHost {
       sandbox: {
         browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace,
-        image: this.opts.defaultImage,
+        image: this.stockImage(),
         env: sandboxMint?.env,
         profile: "headless" as const,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -4686,7 +4771,7 @@ export class EngineHost {
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
-      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name

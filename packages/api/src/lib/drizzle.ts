@@ -401,6 +401,30 @@ END $cost_view$`;
  * statement then stops its boot. Do not rename or drop here.
  */
 
+/** Spec 5.4: first stock image containing tini (2026-09-18T20:31:00Z,
+ * commit 56edb1bd9). Base bakes created at or after it are contract 3. */
+const TINI_EPOCH_MS = 1789763460000;
+
+/** Spec 5.4 backfill as ONE statement: base bakes by age, repo bakes by the
+ * parent base's newest pushed bake created at or before them, else 0. The
+ * sub-select reads the pre-statement snapshot, which is fine: it derives the
+ * parent's contract from created_at, not from the column being written. */
+const CONTRACT_BACKFILL_SQL = `WITH base AS (
+  UPDATE bakes b SET contract_version = CASE WHEN b.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END, contract_source = 'missing'
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'base' AND b.contract_version IS NULL
+  RETURNING b.id
+), repo AS (
+  UPDATE bakes b SET contract_version = COALESCE((
+      SELECT CASE WHEN pb.created_at >= ${TINI_EPOCH_MS} THEN 3 ELSE 0 END
+      FROM bakes pb JOIN image_sources ps ON ps.id = pb.source_id
+      WHERE ps.kind = 'base' AND ps.id = s.parent_id AND pb.status = 'pushed' AND pb.created_at <= b.created_at
+      ORDER BY pb.created_at DESC LIMIT 1), 0),
+    contract_source = CASE WHEN b.recipe->>'image' IS NOT NULL THEN 'override' ELSE 'missing' END
+  FROM image_sources s WHERE s.id = b.source_id AND s.kind = 'repo' AND b.contract_version IS NULL
+  RETURNING b.id
+)
+SELECT id FROM base UNION ALL SELECT id FROM repo`;
+
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
@@ -799,6 +823,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "cli_tokens.prev_refresh_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_refresh_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_refresh_hash" text' },
   { describe: "cli_tokens.rotated_at column", probe: { kind: "column", table: "cli_tokens", column: "rotated_at" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "rotated_at" bigint' },
   { describe: "cli_device_requests_expires", probe: { kind: "index", index: "cli_device_requests_expires" }, sql: 'CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");' },
+  { describe: "cli_device_requests.purpose column", probe: { kind: "column", table: "cli_device_requests", column: "purpose" }, sql: `ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "purpose" text NOT NULL DEFAULT 'login'` },
+  { describe: "cli_device_requests.key_name column", probe: { kind: "column", table: "cli_device_requests", column: "key_name" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "key_name" text' },
+  { describe: "cli_device_requests.requested_by column", probe: { kind: "column", table: "cli_device_requests", column: "requested_by" }, sql: 'ALTER TABLE "cli_device_requests" ADD COLUMN IF NOT EXISTS "requested_by" text REFERENCES "user"("id") ON DELETE cascade' },
 
   {
     describe: "action_invocations.thread_id column",
@@ -1260,6 +1287,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       "artifact_id" text NOT NULL,
       "version" bigint NOT NULL,
       "vdid" text,
+      "anchor_label" text,
       "parent_id" text,
       "body" text NOT NULL,
       "author_user_id" text NOT NULL,
@@ -1274,6 +1302,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "index", index: "artifact_comments_artifact" },
     sql: 'CREATE INDEX IF NOT EXISTS "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")',
   },
+  { describe: "artifact_comments.anchor_label column", probe: { kind: "column", table: "artifact_comments", column: "anchor_label" }, sql: 'ALTER TABLE "artifact_comments" ADD COLUMN IF NOT EXISTS "anchor_label" text' },
   {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
     // the model catalog to the bundled compile-time list, so a deployment
@@ -2296,6 +2325,30 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "tagging accounting use case", probe: { kind: "table", table: "tagging_accounting_ready" },
     sql: `DO $repair$ BEGIN ${taggingAccountingPublishSql} END $repair$` },
 
+  {
+    describe: "bakes contract and lineage columns",
+    probe: { kind: "column", table: "bakes", column: "contract_version" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_version integer;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS contract_source text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS parent_bake_id text;
+      ALTER TABLE bakes ADD COLUMN IF NOT EXISTS base_image_ref text; END $repair$`,
+    backfill: CONTRACT_BACKFILL_SQL,
+  },
+  {
+    describe: "image_sources health columns",
+    probe: { kind: "column", table: "image_sources", column: "health" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health text NOT NULL DEFAULT 'healthy';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_reason text NOT NULL DEFAULT 'ok';
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_detail text;
+      ALTER TABLE image_sources ADD COLUMN IF NOT EXISTS health_checked_at bigint; END $repair$`,
+  },
+  {
+    describe: "agent_sessions.image_fallback column",
+    probe: { kind: "column", table: "agent_sessions", column: "image_fallback" },
+    sql: `ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS image_fallback jsonb`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

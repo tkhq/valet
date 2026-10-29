@@ -50,15 +50,31 @@ export function SignalCard({
   const signal = message.signal;
   if (!signal) return null;
 
-  if (signal.signalType === "child.settled") {
-    return <ChildSettledCard message={message} signal={signal} onOpenChild={onOpenChild} />;
-  }
-  return <EnvelopeCard message={message} signal={signal} />;
+  return (
+    <MessageColumn>
+      {signal.signalType === "child.settled"
+        ? <ChildSettledCard message={message} signal={signal} onOpenChild={onOpenChild} />
+        : <EnvelopeCard message={message} signal={signal} />}
+    </MessageColumn>
+  );
+}
+
+/**
+ * The row spans the list and the card sits in the message column, like a
+ * message (`message-item.tsx`): padding inside the centered column would
+ * shift it right of the messages on a wide screen.
+ */
+function MessageColumn({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-w-0 px-5 py-1.5 sm:px-8">
+      <div className="mx-auto w-full min-w-0 max-w-3xl">{children}</div>
+    </div>
+  );
 }
 
 function CardShell({ children }: { children: ReactNode }) {
   return (
-    <div className="mx-4 my-3 rounded-md border border-line border-l-2 border-l-moss bg-paper px-4 py-3">
+    <div className="rounded-md border border-line border-l-2 border-l-moss bg-paper px-4 py-3">
       {children}
     </div>
   );
@@ -119,7 +135,7 @@ function WorkflowRequestCard({ message, signal }: { message: Message; signal: Me
   const runId = signal.attributes?.runId;
   const outcome = signal.attributes?.outcome;
   return (
-    <div className="mx-auto my-2 w-full min-w-0 max-w-[52rem] px-5 sm:px-8">
+    <div>
       <div className="relative">
         <details className="group rounded-md border border-line border-l-2 border-l-moss bg-paper text-sm">
           <summary className={`flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden ${runId ? "pr-24" : ""}`}>
@@ -523,22 +539,24 @@ export function WatchEventsCard({ events }: { events: Message[] }) {
   const reason = latest.signal.attributes?.reason || "watch";
   const origin = originLabel(latest.signal);
   return (
-    <CardShell>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-ink">{reason}</span>
-        <Badge variant="neutral">watch.event</Badge>
-        <span className="text-xs text-muted">{events.length} events</span>
-        {origin && <span className="text-xs text-muted">{origin}</span>}
-      </div>
-      {open ? (
-        events.map((event) => event.content && <LogBody key={event.id} content={event.content} />)
-      ) : (
-        latest.content && <LogBody content={latest.content} />
-      )}
-      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
-        {open ? "Show latest only" : `Show all ${events.length} events`}
-      </button>
-    </CardShell>
+    <MessageColumn>
+      <CardShell>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-medium text-ink">{reason}</span>
+          <Badge variant="neutral">watch.event</Badge>
+          <span className="text-xs text-muted">{events.length} events</span>
+          {origin && <span className="text-xs text-muted">{origin}</span>}
+        </div>
+        {open ? (
+          events.map((event) => event.content && <LogBody key={event.id} content={event.content} />)
+        ) : (
+          latest.content && <LogBody content={latest.content} />
+        )}
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
+          {open ? "Show latest only" : `Show all ${events.length} events`}
+        </button>
+      </CardShell>
+    </MessageColumn>
   );
 }
 
@@ -608,7 +626,7 @@ function HomeTaskReportCard({ signal }: { signal: MessageSignal }) {
     <span className="shrink-0 font-medium text-ink">{label}</span>
     {attrs.title && <span className="min-w-0 truncate">{attrs.title}</span>}
   </span>;
-  return <div className="mx-auto my-1 w-full min-w-0 max-w-[52rem] px-5 text-xs text-muted sm:px-8">
+  return <div className="text-xs text-muted">
     {threadId ? <Link to="/threads/$threadId" params={{ threadId }} className="inline-flex max-w-full items-center gap-2 rounded px-1 py-1 hover:bg-ink-wash max-sm:min-h-11">
       {line}<span className="shrink-0 underline-offset-2 hover:underline">Open</span>
     </Link> : line}
@@ -616,7 +634,7 @@ function HomeTaskReportCard({ signal }: { signal: MessageSignal }) {
 }
 
 function RoutinePromptCard({ message, signal }: { message: Message; signal: MessageSignal }) {
-  return <div className="mx-auto my-1 w-full min-w-0 max-w-[52rem] px-5 sm:px-8">
+  return <div>
     <details className="group text-xs text-muted">
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded px-1 py-1 hover:text-ink max-sm:min-h-11 [&::-webkit-details-marker]:hidden">
         <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />

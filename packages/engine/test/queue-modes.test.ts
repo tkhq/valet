@@ -812,6 +812,82 @@ describe("queue: abort", () => {
   });
 });
 
+describe("queue: a tool that ignores its abort signal", () => {
+  // A tool that never returns, the way a GitHub call sleeping through a
+  // rate-limit reset did. Stop and steer must still end its turn.
+  function hangingSession(provider: string) {
+    const faux = registerFauxProvider({ provider });
+    let started = false;
+    const tools = [{
+      name: "hang", description: "Never returns", parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        return new Promise<never>(() => {});
+      },
+    }];
+    return { faux, tools, started: () => started };
+  }
+
+  it("ends the turn on Stop and then runs the queued message", async () => {
+    const { faux, tools, started } = hangingSession("stop-hung-tool");
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang1" })], { stopReason: "toolUse" }),
+      // The stopped turn can use one response while it unwinds.
+      fauxAssistantMessage("stopped turn unwinding"),
+      fauxAssistantMessage("next-done"),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools, toolStopGraceMs: 20,
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(started);
+    const next = await thread.submitPrompt("next", {});
+
+    await thread.interrupt(first.queueItemId);
+
+    await waitFor(async () => (await store.getQueueItem(session.id, next.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("reports the steered turn settled only after it has ended", async () => {
+    const { faux, tools, started } = hangingSession("steer-hung-tool");
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang1" })], { stopReason: "toolUse" }),
+      // The stopped turn can use one response while it unwinds.
+      fauxAssistantMessage("stopped turn unwinding"),
+      fauxAssistantMessage("steer-done"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools, toolStopGraceMs: 20,
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(started);
+
+    const steer = await thread.submitPrompt("steer-in", { queueMode: "steer" });
+
+    await waitFor(async () => (await store.getQueueItem(session.id, steer.queueItemId))?.status === "settled");
+    // The running item settles when its turn ends, after its tool call, not
+    // when the steer arrives. A settle event before that told clients the
+    // turn was over while it still ran.
+    const order = events.map(({ event }) => event);
+    const toolEnd = order.findIndex((event) => event.type === "tool_end" && event.callId === "hang1");
+    const firstSettled = order.findIndex((event) => event.type === "submission_settled" && event.queueItemId === first.queueItemId);
+    expect(toolEnd).toBeGreaterThanOrEqual(0);
+    expect(firstSettled).toBeGreaterThan(toolEnd);
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.status).toBe("settled");
+    expect((await store.getQueueItem(session.id, steer.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+});
+
 describe("queue: settlement resilience", () => {
   it("a transient finalizeSettlement failure does not wedge the thread or leak a rejection", async () => {
     // Store whose finalizeSettlement throws once (transient I/O, SQLITE_BUSY).

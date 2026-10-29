@@ -11,7 +11,7 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ProviderFailureKind, ThreadPlan } from "@valet/shared";
 export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
@@ -1931,6 +1931,23 @@ export type WireEvent =
       recoverable: boolean;
     }
   | {
+      /**
+       * A failed model call the turn retries: progress for the working line,
+       * not an error. See the engine's `turn_retry` event.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "turn_retry";
+      threadId: string;
+      action: "retry" | "fallback";
+      provider: string;
+      reason: ProviderFailureKind;
+      attempt?: number;
+      maxAttempts?: number;
+      waitMs?: number;
+      toProvider?: string;
+    }
+  | {
       seq: number;
       ts: number; offset?: string;
       type: "model_switched";
@@ -2677,6 +2694,8 @@ export interface WorkflowRunConversation {
   threadId: string;
   title?: string;
   nodeId?: string;
+  /** The foreach entry a step's own thread ran, from 0. Absent for other threads. */
+  iteration?: number;
 }
 
 /**
@@ -4238,6 +4257,8 @@ export interface ArtifactCommentWire {
   id: string;
   /** Element anchor; null = a page-level comment. */
   vdid: string | null;
+  /** The anchored element's leading text when the comment was written. */
+  anchorLabel: string | null;
   /** Root-thread id; null = this IS a root. One level of nesting. */
   parentId: string | null;
   body: string;
@@ -4262,9 +4283,23 @@ export interface ListArtifactCommentsResponse {
   canResolveAll: boolean;
 }
 
+/** `GET /api/artifacts/:id/comments`: the comments on one artifact for an
+ * agent or API caller, addressed by artifact id or link token. */
+export interface ArtifactCommentsResponse {
+  artifact: { id: string; title: string; url: string; version: number };
+  /** Root comments, oldest first, each with its replies. */
+  threads: ArtifactCommentThreadWire[];
+}
+
+export interface ArtifactCommentThreadWire extends ArtifactCommentWire {
+  replies: ArtifactCommentWire[];
+}
+
 export interface AddArtifactCommentRequest {
   body: string;
   vdid?: string;
+  /** The picked element's text label, stored with the anchor. */
+  anchorLabel?: string;
   parentId?: string;
   /** Also deliver the comment into the artifact's source session as a
    * prompt. Requires session view access; when the caller lacks it the
@@ -6662,6 +6697,10 @@ export interface CliDeviceCodeResponse {
   expires_in: number;
   /** Seconds between polls. */
   interval: number;
+  /** The request type the instance recorded. An instance without `valet
+   * proxy setup` support omits it, and the CLI stops before the person
+   * approves a sign-in it did not ask for. */
+  purpose?: CliDevicePurpose;
 }
 
 /** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
@@ -6678,9 +6717,35 @@ export interface CliDeviceInfo {
   /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
   device: string;
   user_code: string;
+  /** `login` for `valet login`; `proxy-key` for `valet proxy setup`. */
+  purpose: CliDevicePurpose;
+  /** The name of the key a `proxy-key` request creates. */
+  key_name?: string;
   access: string[];
   /** What the CLI cannot do. */
   limits: string[];
+}
+
+export type CliDevicePurpose = "login" | "proxy-key";
+
+/** `GET /api/proxy/keys/:id` — a proxy key the caller owns that still works. */
+export interface ProxyKeyStatusResponse {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  created_at: number;
+}
+
+/** `POST /api/cli/device/token` response for an approved `proxy-key`
+ * request. The secret `key` appears only in this response. */
+export interface CliProxyKeyResponse {
+  proxy_key: {
+    id: string;
+    key: string;
+    name: string;
+    /** Epoch ms. */
+    created_at: number;
+  };
 }
 
 /** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */

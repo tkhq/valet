@@ -1,6 +1,9 @@
 /**
  * `/api/proxy/usage/summary`, `/api/proxy/requests`, `/api/proxy/requests/:id`
  *
+ * Also `GET`/`DELETE /api/proxy/keys/:id`: proxy key status and revoke for
+ * `valet proxy` (`docs/specs/2026-10-27-cli-proxy-setup-design.md`).
+ *
  * Read surface for the LLM recording gateway. Ownership gating:
  *   - the personal usage surface sees only rows owned by the current user.
  *   - team-owned rows are excluded from the personal usage surface.
@@ -11,11 +14,15 @@
  * `buildAuthMiddleware`) so `c.var.user` is always populated.
  */
 import { Hono } from "hono";
-import { and, desc, eq, gte, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { llmProxyRequests } from "../schema/index.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { apikey, llmProxyRequests } from "../schema/index.js";
+import { requireActingUser } from "../middleware/auth.js";
+import { isProxyScopedKeyMetadata, parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import { isOrgAdmin, getProxySettings, setProxySettings } from "../services/org.js";
 import type {
+  ProxyKeyStatusResponse,
   ProxyDayBucket,
   ProxyHarnessBucket,
   ProxyModelBucket,
@@ -65,6 +72,59 @@ proxyUsageRouter.put("/settings", async (c) => {
     mode: parsed.mode as "centralized" | "passthrough" | undefined,
   });
   return c.json(body);
+});
+
+const PROXY_KEY_PERSONAL = "Proxy keys are personal. Sign in as yourself, not with a team key.";
+const PROXY_KEY_NOT_FOUND = "Proxy key not found. It may already be revoked. Run `valet proxy setup <harness>` to get a new one.";
+
+/** The caller's own proxy-scoped key row, or undefined. Any other key reads
+ * as missing, so the routes never confirm a key exists to a caller who
+ * cannot manage it. */
+async function ownProxyKey(db: AppDb, id: string, userId: string) {
+  const [row] = await db
+    .select({
+      id: apikey.id, name: apikey.name, createdAt: apikey.createdAt, enabled: apikey.enabled, expiresAt: apikey.expiresAt,
+      referenceId: apikey.referenceId, teamId: apikey.teamId, metadata: apikey.metadata,
+    })
+    .from(apikey)
+    .where(eq(apikey.id, id))
+    .limit(1);
+  const metadata = parseApiKeyMetadata(row?.metadata);
+  const own = row
+    && row.referenceId === userId
+    && row.teamId === null
+    && teamIdFromApiKeyMetadata(metadata) === undefined
+    && isProxyScopedKeyMetadata(metadata);
+  return own ? row : undefined;
+}
+
+/** GET `/api/proxy/keys/:id` — whether a proxy key the caller owns still
+ * works. `valet proxy setup` checks its stored key with this before it
+ * reuses it, because the person can revoke the key in Settings. A read, so
+ * a CLI token may call it. */
+proxyUsageRouter.get("/keys/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: PROXY_KEY_PERSONAL }, 403);
+  const row = await ownProxyKey(c.var.providers.db, c.req.param("id"), user.id);
+  const usable = row && row.enabled !== false && (row.expiresAt === null || row.expiresAt.getTime() > Date.now());
+  if (!row || !usable) return c.json({ error: PROXY_KEY_NOT_FOUND }, 404);
+  const body: ProxyKeyStatusResponse = { id: row.id, name: row.name ?? "", created_at: row.createdAt.getTime() };
+  return c.json(body);
+});
+
+/** DELETE `/api/proxy/keys/:id` — revoke a proxy key the caller owns
+ * (`valet proxy remove`, `valet logout`). The key is minted on the device
+ * sign-in flow (`routes/cli-device.ts`, purpose `proxy-key`). A CLI token
+ * may call this route (`AGENT_WRITES`), so it deletes only proxy-scoped
+ * keys: an agent cannot revoke the person's other keys. */
+proxyUsageRouter.delete("/keys/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: PROXY_KEY_PERSONAL }, 403);
+  const db = c.var.providers.db;
+  const id = c.req.param("id");
+  if (!(await ownProxyKey(db, id, user.id))) return c.json({ error: PROXY_KEY_NOT_FOUND }, 404);
+  await db.delete(apikey).where(and(eq(apikey.id, id), eq(apikey.referenceId, user.id), isNull(apikey.teamId)));
+  return c.body(null, 204);
 });
 
 /** Parse the `?window=` query parameter into bounded milliseconds. */

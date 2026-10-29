@@ -332,6 +332,14 @@ export interface InboundChannelEvent {
    */
   context?: { entities?: Array<{ type: string; value: string }> };
   /**
+   * Set when people other than the sender read the conversation (Slack: a
+   * group DM). The host tells the assistant so. On the assistant's first turn
+   * there, it reads the thread's messages before `messageTs` as context.
+   * `external` is set when the conversation includes people from another
+   * organization (Slack Connect); the host refuses such a conversation.
+   */
+  group?: { channelId: string; messageTs: string; external?: boolean };
+  /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the
    * reply lands under the user's own message. Transports without threading
@@ -532,10 +540,16 @@ export interface ChannelTransport {
    * it to re-hydrate the gap between a follow's last delivered message and a
    * new one, so an overheard line after downtime carries the missed context.
    * The bot's own posts are excluded — the agent already has its own replies.
+   * `keepAppPostsExcept` keeps the bot's posts except the listed message ids:
+   * in a group DM each person's assistant posts as the same bot, so one
+   * assistant needs the others' replies but not its own.
    * `null` when the window is empty or the thread is unreadable. Optional:
    * providers without thread history omit it.
    */
-  fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
+  fetchThreadWindow?(
+    channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+    opts?: { keepAppPostsExcept?: readonly string[] },
+  ): Promise<string | null>;
   /**
    * Normalize an inbound message into what an agent should read: the sender's
    * display name (not a raw id) and the message text with the bot's own mention
@@ -560,8 +574,13 @@ export interface ChannelTransport {
   // `ChannelStreamError` so the host can tell a retryable rate limit from a
   // dead stream without reading provider error codes.
 
-  /** Open a stream. `threadTs` anchors it to the user's own message. */
-  startStream?(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef>;
+  /**
+   * Open a stream. `threadTs` anchors it to the user's own message.
+   * `recipient` names the person the stream is for, in provider ids. Slack
+   * requires it outside a 1:1 DM. It travels with the turn, because two
+   * people's turns can share one conversation.
+   */
+  startStream?(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef>;
   /** Append markdown to an open stream. */
   appendStream?(ref: StreamRef, markdown: string): Promise<void>;
   /** Close a stream. `final` carries the last markdown and any trailing blocks. */

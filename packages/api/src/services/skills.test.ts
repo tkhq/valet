@@ -461,4 +461,10 @@ describe("rowToSkillSource", () => {
     expect(src.source).toBe("repo");
     expect(src.invocation).toBe("context");
   });
+
+  it("keeps the spec metadata map, so a stored playbook stays a playbook", () => {
+    expect(rowToSkillSource(skillRow({ metadata: { kind: "playbook" } })).metadata).toEqual({ kind: "playbook" });
+    expect(rowToSkillSource(skillRow({ metadata: { kind: 3 } })).metadata).toBeUndefined();
+    expect(rowToSkillSource(skillRow({})).metadata).toBeUndefined();
+  });
 });

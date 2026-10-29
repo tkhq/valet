@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { configPath, loadConfig, saveConfig, type ValetConfig } from "../config.js";
 import { ApiError, AuthError, ExitCode, UnreachableError } from "../exit.js";
 import { parseGlobalFlags } from "../output.js";
-import { apiKeyFromFlags, profileNameForUrl, runLogin, type LoginClient, type LoginDeps } from "./login.js";
+import { apiKeyFromFlags, profileNameForUrl, runLogin, withProxyKeys, type LoginClient, type LoginDeps } from "./login.js";
 import type { MeResponse } from "../../wire/types.js";
 
 const PENDING = { url: "https://valet.example.com", deviceCode: "dev", userCode: "BCDF-GHJK", verificationPath: "/cli/device", expiresAt: 600_000, interval: 5 };
@@ -271,6 +271,20 @@ describe("runLogin", () => {
     const existing: ValetConfig = { profiles: { prod: { url: "https://valet.example.com", cli: { accessToken: "a", refreshToken: "vltr_old", accessExpiresAt: 1, refreshExpiresAt: 1 } } } };
     expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--name", "prod"]), existing)).toBe(ExitCode.OK);
     expect(revoked).toEqual(["vltr_old"]);
+  });
+
+  it("keeps the profile's proxy keys when it signs in again to the same instance", async () => {
+    const { deps } = okDeps();
+    const proxyKeys = { "claude-code": { id: "k1", key: "vlt_k", name: "claude-code@box", createdAt: 1 } };
+    saveConfig({ profiles: { prod: { url: "https://valet.example.com/", cli: { accessToken: "a", refreshToken: "r", accessExpiresAt: 1, refreshExpiresAt: 1 }, proxyKeys } } });
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--name", "prod"]), loadConfig())).toBe(ExitCode.OK);
+    expect(loadConfig().profiles?.prod?.proxyKeys).toEqual(proxyKeys);
+  });
+
+  it("drops proxy keys with a warning when the profile moves to another instance", () => {
+    const proxyKeys = { "claude-code": { id: "k1", key: "vlt_k", name: "claude-code@box", createdAt: 1 } };
+    expect(withProxyKeys({ url: "https://other.example.com" }, { url: "https://valet.example.com", proxyKeys })).toEqual({ url: "https://other.example.com" });
+    expect(stderr()).toContain("Revoke them in that instance's Settings");
   });
 
   it("saves a keyless profile for a stub-auth instance without a device sign-in", async () => {

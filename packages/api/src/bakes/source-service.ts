@@ -47,6 +47,8 @@ import {
   sessionRepos,
   type ImageSourceRow,
   type BakeRow,
+  type SourceHealth,
+  type SourceHealthReason,
 } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
@@ -67,12 +69,16 @@ import { pushRefFor } from "../prebuilds/k8s-builder.js";
 import { headRegistryManifest, parseRegistryImageRef } from "../prebuilds/registry.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { measureBakeSize } from "../prebuilds/bake-size.js";
+import { compatible, readImageContractLabel, type ContractRead } from "../prebuilds/image-contract.js";
+import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
+import type { ImageFallbackEvent } from "../prebuilds/resolve.js";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
   recordPrebuildCompletion,
   recordPrebuildDecision,
   recordPrebuildQueueWait,
+  recordSchedulerPass,
   recordPrebuildRequest,
   recordPrebuildTransition,
   recordRegistryOperation,
@@ -292,11 +298,35 @@ function githubFetchOf(deps: GitHubTokenDeps): typeof fetch {
  */
 export class GitHubApiError extends Error {
   readonly status: number;
+  readonly path: string;
   constructor(status: number, path: string, detail?: string) {
     super(`GitHub API ${path} ${status === 0 ? "request failed" : `responded ${status}`}${detail ? `: ${detail}` : ""}`);
     this.name = "GitHubApiError";
     this.status = status;
+    this.path = path;
   }
+}
+
+/** Spec 6.2: the health reason for a scheduler-pass failure, by error class.
+ * A 404 on the repository path itself (no `/contents/`, `/commits/`, or
+ * `/git/` segment) is the repo being unreachable; any other GitHub error is a
+ * resolve failure. */
+export function healthReasonForError(err: unknown): SourceHealthReason {
+  if (err instanceof GitHubApiError) {
+    const onRepoRoot = !/\/(contents|commits|git|branches)\//.test(err.path + "/");
+    return err.status === 404 && onRepoRoot ? "repo_unreachable" : "resolve_failed";
+  }
+  if (err instanceof AnonymousImageBakesDisabledError) return "credentials";
+  if (err instanceof RegistryCapacityError) return "registry_full";
+  return "bake_failed";
+}
+
+const HEALTH_DETAIL_MAX = 2000;
+
+/** The one health detail for an incompatible bake, shared by the scheduler,
+ * the push transition, and the fallback handler. */
+function contractDetail(bakeId: string, contract: number | null): string {
+  return `bake ${bakeId} contract ${contract ?? "missing"} < ${MIN_IMAGE_CONTRACT}`;
 }
 
 async function fetchGithubJson(
@@ -392,15 +422,26 @@ async function readGithubFile(
     if (err instanceof GitHubApiError && err.status === 404) return null;
     throw err;
   }
-  if (
-    !isRecord(payload) ||
-    (payload.type !== undefined && payload.type !== "file") ||
-    typeof payload.content !== "string" ||
-    payload.encoding !== "base64"
-  ) {
+  if (!isRecord(payload) || (payload.type !== undefined && payload.type !== "file")) {
     throw new GitHubApiError(200, apiPath, "response was not a base64 file");
   }
-  const compact = payload.content.replace(/\s/g, "");
+  let content = payload.content;
+  let encoding = payload.encoding;
+  if (encoding === "none" && typeof payload.sha === "string" && payload.sha.length > 0) {
+    // Files over 1 MB: the contents endpoint omits the body. The blobs
+    // endpoint serves the same object base64-encoded.
+    const blobPath = `/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(payload.sha)}`;
+    const blob = await fetchGithubJson(deps, token, blobPath, signal);
+    if (!isRecord(blob) || typeof blob.content !== "string" || blob.encoding !== "base64") {
+      throw new GitHubApiError(200, blobPath, "blob response was not base64");
+    }
+    content = blob.content;
+    encoding = blob.encoding;
+  }
+  if (typeof content !== "string" || encoding !== "base64") {
+    throw new GitHubApiError(200, apiPath, "response was not a base64 file");
+  }
+  const compact = content.replace(/\s/g, "");
   const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
   if (compact.length % 4 !== 0 || !validBase64.test(compact)) {
     throw new GitHubApiError(200, apiPath, "file content was not valid base64");
@@ -741,6 +782,10 @@ export interface SourceServiceDeps {
   registryPushHost?: string;
   env?: NodeJS.ProcessEnv;
   registryFetch?: typeof fetch;
+  /** Reads the image contract label after a push (spec 5.2). Defaults to
+   * `readImageContractLabel` against this service's registry settings;
+   * tests inject a fake. */
+  contractReader?: (backend: string, imageRef: string) => Promise<ContractRead>;
 }
 
 function newBakeId(newId: () => string): string {
@@ -779,6 +824,7 @@ export class SourceService {
     createdAt: number;
   }> = [];
   private readonly registryFetch: typeof fetch;
+  private readonly contractReader: (backend: string, imageRef: string) => Promise<ContractRead>;
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthReporting = false;
   private pollTimer?: ReturnType<typeof setInterval>;
@@ -796,6 +842,12 @@ export class SourceService {
     this.env = deps.env ?? process.env;
     this.registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
     this.registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
+    this.contractReader = deps.contractReader ?? ((backend, imageRef) => readImageContractLabel(backend, imageRef, {
+      fetchImpl: this.registryFetch,
+      spawnFn: spawn,
+      registryInsecure: this.registryInsecure,
+      registryPushHost: this.registryPushHost,
+    }));
     this.retention = deps.retention ?? defaultRetention(undefined, undefined, this.registryInsecure, this.registryPushHost);
     // Guard: Number("") === 0 and Number(undefined) === NaN; an empty env or a
     // non-positive value must NOT collapse the budget to 0 (which would evict
@@ -974,6 +1026,84 @@ export class SourceService {
     return rows.length > 0;
   }
 
+  /** Spec 6.2 with plan refinement 9. Writes the health columns on a
+   * transition of health or reason; `health_checked_at` is the time the
+   * current (health, reason) was entered, so PR 3 can key a notification
+   * episode on it and the UI can say "failing since". A changed detail
+   * alone updates `health_detail` only. Returns true on a transition. */
+  async setSourceHealth(sourceId: string, health: SourceHealth, reason: SourceHealthReason, detail?: string | null): Promise<boolean> {
+    const trimmed = detail == null ? null : detail.slice(0, HEALTH_DETAIL_MAX);
+    const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason, detail: imageSources.healthDetail })
+      .from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
+    if (!row) return false;
+    const transition = row.health !== health || row.reason !== reason;
+    if (!transition && row.detail === trimmed) return false;
+    await this.db.update(imageSources)
+      .set(transition
+        ? { health, healthReason: reason, healthDetail: trimmed, healthCheckedAt: this.now() }
+        : { healthDetail: trimmed })
+      .where(eq(imageSources.id, sourceId));
+    return transition;
+  }
+
+  /** Spec 6.3: the image contract only gates the kubernetes provider (the
+   * docker backend has no sandbox entrypoint contract to enforce), so the
+   * scheduler's contract logic is off elsewhere. Stamping still runs. */
+  private get contractEnforced(): boolean {
+    return this.builder?.backend === "kubernetes";
+  }
+
+  /** `compatible()` when the contract is enforced; always true otherwise. */
+  private contractOk(row: BakeRow): boolean {
+    return !this.contractEnforced || compatible(row);
+  }
+
+  /** Health for a source that needs (or is waiting on) a new bake. */
+  private pendingHealth(current: BakeRow | null, newest: BakeRow | null): [SourceHealth, SourceHealthReason, string | null] {
+    // A bake that keeps failing stays failing/bake_failed (stale when a
+    // compatible pushed bake survives) instead of cycling through the pending
+    // states at every retry.
+    if (newest?.status === "failed") return [current && this.contractOk(current) ? "stale" : "failing", "bake_failed", newest.error ?? null];
+    if (!current) return ["unbaked", "ok", null];
+    if (!this.contractOk(current)) return ["incompatible", "contract", contractDetail(current.id, current.contractVersion)];
+    return ["stale", "ok", null];
+  }
+
+  /**
+   * The one decision for "does the current bake need a contract rebake".
+   * Only an identity-matching (and, for repos, sha-matching) incompatible
+   * bake qualifies. `reread`: contract columns are null (label read failed),
+   * so re-read before rebuilding. `stuck`: it is already a contract rebake and
+   * still incompatible, so another rebake would loop. `rebake`: build again on
+   * a fresh `-c<contract>` tag. Schedulers and builders share this so the
+   * decision cannot drift.
+   */
+  private contractRebakeFor(current: BakeRow | null, identity: string, sha?: string | null): "rebake" | "reread" | "stuck" | null {
+    if (!this.contractEnforced) return null;
+    if (!current || current.identityHash !== identity) return null;
+    if (sha !== undefined && current.commitSha !== sha) return null;
+    if (compatible(current)) return null;
+    if (current.contractSource === null) return "reread";
+    if (current.imageRef.endsWith(`-c${MIN_IMAGE_CONTRACT}`)) return "stuck";
+    return "rebake";
+  }
+
+  /** Scheduler pre-step: a pushed bake with null contract columns gets its
+   * label re-read and stamped, then is reloaded. Returns the (possibly
+   * updated) bake and the read error if the read failed again. */
+  private async rereadContract(current: BakeRow | null, source: ImageSourceRow): Promise<{ current: BakeRow | null; error: string | null }> {
+    if (!current || current.contractSource !== null) return { current, error: null };
+    const read = await this.stampContract(current, source).catch((err): ContractRead => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    const reloaded = (await this.db.select().from(bakes).where(eq(bakes.id, current.id)))[0] ?? current;
+    return { current: reloaded, error: read.ok ? null : read.error };
+  }
+
+  /** Newest bake of any status for a source, or null. */
+  private async newestBake(sourceId: string): Promise<BakeRow | null> {
+    const rows = await this.db.select().from(bakes).where(eq(bakes.sourceId, sourceId)).orderBy(desc(bakes.createdAt)).limit(1);
+    return rows[0] ?? null;
+  }
+
   /** Newest `pushed` bake for a source, or null. */
   async currentBake(sourceId: string): Promise<BakeRow | null> {
     const rows = await this.db
@@ -1020,6 +1150,10 @@ export class SourceService {
       // would FROM a stale layer while recording the fresh identity.
       const parentIdentity = this.baseIdentity(parent, await this.grandparentIdentity(parent));
       if (parentBake.identityHash !== parentIdentity) return { status: "defer" };
+      // Spec 5.3 via 6.3: a child must not FROM an incompatible base. The
+      // base scheduler rebakes it (contract_changed); children defer like
+      // they do for a stale base identity.
+      if (!this.contractOk(parentBake)) return { status: "defer" };
       return { status: "ready", bake: parentBake };
     }
     return { status: "none" };
@@ -1114,13 +1248,14 @@ export class SourceService {
   async startBake(
     sourceId: string,
     trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other" = "manual",
+    opts: { contractRebake?: boolean } = {},
   ): Promise<BakeRow> {
     const source = await this.loadSource(sourceId);
     try {
       if (!this.builder) throw new PrebuildUnavailableError();
       await this.assertRegistryCapacity();
-      if (source.kind === "base") return await this.startBaseBake(source, trigger);
-      if (source.kind === "repo") return await this.startRepoBake(source, trigger);
+      if (source.kind === "base") return await this.startBaseBake(source, trigger, opts);
+      if (source.kind === "repo") return await this.startRepoBake(source, trigger, opts);
       throw new Error(`cannot bake source of kind '${source.kind}' (${source.id})`);
     } catch (error) {
       recordPrebuildRequest(this.dimensions(source, this.builder?.backend ?? "none"), "rejected", trigger);
@@ -1128,14 +1263,21 @@ export class SourceService {
     }
   }
 
-  private async startBaseBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): Promise<BakeRow> {
+  private async startBaseBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other", opts: { contractRebake?: boolean } = {}): Promise<BakeRow> {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const setup = readSetupCommands(source);
-    const parentIdent = await this.parentIdentity(source);
+    const parentBase = await this.resolveParentBase(source);
+    const parentIdent = parentBase.status === "external" ? parentBase.ref : parentBase.status === "ready" ? parentBase.bake.identityHash : null;
     const baseImage = await this.resolveBaseImage(source, undefined);
+    const parentBakeId = parentBase.status === "ready" ? parentBase.bake.id : null;
     const identity = this.baseIdentity(source, parentIdent);
-    const imageRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
+    // Plan refinement 1: a contract rebake keeps the identity (same inputs)
+    // but must land on a fresh tag, or nodes with IfNotPresent keep serving
+    // the cached old layer.
+    const contractRebake = opts.contractRebake ?? this.contractRebakeFor(await this.currentBake(source.id), identity) === "rebake";
+    const taggedRef = baseImageRefFor(builder.backend, source.id, identity, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
 
     const now = this.now();
     const row: BakeRow = {
@@ -1152,6 +1294,10 @@ export class SourceService {
       startedAt: now,
       finishedAt: null,
       sizeBytes: null,
+      contractVersion: null,
+      contractSource: null,
+      parentBakeId,
+      baseImageRef: baseImage,
       createdAt: now,
     };
     await this.db.insert(bakes).values(row);
@@ -1303,6 +1449,13 @@ export class SourceService {
     return parentBase.status === "defer";
   }
 
+  /** Like `repoBakeDefers` but for any source with a base parent (a base
+   * whose parent is another base must not FROM an incompatible/stale layer). */
+  private async parentBaseDefers(source: ImageSourceRow): Promise<boolean> {
+    if (source.kind !== "base" && source.kind !== "repo") return false;
+    return (await this.resolveParentBase(source)).status === "defer";
+  }
+
   private async anonymousImageBakesAllowed(orgId: string): Promise<boolean> {
     const [org] = await this.db.select({ allowed: orgs.allowAnonymousImageBakes })
       .from(orgs).where(eq(orgs.id, orgId)).limit(1);
@@ -1324,7 +1477,7 @@ export class SourceService {
     return token;
   }
 
-  private async startRepoBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): Promise<BakeRow> {
+  private async startRepoBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other", opts: { contractRebake?: boolean } = {}): Promise<BakeRow> {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const repoFullName = source.repoFullName ?? "";
@@ -1351,6 +1504,8 @@ export class SourceService {
       throw new RepoBaseLayerBakingError(parent?.name ?? parentId ?? "unknown");
     }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
+    const parentBase = await this.resolveParentBase(source);
+    const parentBakeId = parentBase.status === "ready" ? parentBase.bake.id : null;
 
     const snapshot: RecipeSnapshot = {
       recipe: resolved.recipe, setup: resolved.setup, image: resolved.image,
@@ -1359,7 +1514,8 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const imageRef = imageRefFor(
+    const contractRebake = opts.contractRebake ?? this.contractRebakeFor(await this.currentBake(source.id), identity, head.sha) === "rebake";
+    const taggedRef = imageRefFor(
       builder.backend,
       source.id,
       owner,
@@ -1368,6 +1524,7 @@ export class SourceService {
       identity,
       this.env.VALET_PREBUILD_REGISTRY,
     );
+    const imageRef = contractRebake ? `${taggedRef}-c${MIN_IMAGE_CONTRACT}` : taggedRef;
     const now = this.now();
     const row: BakeRow = {
       id: newBakeId(this.newId),
@@ -1383,6 +1540,10 @@ export class SourceService {
       startedAt: now,
       finishedAt: null,
       sizeBytes: null,
+      contractVersion: null,
+      contractSource: null,
+      parentBakeId,
+      baseImageRef: baseImage,
       createdAt: now,
     };
     await this.assertRepoBakeAllowed(source.orgId, gitToken.token);
@@ -1583,6 +1744,11 @@ export class SourceService {
         } catch {
           // best-effort — size measurement never blocks the push transition
         }
+        const contract = await this.stampContract(row, source).catch((err): ContractRead => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        const stamped = (await this.db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
+        if (!contract.ok) await this.setSourceHealth(row.sourceId, "stale", "contract_unknown", contract.error);
+        else if (stamped && this.contractOk(stamped)) await this.setSourceHealth(row.sourceId, "healthy", "ok", null);
+        else await this.setSourceHealth(row.sourceId, "incompatible", "contract", contractDetail(row.id, stamped?.contractVersion ?? null));
         recordPrebuildTransition(dimensions, "succeeded");
         recordPrebuildCompletion(dimensions, observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, measuredSize);
         this.bakeSpans.get(row.id)?.end();
@@ -1604,6 +1770,8 @@ export class SourceService {
         span?.end();
         this.bakeSpans.delete(row.id);
         logPrebuildEvent(canceled ? "bake_canceled" : "bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, error: status.error });
+        const survivor = await this.currentBake(row.sourceId);
+        await this.setSourceHealth(row.sourceId, survivor && this.contractOk(survivor) ? "stale" : "failing", "bake_failed", status.error ?? null);
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).
@@ -1633,6 +1801,27 @@ export class SourceService {
     } catch (err) {
       console.warn(`bake retention (source ${sourceId}):`, err);
     }
+  }
+
+  /**
+   * Spec 5.2: after a push, read the contract label and store it on the
+   * row. Override bakes (recipe.image set) are `override` whatever the read
+   * says (D7). A failed read leaves both columns null so the next pass can
+   * retry; the caller decides what that means for source health.
+   */
+  private async stampContract(row: BakeRow, source: ImageSourceRow): Promise<ContractRead> {
+    const override = typeof (row.recipe as { image?: unknown } | null)?.image === "string";
+    const read = await this.contractReader(row.builderBackend ?? this.builder?.backend ?? "none", row.imageRef);
+    if (!read.ok) {
+      console.warn(`prebuild poll: contract label read failed for ${row.imageRef} (${source.name}): ${read.error}`);
+      if (!override) return read;
+    }
+    const version = read.ok ? read.version : null;
+    await this.db
+      .update(bakes)
+      .set({ contractVersion: version, contractSource: override ? "override" : version === null ? "missing" : "label" })
+      .where(eq(bakes.id, row.id));
+    return read;
   }
 
   /** Keeps the newest 2 `pushed` bakes and all live-session bakes; deletes the images (never
@@ -1735,14 +1924,24 @@ export class SourceService {
     const children = await this.db
       .select()
       .from(imageSources)
-      .where(and(eq(imageSources.parentId, sourceId), eq(imageSources.kind, "repo")));
+      .where(and(eq(imageSources.parentId, sourceId), inArray(imageSources.kind, ["repo", "base"])));
 
     for (const child of children) {
       try {
         if (this.schedulingBlocked(child)) continue;
         // Defer if the just-pushed base bake is still not consistent (e.g. the
         // base already has a newer pending rebake).
-        if (await this.repoBakeDefers(child)) continue;
+        if (await this.parentBaseDefers(child)) continue;
+
+        if (child.kind === "base") {
+          const baseIdent = this.baseIdentity(child, await this.parentIdentity(child));
+          const baseCurrent = await this.currentBake(child.id);
+          if (baseCurrent && baseCurrent.identityHash === baseIdent && this.contractOk(baseCurrent)) continue;
+          if (await this.hasActiveBake(child.id)) continue;
+          console.log(`prebuild cascade: kick ${child.name}: parent base bake pushed`);
+          await this.startBake(child.id, "cascade");
+          continue;
+        }
 
         await this.repoBakeToken(child);
         const owner = ownerOf(child.repoFullName ?? "");
@@ -1755,7 +1954,7 @@ export class SourceService {
         const identity = this.identityHash(child, parentIdent, snapshot);
 
         const current = await this.currentBake(child.id);
-        if (current && current.commitSha === head.sha && current.identityHash === identity) continue;
+        if (current && current.commitSha === head.sha && current.identityHash === identity && this.contractOk(current)) continue;
         // Skip when a bake is already in flight — the scheduler tick may race
         // this cascade for the same child.
         if (await this.hasActiveBake(child.id)) continue;
@@ -1810,8 +2009,11 @@ export class SourceService {
         else if (source.kind === "repo") await this.maybeScheduleRepo(source);
       } catch (err) {
         console.error(`prebuild scheduler: source ${source.id} (${source.repoFullName ?? source.name}) failed:`, err);
+        await this.setSourceHealth(source.id, "failing", healthReasonForError(err), err instanceof Error ? err.message : String(err))
+          .catch((healthErr) => console.error(`prebuild scheduler: health write for ${source.id} failed:`, healthErr));
       }
     }
+    recordSchedulerPass(this.now());
   }
 
   private schedulingBlocked(source: ImageSourceRow): boolean {
@@ -1820,23 +2022,48 @@ export class SourceService {
 
   private async maybeScheduleBase(source: ImageSourceRow): Promise<void> {
     if (this.schedulingBlocked(source)) return;
+    // A base parented at another base waits for that parent's consistent,
+    // compatible bake; the cascade starts it when the parent pushes.
+    if (await this.parentBaseDefers(source)) {
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
+      console.log(`prebuild scheduler: defer ${source.name}: waiting for parent base bake`);
+      return;
+    }
     const parentIdent = await this.parentIdentity(source);
     const identity = this.baseIdentity(source, parentIdent);
-    const current = await this.currentBake(source.id);
-    if (current && current.identityHash === identity) {
+    const reread = await this.rereadContract(await this.currentBake(source.id), source);
+    const current = reread.current;
+    if (current && current.identityHash === identity && this.contractOk(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
+      await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
+      return;
+    }
+    const kind = this.contractRebakeFor(current, identity);
+    if (kind === "reread") {
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
     // Skip when a base bake is already in flight — a prior scheduler tick may
     // have dispatched one that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    recordPrebuildDecision(this.dimensions(source), current ? "parent_changed" : "miss");
+    if (kind === "stuck") {
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
+      return;
+    }
+    recordPrebuildDecision(this.dimensions(source), kind === "rebake" ? "contract_changed" : current ? "parent_changed" : "miss");
+    // Health is written only after startBake resolves: a throw goes to the
+    // pass's catch (failing/<reason>) without flapping through pending first.
+    const newest = await this.newestBake(source.id);
     await this.startBake(source.id, "scheduler");
+    await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
   }
 
   private async maybeScheduleRepo(source: ImageSourceRow): Promise<void> {
@@ -1845,6 +2072,7 @@ export class SourceService {
     // Defer when the parent base has no consistent pushed bake yet — the
     // push-kick in `syncActiveBuilds` (or the next scheduler tick) rebakes.
     if (await this.repoBakeDefers(source)) {
+      await this.setSourceHealth(source.id, "stale", "waiting_for_base", null);
       console.log(`prebuild scheduler: defer ${source.name}: waiting for base bake`);
       return;
     }
@@ -1877,30 +2105,47 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const current = await this.currentBake(source.id);
-    if (current && current.commitSha === head.sha && current.identityHash === identity) {
+    const reread = await this.rereadContract(await this.currentBake(source.id), source);
+    const current = reread.current;
+    if (current && current.commitSha === head.sha && current.identityHash === identity && this.contractOk(current)) {
       recordPrebuildDecision(this.dimensions(source), "hit");
+      await this.setSourceHealth(source.id, "healthy", "ok", null);
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
+      return;
+    }
+    const kind = this.contractRebakeFor(current, identity, head.sha);
+    if (kind === "reread") {
+      await this.setSourceHealth(source.id, "stale", "contract_unknown", reread.error ?? "contract label not read");
+      console.log(`prebuild scheduler: skip ${source.name}: contract label unreadable`);
       return;
     }
     // Skip when a bake is already in flight — a cascade (or a prior scheduler
     // tick) may have dispatched a bake for this source that has not pushed yet.
     if (await this.hasActiveBake(source.id)) {
       recordPrebuildDecision(this.dimensions(source), "coalesced");
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, await this.newestBake(source.id)));
       console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
-    recordPrebuildDecision(this.dimensions(source), !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
+    if (kind === "stuck") {
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, null));
+      console.log(`prebuild scheduler: skip ${source.name}: contract rebake already incompatible`);
+      return;
+    }
+    recordPrebuildDecision(this.dimensions(source), kind === "rebake" ? "contract_changed" : !current ? "miss" : current.commitSha !== head.sha ? "commit_changed" : "recipe_changed");
+    const newest = await this.newestBake(source.id);
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
     try {
       await this.startBake(source.id, "scheduler");
+      await this.setSourceHealth(source.id, ...this.pendingHealth(current, newest));
     } catch (err) {
       // A newly declared/changed `baseSetup` surfaces here on the first pass:
       // startRepoBake linked the synthetic base and kicked ITS bake instead.
       // That is a defer, not a failure — the push cascade bakes this repo.
       if (err instanceof RepoBaseLayerBakingError) {
+        await this.setSourceHealth(source.id, "stale", "waiting_for_base", err.message);
         console.log(`prebuild scheduler: defer ${source.name}: ${err.message}`);
         return;
       }
@@ -2006,6 +2251,57 @@ export class SourceService {
     } catch (err) {
       console.error(`ensureRepoSource(${orgId}, ${repo.fullName}) failed:`, err);
     }
+  }
+
+  /** Spec 7.1: a session fell back from this source's image. Runs on every
+   * reconcile of a fallen-back session, so it is idempotent and cheap: one
+   * source read, a health write only out of a state that does not already
+   * carry a diagnosis, and any bake request or contract re-read runs off the
+   * caller's path (one in flight per source). Never throws. */
+  async handleImageFallback(event: ImageFallbackEvent): Promise<void> {
+    // The contract gates only kubernetes sandboxes; with another builder the
+    // scheduler would flip any incompatible health straight back.
+    if (!this.contractEnforced) return;
+    try {
+      const [row] = await this.db.select({ health: imageSources.health, reason: imageSources.healthReason })
+        .from(imageSources).where(eq(imageSources.id, event.sourceId)).limit(1);
+      if (!row) return;
+      // Never overwrite a diagnosis (failing/*, stale/<not ok>, incompatible/*).
+      const undiagnosed = row.health === "healthy" || row.health === "unbaked" || (row.health === "stale" && row.reason === "ok");
+      if (undiagnosed) {
+        await this.setSourceHealth(event.sourceId, "incompatible", "contract", contractDetail(event.bakeId, event.contract));
+      }
+      // Act only when nothing newer was tried (failed or active) since the
+      // bake this session fell back from.
+      const newest = await this.newestBake(event.sourceId);
+      if (!newest || newest.id !== event.bakeId) return;
+      if (this.fallbackWork.has(event.sourceId)) return;
+      const kind = this.contractRebakeFor(newest, newest.identityHash, newest.commitSha ?? undefined);
+      if (kind === "stuck") return;
+      if (kind === "reread") {
+        this.runFallbackWork(event.sourceId, "contract re-read", async () => {
+          await this.rereadContract(newest, await this.loadSource(event.sourceId));
+        });
+        return;
+      }
+      // A failing source is retried by the scheduler, and a source waiting
+      // for its base is baked by the base's push cascade.
+      if (row.health === "failing" || (row.health === "stale" && row.reason === "waiting_for_base")) return;
+      this.runFallbackWork(event.sourceId, "bake request", () => this.maybeFireFirstBake(event.sourceId, { fullName: event.repoFullName }));
+    } catch (err) {
+      console.error(`image fallback handling for ${event.sourceId} failed:`, err);
+    }
+  }
+
+  /** Fallback work per source, so concurrent reconciles start it once. */
+  private readonly fallbackWork = new Map<string, Promise<void>>();
+
+  private runFallbackWork(sourceId: string, what: string, work: () => Promise<void>): void {
+    const run = work()
+      .catch((err) => console.error(`image fallback ${what} for ${sourceId} failed:`, err))
+      .finally(() => this.fallbackWork.delete(sourceId));
+    this.fallbackWork.set(sourceId, run);
+    void run;
   }
 
   /** Starts the first bake after ensureRepoSource verifies repository access.
@@ -2256,6 +2552,8 @@ export class SourceService {
       void this.runSchedulerPass().catch((err) => console.error("prebuild scheduler pass failed:", err));
     }, this.schedulerIntervalMs);
     this.schedulerTimer.unref();
+    // Arming counts as a pass, so a scheduler stuck from boot still ages.
+    recordSchedulerPass(this.now());
   }
 
   /** Clears all intervals. Safe to call even if `start()` was never

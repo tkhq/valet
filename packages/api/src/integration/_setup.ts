@@ -404,6 +404,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubTokenDeps,
   });
 
+  engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
+
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
   const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children"), scratchCaps };

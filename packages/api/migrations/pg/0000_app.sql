@@ -241,6 +241,7 @@ CREATE TABLE "agent_sessions" (
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
+	"image_fallback" jsonb,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
@@ -641,6 +642,7 @@ CREATE TABLE "artifact_comments" (
 	"artifact_id" text NOT NULL,
 	"version" bigint NOT NULL,
 	"vdid" text,
+	"anchor_label" text,
 	"parent_id" text,
 	"body" text NOT NULL,
 	"author_user_id" text NOT NULL,
@@ -1104,6 +1106,10 @@ CREATE TABLE "image_sources" (
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
 	"enabled" boolean NOT NULL DEFAULT TRUE,
 	"last_bound_at" bigint,
+	"health" text NOT NULL DEFAULT 'healthy' CHECK (health IN ('healthy','stale','incompatible','failing','unbaked')),
+	"health_reason" text NOT NULL DEFAULT 'ok',
+	"health_detail" text,
+	"health_checked_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -1126,6 +1132,10 @@ CREATE TABLE "bakes" (
 	"started_at" bigint,
 	"finished_at" bigint,
 	"size_bytes" BIGINT,
+	"contract_version" integer,
+	"contract_source" text CHECK (contract_source IS NULL OR contract_source IN ('label','missing','override')),
+	"parent_bake_id" text,
+	"base_image_ref" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -2787,7 +2797,9 @@ CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, ses
 CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
-  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint,
+  "purpose" text NOT NULL DEFAULT 'login', "key_name" text,
+  "requested_by" text REFERENCES "user"("id") ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");

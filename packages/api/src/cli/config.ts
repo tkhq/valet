@@ -36,6 +36,15 @@ export interface ProfileConfig {
      * only this profile, again (`latestCredential`). */
     previousAccessTokens?: string[];
   };
+  /** Proxy keys from `valet proxy setup`, keyed by harness id. `createdAt` is epoch ms. */
+  proxyKeys?: Record<string, ProxyKeyRecord>;
+}
+
+export interface ProxyKeyRecord {
+  id: string;
+  key: string;
+  name: string;
+  createdAt: number;
 }
 
 /**
@@ -58,10 +67,13 @@ export interface ValetConfig {
   profiles?: Record<string, ProfileConfig>;
   defaultProfile?: string;
   pendingLogins?: Record<string, PendingLogin>;
+  /** `valet proxy setup` key requests that wait for the person, keyed by
+   * `<profile>/<harness>`. A later setup resumes one (`--no-wait`). */
+  pendingProxyKeys?: Record<string, PendingLogin>;
 }
 
 /** The known top-level keys of `ValetConfig`. Anything else warns + is dropped. */
-const KNOWN_KEYS = new Set<string>(["serve", "profiles", "defaultProfile", "pendingLogins"]);
+const KNOWN_KEYS = new Set<string>(["serve", "profiles", "defaultProfile", "pendingLogins", "pendingProxyKeys"]);
 
 /** Resolve the data root, honoring `VALET_DATA_DIR` (default `~/.valet`). */
 function dataDir(): string {
@@ -114,6 +126,7 @@ export function loadConfig(): ValetConfig {
     else if (key === "profiles" && isRecord(value)) known.profiles = value as Record<string, ProfileConfig>;
     else if (key === "defaultProfile" && typeof value === "string") known.defaultProfile = value;
     else if (key === "pendingLogins" && isRecord(value)) known.pendingLogins = value as Record<string, PendingLogin>;
+    else if (key === "pendingProxyKeys" && isRecord(value)) known.pendingProxyKeys = value as Record<string, PendingLogin>;
   }
   return known;
 }

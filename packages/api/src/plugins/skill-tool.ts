@@ -19,7 +19,7 @@
 import { validSkillPath } from "../services/content-sync/skill-files.js";
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
-import { renderTemplate, skillFileManifest } from "@valet/engine";
+import { isPlaybook, playbookSeedNote, renderTemplate, skillFileManifest } from "@valet/engine";
 import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
@@ -57,7 +57,8 @@ function describeSkills(skills: SkillSource[]): string {
   const lines = skills.map((skill) => {
     const summary = skill.description ? ` — ${skill.description}` : "";
     const args = skill.argsSchema ? " (takes arguments)" : "";
-    return `- ${skill.name}${args}${summary}`;
+    const playbook = isPlaybook(skill) ? " (playbook)" : "";
+    return `- ${skill.name}${playbook}${args}${summary}`;
   });
   return [
     "Read an installed skill: a playbook with detailed instructions for one integration or task.",
@@ -65,6 +66,7 @@ function describeSkills(skills: SkillSource[]): string {
     "Omit path to read the protected SKILL.md body and file manifest. Path reads are not protected from pruning.",
     "Read references with path, offset (byte offset, default 0), and limit (bytes, default and maximum 65536).",
     "Pages end at UTF-8 character boundaries. The footer reports total_bytes, next_offset, and end. Use next_offset to continue.",
+    "Reading a (playbook) skill sets this thread's plan to its steps, unless the thread has an open plan.",
     "",
     "Available skills:",
     ...lines,
@@ -198,6 +200,10 @@ export function buildSkillTool(
         : "[skill_file_unavailable] The stored file could not be read. Retry the skill call." }; }
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, args.path === undefined ? "model_tool" : "file_read", rendered.text);
+      }
+      if (rendered.skill && args.path === undefined && isPlaybook(rendered.skill)) {
+        const seed = ctx.seedPlaybookPlan ? await ctx.seedPlaybookPlan(rendered.skill) : { kind: "unavailable" as const };
+        return { text: `${rendered.text}\n\n${playbookSeedNote(rendered.skill.name, seed)}` };
       }
       return { text: rendered.text };
     },

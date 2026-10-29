@@ -282,7 +282,7 @@ export function createApp(
     app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));
     app.use("/api/cli/device/token", bodyLimit({ maxSize: 16 * 1024 }));
     app.use("/api/cli/token/*", bodyLimit({ maxSize: 16 * 1024 }));
-    app.route("/api/cli", cliDevicePublicRouter(providers.db));
+    app.route("/api/cli", cliDevicePublicRouter(providers.db, auth));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
