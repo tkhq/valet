@@ -183,6 +183,39 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(err).toBeInstanceOf(NoCredentialsError);
     });
 
+    it("a NON-REGISTRY row selection (account-discovered model) synthesizes a bedrock-converse-stream model", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "amazon-bedrock",
+        name: "Amazon Bedrock",
+        models: [{ id: "vendor.brand-new-model", name: "Brand New", contextWindow: 64_000 }],
+      });
+      expect(row.id).toBeTruthy();
+      const spec = "amazon-bedrock/vendor.brand-new-model";
+      const r = await resolveModelSpec(db, credentials, orgId, spec);
+      expect(r?.model.id).toBe("vendor.brand-new-model");
+      expect(r?.model.api).toBe("bedrock-converse-stream");
+      expect(r?.model.provider).toBe("amazon-bedrock");
+      expect(r?.model.contextWindow).toBe(64_000);
+      expect(r?.model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(r?.canonicalId).toBe(spec);
+      expect(r?.apiKey).toBeUndefined();
+    });
+
+    it("an UNSELECTED non-registry id on a bedrock row stays unresolvable", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      expect(await resolveModelSpec(db, credentials, orgId, "amazon-bedrock/vendor.never-selected")).toBeNull();
+    });
+
+    it("a registry id resolves from the registry even when the row's selection omits it", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      const r = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(r?.model.id).toBe("us.anthropic.claude-sonnet-5-5");
+    });
+
     it("other known kinds still require a real key when only AWS credentials exist", async () => {
       vi.stubEnv("AWS_PROFILE", "dev");
       const err = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`).then(() => undefined, (e: unknown) => e);

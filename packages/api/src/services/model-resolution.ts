@@ -49,7 +49,7 @@
  * return a model and a key for the spec today?
  */
 import { getEnvApiKey, type Api, type Model } from "@earendil-works/pi-ai/compat";
-import { registryModelById } from "./model-registry.js";
+import { registryModelById, registryModels } from "./model-registry.js";
 import { NoCredentialsError, type CredentialOwner, type CredentialStore, type ResolvedModel } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
@@ -149,23 +149,36 @@ function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonica
  * from the stored row entry. Null when the id isn't in the row's selection
  * either — an arbitrary un-selected non-registry id stays unresolvable.
  */
-function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
+type CuratedKind = "openrouter" | "amazon-bedrock";
+
+/**
+ * Builds a pi-ai model for a curated-kind row selection the registry does
+ * not know (an OpenRouter live-catalog pick, or a Bedrock model the AWS
+ * account offers but pi-ai has not catalogued). Only ids in `row.models`
+ * synthesize — an arbitrary un-selected non-registry id stays unresolvable.
+ * Bedrock entries carry no baseUrl: pi-ai derives the endpoint from
+ * AWS_REGION, and only consults a model baseUrl when no region is set.
+ */
+function synthesizeCuratedModel(kind: CuratedKind, row: LlmProviderRow, modelId: string): Model<Api> | null {
   const entry = row.models.find((m) => m.id === modelId);
   if (!entry) return null;
-  return {
+  const cost = entry.pricing
+    ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
+    : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const common = {
     id: entry.id,
     name: entry.name,
-    api: "openai-completions",
-    provider: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
     reasoning: false,
-    input: ["text"],
-    cost: entry.pricing
-      ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
-      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    input: ["text"] as ["text"],
+    cost,
     contextWindow: entry.contextWindow ?? 128_000,
     maxTokens: 8192,
   };
+  if (kind === "openrouter") {
+    return { ...common, api: "openai-completions", provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" };
+  }
+  const bundled = registryModels("amazon-bedrock")[0];
+  return { ...common, api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: bundled?.baseUrl ?? "" };
 }
 
 /** Synthesize a `Model<"openai-completions">` for a custom provider's model
@@ -269,7 +282,7 @@ async function resolveConcreteSpec(
       // model IS known.
       const model =
         registryModel(kind, modelId) ??
-        (kind === "openrouter" ? synthesizeOpenrouterModel(row, modelId) : null);
+        (kind === "openrouter" || kind === "amazon-bedrock" ? synthesizeCuratedModel(kind, row, modelId) : null);
       if (!model) return null;
       const org = await orgKey(credentials, orgId, row.id);
       const env = envCredentialFor(kind);
