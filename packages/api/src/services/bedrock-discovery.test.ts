@@ -1,0 +1,202 @@
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  BEDROCK_DEFAULT_MODEL_IDS,
+  bedrockRegistry,
+  curatedBedrockModels,
+  discoverBedrockModels,
+  geoPrefixForRegion,
+  parseBedrockDiscovery,
+  resetBedrockDiscoveryCache,
+  type BedrockDiscoveryClient,
+} from "./bedrock-discovery.js";
+
+const fm = (
+  modelId: string,
+  inferenceTypes: string[],
+  extra: Partial<{ output: string[]; input: string[]; streaming: boolean; status: string; name: string }> = {},
+) => ({
+  modelArn: `arn:aws:bedrock:us-east-1::foundation-model/${modelId}`,
+  modelId,
+  modelName: extra.name ?? modelId,
+  providerName: modelId.split(".")[0],
+  inputModalities: extra.input ?? ["TEXT"],
+  outputModalities: extra.output ?? ["TEXT"],
+  responseStreamingSupported: extra.streaming ?? true,
+  inferenceTypesSupported: inferenceTypes,
+  modelLifecycle: { status: extra.status ?? "ACTIVE" },
+});
+
+const profile = (id: string, ...modelIds: string[]) => ({
+  inferenceProfileId: id,
+  inferenceProfileName: id,
+  status: "ACTIVE",
+  type: "SYSTEM_DEFINED",
+  models: modelIds.flatMap((m) =>
+    ["us-east-1", "us-west-2"].map((r) => ({ modelArn: `arn:aws:bedrock:${r}::foundation-model/${m}` })),
+  ),
+});
+
+const FOUNDATION = {
+  modelSummaries: [
+    fm("qwen.qwen3-coder-next", ["ON_DEMAND"], { name: "Qwen3 Coder Next" }),
+    fm("meta.llama4-maverick-17b-instruct-v1:0", ["INFERENCE_PROFILE"]),
+    fm("vendor.global-only-model", ["INFERENCE_PROFILE"]),
+    fm("anthropic.claude-sonnet-5-5", ["INFERENCE_PROFILE"]),
+    fm("stability.sd3-5-large-v1:0", ["ON_DEMAND"], { output: ["IMAGE"] }),
+    fm("vendor.legacy-model", ["ON_DEMAND"], { status: "LEGACY" }),
+    fm("vendor.no-stream-model", ["ON_DEMAND"], { streaming: false }),
+    fm("vendor.brand-new-model", ["ON_DEMAND"], { name: "Brand New" }),
+  ],
+};
+
+const PROFILES = {
+  inferenceProfileSummaries: [
+    profile("us.meta.llama4-maverick-17b-instruct-v1:0", "meta.llama4-maverick-17b-instruct-v1:0"),
+    profile("global.vendor.global-only-model", "vendor.global-only-model"),
+    profile("us.anthropic.claude-sonnet-5-5", "anthropic.claude-sonnet-5-5"),
+    profile("global.anthropic.claude-sonnet-5-5", "anthropic.claude-sonnet-5-5"),
+  ],
+};
+
+function fakeClient(opts: { useCase?: "ok" | "missing" | "denied"; fail?: boolean } = {}): BedrockDiscoveryClient & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async send(cmd: unknown) {
+      const name = (cmd as { constructor: { name: string } }).constructor.name;
+      calls.push(name);
+      if (opts.fail) throw new Error("boom");
+      if (name === "ListFoundationModelsCommand") return FOUNDATION;
+      if (name === "ListInferenceProfilesCommand") return PROFILES;
+      if (name === "GetUseCaseForModelAccessCommand") {
+        if (opts.useCase === "missing") {
+          const e = new Error("You have not filled out the request form.");
+          e.name = "ResourceNotFoundException";
+          throw e;
+        }
+        if (opts.useCase === "denied") {
+          const e = new Error("not authorized");
+          e.name = "AccessDeniedException";
+          throw e;
+        }
+        return { formData: "{}" };
+      }
+      throw new Error(`unexpected command ${name}`);
+    },
+  };
+}
+
+describe("geoPrefixForRegion", () => {
+  it("maps AWS regions to Bedrock cross-region profile prefixes", () => {
+    expect(geoPrefixForRegion("us-east-1")).toBe("us.");
+    expect(geoPrefixForRegion("eu-central-1")).toBe("eu.");
+    expect(geoPrefixForRegion("ap-southeast-2")).toBe("apac.");
+    expect(geoPrefixForRegion("weird")).toBe("us.");
+  });
+});
+
+describe("parseBedrockDiscovery", () => {
+  const parse = (anthropicAllowed: boolean) =>
+    parseBedrockDiscovery({ foundationModels: FOUNDATION, inferenceProfiles: PROFILES, geoPrefix: "us.", anthropicAllowed }).map((m) => m.id);
+
+  it("lists on-demand models by bare id and profile-only models by their geo profile", () => {
+    const ids = parse(true);
+    expect(ids).toContain("qwen.qwen3-coder-next");
+    expect(ids).toContain("us.meta.llama4-maverick-17b-instruct-v1:0");
+    expect(ids).not.toContain("meta.llama4-maverick-17b-instruct-v1:0");
+  });
+
+  it("omits models whose only profile is global", () => {
+    const ids = parse(true);
+    expect(ids).not.toContain("vendor.global-only-model");
+    expect(ids.some((id) => id.startsWith("global."))).toBe(false);
+  });
+
+  it("omits anthropic ids unless anthropicAllowed", () => {
+    expect(parse(false).some((id) => id.includes("anthropic."))).toBe(false);
+    expect(parse(true)).toContain("us.anthropic.claude-sonnet-5-5");
+  });
+
+  it("omits non-text, non-streaming, and non-ACTIVE models", () => {
+    const ids = parse(true);
+    expect(ids).not.toContain("stability.sd3-5-large-v1:0");
+    expect(ids).not.toContain("vendor.legacy-model");
+    expect(ids).not.toContain("vendor.no-stream-model");
+  });
+
+  it("carries the Bedrock model name", () => {
+    const entry = parseBedrockDiscovery({ foundationModels: FOUNDATION, inferenceProfiles: PROFILES, geoPrefix: "us.", anthropicAllowed: true })
+      .find((m) => m.id === "qwen.qwen3-coder-next");
+    expect(entry?.name).toBe("Qwen3 Coder Next");
+  });
+});
+
+describe("discoverBedrockModels", () => {
+  afterEach(() => resetBedrockDiscoveryCache());
+
+  it("merges discovery with registry metadata and keeps unknown ids with bedrock names and no pricing", async () => {
+    const { models, live } = await discoverBedrockModels({ client: fakeClient({ useCase: "ok" }), region: "us-east-1" });
+    expect(live).toBe(true);
+    const qwen = models.find((m) => m.id === "qwen.qwen3-coder-next");
+    expect(qwen?.pricing?.input).toBeGreaterThan(0);
+    const fresh = models.find((m) => m.id === "vendor.brand-new-model");
+    expect(fresh).toEqual({ id: "vendor.brand-new-model", name: "Brand New" });
+    expect(models.map((m) => m.id)).toEqual([...models.map((m) => m.id)].sort());
+  });
+
+  it("hides anthropic when GetUseCaseForModelAccess rejects with ResourceNotFoundException", async () => {
+    const { models } = await discoverBedrockModels({ client: fakeClient({ useCase: "missing" }), region: "us-east-1" });
+    expect(models.some((m) => m.id.includes("anthropic."))).toBe(false);
+  });
+
+  it("hides anthropic when GetUseCaseForModelAccess fails for any other reason", async () => {
+    const { models, live } = await discoverBedrockModels({ client: fakeClient({ useCase: "denied" }), region: "us-east-1" });
+    expect(live).toBe(true);
+    expect(models.some((m) => m.id.includes("anthropic."))).toBe(false);
+  });
+
+  it("caches for an hour per region", async () => {
+    let now = 1_000_000;
+    const client = fakeClient({ useCase: "ok" });
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now });
+    const first = client.calls.length;
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now + 3_599_000 });
+    expect(client.calls.length).toBe(first);
+    await discoverBedrockModels({ client, region: "us-west-2", now: () => now });
+    expect(client.calls.length).toBeGreaterThan(first);
+    const beforeExpiry = client.calls.length;
+    now += 3_601_000;
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now });
+    expect(client.calls.length).toBeGreaterThan(beforeExpiry);
+  });
+
+  it("degrades to the registry list with live:false when the client throws", async () => {
+    const { models, live } = await discoverBedrockModels({ client: fakeClient({ fail: true }), region: "us-east-1" });
+    expect(live).toBe(false);
+    expect(models.length).toBe(bedrockRegistry().size);
+  });
+
+  it("does not cache a failed discovery", async () => {
+    const failing = fakeClient({ fail: true });
+    await discoverBedrockModels({ client: failing, region: "us-east-1" });
+    const ok = fakeClient({ useCase: "ok" });
+    const { live } = await discoverBedrockModels({ client: ok, region: "us-east-1" });
+    expect(live).toBe(true);
+  });
+});
+
+describe("curated defaults", () => {
+  it("every default id exists in the pi-ai amazon-bedrock registry", () => {
+    const reg = bedrockRegistry();
+    for (const id of BEDROCK_DEFAULT_MODEL_IDS) expect(reg.has(id), id).toBe(true);
+  });
+  it("curatedBedrockModels returns one registry-resolved entry per default, with pricing", () => {
+    const out = curatedBedrockModels();
+    expect(out.map((m) => m.id)).toEqual([...BEDROCK_DEFAULT_MODEL_IDS]);
+    for (const m of out) expect(m.pricing?.input).toBeGreaterThan(0);
+  });
+  it("defaults contain no anthropic or global ids", () => {
+    expect(BEDROCK_DEFAULT_MODEL_IDS.some((id) => id.includes("anthropic.") || id.startsWith("global."))).toBe(false);
+  });
+});
+
