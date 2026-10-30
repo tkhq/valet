@@ -788,6 +788,10 @@ export function useNotifications(opts?: UseQueryOptions<ListNotificationsRespons
     queryKey: qk.notifications(),
     queryFn: () => api.listNotifications(),
     refetchInterval: 30_000,
+    // The attention sound (`use-attention-ping.ts`) fires when this poll
+    // finds something new. TanStack pauses the interval in a hidden tab, so
+    // without this the sound waits until the person comes back to the tab.
+    refetchIntervalInBackground: true,
     ...opts,
   });
 }
