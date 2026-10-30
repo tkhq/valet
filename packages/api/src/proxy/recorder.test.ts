@@ -143,7 +143,8 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
     expect(inserted).toHaveLength(1);
     const row = inserted[0];
     expect(row).toMatchObject({
-      model: "gpt-4o-mini-2024-07-18", inputTokens: 80, outputTokens: 20, totalTokens: 100,
+      // prompt_tokens 80 minus 16 cached — the row stores uncached input.
+      model: "gpt-4o-mini-2024-07-18", inputTokens: 64, outputTokens: 20, totalTokens: 100,
       cacheReadTokens: 16, providerResponseId: "chatcmpl-1", endpoint: "/v1/chat/completions",
     });
     expect(row.costUsd).not.toBeNull(); // priced via the canonical (date-stripped) id
