@@ -34,9 +34,8 @@ import {
   updateLlmProvider,
   LlmProviderSingletonError,
   type LlmProviderKind,
-  type UpdateLlmProviderOptions,
-} from "../services/llm-providers.js";
-import { resolveModelSpec } from "../services/model-resolution.js";
+  type UpdateLlmProviderOptions, KNOWN_PROVIDER_KINDS } from "../services/llm-providers.js";
+import { envCredentialFor, resolveModelSpec } from "../services/model-resolution.js";
 import { curatedOpenrouterModels, mergedOpenrouterModels } from "../services/openrouter.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
@@ -163,7 +162,10 @@ llmProvidersRouter.get("/", async (c) => {
   const user = c.var.user;
   const rows = await listLlmProviders(db, user.orgId);
   const providers = await Promise.all(rows.map((row) => toSummary(c, row)));
-  const resp: ListLlmProvidersResponse = { providers };
+  const envFallbackKinds = KNOWN_PROVIDER_KINDS.filter(
+    (kind) => !rows.some((row) => row.kind === kind) && envCredentialFor(kind).present,
+  );
+  const resp: ListLlmProvidersResponse = { providers, envFallbackKinds };
   return c.json(resp);
 });
 
@@ -184,7 +186,7 @@ llmProvidersRouter.post("/", async (c) => {
   }
 
   if (!isLlmProviderKind(body.kind)) {
-    return c.json({ error: "kind must be one of anthropic|openai|google|openrouter|openai_compatible" }, 400);
+    return c.json({ error: "kind must be one of anthropic|openai|google|openrouter|amazon-bedrock|openai_compatible" }, 400);
   }
   if (typeof body.name !== "string" || body.name.length === 0) {
     return c.json({ error: "name is required" }, 400);
@@ -297,7 +299,10 @@ llmProvidersRouter.put("/:id/key", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (typeof body.apiKey !== "string" || body.apiKey.length === 0) {
+  // Whitespace-only is rejected here, not merely trimmed later: a stored
+  // blank would count as "has key" for catalog activation while the resolver
+  // treats it as absent, leaving a selectable row whose turns all fail.
+  if (typeof body.apiKey !== "string" || body.apiKey.trim().length === 0) {
     return c.json({ error: "apiKey is required" }, 400);
   }
 

@@ -3943,7 +3943,8 @@ export class EngineHost {
       const row = rows.find((r) => providerNamespace(r) === namespace);
       let active: boolean;
       if (!row) {
-        active = namespace === "anthropic" || namespace === "openai" || namespace === "google";
+        active =
+          namespace === "anthropic" || namespace === "openai" || namespace === "google" || namespace === "amazon-bedrock";
       } else if (row.kind === "openai_compatible") {
         active = row.enabled && (await hasOrgKey(this.opts.engineCredentials, orgId, row.id));
       } else {

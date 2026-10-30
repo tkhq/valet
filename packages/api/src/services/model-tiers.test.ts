@@ -49,6 +49,16 @@ describe("model-tiers", () => {
     expect((await resolvableTiers(db, credentials, orgId)).get("l")).toBe("openai/gpt-6-astra");
   });
 
+  it("treats amazon-bedrock like the other known kinds: active with no row, inactive when its row is disabled", async () => {
+    const spec = "amazon-bedrock/us.anthropic.claude-sonnet-5-5";
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: [spec] });
+    // No row: zero-config path counts as active (credential checks happen at resolution).
+    expect(await resolveTier(db, credentials, orgId, "l")).toBe(spec);
+    const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+    await updateLlmProvider(db, orgId, row.id, { enabled: false });
+    expect(await resolveTier(db, credentials, orgId, "l")).toBeUndefined();
+  });
+
   it("does not include Astra in default tiers", () => {
     expect(Object.values(DEFAULT_TIER_MAP).flat().some((id) => id.includes("astra"))).toBe(false);
   });

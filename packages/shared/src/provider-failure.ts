@@ -25,9 +25,17 @@ const USAGE_LIMIT = /\bquota\b|insufficient_quota|payment_required|\b402\b|billi
 
 const AUTH = /authentication|unauthorized|invalid[_ -]?api[_ -]?key|permission[_ -]denied|\b401\b/i;
 const OVERLOADED = /overloaded|high demand|at capacity|\b529\b/i;
-const RATE_LIMITED = /rate.?limit|too many requests|\b429\b/i;
+// "throttl" / "too many tokens": pi-ai formats Bedrock's ThrottlingException as
+// "Throttling error: Too many tokens, please wait before trying again."
+const RATE_LIMITED = /rate.?limit|too many requests|throttl|too many tokens|\b429\b/i;
 const SERVER_ERROR = /\b50[0-4]\b|server.?error|internal.?error|service.?unavailable|error occurred while processing your request/i;
 const NETWORK = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network.?error|socket hang up|timed? ?out/i;
+
+/** True when the provider refused the call for capacity it will regain
+ * (rate limit, throttling). Retryable on the same provider. */
+export function isRateLimitedProviderFailure(text: string): boolean {
+  return RATE_LIMITED.test(text) && !NOT_RETRYABLE.test(text);
+}
 
 /** True when no retry can fix the failure. See `NOT_RETRYABLE`. */
 export function isNonRetryableProviderFailure(text: string): boolean {
@@ -53,7 +61,7 @@ export function classifyProviderFailure(text: string): ProviderFailureKind {
 /** "openai" → "OpenAI". Unknown ids get a capital first letter. */
 export function providerLabel(provider: string | undefined): string {
   if (!provider) return 'The model provider';
-  const known: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', bedrock: 'Amazon Bedrock', openrouter: 'OpenRouter', xai: 'xAI' };
+  const known: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', bedrock: 'Amazon Bedrock', 'amazon-bedrock': 'Amazon Bedrock', openrouter: 'OpenRouter', xai: 'xAI' };
   return known[provider.toLowerCase()] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 

@@ -4947,7 +4947,7 @@ export interface PatchIdentityLinkResponse {
 // per-tier ordered target lists (`/api/org/model-tiers`) are the org's
 // fallback chain now — org model preferences are removed.
 
-export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
+export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock" | "openai_compatible";
 
 export interface LlmProviderModelWire {
   id: string;
@@ -4971,6 +4971,10 @@ export interface LlmProviderSummary {
 
 export interface ListLlmProvidersResponse {
   providers: LlmProviderSummary[];
+  /** Known kinds with NO row whose deployment env can authenticate (an API
+   * key env var, or ambient AWS credentials for amazon-bedrock). Lets the
+   * settings card show its deployment badge before any row exists. */
+  envFallbackKinds?: LlmProviderKindWire[];
 }
 
 export interface CreateLlmProviderRequest {

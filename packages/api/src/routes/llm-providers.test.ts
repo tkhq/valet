@@ -317,6 +317,79 @@ describe("GET /api/org/llm-providers", () => {
     }
   });
 
+  it("lists known kinds with no row whose deployment env can authenticate in envFallbackKinds", async () => {
+    api = await bootTestApi();
+    const before = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+    expect(((await before.json()) as ListLlmProvidersResponse).envFallbackKinds ?? []).toEqual([]);
+
+    const prev = process.env.AWS_WEB_IDENTITY_TOKEN_FILE;
+    process.env.AWS_WEB_IDENTITY_TOKEN_FILE = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token";
+    try {
+      const after = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+      expect(((await after.json()) as ListLlmProvidersResponse).envFallbackKinds).toEqual(["amazon-bedrock"]);
+      // Once a row exists the per-row envFallback carries the signal instead.
+      const created = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ kind: "amazon-bedrock", name: "Amazon Bedrock" }),
+      });
+      expect(created.status).toBe(201);
+      const withRow = (await (await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS })).json()) as ListLlmProvidersResponse;
+      expect(withRow.envFallbackKinds).toEqual([]);
+      expect(withRow.providers[0]?.envFallback).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AWS_WEB_IDENTITY_TOKEN_FILE;
+      else process.env.AWS_WEB_IDENTITY_TOKEN_FILE = prev;
+    }
+  });
+
+  it("rejects a whitespace-only key so a row can never look keyed but resolve as keyless", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "   " }),
+    });
+    expect(res.status).toBe(400);
+    const list = (await (await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS })).json()) as ListLlmProvidersResponse;
+    expect(list.providers[0]?.hasKey).toBe(false);
+  });
+
+  it("names amazon-bedrock in the invalid-kind error", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "nope", name: "x" }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/amazon-bedrock/);
+  });
+
+  it("envFallback for amazon-bedrock follows ambient AWS credentials", async () => {
+    api = await bootTestApi();
+    const created = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "amazon-bedrock", name: "Amazon Bedrock" }),
+    });
+    expect(created.status).toBe(201);
+
+    const before = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+    expect(((await before.json()) as ListLlmProvidersResponse).providers[0]?.envFallback).toBe(false);
+
+    const prev = process.env.AWS_PROFILE;
+    process.env.AWS_PROFILE = "dev";
+    try {
+      const after = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+      expect(((await after.json()) as ListLlmProvidersResponse).providers[0]?.envFallback).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AWS_PROFILE;
+      else process.env.AWS_PROFILE = prev;
+    }
+  });
+
   it("envFallback is false once an org key is stored, even with the env var stubbed", async () => {
     api = await bootTestApi();
     const created = await createAnthropicProvider(api.baseUrl);

@@ -66,7 +66,7 @@ import { isRegistryModel, parseLastModified, parseRemoteCatalog, type RegistryMo
  * org catalog and the resolver understand (`services/model-catalog.ts`'s
  * known kinds plus openrouter). Adding one here is not enough to make it
  * selectable — the catalog's own kind lists govern that. */
-export const REGISTRY_PROVIDERS = ["anthropic", "openai", "google", "openrouter"] as const;
+export const REGISTRY_PROVIDERS = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"] as const;
 
 export type RegistryProvider = (typeof REGISTRY_PROVIDERS)[number];
 

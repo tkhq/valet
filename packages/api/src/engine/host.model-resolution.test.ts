@@ -131,6 +131,65 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
+  describe("amazon-bedrock: AWS credential chain", () => {
+    const BEDROCK_SPEC = "amazon-bedrock/us.anthropic.claude-sonnet-5-5";
+
+    it("no row: ambient AWS credentials resolve with apiKey undefined so the SDK chain runs", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.model.provider).toBe("amazon-bedrock");
+      expect(resolved?.model.id).toBe("us.anthropic.claude-sonnet-5-5");
+      expect(resolved?.apiKey).toBeUndefined();
+      expect(resolved?.canonicalId).toBe(BEDROCK_SPEC);
+    });
+
+    it("row + ambient credentials: apiKey is undefined, never the <authenticated> marker", async () => {
+      vi.stubEnv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBeUndefined();
+      expect(resolved?.apiKey).not.toBe("<authenticated>");
+    });
+
+    it("stored org bearer token wins over ambient credentials", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      await saveKey(row.id, "bedrock-token-123");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBe("bedrock-token-123");
+    });
+
+    it("blank stored key is absent and falls through to the chain", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      await saveKey(row.id, "   ");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBeUndefined();
+    });
+
+    it("no org key and no AWS environment → NoCredentialsError (row and no-row)", async () => {
+      // vitest.setup.ts scrubbed the AWS env vars.
+      const noRow = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(noRow).toBeInstanceOf(NoCredentialsError);
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      const withRow = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(withRow).toBeInstanceOf(NoCredentialsError);
+      expect((withRow as NoCredentialsError).model?.id).toBe(BEDROCK_SPEC);
+    });
+
+    it("AWS_REGION alone is not a credential", async () => {
+      vi.stubEnv("AWS_REGION", "us-east-1");
+      const err = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(NoCredentialsError);
+    });
+
+    it("other known kinds still require a real key when only AWS credentials exist", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const err = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(NoCredentialsError);
+    });
+  });
+
   describe("no key ANYWHERE → NoCredentialsError with the resolved model attached", () => {
     it("known kind with a row, no org key, no env key", async () => {
       // vitest.setup.ts scrubbed the provider env vars; no key is saved.

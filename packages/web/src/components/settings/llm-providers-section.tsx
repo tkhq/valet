@@ -28,15 +28,27 @@ import {
 } from "~/api/settings";
 import { matchesNeedle } from "~/lib/text-match";
 
-type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
+type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
-const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter"];
+const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"];
 
 const KNOWN_LABEL: Record<KnownKind, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
   openrouter: "OpenRouter",
+  "amazon-bedrock": "Amazon Bedrock",
+};
+
+/** Per-kind copy for the key field and the deployment-credential badge.
+ * Bedrock's "key" is a Bedrock API key (bearer token), and its deployment
+ * fallback is the pod's AWS credential chain, not an API-key env var. */
+const KIND_COPY: Record<KnownKind, { placeholder: string; deploymentBadge: string }> = {
+  anthropic: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openai: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  google: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openrouter: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  "amazon-bedrock": { placeholder: "Bedrock API key (bearer token)", deploymentBadge: "using deployment AWS credentials" },
 };
 
 /**
@@ -51,6 +63,7 @@ const KNOWN_LABEL: Record<KnownKind, string> = {
 export function LlmProvidersSection() {
   const providersQ = useLlmProviders();
   const providers = providersQ.data?.providers ?? [];
+  const envFallbackKinds = providersQ.data?.envFallbackKinds ?? [];
   const knownRows = new Map(
     providers.filter((p) => p.kind !== "openai_compatible").map((p) => [p.kind, p]),
   );
@@ -74,6 +87,7 @@ export function LlmProvidersSection() {
               key={kind}
               kind={kind as KnownKind}
               row={knownRows.get(kind)}
+              envFallback={envFallbackKinds.includes(kind)}
             />
           ))}
           {customRows.map((row) => (
@@ -91,9 +105,12 @@ export function LlmProvidersSection() {
 function KnownProviderCard({
   kind,
   row,
+  envFallback,
 }: {
   kind: KnownKind;
   row: LlmProviderSummary | undefined;
+  /** Deployment env can authenticate this kind even with no row (server `envFallbackKinds`). */
+  envFallback: boolean;
 }) {
   const createProvider = useCreateLlmProvider();
   const patchProvider = usePatchLlmProvider();
@@ -140,15 +157,15 @@ function KnownProviderCard({
     deleteKey.mutate(row.id);
   }
 
-  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : "sk-…";
-  const showDeploymentBadge = Boolean(row?.envFallback && !row.hasKey);
+  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : KIND_COPY[kind].placeholder;
+  const showDeploymentBadge = row ? Boolean(row.envFallback && !row.hasKey) : envFallback;
 
   return (
     <div className="space-y-3 py-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
-          {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
+          {showDeploymentBadge && <Badge variant="neutral">{KIND_COPY[kind].deploymentBadge}</Badge>}
         </div>
         <Switch
           checked={row?.enabled ?? true}

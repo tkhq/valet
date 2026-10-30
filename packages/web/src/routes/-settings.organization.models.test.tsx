@@ -32,7 +32,7 @@ const deleteLlmProviderKeyMutate = vi.fn();
 const probeLlmProviderMutate = vi.fn();
 const testLlmProviderMutate = vi.fn();
 
-let providersData: { providers: LlmProviderSummary[] } = { providers: [] };
+let providersData: { providers: LlmProviderSummary[]; envFallbackKinds?: LlmProviderSummary["kind"][] } = { providers: [] };
 let modelsData: { models: ModelInfo[] } = { models: [] };
 
 vi.mock("@tanstack/react-router", () => ({
@@ -178,6 +178,36 @@ describe("LlmProvidersSection — known provider cards", () => {
     };
     renderWithTooltip(<LlmProvidersSection />);
     expect(screen.getByText("using deployment key")).toBeTruthy();
+  });
+
+  it("renders an Amazon Bedrock card with AWS-credential copy", () => {
+    providersData = {
+      providers: [
+        {
+          id: "row_b",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("Amazon Bedrock")).toBeTruthy();
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    expect(screen.queryByText("using deployment key")).toBeNull();
+    expect(screen.getByPlaceholderText("Bedrock API key (bearer token)")).toBeTruthy();
+  });
+
+  it("shows the deployment badge on a known card with no row when the deployment env can authenticate", () => {
+    providersData = { providers: [], envFallbackKinds: ["amazon-bedrock"] };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    // Other no-row cards stay badge-less.
+    expect(screen.queryByText("using deployment key")).toBeNull();
   });
 
   it("Escape dismisses the OpenRouter model picker", async () => {

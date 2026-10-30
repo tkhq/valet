@@ -138,6 +138,13 @@ serviceAccount:
   # access — see templates/rbac.yaml.
   name: valet-api
   create: true
+  # Annotations on the ServiceAccount. Use this to bind an IAM role on EKS
+  # (IRSA), which is how the api reaches Amazon Bedrock with no stored key:
+  #   annotations:
+  #     eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<role>
+  # The pod identity webhook then injects AWS_WEB_IDENTITY_TOKEN_FILE and
+  # AWS_REGION into the api container.
+  annotations: {}
 
 sandbox:
   # Namespace where session Sandbox CRs (and their backing pods/PVCs) live.
