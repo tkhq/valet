@@ -2,6 +2,8 @@
 
 *Depends on: Part 00, Part 01, Part 03, Part 04, Part 05. Conformance: L1+ (server-side surfaces stay usable at every level from L1 up).*
 
+Part 13 (`13-ux-v2.md`) supersedes the sections listed in its supersession table. Read Part 13 first for the current UX contract.
+
 ## Purpose
 
 This part fixes the end-to-end flow a human follows to launch, monitor, resolve, and read a security engagement in the Valet web client. The base design (`docs/specs/2026-08-27-valet-security-design.md`) fixed the runtime substrate (`security_engagements`, `security_cells`, `security_files`, `sec_*` tools) and the persona catalog grew persona by persona: `code-review`, then the architect/verifier triad (M-P2b), then `threat-model`/`sast`/`attack-tree` (M-P2c), then coverage honesty (M-P2d), then `report` (M-P3), then the live personas `dast`/`fuzz`/`exploit` (M-P4b), then `reconcile` (re-scan v2), then the flat needs loop (M-P4c). The web UI followed the source-only path faithfully but never caught up to the live-persona milestones. The v1 spec added `pivot-coordinator` and the delta-re-run contract on top of that.

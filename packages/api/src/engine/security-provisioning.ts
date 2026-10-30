@@ -125,6 +125,11 @@ export function securityDeclaredMcpPlugins(decls: readonly ToolDecl[]): ValetPlu
   return plugins;
 }
 
+/** The MCP service names of the declared tools that carry an `mcp` block, in declaration order. */
+export function declaredMcpServices(decls: readonly ToolDecl[]): string[] {
+  return decls.flatMap((decl) => (decl.mcp ? [mcpServiceName(decl)] : []));
+}
+
 /** The MCP service name for a declared tool (M-P4a): the mcp prefix without its
  * `mcp__…__` decoration, else the tool id. So `prefix: mcp__zap__` → `zap`. */
 function mcpServiceName(decl: ToolDecl): string {

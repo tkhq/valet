@@ -58,6 +58,7 @@ const ENGAGEMENT: SecurityEngagementRow = {
   reportGeneratedAt: null,
   createdAt: 1_000,
   updatedAt: 2_000,
+  credentialsJson: null,
 };
 
 function finding(overrides: Partial<SecurityFindingRow> & { id: string }): SecurityFindingRow {

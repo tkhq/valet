@@ -59,7 +59,10 @@ export interface BackgroundWork {
 }
 
 /** Every open wakeup and active lease of `sessionId`. */
-export async function listBackgroundWork(engineStore: SessionStore, sessionId: string): Promise<BackgroundWork> {
+export async function listBackgroundWork(
+  engineStore: Pick<SessionStore, "listWakeups" | "listActiveLeases">,
+  sessionId: string,
+): Promise<BackgroundWork> {
   const [wakeups, leases] = await Promise.all([
     engineStore.listWakeups(sessionId, ["pending", "running"]),
     engineStore.listActiveLeases(sessionId),
@@ -138,6 +141,15 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
       createdAt: l.createdAt,
     }));
   return [...wakeups, ...holds];
+}
+
+/** Count a session's open background work: pending or running wakeups and
+ * active holds. `selectWork` drops child-delivery subscriptions. */
+export async function openBackgroundWork(
+  store: Pick<SessionStore, "listWakeups" | "listActiveLeases">,
+  sessionId: string,
+): Promise<number> {
+  return selectWork(await listBackgroundWork(store, sessionId), {}).length;
 }
 
 /** An action that stops background work, and the words its refusal uses. */

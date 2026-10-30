@@ -14,6 +14,7 @@ export * from './schedule-run-id.js';
 export * from './resource-quantity.js';
 export * from './search-query.js';
 export * from './sandbox-resources.js';
+export * from './security-credentials.js';
 export * from './skill-block.js';
 export * from './thread-policy.js';
 export * from './thread-plan.js';

@@ -6,6 +6,7 @@ import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
+import { validateCredentialDecls } from "@valet/shared";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { cancelAllWorkAsHuman, endChildSubscriptions, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
@@ -27,7 +28,13 @@ import {
   createSecurityEngagementService,
   type SecurityConfigContext,
 } from "../services/security-engagements.js";
-import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
+import {
+  seedSecurityReview,
+  seededConfigContext,
+  SecurityCredentialPreflightError,
+  type SecurityConfigCredentialDecl,
+} from "../services/security-seed.js";
+import { reservedToolServices } from "../services/security-persona-scope.js";
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
@@ -419,6 +426,16 @@ sessionsRouter.post("/", async (c) => {
           }
         }
       }
+      if (sc.credentials !== undefined) {
+        // One vocabulary for a declared credential, shared with the repo
+        // config parser and the setup form, so a declaration the form accepts
+        // is a declaration this route accepts. The `op://` reference is
+        // resolved later, by the seed preflight.
+        const checked = validateCredentialDecls(sc.credentials);
+        if (!checked.ok) {
+          return c.json({ error: `securityConfig.credentials: ${checked.message}` }, 400);
+        }
+      }
     }
     if (body.planCells !== undefined && (!Array.isArray(body.planCells) || body.planCells.length === 0)) {
       return c.json({ error: "planCells must be a non-empty list of plan steps, or omit the field." }, 400);
@@ -478,6 +495,9 @@ sessionsRouter.post("/", async (c) => {
   // (repo, preset, paths, model). Validated here, before anything is written.
   let rescanParentEngagementId: string | undefined;
   let rescanPlanYaml: string | undefined;
+  // The prior engagement's declared credentials: the list the user confirmed
+  // at its create. A re-scan request with no list reuses it.
+  let rescanCredentials: SecurityConfigCredentialDecl[] | undefined;
   if (body.rescanOf !== undefined) {
     if (kind !== "security") {
       return c.json({ error: "rescanOf only applies to a security session. Send kind 'security'." }, 400);
@@ -502,6 +522,20 @@ sessionsRouter.post("/", async (c) => {
       return c.json({ error: "The prior session has no security engagement to re-scan." }, 404);
     }
     rescanParentEngagementId = priorEngagement.engagement.id;
+    // The stored list passed the rules of its day. Validate it again, because
+    // a rule may have tightened since (a newly reserved label, a derived env).
+    // A request list replaces it, so then it is not read at all.
+    const storedCredentials = priorEngagement.engagement.credentialsJson;
+    if (body.securityConfig?.credentials === undefined && storedCredentials !== null) {
+      const checked = validateCredentialDecls(storedCredentials);
+      if (!checked.ok) {
+        return c.json(
+          { error: `${checked.message} Open the review's setup page and declare the credentials again.` },
+          400,
+        );
+      }
+      rescanCredentials = checked.decls;
+    }
     // Re-scan v2: seed the plan from `rescanPlan(presetId)` — recon → reconcile
     // → the diff-scoped sweeps → verify → report. The reconcile pass re-checks
     // the carried findings; the sweeps find what the changed code introduced.
@@ -579,20 +613,40 @@ sessionsRouter.post("/", async (c) => {
       : "";
   let engagementConfig: SecurityConfigContext | undefined;
   let engagementHasRepoConfig = false;
+  // Declared 1Password credential references (Part 12, INV-33): preflight-
+  // validated below through `seedSecurityReview`, then stored verbatim
+  // (references only, never a resolved value) on the engagement row.
+  let engagementCredentialsJson: SecurityConfigCredentialDecl[] | null = null;
   if (kind === "security") {
-    const [owner, repo] = repos[0].fullName.split("/");
-    if (owner && repo) {
+    const [repoOwner, repoName] = repos[0].fullName.split("/");
+    if (repoOwner && repoName) {
       const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-      const seeded = await seedSecurityReview({
-        owner,
-        repo,
-        ...(repos[0].ref ? { ref: repos[0].ref } : {}),
-        presetId,
-        ...(body.paths ? { paths: body.paths } : {}),
-        ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
-        tokenDeps,
-        orgId: user.orgId,
-      });
+      const declaredCredentials = body.securityConfig?.credentials ?? rescanCredentials;
+      let seeded;
+      try {
+        seeded = await seedSecurityReview({
+          owner: repoOwner,
+          repo: repoName,
+          ...(repos[0].ref ? { ref: repos[0].ref } : {}),
+          presetId,
+          ...(body.paths ? { paths: body.paths } : {}),
+          ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
+          tokenDeps,
+          orgId: user.orgId,
+          onePassword: c.var.providers.onePassword,
+          userId: user.id,
+          ownerType: owner.type,
+          ...(owner.type === "team" ? { teamId: owner.id } : {}),
+          ...(declaredCredentials !== undefined ? { credentials: declaredCredentials } : {}),
+          reservedServices: reservedToolServices(c.var.providers.actionPluginByService),
+        });
+      } catch (err) {
+        if (err instanceof SecurityCredentialPreflightError) {
+          return c.json({ error: err.remedy }, 400);
+        }
+        throw err;
+      }
+      engagementCredentialsJson = seeded.credentialsJson;
       engagementHasRepoConfig = seeded.hasRepoConfig;
 
       // The plan: the re-scan v2 plan (recon → reconcile → sweeps → verify →
@@ -733,6 +787,9 @@ sessionsRouter.post("/", async (c) => {
           // exist": a preset review with a user-edited focus carries a config
           // context but no repo config seeded it.
           hasRepoConfig: engagementHasRepoConfig,
+          // Declared 1Password credential references (Part 12, INV-33),
+          // preflight-validated above.
+          credentialsJson: engagementCredentialsJson,
         },
         tx,
       );

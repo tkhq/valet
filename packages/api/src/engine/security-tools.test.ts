@@ -14,24 +14,29 @@
 import { decode } from "@toon-format/toon";
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { isToolScope } from "@valet/shared";
 import type {
   Credential,
   CredentialProvider,
   DecisionGateRequest,
   DecisionResolution,
+  Lease,
   MessageQuery,
   Sandbox,
   SessionEntry,
   ToolContext,
+  Wakeup,
 } from "@valet/engine";
+import { NATIVE_IMAGE_RESULT_TOOL } from "@valet/engine";
 import securityPlugin from "@valet/plugin-security/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { agentSessions, childWatches, securityCells, securityFiles, securityFindings } from "../schema/index.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
-import type { CreateSessionResponse, GetSessionSecurityResponse } from "../wire/types.js";
+import { PERSONA_DENIED_TOOLS } from "../services/security-persona-scope.js";
+import type { CreateSessionResponse, GetSecurityStatusResponse, GetSessionSecurityResponse } from "../wire/types.js";
 import {
   buildSecurityPersonaTools,
   buildSecurityRunnerTools,
@@ -47,7 +52,6 @@ import {
   secProtocolReadTool,
   secStartTool,
   secStatusTool,
-  secWaitTool,
   ESTIMATED_TOKENS_PER_CELL,
 } from "./security-tools.js";
 
@@ -112,12 +116,11 @@ async function engagementOf(a: TestApi, sessionId: string): Promise<GetSessionSe
 }
 
 describe("buildSecurityRunnerTools", () => {
-  it("returns exactly the twelve runner sec_* tools", () => {
+  it("returns exactly the eleven runner sec_* tools", () => {
     expect(buildSecurityRunnerTools().map((t) => t.name)).toEqual([
       "sec_plan_set",
       "sec_start",
       "sec_status",
-      "sec_wait",
       "sec_dispatch",
       "sec_cell_complete",
       "sec_cell_fail",
@@ -352,7 +355,8 @@ describe("sec_dispatch", () => {
     );
     await runner.pause();
 
-    // The child gets the runner's ceiling; the runner's own focus stays with the runner.
+    // The child gets the runner's ceiling narrowed to the persona scope, so the
+    // ceiling's own refusals hold; the runner's own focus stays with the runner.
     const toolScopeCeiling = { tools: ["sec_dispatch", "bash"], actions: [] };
     const toolScope = { tools: ["sec_dispatch"], actions: [] };
     const result = await secDispatchTool.execute({}, toolCtx(api, created.id, { threadId: "t-runner", toolScope, toolScopeCeiling }));
@@ -367,7 +371,7 @@ describe("sec_dispatch", () => {
     expect(recon?.status).toBe("running");
     expect(recon?.attempts).toBe(1);
     expect(recon?.childSessionId).toBeTruthy();
-    expect((await api.providers.engineStore.getSession(recon?.childSessionId ?? ""))?.metadata?.toolScope).toEqual(toolScopeCeiling);
+    expect((await api.providers.engineStore.getSession(recon?.childSessionId ?? ""))?.metadata?.toolScope).toEqual({ tools: ["bash"], actions: [] });
     expect(result.text).toContain(recon!.childSessionId!);
 
     // The spawner (not a bypass) created the durable watch edge, armed for
@@ -384,6 +388,39 @@ describe("sec_dispatch", () => {
     // Stop the child's queued turn before cleanup — this test asserts the
     // durable rows only, and an unattended turn must never reach a model.
     await api.providers.engineHost.liveSession(recon!.childSessionId!)?.abort();
+  });
+
+  it("narrows a persona child to its own tool scope and removes only the denied tools", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db, engineHost, engineStore } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    if (!found) throw new Error("engagement missing");
+    await service.startEngagement(found.engagement.id, { resolvedSha: SHA });
+    const [row] = await db.select().from(agentSessions).where(eq(agentSessions.id, created.id)).limit(1);
+    if (!row) throw new Error("runner missing");
+    const runner = await engineHost.sessionFor(created.id, await loadSessionMeta(db, row));
+    await runner.pause();
+
+    // No runner ceiling: the persona scope alone limits the child.
+    await secDispatchTool.execute({}, toolCtx(api, created.id, { threadId: "t-runner" }));
+    const [recon] = await db.select().from(securityCells)
+      .where(and(eq(securityCells.engagementId, found.engagement.id), eq(securityCells.ordinal, 1)));
+    const childId = recon?.childSessionId;
+    if (!childId) throw new Error("child id missing");
+    const scope = (await engineStore.getSession(childId))?.metadata?.toolScope;
+    if (!isToolScope(scope)) throw new Error("child tool scope missing");
+    const child = engineHost.liveSession(childId);
+    if (!child) throw new Error("child session missing");
+    // Thread.buildTools filters these ToolDefs by name. It prepends the native
+    // image receipt tool, which the session does not list.
+    // Pinned action tools carry scopeAction, so `actions` gates them instead.
+    const names = [NATIVE_IMAGE_RESULT_TOOL, ...[...child.builtinTools, ...(child.options.tools ?? [])]
+      .filter((def) => !def.scopeAction).map((def) => def.name)];
+    expect(names.filter((name) => !scope.tools?.includes(name) && !PERSONA_DENIED_TOOLS.includes(name))).toEqual([]);
+    expect(scope.tools).toEqual(expect.arrayContaining(["sec_fs_write", "bash"]));
+    await child.abort();
   });
 });
 
@@ -410,6 +447,75 @@ describe("sec_handoff tool scopes", () => {
     await p.engineHost.liveSession(watch.childSessionId)?.abort();
   });
 });
+
+/** Dispatch the first cell to a fake child and give that child a session row
+ * and a settled watch, so only background work can block the cell. */
+async function dispatchSettledChild(a: TestApi, sessionId: string, childSessionId: string) {
+  const { db } = a.providers;
+  const service = createSecurityEngagementService({ db });
+  const found = await service.getEngagementBySession(sessionId);
+  await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+  const { cell } = await service.dispatchCell(found!.engagement.id, {
+    spawn: async () => ({ childSessionId }),
+  });
+  const now = Date.now();
+  await db.insert(agentSessions).values({
+    id: childSessionId,
+    userId: "local-user",
+    orgId: "local-org",
+    workspace: "/tmp",
+    ownerType: "user",
+    ownerId: "local-user",
+    profile: "headless",
+    docker: false,
+    status: "active",
+    kind: "code",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(childWatches).values({
+    childSessionId,
+    queueItemId: `qi-${childSessionId}`,
+    parentSessionId: sessionId,
+    parentThreadId: "t-runner",
+    actorUserId: "local-user",
+    orgId: "local-org",
+    settled: true,
+    createdAt: now,
+  });
+  await db.insert(securityFiles).values({
+    id: `file_${randomUUID()}`,
+    engagementId: found!.engagement.id,
+    cellId: cell.id,
+    path: `/cells/${cell.dir}/state.yml`,
+    revision: 1,
+    content: [
+      "protocol_version: 1",
+      `cell: ${cell.dir}`,
+      `persona: ${cell.persona}`,
+      "status: done",
+      "checklist: { pending: 0, done: 1 }",
+      "queue: { pending: 0, done: 1 }",
+      "findings: []",
+      "log: []",
+    ].join("\n"),
+    createdAt: now,
+  });
+  return cell;
+}
+
+function holdLease(sessionId: string): Lease {
+  const now = Date.now();
+  return {
+    id: `ls_hold_${randomUUID()}`,
+    sessionId,
+    sandboxId: "sb-1",
+    ownerKind: "hold",
+    reason: "long scan",
+    createdAt: now,
+    deadlineAt: now + 60 * 60 * 1000,
+  };
+}
 
 describe("sec_cell_complete", () => {
   it("relays the server's exit-condition violation verbatim", async () => {
@@ -511,6 +617,46 @@ describe("sec_cell_complete", () => {
     expect(result.text).toContain("[security_error]");
     expect(result.text).toContain("has not settled");
   });
+
+  it("refuses while the child has background work, naming wakeup_cancel", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const cell = await dispatchSettledChild(api, created.id, "child-bg");
+    await api.providers.engineStore.createLease(holdLease("child-bg"));
+
+    const result = await secCellCompleteTool.execute({ cell_id: cell.id }, toolCtx(api, created.id));
+    expect(result.text).toContain("still has 1 background item(s)");
+    expect(result.text).toContain("wakeup_cancel");
+    const rows = await api.providers.db.select().from(securityCells).where(eq(securityCells.id, cell.id)).limit(1);
+    expect(rows[0].status).toBe("running");
+  });
+
+  it("does not count lost work of a destroyed child", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const cell = await dispatchSettledChild(api, created.id, "child-lost");
+    const now = Date.now();
+    const lost: Wakeup = {
+      id: "wk_lost1",
+      sessionId: "child-lost",
+      threadId: "t-child",
+      kind: "process",
+      status: "lost",
+      reason: "long scan",
+      command: "nuclei -l targets.txt",
+      cause: "sandbox_unavailable",
+      logOffset: 0,
+      logTail: "",
+      eventCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      endedAt: now,
+    };
+    await api.providers.engineStore.createWakeup(lost);
+
+    const result = await secCellCompleteTool.execute({ cell_id: cell.id }, toolCtx(api, created.id));
+    expect(result.text).toContain("outcome: completed");
+  });
 });
 
 describe("sec_status", () => {
@@ -532,74 +678,22 @@ describe("sec_status", () => {
     expect(result.text).toContain("critical 0");
     expect(result.text).toContain("CHILD GONE");
   });
-});
 
-describe("sec_wait", () => {
-  it("answers [security_unavailable] without apiBaseUrl/internalToken", async () => {
-    const result = await secWaitTool.execute({}, makeCtx());
-    expect(result.text).toBe("[security_unavailable] security endpoint not configured");
-  });
-
-  it("returns the status snapshot at once when the running child is already settled", async () => {
+  it("reports open background work of the running child", async () => {
     api = await bootTestApi();
     const created = await createSecuritySession(api.baseUrl);
-    const { db } = api.providers;
-    const service = createSecurityEngagementService({ db });
-    const found = await service.getEngagementBySession(created.id);
-    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
-    const { cell } = await service.dispatchCell(found!.engagement.id, {
-      spawn: async () => ({ childSessionId: "child-settled" }),
-    });
-    // A real spawn creates the child's session row; the mock does not, so
-    // insert it — the status route verifies the child session exists before
-    // trusting the settled flag (else it reports CHILD GONE).
-    await db.insert(agentSessions).values({
-      id: "child-settled",
-      userId: "local-user",
-      orgId: "local-org",
-      workspace: "/tmp",
-      ownerType: "user",
-      ownerId: "local-user",
-      profile: "headless",
-      docker: false,
-      status: "active",
-      kind: "code",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    // A settled watch → sec_wait must not park; it returns the snapshot so the
-    // runner rules on the cell immediately.
-    await db.insert(childWatches).values({
-      childSessionId: "child-settled",
-      queueItemId: `qi-${cell.id}`,
-      parentSessionId: created.id,
-      parentThreadId: "t-runner",
-      actorUserId: "local-user",
-      orgId: "local-org",
-      settled: true,
-      createdAt: Date.now(),
-    });
+    await dispatchSettledChild(api, created.id, "child-scan");
+    await api.providers.engineStore.createLease(holdLease("child-scan"));
 
-    const started = Date.now();
-    const result = await secWaitTool.execute({ timeout_seconds: 30 }, toolCtx(api, created.id));
-    // Returned promptly (no 30s park) with a settled snapshot, no wait note.
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(result.text).toContain("running cell child child-settled: settled=true");
-    expect(result.text).not.toContain("sec_wait: still running");
-  });
+    const result = await secStatusTool.execute({}, toolCtx(api, created.id));
+    expect(result.text).toContain("background work: 1 open");
 
-  it("returns at once when no cell is running (dispatch work is due)", async () => {
-    api = await bootTestApi();
-    const created = await createSecuritySession(api.baseUrl);
-    const { db } = api.providers;
-    const service = createSecurityEngagementService({ db });
-    const found = await service.getEngagementBySession(created.id);
-    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
-
-    const started = Date.now();
-    const result = await secWaitTool.execute({ timeout_seconds: 30 }, toolCtx(api, created.id));
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(result.text).toContain("01-recon [code-review] pending");
+    const res = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security/status`, {
+      headers: { "x-valet-internal": internalToken(), "x-valet-session-id": created.id },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetSecurityStatusResponse;
+    expect(body.runningChild?.backgroundWork).toBe(1);
   });
 });
 

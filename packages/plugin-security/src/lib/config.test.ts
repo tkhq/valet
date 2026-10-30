@@ -113,6 +113,36 @@ personas:
     ).toThrow(/"mcp.url" must be a non-empty URL/);
   });
 
+  it("rejects a tool id with characters outside the service name set", () => {
+    expect(() => parseSecurityConfig('version: 1\ntools:\n  - id: "zap scan"\n', KNOWN)).toThrow(
+      'tools[0] id "zap scan" has characters outside letters, digits, _ and -. Rename the tool.',
+    );
+    expect(() => parseSecurityConfig("version: 1\ntools:\n  - zap.proxy\n", KNOWN)).toThrow(/tools\[0\] id "zap.proxy"/);
+  });
+
+  it("rejects an mcp prefix whose service name has characters outside the service name set", () => {
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - id: zap\n    mcp:\n      url: http://127.0.0.1:8090\n      prefix: mcp__zap.proxy__\n", KNOWN),
+    ).toThrow('tools[0] mcp.prefix "mcp__zap.proxy__" has characters outside letters, digits, _ and -. Rename the prefix.');
+  });
+
+  it("refuses an mcp tool whose service name is an installed integration", () => {
+    const reservedServices = new Set(["github", "slack"]);
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - id: github\n    mcp:\n      url: http://127.0.0.1:8090\n", KNOWN, { reservedServices }),
+    ).toThrow('tools[0] "github" is the name of an installed integration. Rename the tool id or set mcp.prefix to a name that is not an integration.');
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - id: zap\n    mcp:\n      url: http://127.0.0.1:8090\n      prefix: mcp__slack__\n", KNOWN, { reservedServices }),
+    ).toThrow('tools[0] "slack" is the name of an installed integration. Change mcp.prefix to a name that is not an integration.');
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - id: slack_user\n    mcp:\n      url: http://127.0.0.1:8090\n", KNOWN, {
+        reservedServices: new Set(["slack-user", "slack_user"]),
+      }),
+    ).toThrow('tools[0] "slack_user" is the name of an installed integration.');
+    const config = parseSecurityConfig("version: 1\ntools:\n  - id: zap\n    mcp:\n      url: http://127.0.0.1:8090\n", KNOWN, { reservedServices });
+    expect(config.tools).toEqual([{ id: "zap", mcp: { url: "http://127.0.0.1:8090" } }]);
+  });
+
   it("parses a structured tool decl with install, mcp, and egress (M-P4a)", () => {
     const yaml = `version: 1
 scope:
@@ -204,6 +234,61 @@ tools:
     expect(() => parseSecurityConfig("version: 1\n  bad: : :\n", KNOWN)).toThrow(
       /Fix .valet\/security.yml/,
     );
+  });
+});
+
+describe("credential declarations", () => {
+  it("parses an mTLS primary reference and certificate reference", () => {
+    const config = parseSecurityConfig(
+      `version: 1
+credentials:
+  - label: partner-api
+    kind: mtls
+    env: CLIENT_KEY
+    reference: op://Security/Partner/key
+    meta:
+      certRef: op://Security/Partner/cert
+`,
+      KNOWN,
+    );
+    expect(config.credentials).toEqual([
+      {
+        label: "partner-api",
+        kind: "mtls",
+        env: "CLIENT_KEY",
+        reference: "op://Security/Partner/key",
+        meta: { certRef: "op://Security/Partner/cert" },
+      },
+    ]);
+  });
+
+  it("rejects reserved launchers and malformed certificate references", () => {
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: valet-secrets\n    kind: password\n    env: TOKEN\n    reference: op://v/i/f\n",
+        KNOWN,
+      ),
+    ).toThrow(/Credential label "valet-secrets" is reserved: .* Pick another label/);
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: mtls\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: not-a-reference\n",
+        KNOWN,
+      ),
+    ).toThrow(/has an invalid certificate reference/);
+    // A certRef that is not text used to slip through the string-only meta
+    // filter, leaving an mTLS launcher with no certificate.
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: mtls\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: 123\n",
+        KNOWN,
+      ),
+    ).toThrow(/has an invalid certificate reference/);
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: password\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: op://v/i/cert\n",
+        KNOWN,
+      ),
+    ).toThrow(/only on an mTLS client cert credential/);
   });
 });
 

@@ -29,7 +29,12 @@ import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
-import { agentSessions, childWatches, securityCells } from "../schema/index.js";
+import {
+  clearSecurityCredentialSession,
+  registerSecurityCredentialValue,
+  SECURITY_CREDENTIAL_OUTPUT_BLOCKED,
+} from "../services/security-credential-tripwire.js";
+import { agentSessions, childWatches, securityCells, securityCoverage, securityEngagements, securityFindings } from "../schema/index.js";
 import type {
   CreateSessionResponse,
   SecurityCompleteCellResponse,
@@ -82,12 +87,28 @@ const EVIDENCE =
   "Attacker-controlled req.body.name reaches the query text unescaped, so a single quote breaks out " +
   "of the literal and injects arbitrary SQL — full table read via UNION SELECT.";
 
+/** A credential value the tests register with the tripwire for a child. */
+const LEAKED = "sk-live-persona-0123456789abcdef";
+
 let api: TestApi | undefined;
+const tripwireSessions: string[] = [];
 
 afterEach(async () => {
+  for (const id of tripwireSessions.splice(0)) clearSecurityCredentialSession(id);
   await api?.cleanup();
   api = undefined;
 });
+
+/** Arm the tripwire with `LEAKED` for one persona child. */
+function registerLeak(childSessionId: string, engagementId: string): void {
+  registerSecurityCredentialValue(childSessionId, engagementId, LEAKED);
+  tripwireSessions.push(childSessionId);
+}
+
+async function expectBlocked(res: Response): Promise<void> {
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: string }).error).toBe(SECURITY_CREDENTIAL_OUTPUT_BLOCKED);
+}
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const start = Date.now();
@@ -224,6 +245,18 @@ describe("api integration: persona round trip over the cell claim", () => {
       expect(reported.siblings).toEqual([]);
       const findingId = reported.finding.id;
 
+      // A coverage reason that carries a registered credential is refused
+      // before the row lands.
+      registerLeak(child1, engagementId);
+      await expectBlocked(
+        await fetch(`${api.baseUrl}/api/sessions/${child1}/security/coverage`, {
+          method: "POST",
+          headers: actingAs(child1),
+          body: JSON.stringify({ area: "secrets scan", status: "not_assessed", reason: `token ${LEAKED}` }),
+        }),
+      );
+      expect(await db.select().from(securityCoverage).where(eq(securityCoverage.engagementId, engagementId))).toEqual([]);
+
       // A NON-review cell must not flip statuses (spec threat 8).
       const badReview = await fetch(
         `${api.baseUrl}/api/sessions/${child1}/security/findings/${findingId}/review`,
@@ -306,6 +339,19 @@ describe("api integration: persona round trip over the cell claim", () => {
       expect(child2Tools).toContain("sec_finding_review");
       expect(child2Tools).not.toContain("sec_dispatch");
 
+      // A review reason that carries a registered credential is refused, and
+      // the finding keeps its status.
+      registerLeak(child2, engagementId);
+      await expectBlocked(
+        await fetch(`${api.baseUrl}/api/sessions/${child2}/security/findings/${findingId}/review`, {
+          method: "POST",
+          headers: actingAs(child2),
+          body: JSON.stringify({ status: "verified", reason: `reproduced with ${LEAKED}` }),
+        }),
+      );
+      const [unreviewed] = await db.select().from(securityFindings).where(eq(securityFindings.id, findingId));
+      expect(unreviewed.status).toBe("open");
+
       // Acting as the review cell's child, the flip lands.
       const goodReview = await fetch(
         `${api.baseUrl}/api/sessions/${child2}/security/findings/${findingId}/review`,
@@ -341,4 +387,47 @@ describe("api integration: persona round trip over the cell claim", () => {
     },
     60_000,
   );
+
+  it("refuses a report whose markdown carries a registered credential", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const createRes = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: `/tmp/valet-sec-persona-${randomUUID()}`, kind: "security", repo: REPO }),
+    });
+    expect(createRes.status).toBe(201);
+    const { id: sessionId } = (await createRes.json()) as CreateSessionResponse;
+    const service = createSecurityEngagementService({ db });
+    const engagementId = (await service.getEngagementBySession(sessionId))!.engagement.id;
+    await service.setPlan(
+      engagementId,
+      ["cells:", "  - ordinal: 1", "    persona: report", "    name: report", "    goal: Write the engagement report"].join("\n"),
+    );
+    const started = await service.startEngagement(engagementId, { resolvedSha: SHA });
+    await service.dispatchCell(engagementId, {
+      cellId: started.cells[0].id,
+      spawn: async () => ({ childSessionId: "child-report" }),
+    });
+    registerLeak("child-report", engagementId);
+    // Long enough to clear the report floor, so only the tripwire refuses it.
+    const leakyReport = [
+      "# Valet Security report",
+      "",
+      "## Executive summary",
+      "One confirmed high-severity finding: the staging admin token leaks through the",
+      `debug route, which echoes ${LEAKED} to any caller. Remediation is to remove`,
+      "the debug route and rotate the token in 1Password before the next deploy.",
+    ].join("\n");
+
+    await expectBlocked(
+      await fetch(`${api.baseUrl}/api/sessions/child-report/security/report`, {
+        method: "POST",
+        headers: actingAs("child-report"),
+        body: JSON.stringify({ markdown: leakyReport, json: { executiveSummary: "one high" } }),
+      }),
+    );
+    const [row] = await db.select().from(securityEngagements).where(eq(securityEngagements.id, engagementId));
+    expect(row.reportMarkdown).toBeNull();
+  });
 });

@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, securityCells, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { GetMemoryTreeResponse } from "../wire/types.js";
 
 describe("api integration: memory routes", () => {
@@ -602,5 +602,47 @@ describe("api integration: memory owner scope", () => {
       },
     });
     expect(onUser.status).toBe(200);
+  });
+
+  it("refuses every memory write from a security persona child, in any cell status", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(agentSessions).values({ id: "sec-child", userId: "local-user", orgId: "local-org",
+      ownerType: "user", ownerId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(securityCells).values({ id: "cell-1", engagementId: "eng-1", ordinal: 1, persona: "sast",
+      goal: "Scan", dir: "01-scan", status: "running", childSessionId: "sec-child", createdAt: 1 });
+    const { token } = await mintSandboxToken(db, { sessionId: "sec-child", userId: "local-user", orgId: "local-org" });
+    const refusal = "A security persona cannot write memory. Record findings with sec_finding_report.";
+    const writes: Array<[string, string, unknown]> = [
+      ["PUT", "/api/memory", { path: "notes/leak.md", content: "# Leak\n" }],
+      ["POST", "/api/memory/patch", { path: "notes/leak.md", find: "a", replace: "b" }],
+      ["DELETE", "/api/memory?path=notes/leak.md", undefined],
+    ];
+    for (const status of ["running", "completed"] as const) {
+      await db.update(securityCells).set({ status }).where(eq(securityCells.id, "cell-1"));
+      for (const [method, path, body] of writes) {
+        const res = await fetch(`${api.baseUrl}${path}`, {
+          method,
+          headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe(refusal);
+      }
+    }
+    // A read is not a write: the persona still gets the ordinary answer.
+    const read = await fetch(`${api.baseUrl}/api/memory?path=notes/leak.md`, { headers: { "x-valet-sandbox": token } });
+    expect(read.status).toBe(404);
+
+    // A sandbox session with no cell row still writes its memory.
+    await db.insert(agentSessions).values({ id: "plain-child", userId: "local-user", orgId: "local-org",
+      ownerType: "user", ownerId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 });
+    const plain = await mintSandboxToken(db, { sessionId: "plain-child", userId: "local-user", orgId: "local-org" });
+    const put = await fetch(`${api.baseUrl}/api/memory`, {
+      method: "PUT",
+      headers: { ...JSON_HEADERS, "x-valet-sandbox": plain.token },
+      body: JSON.stringify({ path: "notes/plain.md", content: "# Plain\n" }),
+    });
+    expect(put.status).toBe(200);
   });
 });

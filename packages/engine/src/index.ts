@@ -209,6 +209,7 @@ export {
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
+export { NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.

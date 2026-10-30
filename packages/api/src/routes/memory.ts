@@ -42,7 +42,7 @@ import { getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { assistantMemoryNamespace, workflowMemoryNamespace } from "../services/memory-scope.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
-import { agentSessions, memoryFiles } from "../schema/index.js";
+import { agentSessions, memoryFiles, securityCells } from "../schema/index.js";
 import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
@@ -63,6 +63,24 @@ import {
 } from "../services/memory.js";
 
 export const memoryRouter = new Hono<AppEnv>();
+
+// A security persona child never writes memory, in any cell status. Its tool
+// scope grants no memory action, so this sandbox token path is the only one.
+// A refusal leaves no encoding residual, where a tripwire scan would.
+memoryRouter.use("*", async (c, next) => {
+  const sandbox = c.var.sandbox;
+  if (sandbox && c.req.method !== "GET" && c.req.method !== "HEAD") {
+    const [cell] = await c.var.providers.db
+      .select({ id: securityCells.id })
+      .from(securityCells)
+      .where(eq(securityCells.childSessionId, sandbox.sessionId))
+      .limit(1);
+    if (cell) {
+      return c.json({ error: "A security persona cannot write memory. Record findings with sec_finding_report." }, 403);
+    }
+  }
+  await next();
+});
 
 /** What the caller wants to do with the scope it asked for. A team read and
  * a team write are authorized by different rules — see `authorizeOwner`. */

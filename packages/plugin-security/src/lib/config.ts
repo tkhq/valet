@@ -1,4 +1,10 @@
 import { parse } from "yaml";
+import {
+  SCOPE_SERVICE_NAME,
+  validateCredentialDecls,
+  type SecurityCredentialDecl,
+  type SecurityCredentialKind,
+} from "@valet/shared";
 import { isKnownCategory, KNOWN_CATEGORIES } from "./categories.js";
 import { parsePlan, type PlanCell } from "./plan.js";
 import { serializePlan } from "./presets.js";
@@ -41,7 +47,15 @@ export interface SecurityConfig {
    * live testing is authorized — the dispatch prompt says so, and a live
    * persona has no target. */
   scope?: SecurityScope;
+  /** Declared 1Password references available to security persona cells. */
+  credentials?: SecurityConfigCredentialDecl[];
 }
+
+/** The credential vocabulary, re-exported under the names this config module
+ * has always used. A credential declared in the repo config and one declared
+ * in the setup form are the same declaration, held to the same rules. */
+export type { SecurityCredentialKind };
+export type SecurityConfigCredentialDecl = SecurityCredentialDecl;
 
 /**
  * One declared tool a step needs (M-P4a). The mechanism accepts the decl; the
@@ -114,6 +128,15 @@ export interface SecurityScope {
 
 const CORRECTIVE = "Fix .valet/security.yml and commit it, or remove it to use a preset.";
 
+function serviceNameError(where: string, field: string, value: string, fix: string): Error {
+  return new Error(`${where} ${field} "${value}" has characters outside letters, digits, _ and -. ${fix}`);
+}
+
+/** The service name an MCP prefix names: `mcp__zap__` is `zap`. */
+function prefixService(prefix: string): string {
+  return prefix.replace(/^mcp__/, "").replace(/__$/, "").trim();
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
@@ -154,9 +177,14 @@ export function egressHostInScope(egressHost: string, scopeHosts: readonly strin
  * registry; a step's `persona` must be a bundled id OR a key in the config's
  * own `personas` map. The steps validate through `parsePlan`'s cell rules
  * (dense ordinals, earlier-only reads, known playbooks) against the union of
- * both persona sources.
+ * both persona sources. `reservedServices` names the installed integrations;
+ * a declared MCP tool whose service name is one of them is refused.
  */
-export function parseSecurityConfig(yaml: string, knownPersonas: readonly string[]): SecurityConfig {
+export function parseSecurityConfig(
+  yaml: string,
+  knownPersonas: readonly string[],
+  options: { reservedServices?: ReadonlySet<string> } = {},
+): SecurityConfig {
   let raw: unknown;
   try {
     raw = parse(yaml);
@@ -203,6 +231,14 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
       );
     }
     config.categories = map.categories;
+  }
+
+  if (map.credentials !== undefined) {
+    const checked = validateCredentialDecls(map.credentials);
+    if (!checked.ok) {
+      throw new Error(`.valet/security.yml credentials: ${checked.message} ${CORRECTIVE}`);
+    }
+    config.credentials = checked.decls;
   }
 
   // Authorized live-testing scope (M-P4b). Parse it before tools so a declared
@@ -258,7 +294,7 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
   }
 
   if (map.tools !== undefined) {
-    config.tools = parseToolDecls(map.tools, scopeHosts);
+    config.tools = parseToolDecls(map.tools, scopeHosts, options.reservedServices);
   }
 
   let personaKeys: string[] = [];
@@ -312,20 +348,32 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
  * optional `install`/`image`/`mcp`/`egress` fields. Every declared egress host
  * MUST be within the authorized `scope.hosts`; a decl whose egress escapes
  * scope is a config error, so live tooling can never be told to reach a host
- * the human never authorized.
+ * the human never authorized. An MCP decl whose service name is in
+ * `reservedServices` is refused too: its `<service>.*` scope would grant the
+ * installed integration's actions under the owner's credentials.
  */
-export function parseToolDecls(value: unknown, scopeHosts: readonly string[]): ToolDecl[] {
+export function parseToolDecls(
+  value: unknown,
+  scopeHosts: readonly string[],
+  reservedServices: ReadonlySet<string> = new Set(),
+): ToolDecl[] {
   if (!Array.isArray(value)) {
     throw new Error(`.valet/security.yml "tools" must be a list. ${CORRECTIVE}`);
   }
-  return value.map((raw, i) => parseToolDecl(raw, i, scopeHosts));
+  return value.map((raw, i) => parseToolDecl(raw, i, scopeHosts, reservedServices));
 }
 
-function parseToolDecl(raw: unknown, index: number, scopeHosts: readonly string[]): ToolDecl {
+function parseToolDecl(
+  raw: unknown,
+  index: number,
+  scopeHosts: readonly string[],
+  reservedServices: ReadonlySet<string>,
+): ToolDecl {
   const where = `.valet/security.yml tools[${index}]`;
   if (typeof raw === "string") {
     const id = raw.trim();
     if (id === "") throw new Error(`${where} must be a non-empty tool id. ${CORRECTIVE}`);
+    if (!SCOPE_SERVICE_NAME.test(id)) throw serviceNameError(where, "id", id, "Rename the tool.");
     return { id };
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -336,6 +384,7 @@ function parseToolDecl(raw: unknown, index: number, scopeHosts: readonly string[
     throw new Error(`${where} must have a non-empty "id". ${CORRECTIVE}`);
   }
   const decl: ToolDecl = { id: map.id.trim() };
+  if (!SCOPE_SERVICE_NAME.test(decl.id)) throw serviceNameError(where, "id", decl.id, "Rename the tool.");
   if (map.install !== undefined) {
     if (typeof map.install !== "string" || map.install.trim() === "") {
       throw new Error(`${where} "install" must be a non-empty command. ${CORRECTIVE}`);
@@ -362,6 +411,19 @@ function parseToolDecl(raw: unknown, index: number, scopeHosts: readonly string[
         throw new Error(`${where} "mcp.prefix" must be a non-empty string. ${CORRECTIVE}`);
       }
       mcpDecl.prefix = mcp.prefix.trim();
+      const service = prefixService(mcpDecl.prefix);
+      if (service !== "" && !SCOPE_SERVICE_NAME.test(service)) {
+        throw serviceNameError(where, "mcp.prefix", mcpDecl.prefix, "Rename the prefix.");
+      }
+    }
+    // The same rule as the api's `mcpServiceName`: the stripped prefix, else the id.
+    const fromPrefix = mcpDecl.prefix ? prefixService(mcpDecl.prefix) : "";
+    const service = fromPrefix || decl.id;
+    if (reservedServices.has(service)) {
+      const fix = fromPrefix
+        ? "Change mcp.prefix to a name that is not an integration."
+        : "Rename the tool id or set mcp.prefix to a name that is not an integration.";
+      throw new Error(`${where} "${service}" is the name of an installed integration. ${fix}`);
     }
     decl.mcp = mcpDecl;
   }

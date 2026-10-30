@@ -851,6 +851,15 @@ export class Thread {
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
     if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    // A signal body is machine output (a process log, a watch line), so it
+    // takes the same seam as a tool result; a user prompt does not. This is
+    // the one admission path, so hosts that submit to a thread directly are
+    // covered too.
+    const sanitizer = this.session.providers.sanitizeToolOutput;
+    if (sanitizer && isSignalContent(content)) {
+      const safe = sanitizer(this.session.id, content.body);
+      if (safe !== content.body) content = { ...content, body: String(safe) };
+    }
     if (opts.promoteItemId) {
       throw new ValidationError(
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
@@ -1850,6 +1859,7 @@ export class Thread {
     result: { content?: unknown; details?: unknown },
   ): Promise<void> {
     const store = this.session.providers.store;
+    const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
     const entries = await store.getEntries(this.session.id, this.id);
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
@@ -1859,8 +1869,8 @@ export class Thread {
       if (part && part.type === "tool_call") {
         part.status = "completed";
         const structured =
-          result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-        part.result = { ...structured, text: toolResultText(result) };
+          safeResult && typeof safeResult === "object" ? (safeResult as Record<string, unknown>) : {};
+        part.result = { ...structured, text: toolResultText(safeResult) };
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
@@ -6785,7 +6795,8 @@ export class Thread {
   private buildTools(includeRestricted = false): AgentTool[] {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])]
       .map(refuseOutsideAuthors)
-      .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def);
+      .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def)
+      .map((def) => this.withOutputSanitizer(def));
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
@@ -6794,6 +6805,37 @@ export class Thread {
         this.session.options.toolStopGraceMs,
       ),
     );
+  }
+
+  /** Wraps a tool so the host's output sanitizer (the credential tripwire)
+   * sees every result before pi-agent-core or the transcript does. */
+  private withOutputSanitizer(def: ToolDef): ToolDef {
+    const sanitizer = this.session.providers.sanitizeToolOutput;
+    if (!sanitizer) return def;
+    return {
+      ...def,
+      execute: async (args, ctx) => {
+        let result: ToolResult;
+        try {
+          result = await def.execute(args, ctx);
+        } catch (err) {
+          // pi-agent-core shows a thrown message to the model as the result.
+          const message = err instanceof Error ? err.message : String(err);
+          const safe = sanitizer(this.session.id, message);
+          if (safe !== message) throw new Error(String(safe));
+          throw err;
+        }
+        const safe = sanitizer(this.session.id, result);
+        // `usageOutcome.name` is the usage action id, not the tool name, so
+        // keep the one the tool reported (call_tool's qualified id).
+        const name = result.usageOutcome?.name;
+        return safe === result ? result : {
+          text: String(safe),
+          ok: false,
+          usageOutcome: { outcome: "error", errorCode: "output_blocked", ...(name ? { name } : {}) },
+        };
+      },
+    };
   }
 
   private async persistContinuationToolScope(): Promise<void> {
@@ -7178,10 +7220,13 @@ export class Thread {
             text: ev.delta,
           });
         } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
-          // Live-only args streaming: forward the raw JSON chunk keyed by
-          // callId so clients can render the tool call before it executes.
+          // A credential-bearing session cannot emit raw argument chunks. A
+          // split credential can cross chunk boundaries before the completed
+          // argument object reaches the sanitizer at toolcall_end.
+          const canStream =
+            this.session.providers.canStreamToolCallArguments?.(this.session.id) ?? true;
           const block = ev.partial.content[ev.contentIndex];
-          if (block?.type === "toolCall") {
+          if (canStream && block?.type === "toolCall") {
             await this.session.emit({
               type: "tool_call_update",
               threadId: this.id,
@@ -7193,12 +7238,17 @@ export class Thread {
         } else if (ev.type === "toolcall_end") {
           // A native image receipt was checkpointed when its file was saved; keep that part.
           if (this.currentToolCalls.has(ev.toolCall.id)) break;
+          const safeArgs =
+            this.session.providers.sanitizeToolOutput?.(
+              this.session.id,
+              ev.toolCall.arguments,
+            ) ?? ev.toolCall.arguments;
           const part: MessagePart = {
             type: "tool_call",
             callId: ev.toolCall.id,
             toolName: ev.toolCall.name,
             status: "running",
-            args: ev.toolCall.arguments,
+            args: sanitizedToolArgs(safeArgs),
           };
           this.currentToolCalls.set(ev.toolCall.id, part);
           this.currentAssistantParts.push(part);
@@ -7322,17 +7372,22 @@ export class Thread {
         }
         break;
       }
-      case "tool_execution_start":
+      case "tool_execution_start": {
         this.startToolUsage(event.toolCallId, event.toolName, event.args ?? {});
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
+        const safeArgs =
+          this.session.providers.sanitizeToolOutput?.(
+            this.session.id,
+            event.args ?? {},
+          ) ?? event.args ?? {};
         await this.fencedEmit(
           {
             type: "tool_start",
             threadId: this.id,
             tool: event.toolName,
             callId: event.toolCallId,
-            args: event.args ?? {},
+            args: sanitizedToolArgs(safeArgs),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -7342,10 +7397,13 @@ export class Thread {
           { queueItemId: this.runningItem?.id },
         );
         break;
+      }
       case "tool_execution_end": {
         this.finishToolUsage(event.toolCallId, event.result?.details, event.isError);
         const part = this.currentToolCalls.get(event.toolCallId);
-        const resultText = toolResultText(event.result);
+        const safeResult =
+          this.session.providers.sanitizeToolOutput?.(this.session.id, event.result) ?? event.result;
+        const resultText = toolResultText(safeResult);
         if (part && part.type === "tool_call") {
           part.status = event.isError ? "error" : "completed";
           // Persist the *flattened* text alongside the raw structured
@@ -7357,8 +7415,8 @@ export class Thread {
           // Get something readable; clients that want the raw blocks can
           // still inspect `result.content`.
           const structured =
-            event.result && typeof event.result === "object"
-              ? (event.result as Record<string, unknown>)
+            safeResult && typeof safeResult === "object"
+              ? (safeResult as Record<string, unknown>)
               : {};
           part.result = { ...structured, text: resultText };
           const skillFact = this.activeSkillInvocations.get(
@@ -7385,9 +7443,9 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
-            ...(toolResultImages(event.result).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : event.result } : {}),
+            ...(toolResultImages(safeResult).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
             isError: event.isError,
-            ...(event.isError ? {} : toolOutcome(event.result)),
+            ...(event.isError ? {} : toolOutcome(safeResult)),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -8037,6 +8095,19 @@ function textOf(message: AgentMessage): string {
     text: string;
   }>;
   return parts.map((p) => p.text).join("");
+}
+
+/**
+ * Tool-call arguments after the host sanitizer ran.
+ *
+ * The sanitizer returns the arguments unchanged, or a replacement string
+ * when it refuses them. A string is not an argument object, so it is
+ * carried under one key that every consumer can render.
+ */
+function sanitizedToolArgs(safeArgs: unknown): Record<string, unknown> {
+  // The cast is narrowed by the typeof check on the same line.
+  if (safeArgs && typeof safeArgs === "object") return safeArgs as Record<string, unknown>;
+  return { blocked: String(safeArgs) };
 }
 
 interface RoleOverlay {
