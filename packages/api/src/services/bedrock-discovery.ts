@@ -33,10 +33,17 @@ import { registryModels } from "./model-registry.js";
  * new amazon-bedrock row and used as the no-row catalog (filtered by live
  * discovery when available). No Anthropic (account form gate) and no
  * `global.*` (routes to any commercial region).
+ *
+ * Ordered by tier. The first three are the frontier-class value picks
+ * (2026-10-30, US-profile $/M in-out): DeepSeek V3.2 0.62/1.85, Mistral
+ * Large 3 0.50/1.50, GLM-5.3 1.85/5.81 — far below Kimi K3's 3.30/16.50 for
+ * similar benchmark standing. The rest are cheaper coding / utility models.
  */
 export const BEDROCK_DEFAULT_MODEL_IDS: readonly string[] = [
-  "qwen.qwen3-coder-next",
   "deepseek.v3.2",
+  "mistral.mistral-large-3-675b-instruct",
+  "us.zai.glm-5.3",
+  "qwen.qwen3-coder-next",
   "mistral.devstral-2-123b",
   "moonshotai.kimi-k2.5",
   "openai.gpt-oss-120b-1:0",

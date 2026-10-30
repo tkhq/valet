@@ -80,7 +80,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   useProviderModelCatalog: (kind: string) => ({
     data:
       kind === "amazon-bedrock"
-        ? { models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next" }, { id: "vendor.brand-new-model", name: "Brand New" }], live: true }
+        ? { models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next", pricing: { input: 0.5, output: 1.2 } }, { id: "vendor.brand-new-model", name: "Brand New" }], live: true }
         : { models: [{ id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3" }], live: true },
     isLoading: false,
     error: null,
@@ -268,6 +268,34 @@ describe("LlmProvidersSection — known provider cards", () => {
     await user.type(filter, "brand");
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("textbox", { name: "Filter Amazon Bedrock models" })).toBeNull();
+  });
+
+  it("shows $/M pricing on picker rows and selected chips when the catalog knows it", async () => {
+    const user = userEvent.setup();
+    providersData = {
+      providers: [
+        {
+          id: "row_br",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [{ id: "deepseek.v3.2", name: "DeepSeek V3.2", pricing: { input: 0.62, output: 1.85 } }, { id: "vendor.unpriced", name: "Unpriced" }],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+
+    // Selected chip: short form; an unpriced model shows no price.
+    expect(screen.getByText("$0.62 / $1.85")).toBeTruthy();
+    expect(screen.getByText("vendor.unpriced").closest("span")?.textContent).not.toContain("$");
+
+    await user.click(screen.getByRole("button", { name: "Add models" }));
+    // Picker row: full per-million form; the unpriced catalog entry shows none.
+    expect(screen.getByText("$0.50 in / $1.20 out per 1M tokens")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /vendor\.brand-new-model/ }).textContent).not.toContain("per 1M");
   });
 
   it("toggling enabled fires PATCH", async () => {

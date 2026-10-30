@@ -276,6 +276,14 @@ describe("curated defaults", () => {
     expect(out.map((m) => m.id)).toEqual([...BEDROCK_DEFAULT_MODEL_IDS]);
     for (const m of out) expect(m.pricing?.input).toBeGreaterThan(0);
   });
+  it("defaults include the best-value frontier open models", () => {
+    // DeepSeek V3.2 ($0.62/$1.85), Mistral Large 3 ($0.50/$1.50) and GLM-5.3
+    // (~$1.85/$5.81 on the US profile) are the cost/quality picks the team
+    // settled on; the picker must offer them with no admin curation.
+    for (const id of ["deepseek.v3.2", "mistral.mistral-large-3-675b-instruct", "us.zai.glm-5.3"]) {
+      expect(BEDROCK_DEFAULT_MODEL_IDS, id).toContain(id);
+    }
+  });
   it("defaults contain no anthropic or global ids", () => {
     expect(BEDROCK_DEFAULT_MODEL_IDS.some((id) => id.includes("anthropic.") || id.startsWith("global."))).toBe(false);
   });

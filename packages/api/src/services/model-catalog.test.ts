@@ -64,7 +64,7 @@ describe("model catalog", () => {
       vi.stubEnv("AWS_PROFILE", "dev");
       setBedrockDiscoveryClientForTests(fakeBedrock());
       const ids = (await bedrockEntries()).map((e) => e.id);
-      expect(ids).toEqual(["amazon-bedrock/qwen.qwen3-coder-next", "amazon-bedrock/deepseek.v3.2"]);
+      expect(ids).toEqual(["amazon-bedrock/deepseek.v3.2", "amazon-bedrock/qwen.qwen3-coder-next"]);
       for (const e of await bedrockEntries()) {
         expect(e.active).toBe(true);
         expect(e.providerName).toBe("Amazon Bedrock");
@@ -112,7 +112,7 @@ describe("model catalog", () => {
       setBedrockDiscoveryClientForTests(fakeBedrock());
       const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
       const entries = await bedrockEntries();
-      expect(entries.map((e) => e.id)).toEqual(["amazon-bedrock/qwen.qwen3-coder-next", "amazon-bedrock/deepseek.v3.2"]);
+      expect(entries.map((e) => e.id)).toEqual(["amazon-bedrock/deepseek.v3.2", "amazon-bedrock/qwen.qwen3-coder-next"]);
       expect(entries[0]?.providerId).toBe(row.id);
     });
 
