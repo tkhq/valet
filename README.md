@@ -186,3 +186,5 @@ make e2e                  # run the e2e scorecard
 ## License
 
 MIT
+
+<!-- ci babysit test, safe to close -->
