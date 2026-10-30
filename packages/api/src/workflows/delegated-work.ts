@@ -9,15 +9,16 @@
  * (`engine-deps.ts`) and the run's thread archive (`run-attention.ts`) that
  * the step still owes that work.
  */
-import { and, eq, gte } from "drizzle-orm";
+import { and, asc, eq, gte } from "drizzle-orm";
 import type { QueueItem, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { childWatches } from "../schema/index.js";
 
-/** A turn that a child's report started on the parent thread. */
-function isChildReportTurn(item: QueueItem): boolean {
+/** The child whose report started this turn, if a child's report started it. */
+function reportedChild(item: QueueItem): string | undefined {
   const content = item.content;
-  return typeof content !== "string" && "kind" in content && content.kind === "signal" && content.signalType.startsWith("child.");
+  if (typeof content === "string" || !("kind" in content) || content.kind !== "signal" || !content.signalType.startsWith("child.")) return undefined;
+  return content.attributes?.child_session_id;
 }
 
 /**
@@ -25,34 +26,72 @@ function isChildReportTurn(item: QueueItem): boolean {
  * The watcher marks the watch settled only after it admits the report to
  * the parent thread, or after it drops the report.
  */
-export async function hasUnreportedChild(db: AppDb, sessionId: string, threadId: string, since?: number): Promise<boolean> {
+export async function hasUnreportedChild(db: AppDb, sessionId: string, threadId: string): Promise<boolean> {
   const [row] = await db.select({ id: childWatches.childSessionId }).from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.parentThreadId, threadId),
-      eq(childWatches.settled, false), ...(since !== undefined ? [gte(childWatches.createdAt, since)] : [])))
+    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.parentThreadId, threadId), eq(childWatches.settled, false)))
     .limit(1);
   return row !== undefined;
 }
 
-/** The first unsettled turn a child's report started on this thread since `since`. */
-export async function unsettledChildReportTurn(
-  store: SessionStore, sessionId: string, threadId: string, since: number,
-): Promise<QueueItem | undefined> {
-  return (await store.listUnsettledSubmissions(sessionId))
-    .find((item) => item.threadId === threadId && item.createdAt >= since && isChildReportTurn(item));
+/**
+ * The children that the step's own turns spawned, mapped to whether each has
+ * reported back. The step's turns are its queue item and the report turns of
+ * its children. Two steps can share a thread, so a child spawned on the thread
+ * by another step's turn is not this step's work.
+ */
+async function stepChildren(db: AppDb, store: SessionStore, sessionId: string, item: QueueItem): Promise<Map<string, boolean>> {
+  const rows = await db.select({ child: childWatches.childSessionId, parent: childWatches.parentQueueItemId, settled: childWatches.settled })
+    .from(childWatches)
+    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.parentThreadId, item.threadId),
+      gte(childWatches.createdAt, item.createdAt)))
+    .orderBy(asc(childWatches.createdAt));
+  const turns = new Set([item.id]);
+  const children = new Map<string, boolean>();
+  // A child's watch row exists before its report turn, and a report turn
+  // exists before any child it spawns, so one pass in creation order sees
+  // each parent before its children.
+  for (const row of rows) {
+    if (row.parent === null) continue;
+    if (!turns.has(row.parent)) {
+      const turn = await store.getQueueItem(sessionId, row.parent);
+      const reported = turn && reportedChild(turn);
+      if (!reported || !children.has(reported)) continue;
+      turns.add(row.parent);
+    }
+    children.set(row.child, row.settled);
+  }
+  return children;
+}
+
+/** What the step that `item` started still owes: a report turn to finish, or a child that has not reported. */
+export interface StepWork {
+  reportTurn?: QueueItem;
+  childPending: boolean;
+}
+
+export async function openStepWork(db: AppDb, store: SessionStore, sessionId: string, item: QueueItem): Promise<StepWork> {
+  const children = await stepChildren(db, store, sessionId, item);
+  const reportTurn = children.size === 0 ? undefined : (await store.listUnsettledSubmissions(sessionId)).find((turn) => {
+    const reported = turn.threadId === item.threadId && turn.createdAt >= item.createdAt ? reportedChild(turn) : undefined;
+    return reported !== undefined && children.has(reported);
+  });
+  return { ...(reportTurn ? { reportTurn } : {}), childPending: [...children.values()].some((settled) => !settled) };
 }
 
 /** True when the step that `item` started still owes delegated work. */
 export async function delegatedWorkOpen(db: AppDb, store: SessionStore, sessionId: string, item: QueueItem): Promise<boolean> {
-  return await unsettledChildReportTurn(store, sessionId, item.threadId, item.createdAt) !== undefined
-    || await hasUnreportedChild(db, sessionId, item.threadId, item.createdAt);
+  const work = await openStepWork(db, store, sessionId, item);
+  return work.reportTurn !== undefined || work.childPending;
 }
 
 /**
- * The step's last turn: the latest child-report turn on the thread since
- * the step started, or the step's own queue item when there is none.
+ * The step's last turn: the latest report turn of the step's own children,
+ * or the step's own queue item when there is none.
  * Reads only the thread's tail, so a long thread costs one bounded read.
  */
-export async function lastStepTurn(store: SessionStore, sessionId: string, item: QueueItem): Promise<string> {
+export async function lastStepTurn(db: AppDb, store: SessionStore, sessionId: string, item: QueueItem): Promise<string> {
+  const children = await stepChildren(db, store, sessionId, item);
+  if (children.size === 0) return item.id;
   const entries = await store.getEntries(sessionId, item.threadId, { limit: 50 });
   const seen = new Set<string>();
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -61,7 +100,8 @@ export async function lastStepTurn(store: SessionStore, sessionId: string, item:
     if (id === item.id) return id;
     seen.add(id);
     const turn = await store.getQueueItem(sessionId, id);
-    if (turn && turn.createdAt >= item.createdAt && isChildReportTurn(turn)) return id;
+    const reported = turn && turn.createdAt >= item.createdAt ? reportedChild(turn) : undefined;
+    if (reported !== undefined && children.has(reported)) return id;
   }
   return item.id;
 }

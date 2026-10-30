@@ -692,6 +692,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         queueItemId: receipt.queueItemId,
         parentSessionId: ctx.parentSessionId,
         parentThreadId: ctx.parentThreadId,
+        parentQueueItemId: ctx.parentQueueItemId ?? null,
         actorUserId: ctx.actorUserId,
         orgId,
         settled: false,

@@ -1010,6 +1010,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',
   },
   {
+    describe: "child_watches.parent_queue_item_id column",
+    probe: { kind: "column", table: "child_watches", column: "parent_queue_item_id" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "parent_queue_item_id" text',
+  },
+  {
     describe: "child_watches_delivery index",
     probe: { kind: "index", index: "child_watches_delivery" },
     sql: 'CREATE INDEX IF NOT EXISTS "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false',

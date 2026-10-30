@@ -88,7 +88,7 @@ import { resolveWorkflowReportTarget } from "./report-target.js";
 import { definitionVersionId } from "./definition-version.js";
 import { submissionWorkflowStep } from "./step-grants.js";
 import { recordLlmStepUsage } from "./step-usage.js";
-import { delegatedWorkOpen, hasUnreportedChild, lastStepTurn, unsettledChildReportTurn } from "./delegated-work.js";
+import { delegatedWorkOpen, lastStepTurn, openStepWork } from "./delegated-work.js";
 
 /** How often a step wait re-reads a delegated child's watch row. */
 const DELEGATED_WORK_POLL_MS = 2_000;
@@ -453,17 +453,17 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const item = await opts.engineStore.getQueueItem(sessionId, queueItemId);
       if (!item) throw new Error(`workflow engine-deps: queue item not found: ${queueItemId} on session ${sessionId}`);
       for (;;) {
-        const turn = await unsettledChildReportTurn(opts.engineStore, sessionId, threadId, item.createdAt);
-        if (turn) {
-          await thread.awaitResult(turn.id);
+        const work = await openStepWork(opts.db, opts.engineStore, sessionId, item);
+        if (work.reportTurn) {
+          await thread.awaitResult(work.reportTurn.id);
           continue;
         }
-        if (!(await hasUnreportedChild(opts.db, sessionId, threadId, item.createdAt))) break;
+        if (!work.childPending) break;
         // The child watcher publishes no event this wait can subscribe to.
         // Poll its durable watch row, like the engine's own settlement wait.
         await new Promise((resolve) => setTimeout(resolve, DELEGATED_WORK_POLL_MS));
       }
-      const lastTurn = await lastStepTurn(opts.engineStore, sessionId, item);
+      const lastTurn = await lastStepTurn(opts.db, opts.engineStore, sessionId, item);
       const result = await thread.awaitResult(lastTurn, {
         resultSchema: awaitOpts?.resultSchema,
       });
