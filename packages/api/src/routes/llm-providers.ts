@@ -37,6 +37,7 @@ import {
   type UpdateLlmProviderOptions, KNOWN_PROVIDER_KINDS } from "../services/llm-providers.js";
 import { envCredentialFor, resolveModelSpec } from "../services/model-resolution.js";
 import { curatedOpenrouterModels, mergedOpenrouterModels } from "../services/openrouter.js";
+import { curatedBedrockModels, discoverBedrockModels } from "../services/bedrock-discovery.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
@@ -44,6 +45,7 @@ import type {
   ListLlmProvidersResponse,
   LlmProviderSummary,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   ProbeLlmProviderResponse,
@@ -95,8 +97,17 @@ function isLlmProviderModelArray(v: unknown): v is LlmProviderModel[] {
  * declared list) and openrouter (the curated selection from pi-ai's
  * registry — see `services/openrouter.ts`). */
 function kindAcceptsModels(kind: LlmProviderKind): boolean {
-  return kind === "openai_compatible" || kind === "openrouter";
+  return kind === "openai_compatible" || kind === "openrouter" || kind === "amazon-bedrock";
 }
+
+/** The seeded selection for a curated known kind created without `models`. */
+function defaultModelsFor(kind: LlmProviderKind): LlmProviderModel[] | undefined {
+  if (kind === "openrouter") return curatedOpenrouterModels();
+  if (kind === "amazon-bedrock") return curatedBedrockModels();
+  return undefined;
+}
+
+const MODELS_KINDS_ERROR = "models is only accepted for openai_compatible, openrouter, or amazon-bedrock providers";
 
 /** `baseUrl` is required for `openai_compatible` and refused for known kinds. */
 function validateBaseUrl(kind: LlmProviderKind, baseUrl: unknown): { error: string } | { value: string | undefined } {
@@ -152,6 +163,18 @@ llmProvidersRouter.get("/openrouter/models", async (c) => {
   return c.json(resp);
 });
 
+// Amazon Bedrock: what THIS AWS account can invoke (services/bedrock-discovery.ts),
+// registry-enriched. live:false means the account lookup failed and the list
+// is the bundled registry. Registered before `/:id` like the OpenRouter route.
+llmProvidersRouter.get("/amazon-bedrock/models", async (c) => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+
+  const { models, live } = await discoverBedrockModels();
+  const resp: ProviderModelCatalogResponse = { models, live };
+  return c.json(resp);
+});
+
 // ── GET / — list ──────────────────────────────────────────────────────────
 
 llmProvidersRouter.get("/", async (c) => {
@@ -199,7 +222,7 @@ llmProvidersRouter.post("/", async (c) => {
     return c.json({ error: "models must be an array of {id, name}" }, 400);
   }
   if (body.models !== undefined && !kindAcceptsModels(body.kind)) {
-    return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
+    return c.json({ error: MODELS_KINDS_ERROR }, 400);
   }
 
   try {
@@ -211,7 +234,7 @@ llmProvidersRouter.post("/", async (c) => {
       // OpenRouter rows seed the curated default selection unless the
       // caller supplied an explicit list (services/openrouter.ts).
       models: kindAcceptsModels(body.kind)
-        ? body.models ?? (body.kind === "openrouter" ? curatedOpenrouterModels() : undefined)
+        ? body.models ?? defaultModelsFor(body.kind)
         : undefined,
     });
     const resp: CreateLlmProviderResponse = await toSummary(c, row);
@@ -269,7 +292,7 @@ llmProvidersRouter.patch("/:id", async (c) => {
       return c.json({ error: "models must be an array of {id, name}" }, 400);
     }
     if (!kindAcceptsModels(existing.kind)) {
-      return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
+      return c.json({ error: MODELS_KINDS_ERROR }, 400);
     }
     patch.models = body.models;
   }

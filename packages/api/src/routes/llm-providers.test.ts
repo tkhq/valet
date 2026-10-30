@@ -15,10 +15,17 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProviders } from "../schema/index.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
+import {
+  BEDROCK_DEFAULT_MODEL_IDS,
+  resetBedrockDiscoveryCache,
+  setBedrockDiscoveryClientForTests,
+  type BedrockDiscoveryClient,
+} from "../services/bedrock-discovery.js";
 import type {
   CreateLlmProviderResponse,
   ListLlmProvidersResponse,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   ProbeLlmProviderResponse,
   PutLlmProviderKeyResponse,
   TestLlmProviderResponse,
@@ -953,6 +960,94 @@ describe("POST /api/org/llm-providers/:id/test", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TestLlmProviderResponse;
     expect(body.ok).toBe(false);
+  });
+});
+
+describe("amazon-bedrock curation", () => {
+  const fakeBedrock = (opts: { fail?: boolean } = {}): BedrockDiscoveryClient => ({
+    async send(cmd: unknown) {
+      const name = (cmd as { constructor: { name: string } }).constructor.name;
+      if (opts.fail) throw new Error("boom");
+      if (name === "ListFoundationModelsCommand") {
+        return {
+          modelSummaries: [
+            {
+              modelId: "qwen.qwen3-coder-next", modelName: "Qwen3 Coder Next", inputModalities: ["TEXT"], outputModalities: ["TEXT"],
+              responseStreamingSupported: true, inferenceTypesSupported: ["ON_DEMAND"], modelLifecycle: { status: "ACTIVE" },
+            },
+            {
+              modelId: "vendor.brand-new-model", modelName: "Brand New", inputModalities: ["TEXT"], outputModalities: ["TEXT"],
+              responseStreamingSupported: true, inferenceTypesSupported: ["ON_DEMAND"], modelLifecycle: { status: "ACTIVE" },
+            },
+          ],
+        };
+      }
+      if (name === "ListInferenceProfilesCommand") return { inferenceProfileSummaries: [] };
+      if (name === "GetUseCaseForModelAccessCommand") { const e = new Error("no form"); e.name = "ResourceNotFoundException"; throw e; }
+      throw new Error(`unexpected ${name}`);
+    },
+  });
+  afterEach(() => { setBedrockDiscoveryClientForTests(undefined); resetBedrockDiscoveryCache(); });
+
+  it("GET /amazon-bedrock/models 403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/amazon-bedrock/models`, { headers: MEMBER_HEADERS });
+    expect(res.status).toBe(403);
+  });
+
+  it("GET /amazon-bedrock/models returns the account's discovered models, registry-enriched, live:true", async () => {
+    setBedrockDiscoveryClientForTests(fakeBedrock());
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/amazon-bedrock/models`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProviderModelCatalogResponse;
+    expect(body.live).toBe(true);
+    expect(body.models.map((m) => m.id)).toEqual(["qwen.qwen3-coder-next", "vendor.brand-new-model"]);
+    expect(body.models[0]?.pricing?.input).toBeGreaterThan(0);
+    expect(body.models[1]?.pricing).toBeUndefined();
+  });
+
+  it("GET /amazon-bedrock/models degrades to the registry with live:false when AWS is unreachable", async () => {
+    setBedrockDiscoveryClientForTests(fakeBedrock({ fail: true }));
+    api = await bootTestApi();
+    const body = (await (await fetch(`${api.baseUrl}/api/org/llm-providers/amazon-bedrock/models`, { headers: HEADERS })).json()) as ProviderModelCatalogResponse;
+    expect(body.live).toBe(false);
+    // Filtered registry: bare + us. ids only, no global.*, no anthropic.
+    expect(body.models.length).toBeGreaterThan(20);
+    expect(body.models.some((m) => m.id.startsWith("global.") || m.id.includes("anthropic."))).toBe(false);
+  });
+
+  it("creates an amazon-bedrock provider seeded with the curated default selection", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ kind: "amazon-bedrock", name: "Amazon Bedrock" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateLlmProviderResponse;
+    expect(body.models.map((m) => m.id)).toEqual([...BEDROCK_DEFAULT_MODEL_IDS]);
+  });
+
+  it("PATCH accepts a models selection on an amazon-bedrock row", async () => {
+    api = await bootTestApi();
+    const created = (await (await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ kind: "amazon-bedrock", name: "Amazon Bedrock" }),
+    })).json()) as CreateLlmProviderResponse;
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH", headers: HEADERS, body: JSON.stringify({ models: [{ id: "vendor.brand-new-model", name: "Brand New" }] }),
+    });
+    expect(res.status).toBe(200);
+    const list = (await (await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS })).json()) as ListLlmProvidersResponse;
+    expect(list.providers[0]?.models.map((m) => m.id)).toEqual(["vendor.brand-new-model"]);
+  });
+
+  it("rejects models on an anthropic row and names the curated kinds", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH", headers: HEADERS, body: JSON.stringify({ models: [{ id: "x", name: "x" }] }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/amazon-bedrock/);
   });
 });
 

@@ -1,7 +1,7 @@
 # Amazon Bedrock Provider Design — a known provider kind on the AWS credential chain
 
 **Date:** 2026-10-29
-**Status:** Implemented (Valet side); infra rollout tracked in tkhq/test-agents-infra
+**Status:** Implemented (Valet side, #1101); infra applied (test-agents-infra #237). Extension below (discovery + curation) implemented on the Valet side; IAM widening in test-agents-infra.
 **Scope:** Add Amazon Bedrock as a known LLM provider kind in Valet, equal in standing to Anthropic, OpenAI, and Google. Authenticate through the AWS credential chain (IAM role on the api pod) or an org-level Bedrock API key. Expose Anthropic models on Bedrock in the org catalog with registry pricing. Deploy to agents-dev with an IRSA role and a one-line chart addition. Extends `2026-07-16-llm-providers-design.md`.
 
 ## Intent
@@ -66,3 +66,33 @@ On agents-dev with the IRSA role applied and Flux values merged: the Models sett
 - Exact placement of the Anthropic-family filter (catalog service versus a registry overlay).
 - IAM policy resource wording for inference profiles, verified against a real `InvokeModelWithResponseStream` call from the pod.
 - Order of the two PRs (chart and Valet code can ship together; infra follows).
+
+## Extension 2026-10-30: account-driven discovery and admin curation
+
+### Why
+
+Decision 4 hardcoded a `us.anthropic.*` filter. Two things changed on 2026-10-29: the agents-dev account turned out to gate Anthropic models behind a one-time use-case form, and the models we want first are open-weight ones (Qwen, DeepSeek, Mistral, Kimi, gpt-oss, Llama, GLM, MiniMax). A static filter cannot track what an account can invoke. Bedrock gets the OpenRouter pattern instead: discover what the account offers, let admins pick what the org sees.
+
+### Decisions
+
+9. **Discovery comes from the account, not a static list.** A new service calls `ListFoundationModels` (text output) and `ListInferenceProfiles` with the api's AWS credentials and derives the invokable id for each ACTIVE, streaming, text-in model: the bare `modelId` when `ON_DEMAND` is supported, otherwise the `SYSTEM_DEFINED` inference profile whose `models[]` names the model and whose prefix matches the pod's geography (`us.` for `us-*` regions). `global.*` profiles are never derived. A `GetUseCaseForModelAccess` call decides whether `anthropic.*` ids appear: a `ResourceNotFoundException` hides them until the form is on file. Results merge with pi-ai's `amazon-bedrock` registry for name, context window, and pricing; ids the registry lacks keep the Bedrock `modelName` and no pricing, so they are pickable and run through synthesis (decision 12). A successful lookup is cached in-process for one hour per region; concurrent misses share one lookup; the AWS client has a 3-second request timeout and 2 attempts. On any error the service degrades to a filtered registry list (bare ids and this geography's profiles, never `global.*`, never Anthropic) with `live: false`, holds that answer for two minutes, and logs one warning. A use-case answer other than success or `ResourceNotFoundException` also hides Anthropic for only two minutes and is logged.
+
+10. **The catalog uses the curated branch.** `amazon-bedrock` leaves the full-registry known-kind path. With a row, the row's `models` selection is the catalog, registry-enriched; an empty selection means the default set, so rows created before Bedrock accepted a selection do not go blank. With no row and ambient credentials, the catalog is `BEDROCK_DEFAULT_MODEL_IDS` (a short open-weight default set) intersected with live discovery when discovery succeeded. With neither, nothing. `BEDROCK_CATALOG_FILTER` is removed.
+
+11. **Admins curate on the Bedrock card.** `kindAcceptsModels` includes `amazon-bedrock`; create seeds the default set; `GET /api/org/llm-providers/amazon-bedrock/models` returns discovery for the picker. The web `OpenrouterModelsEditor` becomes a kind-parameterized `CuratedModelsEditor` with per-kind copy. "Customize models" creates the row from the zero-config state, as it does for OpenRouter.
+
+12. **Selections the registry does not know still resolve.** `synthesizeCuratedModel` covers `amazon-bedrock` rows with `api: "bedrock-converse-stream"`, `provider: "amazon-bedrock"`, the stored name, context window (default 128k), pricing (default 0), and a baseUrl copied from any bundled Bedrock model (pi-ai ignores it when `AWS_REGION` is set).
+
+13. **IAM widens for discovery and open models.** The IRSA policy adds `bedrock:ListFoundationModels`, `bedrock:ListInferenceProfiles`, and `bedrock:GetUseCaseForModelAccess` on `*`, and invoke moves from `foundation-model/anthropic.*` to `foundation-model/*`. Inference-profile invoke is unchanged.
+
+14. **New dependency.** `@aws-sdk/client-bedrock` pinned to `3.1127.0`, the same family as pi-ai's bundled runtime client, so smithy and credential packages dedupe.
+
+### Out of scope
+
+- A Bedrock twin of `openrouterRegistryIds` that widens workflow validation past the selection. Validation follows the catalog.
+- Org bearer tokens for control-plane discovery. Discovery uses the AWS chain; a bearer-only org still gets the registry fallback and the admin picks from it.
+- Refreshing discovery on demand from the UI. The one-hour cache is enough.
+
+### Exit criteria
+
+On agents-dev after the IAM change: the Bedrock card's "Add models" picker lists what the account can invoke, with no `anthropic.*` until the form is submitted and no `global.*`. Selecting `qwen.qwen3-coder-next` and starting a session on it completes a turn with cost. With discovery blocked (IAM denied), the picker falls back to the registry and shows the "couldn't reach" notice. Zero-config with no row lists the default set filtered to what discovery found.

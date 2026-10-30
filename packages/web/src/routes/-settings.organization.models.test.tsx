@@ -77,6 +77,14 @@ vi.mock("~/api/settings", async (importOriginal) => {
     isLoading: false,
     error: null,
   }),
+  useProviderModelCatalog: (kind: string) => ({
+    data:
+      kind === "amazon-bedrock"
+        ? { models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next" }, { id: "vendor.brand-new-model", name: "Brand New" }], live: true }
+        : { models: [{ id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3" }], live: true },
+    isLoading: false,
+    error: null,
+  }),
   };
 });
 
@@ -234,6 +242,32 @@ describe("LlmProvidersSection — known provider cards", () => {
     await user.type(filter, "kimi");
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("textbox", { name: "Filter OpenRouter models" })).toBeNull();
+  });
+
+  it("Escape dismisses the Amazon Bedrock model picker, which lists the account's models", async () => {
+    const user = userEvent.setup();
+    providersData = {
+      providers: [
+        {
+          id: "row_br",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next" }],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+
+    await user.click(screen.getByRole("button", { name: "Add models" }));
+    const filter = screen.getByRole("textbox", { name: "Filter Amazon Bedrock models" });
+    expect(screen.getByText("Brand New")).toBeTruthy();
+    await user.type(filter, "brand");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Filter Amazon Bedrock models" })).toBeNull();
   });
 
   it("toggling enabled fires PATCH", async () => {

@@ -66,6 +66,7 @@
   },
   "dependencies": {
     "@1password/sdk": "^0.4.1",
+    "@aws-sdk/client-bedrock": "3.1127.0",
     "@better-auth/api-key": "1.6.23",
     "@better-auth/sso": "1.6.23",
     "@earendil-works/pi-agent-core": "1.0.3",

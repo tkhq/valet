@@ -5014,10 +5014,15 @@ export interface PutLlmProviderKeyResponse {
 // selection; the live fetch is what makes brand-new models pickable before
 // any registry bump. `live: false` = the upstream fetch failed and the
 // response is registry-only (stale but usable).
-export interface OpenrouterRegistryResponse {
+export interface ProviderModelCatalogResponse {
   models: LlmProviderModelWire[];
+  /** True when the upstream source answered (OpenRouter's live catalog, or
+   * the AWS account for amazon-bedrock); false means registry-only. */
   live: boolean;
 }
+
+/** @deprecated Use ProviderModelCatalogResponse; kept for existing callers. */
+export type OpenrouterRegistryResponse = ProviderModelCatalogResponse;
 
 // `POST .../probe` — custom-provider discovery: GETs `{baseUrl}/models`
 // upstream and echoes back the ids. 502 `{ error }` carries the verbatim
