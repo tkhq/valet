@@ -130,12 +130,16 @@ function versionTuple(v: string): number[] {
   return m ? m[1].split(".").map(Number) : [-1];
 }
 
-/** The newest `indexVersion` among scored entries; undefined when none is scored. */
+/**
+ * The index version that anchors Quality: the newest version with a ceiling
+ * (`MIN_SCORED_PER_VERSION` scored entries). A single early score on a newer
+ * version therefore does not demote every current score to display-only;
+ * the switch happens once the newer version has enough entries.
+ */
 export function latestIndexVersion(snap: ModelBenchmarksSnapshot = MODEL_BENCHMARKS_SNAPSHOT): string | undefined {
   let best: string | undefined;
-  for (const entry of snap.entries) {
-    if (typeof entry.intelligenceIndex !== "number" || !entry.indexVersion) continue;
-    if (best === undefined || compareVersions(entry.indexVersion, best) > 0) best = entry.indexVersion;
+  for (const version of intelligenceCeilings(snap).keys()) {
+    if (best === undefined || compareVersions(version, best) > 0) best = version;
   }
   return best;
 }

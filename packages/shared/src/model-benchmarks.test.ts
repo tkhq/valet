@@ -77,13 +77,31 @@ describe("intelligenceCeilings", () => {
 });
 
 describe("latestIndexVersion", () => {
-  it("picks the numerically highest vX.Y(.Z) among scored entries", () => {
+  it("ignores a newer version until it has enough scores to anchor Quality", () => {
+    // One early v5.1 score must not demote every v5.0 score to display-only
+    // (review of #1106): the scoring version is the newest one WITH a ceiling.
+    const snap = bare([
+      { family: "a", name: "a", ids: ["a"], intelligenceIndex: 40, indexVersion: "v5.0" },
+      { family: "b", name: "b", ids: ["b"], intelligenceIndex: 55, indexVersion: "v5.0" },
+      { family: "c", name: "c", ids: ["c"], intelligenceIndex: 20, indexVersion: "v5.0" },
+      { family: "d", name: "d", ids: ["d"], intelligenceIndex: 61, indexVersion: "v5.1" },
+    ]);
+    expect(latestIndexVersion(snap)).toBe("v5.0");
+    const three = bare([
+      ...snap.entries,
+      { family: "e", name: "e", ids: ["e"], intelligenceIndex: 50, indexVersion: "v5.1" },
+      { family: "f", name: "f", ids: ["f"], intelligenceIndex: 30, indexVersion: "v5.1" },
+    ]);
+    expect(latestIndexVersion(three)).toBe("v5.1");
+  });
+  it("picks the numerically highest vX.Y(.Z) among versions with a ceiling", () => {
+    const v = (family: string, version: string) => ({ family, name: family, ids: [family], intelligenceIndex: 1, indexVersion: version });
     expect(
       latestIndexVersion(
         bare([
-          { family: "a", name: "a", ids: ["a"], intelligenceIndex: 1, indexVersion: "v4.3.2" },
-          { family: "b", name: "b", ids: ["b"], intelligenceIndex: 1, indexVersion: "v5.0" },
-          { family: "c", name: "c", ids: ["c"], intelligenceIndex: 1, indexVersion: "v4.10" },
+          v("a1", "v4.3.2"), v("a2", "v4.3.2"), v("a3", "v4.3.2"),
+          v("b1", "v5.0"), v("b2", "v5.0"), v("b3", "v5.0"),
+          v("c1", "v4.10"), v("c2", "v4.10"), v("c3", "v4.10"),
           { family: "d", name: "d", ids: ["d"], indexVersion: "v9.9" }, // unscored: ignored
         ]),
       ),

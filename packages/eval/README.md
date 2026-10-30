@@ -117,7 +117,7 @@ rate next to its public benchmark score and list price. The numbers come
 from `packages/shared/src/model-benchmarks.json`, refreshed by PR:
 
 ```bash
-pnpm --silent --filter @valet/eval start -- --cases evals/cases/hard \
+pnpm --silent --filter @valet/eval start --cases evals/cases/hard \
   --model amazon-bedrock/deepseek.v3.2 --runs 3 --json > run.json
 node scripts/evals/snapshot-benchmarks.mjs --family deepseek-v3.2 \
   --model amazon-bedrock/deepseek.v3.2 --suite evals/cases/hard < run.json
