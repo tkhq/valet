@@ -25,6 +25,7 @@ import {
   type MessageEntry,
   type QueueItem,
   type ToolDef,
+  type WriteFence,
 } from "../src/index.js";
 
 const PERSON = { id: "u1", interactive: true };
@@ -68,11 +69,10 @@ function userTexts(context: { messages: Array<{ role: string; content: unknown }
       : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
 }
 
-async function setup(provider: string, responses: FauxResponseStep[], tools: ToolDef[] = []) {
+async function setup(provider: string, responses: FauxResponseStep[], tools: ToolDef[] = [], stream = new InMemoryEventStream()) {
   const faux = registerFauxProvider({ provider });
   faux.setResponses(responses);
   const store = new InMemorySessionStore();
-  const stream = new InMemoryEventStream();
   const events: BusEvent[] = [];
   stream.subscribe({}, (e) => events.push(e));
   const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
@@ -470,5 +470,111 @@ describe("canDeliverMidTurn", () => {
     expect(canDeliverMidTurn(result("u1"), { ...resultTurn, metadata: {} }, "u1")).toBe(false);
     // Never a result turn from another owner.
     expect(canDeliverMidTurn(result("u2"), resultTurn, "u1")).toBe(false);
+  });
+});
+
+/** The tool-result texts the model received, in order. */
+function toolResultTexts(context: { messages: Array<{ role: string; content: unknown }> }): string[] {
+  return context.messages.filter((m) => m.role === "toolResult").map((m) =>
+    typeof m.content === "string"
+      ? m.content
+      : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
+}
+
+describe("a message while a question is open", () => {
+  const askRepo = fauxAssistantMessage(
+    [fauxToolCall("ask_question", { question: "Which repo?", options: ["web", "api"] }, { id: "tc-q" })],
+    { stopReason: "toolUse" },
+  );
+
+  it("withdraws the question so the turn replies to the message", async () => {
+    let seenUsers: string[] = [];
+    let seenResults: string[] = [];
+    const h = await setup("question-message", [
+      askRepo,
+      (context) => {
+        seenUsers = userTexts(context);
+        seenResults = toolResultTexts(context);
+        return fauxAssistantMessage("web is the frontend");
+      },
+    ]);
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await waitFor(() => h.thread.pendingDecisionGates().length === 1);
+    const gateId = h.thread.pendingDecisionGates()[0]!.id;
+    const second = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
+    await waitFor(() => h.settled(first.queueItemId));
+
+    // One turn: the question closed, and the message joined the turn.
+    expect(seenUsers).toEqual(["pick a repo for me", "what is in web?"]);
+    expect(seenResults.at(-1)).toContain('The person wrote a message instead of answering "Which repo?"');
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(h.faux.state.callCount).toBe(2);
+    expect(await h.store.getDecisionGate(h.session.id, gateId)).toMatchObject({ status: "withdrawn" });
+    expect(h.events.map((e) => e.event).find((e) => e.type === "decision_gate_withdrawn"))
+      .toMatchObject({ gateId, reason: "message" });
+    h.faux.unregister();
+  });
+
+  it("withdraws the question for a message admitted before the question's waiter exists", async () => {
+    // Hold the question's announcement: the gate is saved and shown, but the
+    // waiter is not registered yet. A message sent now must still close it.
+    let reached!: () => void;
+    const announced = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    class HoldingStream extends InMemoryEventStream {
+      override async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
+        if (event.event.type === "decision_gate") { reached(); await held; }
+        return super.append(event, eventKey, fence);
+      }
+    }
+    const h = await setup("question-window", [askRepo, fauxAssistantMessage("web is the frontend")], [], new HoldingStream());
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await announced;
+    expect(h.thread.pendingDecisionGates()).toHaveLength(0);
+    const second = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
+    release();
+    await waitFor(() => h.settled(first.queueItemId));
+
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(h.events.map((e) => e.event).find((e) => e.type === "decision_gate_withdrawn")).toMatchObject({ reason: "message" });
+    h.faux.unregister();
+  });
+
+  it("keeps the question open for a message no person typed", async () => {
+    const h = await setup("question-event", [askRepo, fauxAssistantMessage("picked web")]);
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await waitFor(() => h.thread.pendingDecisionGates().length === 1);
+    const gateId = h.thread.pendingDecisionGates()[0]!.id;
+    // An event delivery runs as the person but is not their typing.
+    const event = await h.thread.submitPrompt("a webhook arrived", { author: { id: "u1" }, queueMode: "inject" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(h.thread.isPendingGate(gateId)).toBe(true);
+    expect((await h.store.getQueueItem(h.session.id, event.queueItemId))?.status).toBe("queued");
+    h.thread.resolveDecision(gateId, { actionId: "option-0", resolvedBy: "u1", resolvedAt: Date.now() });
+    await waitFor(() => h.settled(first.queueItemId));
+    h.faux.unregister();
+  });
+
+  it("keeps the question open for a followup that waits for the turn to end", async () => {
+    const h = await setup("question-followup", [askRepo, fauxAssistantMessage("picked web"), fauxAssistantMessage("ok")]);
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await waitFor(() => h.thread.pendingDecisionGates().length === 1);
+    const gateId = h.thread.pendingDecisionGates()[0]!.id;
+    const later = await h.thread.submitPrompt("after that, open a PR", { author: PERSON, queueMode: "followup" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(h.thread.isPendingGate(gateId)).toBe(true);
+    h.thread.resolveDecision(gateId, { actionId: "option-0", resolvedBy: "u1", resolvedAt: Date.now() });
+    await waitFor(() => h.settled(later.queueItemId));
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    h.faux.unregister();
   });
 });

@@ -833,6 +833,46 @@ export class Thread {
     });
   }
 
+  /**
+   * A person who writes while the running turn waits on a question wants to
+   * talk first, for example to ask what an option means. Withdraw the
+   * question with reason `message`: the tool returns, the message joins the
+   * turn after the tool batch, and the model answers it and can ask again.
+   * Only a message that may join the running turn (`canDeliverMidTurn`) and
+   * that a person typed does this, so an event or a token caller never
+   * closes a question.
+   */
+  private withdrawQuestionForMessage(item: QueueItem): void {
+    const running = this.runningItem;
+    if (!running || !this.messageWithdrawsQuestion(item, running)) return;
+    for (const gate of this.pendingDecisionGates()) {
+      if (gate.type === "question" && gate.queueItemId === running.id) this.withdrawDecision(gate.id, "message");
+    }
+  }
+
+  /** True when a person typed `item` and it may join `running`, so it closes that turn's open question. */
+  private messageWithdrawsQuestion(item: QueueItem, running: QueueItem): boolean {
+    if (this.session.isThreadExecutionFenced(this.id)) return false;
+    const author = item.author;
+    if (!author || author.externalSender || !(author.interactive || author.directChannel)) return false;
+    return canDeliverMidTurn(item, running, this.defaultActorId());
+  }
+
+  /**
+   * The gate cycle saves and announces a question before it registers the
+   * waiter, so a message admitted in between finds no gate to withdraw and
+   * waits behind the blocked turn. Once the waiter exists, withdraw the
+   * question if such a message is already queued. A later message takes the
+   * `withdrawQuestionForMessage` path.
+   */
+  private async withdrawQuestionForQueuedMessage(gate: DecisionGate): Promise<void> {
+    const running = this.runningItem;
+    if (!running || gate.queueItemId !== running.id) return;
+    const queued = (await this.session.providers.store.listUnsettledSubmissions(this.session.id))
+      .filter((item) => item.threadId === this.id && item.status === "queued");
+    if (queued.some((item) => this.messageWithdrawsQuestion(item, running))) this.withdrawDecision(gate.id, "message");
+  }
+
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): boolean {
     const ok = this.gates.withdraw(gateId, reason);
     if (ok) {
@@ -958,6 +998,7 @@ export class Thread {
         receiptItem = (await run) ?? admitted;
       }
     }
+    if (wasAdmitted) this.withdrawQuestionForMessage(admitted);
     await this.emitQueueState();
     void this.kick();
     return {
@@ -2243,6 +2284,7 @@ export class Thread {
         );
       });
       if (this.session.isExecutionFenced) this.handoffParkedGate();
+      if (gate.type === "question") await this.withdrawQuestionForQueuedMessage(gate);
       const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.

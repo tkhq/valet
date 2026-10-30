@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { askQuestionTool } from "../src/builtin-tools/index.js";
-import { DecisionGateExpiredError } from "../src/decision-gate.js";
+import { DecisionGateExpiredError, DecisionGateWithdrawnError } from "../src/decision-gate.js";
 import type {
   Credential,
   CredentialProvider,
@@ -52,7 +52,45 @@ describe("ask_question tool", () => {
       { question: "Which repo?", options: ["web"] },
       makeCtx(async () => ({ value: " api ", resolvedBy: "u1", resolvedAt: 1 })),
     );
-    expect(result.text).toBe('answer to "Which repo?": api');
+    expect(result.text).toContain('answer to "Which repo?": api');
+  });
+
+  it("tells the model a typed reply off the options may be a question back", async () => {
+    const result = await askQuestionTool.execute(
+      { question: "Which repo?", options: ["web", "api"] },
+      makeCtx(async () => ({ value: "what is in web?", resolvedBy: "u1", resolvedAt: 1 })),
+    );
+    expect(result.text).toBe('answer to "Which repo?": what is in web? The person typed this instead of picking an option. ' +
+      "If it asks you something, reply to it first, then ask again if you still need a choice.");
+  });
+
+  it("adds no note to a typed answer that names an option or to a question without options", async () => {
+    const named = await askQuestionTool.execute(
+      { question: "Which repo?", options: ["web", "api"] },
+      makeCtx(async () => ({ value: "api", resolvedBy: "u1", resolvedAt: 1 })),
+    );
+    expect(named.text).toBe('answer to "Which repo?": api');
+    const open = await askQuestionTool.execute(
+      { question: "Which repo?" },
+      makeCtx(async () => ({ value: "api", resolvedBy: "u1", resolvedAt: 1 })),
+    );
+    expect(open.text).toBe('answer to "Which repo?": api');
+  });
+
+  it("asks the model to reply first when the person wrote a message instead", async () => {
+    const result = await askQuestionTool.execute(
+      { question: "Which repo?", options: ["web", "api"] },
+      makeCtx(async () => { throw new DecisionGateWithdrawnError("g1", "message"); }),
+    );
+    expect(result.text).toContain('The person wrote a message instead of answering "Which repo?"');
+    expect(result.text).toContain("Reply to it first.");
+  });
+
+  it("still fails the call when the question is withdrawn for another reason", async () => {
+    await expect(askQuestionTool.execute(
+      { question: "Which repo?" },
+      makeCtx(async () => { throw new DecisionGateWithdrawnError("g1", "cancel"); }),
+    )).rejects.toBeInstanceOf(DecisionGateWithdrawnError);
   });
 
   it("ignores a stored answer that is not text, instead of crashing", async () => {
