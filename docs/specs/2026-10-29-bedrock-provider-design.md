@@ -96,3 +96,21 @@ Decision 4 hardcoded a `us.anthropic.*` filter. Two things changed on 2026-10-29
 ### Exit criteria
 
 On agents-dev after the IAM change: the Bedrock card's "Add models" picker lists what the account can invoke, with no `anthropic.*` until the form is submitted and no `global.*`. Selecting `qwen.qwen3-coder-next` and starting a session on it completes a turn with cost. With discovery blocked (IAM denied), the picker falls back to the registry and shows the "couldn't reach" notice. Zero-config with no row lists the default set filtered to what discovery found.
+
+## Extension 2026-10-30 (b): value-tier defaults and visible list prices
+
+### Why
+
+Discovery on agents-dev returned 67 invokable models. Comparing their US-profile list prices against Anthropic and OpenAI showed that the frontier-size open models split sharply: Kimi K3 ($3.30 in / $16.50 out per 1M tokens) costs about what Opus 5.5 does for a lower benchmark standing, while DeepSeek V3.2 ($0.62 / $1.85), Mistral Large 3 ($0.50 / $1.50) and GLM-5.3 ($1.85 / $5.81) sit at a similar standing for three to ten times less. The default set should steer towards that tier, and admins choosing models should see the price they are choosing.
+
+### Decisions
+
+15. **Defaults lead with the value tier.** `BEDROCK_DEFAULT_MODEL_IDS` adds `mistral.mistral-large-3-675b-instruct` and `us.zai.glm-5.3` and orders the list by tier: DeepSeek V3.2, Mistral Large 3 and GLM-5.3 first, then the cheaper coding and utility models already there. Nothing is removed; the picker lets admins prune.
+
+16. **pi-ai moves to 1.4.0.** GLM-5.3 reached the `amazon-bedrock` registry after 1.0.3, and a default the registry lacks is silently dropped by `curatedBedrockModels()`. The bump is workspace-wide (api, engine, sandbox-docker). pi-ai 1.4.0 anchors function tools declared after the first system message as `additional_tools` input items for OpenAI Responses rather than in the top-level `tools` field; the engine's native-image bridge filters hidden tools at the transcript level, so behaviour is unchanged and only its tests' placement assertions move to the whole request body. The same registry retires `deepseek/deepseek-r1` from OpenRouter; the OpenRouter default set replaces it with `deepseek/deepseek-v4-flash`, the current low-cost DeepSeek entry.
+
+17. **The picker shows list price.** `CuratedModelsEditor` renders `pricing` from the catalog as "$0.62 in / $1.85 out per 1M tokens" on each picker row and as "$0.62 / $1.85" on each selected chip (long form in the chip's tooltip). Prices come from the same `LlmProviderModel.pricing` the catalog already carries (pi-ai registry for Bedrock, the live catalog for OpenRouter); a model with no known price shows none rather than $0. Sub-cent rates keep a third decimal. This applies to both curated kinds.
+
+### Exit criteria
+
+A fresh Bedrock row seeds ten models with DeepSeek V3.2, Mistral Large 3 and GLM-5.3 first, each with a price. The picker and the chips on agents-dev show per-million prices for registry-known models and none for the account's unregistered ones. The engine, api and web suites pass on pi-ai 1.4.0.

@@ -146,10 +146,12 @@ it("hides only pinned generation and internal receipts from native requests", as
     toolsAdded: [NATIVE_IMAGE_RESULT_TOOL, "openai__generate_image", "openai__edit_image"].map((name) => ({ name, description: name, parameters: { type: "object", properties: {} } })) }] },
     { apiKey: "fixture-key", maxRetries: 0 }, new VirtualSandbox("s")).result();
   const [, init] = fetchMock.mock.calls[0];
-  const tools: unknown[] = JSON.parse(String(init?.body)).tools;
-  expect(JSON.stringify(tools)).toContain("openai__edit_image");
-  expect(JSON.stringify(tools)).not.toContain("openai__generate_image");
-  expect(JSON.stringify(tools)).not.toContain(NATIVE_IMAGE_RESULT_TOOL);
+  // pi-ai >= 1.4 anchors function tools as `additional_tools` input items rather
+  // than in the top-level `tools` field, so check the whole request body.
+  const body = String(init?.body);
+  expect(body).toContain("openai__edit_image");
+  expect(body).not.toContain("openai__generate_image");
+  expect(body).not.toContain(NATIVE_IMAGE_RESULT_TOOL);
 });
 
 it.each(["png", "jpeg", "webp"] as const)("validates native %s bytes and retains the correct extension", async (format) => {
@@ -228,8 +230,8 @@ it.each([
   expect(fetchMock).toHaveBeenCalledTimes(2);
   const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
   expect(bodies[0].tools).toContainEqual({ type: "image_generation", model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" });
-  expect(JSON.stringify(bodies[1].tools)).not.toContain('"type":"image_generation"');
-  expect(JSON.stringify(bodies[1].tools)).toContain("openai__generate_image");
+  expect(JSON.stringify(bodies[1].tools ?? [])).not.toContain('"type":"image_generation"');
+  expect(JSON.stringify(bodies[1])).toContain("openai__generate_image");
   expect(JSON.stringify(bodies[1].input)).not.toContain("Use native image_generation");
   expect(bridge.enabled(model)).toBe(false);
   // The retry did not offer the hosted tool, so its plugin generation must not be hidden.

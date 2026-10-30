@@ -27,6 +27,7 @@ import {
   useTestLlmProvider,
 } from "~/api/settings";
 import { matchesNeedle } from "~/lib/text-match";
+import { formatPerMillion } from "~/lib/format-usage";
 
 type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
@@ -298,6 +299,11 @@ function CuratedModelsEditor({ provider, kind }: { provider: LlmProviderSummary;
             className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
           >
             {m.id}
+            {formatPerMillion(m.pricing, "short") && (
+              <span className="text-muted" title={formatPerMillion(m.pricing)}>
+                {formatPerMillion(m.pricing, "short")}
+              </span>
+            )}
             <button
               type="button"
               aria-label={`Remove ${m.id}`}
@@ -349,7 +355,10 @@ function CuratedModelsEditor({ provider, kind }: { provider: LlmProviderSummary;
                 className="flex min-h-11 w-full flex-wrap items-center justify-between gap-2 rounded sm:min-h-0 px-2 py-1 text-left text-sm text-ink hover:bg-ink-wash"
               >
                 <span className="truncate">{m.id}</span>
-                <span className="ml-2 shrink-0 text-xs text-muted">{m.name}</span>
+                <span className="ml-2 flex shrink-0 flex-col items-end text-xs text-muted">
+                  <span>{m.name}</span>
+                  {formatPerMillion(m.pricing) && <span>{formatPerMillion(m.pricing)}</span>}
+                </span>
               </button>
             ))}
             {registryQ.data && filtered.length === 0 && (

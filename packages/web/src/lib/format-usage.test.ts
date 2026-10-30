@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTokens, formatTurns, formatUsd, formatUsdPrecise } from "./format-usage";
+import { formatPerMillion, formatTokens, formatTurns, formatUsd, formatUsdPrecise } from "./format-usage";
 
 describe("formatTokens", () => {
   it("formats across magnitudes", () => {
@@ -40,5 +40,22 @@ describe("formatTurns", () => {
     expect(formatTurns(1)).toBe("1 turn");
     expect(formatTurns(0)).toBe("0 turns");
     expect(formatTurns(1204)).toBe(`${(1204).toLocaleString()} turns`);
+  });
+});
+
+describe("formatPerMillion", () => {
+  it("renders list prices as input / output per million tokens", () => {
+    expect(formatPerMillion({ input: 0.62, output: 1.85 })).toBe("$0.62 in / $1.85 out per 1M tokens");
+    expect(formatPerMillion({ input: 3.3, output: 16.5 })).toBe("$3.30 in / $16.50 out per 1M tokens");
+  });
+  it("keeps sub-cent rates visible instead of rounding to $0.00", () => {
+    expect(formatPerMillion({ input: 0.005, output: 0.0825 })).toBe("$0.005 in / $0.08 out per 1M tokens");
+  });
+  it("returns undefined when pricing is missing or free", () => {
+    expect(formatPerMillion(undefined)).toBeUndefined();
+    expect(formatPerMillion({ input: 0, output: 0 })).toBeUndefined();
+  });
+  it("short form fits a chip", () => {
+    expect(formatPerMillion({ input: 0.62, output: 1.85 }, "short")).toBe("$0.62 / $1.85");
   });
 });
