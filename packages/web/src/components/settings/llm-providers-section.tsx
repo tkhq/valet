@@ -20,7 +20,7 @@ import {
   useDeleteLlmProvider,
   useDeleteLlmProviderKey,
   useLlmProviders,
-  useOpenrouterRegistry,
+  useProviderModelCatalog,
   usePatchLlmProvider,
   useProbeLlmProvider,
   usePutLlmProviderKey,
@@ -199,9 +199,9 @@ function KnownProviderCard({
           </Button>
         )}
       </div>
-      {kind === "openrouter" &&
+      {(kind === "openrouter" || kind === "amazon-bedrock") &&
         (row ? (
-          <OpenrouterModelsEditor provider={row} />
+          <CuratedModelsEditor provider={row} kind={kind} />
         ) : (
           // Zero-config (env key, no row): the selection editor needs a row
           // to persist to. Materialize one — the server seeds it with the
@@ -234,11 +234,29 @@ function KnownProviderCard({
  * the current selection with per-model remove, and an "Add models" panel
  * with a client-side filter over the full registry (fetched lazily).
  */
-function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) {
+type CuratedKind = "openrouter" | "amazon-bedrock";
+
+/** Per-kind copy for the curated model picker. The OpenRouter strings are
+ * unchanged from before the picker was shared. */
+const PICKER_COPY: Record<CuratedKind, { filterLabel: string; placeholder: string; offline: string }> = {
+  openrouter: {
+    filterLabel: "Filter OpenRouter models",
+    placeholder: "Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…",
+    offline: "Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).",
+  },
+  "amazon-bedrock": {
+    filterLabel: "Filter Amazon Bedrock models",
+    placeholder: "Search models available in your AWS account — e.g. qwen3-coder, deepseek, llama…",
+    offline: "Couldn't reach Amazon Bedrock — showing the built-in registry, which may include models this account cannot invoke.",
+  },
+};
+
+function CuratedModelsEditor({ provider, kind }: { provider: LlmProviderSummary; kind: CuratedKind }) {
+  const copy = PICKER_COPY[kind];
   const patchProvider = usePatchLlmProvider();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [filter, setFilter] = useState("");
-  const registryQ = useOpenrouterRegistry({ enabled: pickerOpen });
+  const registryQ = useProviderModelCatalog(kind, { enabled: pickerOpen });
 
   const selectedIds = new Set(provider.models.map((m) => m.id));
 
@@ -295,7 +313,7 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
       {pickerOpen && (
         <div className="space-y-2 rounded border border-line p-2">
           <Input
-            aria-label="Filter OpenRouter models"
+            aria-label={copy.filterLabel}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => {
@@ -306,12 +324,12 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
                 setPickerOpen(false);
               }
             }}
-            placeholder="Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…"
+            placeholder={copy.placeholder}
             autoFocus
           />
           {registryQ.data && !registryQ.data.live && (
             <p className="text-xs text-muted">
-              Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).
+              {copy.offline}
             </p>
           )}
           {registryQ.isLoading && (

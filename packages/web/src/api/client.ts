@@ -213,6 +213,7 @@ import type {
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   PreviewOrgPolicyRequest,
   PreviewOrgPolicyResponse,
   ProbeLlmProviderResponse,
@@ -1380,6 +1381,10 @@ export const api = {
     request<ProbeLlmProviderResponse>("POST", `/org/llm-providers/${encodeURIComponent(id)}/probe`),
   openrouterRegistry: () =>
     request<OpenrouterRegistryResponse>("GET", "/org/llm-providers/openrouter/models"),
+  /** Pickable models for a curated known kind: OpenRouter's live catalog, or
+   * what the AWS account can invoke for amazon-bedrock. */
+  providerModelCatalog: (kind: "openrouter" | "amazon-bedrock") =>
+    request<ProviderModelCatalogResponse>("GET", `/org/llm-providers/${kind}/models`),
   testLlmProvider: (id: string, body: TestLlmProviderRequest) =>
     request<TestLlmProviderResponse>(
       "POST",

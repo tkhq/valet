@@ -35,6 +35,7 @@ import type {
   ListTeamsResponse,
   MeResponse,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -99,6 +100,7 @@ export const qkSettings = {
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
+  providerModelCatalog: (kind: string) => ["settings", "providerModelCatalog", kind] as const,
   modelTiers: () => ["settings", "modelTiers"] as const,
   approvedModels: () => ["settings", "approvedModels"] as const,
   orgReasoning: () => ["settings", "orgReasoning"] as const,
@@ -212,6 +214,19 @@ export function useOpenrouterRegistry(opts?: { enabled?: boolean }) {
   return useQuery<OpenrouterRegistryResponse>({
     queryKey: qkSettings.openrouterRegistry(),
     queryFn: () => api.openrouterRegistry(),
+    staleTime: Infinity,
+    enabled: opts?.enabled ?? true,
+  });
+}
+
+/** Pickable models for a curated known kind — powers the model-selection
+ * picker on the OpenRouter and Amazon Bedrock cards. The server caches the
+ * Bedrock account lookup for an hour; the client keeps it for the page
+ * session and fetches only while the picker is open (`enabled`). */
+export function useProviderModelCatalog(kind: "openrouter" | "amazon-bedrock", opts?: { enabled?: boolean }) {
+  return useQuery<ProviderModelCatalogResponse>({
+    queryKey: qkSettings.providerModelCatalog(kind),
+    queryFn: () => api.providerModelCatalog(kind),
     staleTime: Infinity,
     enabled: opts?.enabled ?? true,
   });
