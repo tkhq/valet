@@ -4949,6 +4949,10 @@ export interface LlmProviderSummary {
 
 export interface ListLlmProvidersResponse {
   providers: LlmProviderSummary[];
+  /** Known kinds with NO row whose deployment env can authenticate (an API
+   * key env var, or ambient AWS credentials for amazon-bedrock). Lets the
+   * settings card show its deployment badge before any row exists. */
+  envFallbackKinds?: LlmProviderKindWire[];
 }
 
 export interface CreateLlmProviderRequest {

@@ -63,6 +63,7 @@ const KIND_COPY: Record<KnownKind, { placeholder: string; deploymentBadge: strin
 export function LlmProvidersSection() {
   const providersQ = useLlmProviders();
   const providers = providersQ.data?.providers ?? [];
+  const envFallbackKinds = providersQ.data?.envFallbackKinds ?? [];
   const knownRows = new Map(
     providers.filter((p) => p.kind !== "openai_compatible").map((p) => [p.kind, p]),
   );
@@ -86,6 +87,7 @@ export function LlmProvidersSection() {
               key={kind}
               kind={kind as KnownKind}
               row={knownRows.get(kind)}
+              envFallback={envFallbackKinds.includes(kind)}
             />
           ))}
           {customRows.map((row) => (
@@ -103,9 +105,12 @@ export function LlmProvidersSection() {
 function KnownProviderCard({
   kind,
   row,
+  envFallback,
 }: {
   kind: KnownKind;
   row: LlmProviderSummary | undefined;
+  /** Deployment env can authenticate this kind even with no row (server `envFallbackKinds`). */
+  envFallback: boolean;
 }) {
   const createProvider = useCreateLlmProvider();
   const patchProvider = usePatchLlmProvider();
@@ -153,7 +158,7 @@ function KnownProviderCard({
   }
 
   const placeholder = row?.hasKey ? `••••${row.keyLast4}` : KIND_COPY[kind].placeholder;
-  const showDeploymentBadge = Boolean(row?.envFallback && !row.hasKey);
+  const showDeploymentBadge = row ? Boolean(row.envFallback && !row.hasKey) : envFallback;
 
   return (
     <div className="space-y-3 py-4">

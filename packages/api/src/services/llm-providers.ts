@@ -20,7 +20,9 @@ import { llmProviders, type LlmProviderModel, type LlmProviderRow } from "../sch
 
 export type LlmProviderKind = LlmProviderRow["kind"];
 
-const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"];
+/** Known kinds: pi-ai provider ids whose registry/env the api reads directly. */
+export const KNOWN_PROVIDER_KINDS = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"] as const satisfies readonly LlmProviderKind[];
+const KNOWN_KINDS: readonly LlmProviderKind[] = KNOWN_PROVIDER_KINDS;
 
 export function isLlmProviderKind(v: unknown): v is LlmProviderKind {
   return (

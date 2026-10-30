@@ -32,7 +32,7 @@ const deleteLlmProviderKeyMutate = vi.fn();
 const probeLlmProviderMutate = vi.fn();
 const testLlmProviderMutate = vi.fn();
 
-let providersData: { providers: LlmProviderSummary[] } = { providers: [] };
+let providersData: { providers: LlmProviderSummary[]; envFallbackKinds?: LlmProviderSummary["kind"][] } = { providers: [] };
 let modelsData: { models: ModelInfo[] } = { models: [] };
 
 vi.mock("@tanstack/react-router", () => ({
@@ -200,6 +200,14 @@ describe("LlmProvidersSection — known provider cards", () => {
     expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
     expect(screen.queryByText("using deployment key")).toBeNull();
     expect(screen.getByPlaceholderText("Bedrock API key (bearer token)")).toBeTruthy();
+  });
+
+  it("shows the deployment badge on a known card with no row when the deployment env can authenticate", () => {
+    providersData = { providers: [], envFallbackKinds: ["amazon-bedrock"] };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    // Other no-row cards stay badge-less.
+    expect(screen.queryByText("using deployment key")).toBeNull();
   });
 
   it("Escape dismisses the OpenRouter model picker", async () => {

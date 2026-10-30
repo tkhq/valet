@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyProviderFailure, isNonRetryableProviderFailure, providerFailureSummary, providerLabel } from "./provider-failure.js";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isRateLimitedProviderFailure, providerFailureSummary, providerLabel } from "./provider-failure.js";
 
 describe("classifyProviderFailure", () => {
   it.each([
@@ -37,5 +37,18 @@ describe("providerFailureSummary", () => {
 describe("providerLabel", () => {
   it("names Amazon Bedrock by its pi-ai provider id", () => {
     expect(providerLabel("amazon-bedrock")).toBe("Amazon Bedrock");
+  });
+});
+
+describe("Bedrock throttling", () => {
+  // pi-ai formats Bedrock's ThrottlingException as "Throttling error: <aws message>".
+  const text = "Throttling error: Too many tokens, please wait before trying again.";
+  it("classifies pi-ai's Bedrock throttling text as rate_limited", () => {
+    expect(classifyProviderFailure(text)).toBe("rate_limited");
+    expect(isRateLimitedProviderFailure(text)).toBe(true);
+    expect(isNonRetryableProviderFailure(text)).toBe(false);
+  });
+  it("does not treat ordinary errors as rate limited", () => {
+    expect(isRateLimitedProviderFailure("401 invalid x-api-key")).toBe(false);
   });
 });

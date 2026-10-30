@@ -5,7 +5,7 @@ import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
-import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure } from "@valet/shared";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -5385,7 +5385,9 @@ export class Thread {
       // application budget failures, even when their text also mentions 429.
       if (isNonRetryableProviderFailure(error)) return;
       const quota = isUsageLimitFailure(error);
-      const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
+      // `isRateLimitedProviderFailure` covers throttling text pi-ai's own
+      // retry pattern misses (Bedrock's "Throttling error: Too many tokens").
+      const transient = !quota && (isRetryableAssistantError(last) || isRateLimitedProviderFailure(error) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
       if (!quota && !transient) return;
       if (!(await this.canRunCurrentSubmission())) return;
       attemptedProviderIds.add(this.agent.state.model.provider);
