@@ -182,7 +182,7 @@ export default function UiStressGallery() {
             </div>
           </Section>
 
-          <Section id="thread-work" note="One finished turn as the engine writes it: a message per agent step, most of them tool calls only. The transcript folds the steps into one line that says what happened; it opens into a timeline, and a step opens into its full card. The failed push shows in red, and the reply ends with how long the turn worked.">
+          <Section id="thread-work" note="One finished turn as the engine writes it: a message per agent step, most of them tool calls only. The transcript folds the steps into one line that says what happened; it opens into a timeline, and a step opens into its full card. The failed push shows in red, and the reply ends with how long the turn worked. A last reply has a two-column table of long text and a six-column table with commit hashes.">
             <Frame label="Thread view: a finished turn" className="h-[min(40rem,80dvh)]">
               <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
                 <MessageList messages={workTurnMessages} threadId={THREAD_ID} viewerId={stressMe.id} ratings={false} />

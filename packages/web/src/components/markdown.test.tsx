@@ -15,7 +15,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 const renderMermaidMock = vi.hoisted(() => vi.fn());
 vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
 
-import { Markdown, localDownloadHref } from "./markdown";
+import { Markdown, localDownloadHref, tableCellClass } from "./markdown";
 import { setPublicOrigin } from "~/lib/public-origin";
 
 describe("Markdown", () => {
@@ -41,6 +41,34 @@ describe("Markdown", () => {
     expect(region.tabIndex).toBe(0);
     expect(region.contains(screen.getByRole("table"))).toBe(true);
     expect(screen.getByRole("cell", { name: hash }).textContent).toBe(hash);
+  });
+
+  it("lets table cells wrap instead of sizing the table to its longest line", () => {
+    const sentence = "Your figures show about $24K each month in known maintenance costs.";
+    render(<Markdown>{`| Key result | What we have |\n| --- | --- |\n| KR1 | ${sentence} |`}</Markdown>);
+    const table = screen.getByRole("table");
+    expect(table.className).not.toContain("w-max");
+    expect(table.className).toContain("[overflow-wrap:break-word]");
+    expect(screen.getByRole("region", { name: "Table" }).className).toContain("max-w-full");
+    expect(screen.getByRole("cell", { name: "KR1" }).className).toContain("whitespace-nowrap");
+    expect(screen.getByRole("cell", { name: sentence }).className).toContain("min-w-[min(10rem,35vw)]");
+  });
+
+  it("picks a cell width rule from the length of its text", () => {
+    expect(tableCellClass("member-1")).toBe("whitespace-nowrap");
+    expect(tableCellClass("Changes requested")).toBeUndefined();
+    expect(tableCellClass(["Needs one more review ", <code key="c">before</code>, " it lands"])).toBe("min-w-[min(10rem,35vw)]");
+  });
+
+  it("lets a table grow past the text column only with wideTables", () => {
+    const table = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+    const { unmount } = render(<Markdown wideTables>{table}</Markdown>);
+    const wide = screen.getByRole("region", { name: "Table" }).className;
+    expect(wide).toContain("max-w-[min(100cqw,64rem)]");
+    expect(wide).not.toContain("max-w-full");
+    unmount();
+    render(<Markdown>{table}</Markdown>);
+    expect(screen.getByRole("region", { name: "Table" }).className).not.toContain("cqw");
   });
 
   it("tokenizes a fenced code block via CodeBlock", () => {

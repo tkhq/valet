@@ -170,10 +170,11 @@ export const MessageItem = memo(function MessageItem({
     <article
       data-message-id={message.id}
       aria-disabled={dimmed || undefined}
-      className={cn("group min-w-0 px-5 sm:px-8 transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
+      className={cn("group min-w-0 px-5 sm:px-8 [container-type:inline-size] transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
     >
       {/* Row background spans full width; the content column is capped at a
-          readable measure and centered — prose and tool cards both benefit. */}
+          readable measure and centered — prose and tool cards both benefit.
+          The row is the size container a wide table measures. */}
       <div className={cn(
         "mx-auto flex w-full min-w-0 max-w-3xl justify-end"
       )}>
@@ -430,7 +431,9 @@ function TextBlock({
       </>
     );
   }
-  return <Markdown>{text}</Markdown>;
+  // Assistant text fills a centered column, so its tables may grow past
+  // it. A user message sits in a bubble at one side.
+  return <Markdown wideTables={!detectSkill}>{text}</Markdown>;
 }
 
 interface StructuredText {
