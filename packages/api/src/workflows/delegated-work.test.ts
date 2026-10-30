@@ -5,7 +5,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { childWatches } from "../schema/index.js";
-import { delegatedWorkOpen, openStepWork } from "./delegated-work.js";
+import { delegatedWorkOpen, lastStepTurn, openStepWork } from "./delegated-work.js";
 
 let api: TestApi | undefined;
 
@@ -60,5 +60,37 @@ describe("delegated work of a workflow step", () => {
     await watch("grandchild-a", reportA.id, base + 60, false);
     expect(await openStepWork(db, engineStore, sessionId, stepA)).toEqual({ childPending: true });
     expect((await openStepWork(db, engineStore, sessionId, stepB)).childPending).toBe(false);
+  });
+
+  it("returns the step's newest report turn without reading the thread tail", async () => {
+    // A busy shared run thread can append many entries after a report turn.
+    // The watch row records the report turn, so the step finds it directly.
+    api = await bootTestApi();
+    const { db, engineStore } = api.providers;
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id },
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const sessionId = root.sessionId;
+    const thread = await root.session.createThread("signal:workflow:busy_run");
+    const base = Date.now();
+    const admit = async (id: string, at: number, content: QueueItem["content"]): Promise<QueueItem> => {
+      await engineStore.admitSubmission(sessionId, thread.id, { id, threadId: thread.id, dispatchId: `d:${id}`, content,
+        status: "settled", attemptCount: 0, maxAttempts: 10, timeoutAt: at + 60_000, createdAt: at, updatedAt: at });
+      const item = await engineStore.getQueueItem(sessionId, id);
+      if (!item) throw new Error(`queue item ${id} was not admitted`);
+      return item;
+    };
+    const step = await admit("step", base, { kind: "signal", signalType: "workflow.request", body: "review", attributes: { runId: "busy_run" } });
+    const report = (child: string): QueueItem["content"] =>
+      ({ kind: "signal", signalType: "child.settled", body: "done", attributes: { child_session_id: child, outcome: "completed" } });
+    const first = await admit("report-1", base + 10, report("child-1"));
+    const second = await admit("report-2", base + 30, report("child-2"));
+    await db.insert(childWatches).values([
+      { childSessionId: "child-1", queueItemId: "c1", parentSessionId: sessionId, parentThreadId: thread.id, parentQueueItemId: step.id,
+        reportQueueItemId: first.id, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, settled: true, createdAt: base + 5 },
+      { childSessionId: "child-2", queueItemId: "c2", parentSessionId: sessionId, parentThreadId: thread.id, parentQueueItemId: first.id,
+        reportQueueItemId: second.id, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, settled: true, createdAt: base + 20 },
+    ]);
+    // No entries exist for these turns, so a tail scan finds nothing.
+    expect(await lastStepTurn(db, engineStore, sessionId, step)).toBe(second.id);
   });
 });

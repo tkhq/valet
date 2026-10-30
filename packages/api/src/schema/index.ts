@@ -635,6 +635,9 @@ export const childWatches = pgTable(
     // waits only for children its own turns spawned. Null for rows from
     // before this column.
     parentQueueItemId: text("parent_queue_item_id"),
+    // The parent-thread queue item that this child's latest report started.
+    // A workflow step returns the result of its newest report turn.
+    reportQueueItemId: text("report_queue_item_id"),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
     deliveryActive: boolean("delivery_active").notNull().default(false),
