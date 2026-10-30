@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "@valet/api/wire";
 import type { ModelBenchmark } from "@valet/shared";
-import { blendedPrice, buildRows, filterRows, qualityOf, sortRows } from "./model-value";
+import { blendedPrice, buildRows, filterRows, isCurrentScore, qualityOf, sortRows } from "./model-value";
 
 function mk(id: string, o: { input?: number; output?: number; name?: string; approved?: boolean; contextWindow?: number; providerName?: string }): ModelInfo {
   return {
@@ -110,17 +110,48 @@ describe("sortRows / filterRows", () => {
     expect(ids(sortRows(rows, "intelligence", "asc"))[0]).toBe("b");
     expect(ids(sortRows(rows, "intelligence", "desc"))[0]).toBe("a");
   });
+  it("sorts by measured eval cost with unevaluated rows last", () => {
+    const evaluated = buildRows(
+      [mk("amazon-bedrock/x", { input: 1, output: 2, name: "X" }), mk("amazon-bedrock/y", { input: 1, output: 2, name: "Y" }), mk("amazon-bedrock/z", { input: 1, output: 2, name: "Z" })],
+      { ...scoring, lookup: (id) => (id.endsWith("/x") ? bm("x", { valetEval: { suite: "s", modelSpec: "m", cases: 1, runsPerCase: 1, passRate: 50, meanCostUsd: 0.03, ranAt: "2026-10-30" } }) : id.endsWith("/y") ? bm("y", { valetEval: { suite: "s", modelSpec: "m", cases: 1, runsPerCase: 1, passRate: 50, meanCostUsd: 0.001, ranAt: "2026-10-30" } }) : undefined) },
+    );
+    expect(ids(sortRows(evaluated, "evalCost", "asc"))).toEqual(["y", "x", "z"]);
+    expect(ids(sortRows(evaluated, "evalCost", "desc"))).toEqual(["x", "y", "z"]);
+  });
   it("sorts by name both ways and does not mutate the input", () => {
     const before = ids(rows);
     expect(ids(sortRows(rows, "name", "asc"))).toEqual(["a", "b", "c", "d", "e"]);
     expect(ids(sortRows(rows, "name", "desc"))).toEqual(["e", "d", "c", "b", "a"]);
     expect(ids(rows)).toEqual(before);
   });
-  it("filters by name, id and provider, case-insensitively", () => {
-    expect(ids(filterRows(rows, "BRAVO"))).toEqual(["b"]);
-    expect(ids(filterRows(rows, "openrouter"))).toEqual(["b"]);
-    expect(ids(filterRows(rows, "amazon-bedrock/c"))).toEqual(["c"]);
-    expect(ids(filterRows(rows, "  "))).toEqual(["a", "b", "c", "d", "e"]);
-    expect(filterRows(rows, "zzz")).toEqual([]);
+  it("filters by name, id and provider text, case-insensitively", () => {
+    expect(ids(filterRows(rows, { needle: "BRAVO" }))).toEqual(["b"]);
+    expect(ids(filterRows(rows, { needle: "openrouter" }))).toEqual(["b"]);
+    expect(ids(filterRows(rows, { needle: "amazon-bedrock/c" }))).toEqual(["c"]);
+    expect(ids(filterRows(rows, { needle: "  " }))).toEqual(["a", "b", "c", "d", "e"]);
+    expect(filterRows(rows, { needle: "zzz" })).toEqual([]);
+  });
+  it("filters by provider, approval, and current public score", () => {
+    const mixed = buildRows(
+      [
+        mk("amazon-bedrock/a", { input: 4, output: 20, name: "Alpha" }),
+        mk("amazon-bedrock/b", { input: 0.1, output: 0.5, name: "Bravo", providerName: "OpenRouter", approved: false }),
+        mk("amazon-bedrock/d", { input: 0.3, output: 1.2, name: "Delta" }),
+      ],
+      { ...scoring, lookup: (id) => (id === "amazon-bedrock/a" ? bm("a", { intelligenceIndex: 60, indexVersion: "v5.0" }) : id === "amazon-bedrock/d" ? bm("d", { intelligenceIndex: 50, indexVersion: "v4.0" }) : undefined) },
+    );
+    expect(ids(filterRows(mixed, { provider: "OpenRouter" }))).toEqual(["b"]);
+    expect(ids(filterRows(mixed, { approvedOnly: true }))).toEqual(["a", "d"]);
+    // currentOnly keeps rows whose public score is on the latest index version;
+    // an older-version score (d) and no score (b) are hidden.
+    expect(ids(filterRows(mixed, { currentOnly: true, scoring }))).toEqual(["a"]);
+    expect(ids(filterRows(mixed, { currentOnly: true, scoring, needle: "alpha" }))).toEqual(["a"]);
+    expect(isCurrentScore(mixed[2].benchmark, scoring)).toBe(false);
+    // A model with our own eval result is "current" even without a current public score.
+    const evaluated = buildRows([mk("amazon-bedrock/d", { input: 0.3, output: 1.2, name: "Delta" })], {
+      ...scoring,
+      lookup: () => bm("d", { intelligenceIndex: 50, indexVersion: "v4.0", valetEval: { suite: "s", modelSpec: "m", cases: 1, runsPerCase: 1, passRate: 80, ranAt: "2026-10-30" } }),
+    });
+    expect(ids(filterRows(evaluated, { currentOnly: true, scoring }))).toEqual(["d"]);
   });
 });

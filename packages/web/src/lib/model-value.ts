@@ -19,6 +19,7 @@ export type SortKey =
   | "intelligence"
   | "coding"
   | "valetEval"
+  | "evalCost"
   | "name";
 
 export type QualitySource = "aa" | "valet";
@@ -136,6 +137,7 @@ function keyValue(row: ComparisonRow, key: SortKey): number | string | undefined
     case "intelligence": return positive(row.benchmark?.intelligenceIndex);
     case "coding": return positive(row.benchmark?.codingIndex);
     case "valetEval": return row.benchmark?.valetEval?.passRate;
+    case "evalCost": return positive(row.benchmark?.valetEval?.meanCostUsd);
     case "name": return row.model.name.toLowerCase();
   }
 }
@@ -170,9 +172,26 @@ export function sortRows(rows: ComparisonRow[], key: SortKey, dir: "asc" | "desc
   });
 }
 
-/** Case-insensitive substring match over name, id and provider name. */
-export function filterRows(rows: ComparisonRow[], needle: string): ComparisonRow[] {
-  const q = needle.trim().toLowerCase();
-  if (q === "") return rows;
-  return rows.filter((r) => [r.model.name, r.model.id, r.model.providerName].some((s) => s.toLowerCase().includes(q)));
+export interface RowFilter {
+  /** Case-insensitive substring over name, id and provider name. */
+  needle?: string;
+  /** Exact provider display name; undefined means any. */
+  provider?: string;
+  approvedOnly?: boolean;
+  /** Keep only rows that are benchmarked for today: a public score on the
+   * newest index version (`isCurrentScore`) or a Valet eval result. Needs
+   * `scoring`. */
+  currentOnly?: boolean;
+  scoring?: QualityScoring;
+}
+
+export function filterRows(rows: ComparisonRow[], filter: RowFilter): ComparisonRow[] {
+  const q = (filter.needle ?? "").trim().toLowerCase();
+  return rows.filter((r) => {
+    if (q !== "" && ![r.model.name, r.model.id, r.model.providerName].some((s) => s.toLowerCase().includes(q))) return false;
+    if (filter.provider !== undefined && r.model.providerName !== filter.provider) return false;
+    if (filter.approvedOnly && r.model.approved === false) return false;
+    if (filter.currentOnly && filter.scoring && !isCurrentScore(r.benchmark, filter.scoring) && r.benchmark?.valetEval === undefined) return false;
+    return true;
+  });
 }
