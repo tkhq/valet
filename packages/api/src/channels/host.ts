@@ -1,7 +1,7 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
-import { bindConversation, findConversationBinding, findPriorConversationThread } from "./conversation-bindings.js";
+import { bindConversation, findConversationBinding, findPriorConversationThread, type ConversationScope } from "./conversation-bindings.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -341,6 +341,17 @@ function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & 
 /** Thread metadata: the last Slack message ts a group DM turn has read. */
 const GROUP_READ_THROUGH_KEY = "slackGroupReadThroughTs";
 
+/** Runs `work` after the earlier work queued on `key`. An entry is removed once its chain drains. */
+async function serializeOn<T>(chains: Map<string, Promise<unknown>>, key: string, work: () => Promise<T>): Promise<T> {
+  const next = (chains.get(key) ?? Promise.resolve()).catch(() => undefined).then(work);
+  chains.set(key, next);
+  try {
+    return await next;
+  } finally {
+    if (chains.get(key) === next) chains.delete(key);
+  }
+}
+
 function chatIdFromKey(conversationKey: string): string {
   const idx = conversationKey.lastIndexOf(":");
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
@@ -401,7 +412,10 @@ export class ChannelHost {
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
   /** Serializes same-gate callbacks so only the first concurrent decision wins. */
-  private gateCallbackChains = new Map<string, Promise<void>>();
+  private gateCallbackChains = new Map<string, Promise<unknown>>();
+  /** Serializes one person's destination lookups per Slack conversation, so a
+   * follow-up waits for the mention that is still opening its chat. */
+  private destinationChains = new Map<string, Promise<unknown>>();
   /** Recent gate resolutions, bounded FIFO (cap `DEDUP_CAP`). A prompt can be
    * recorded AFTER its gate settled — `routeAttention` fires deliverers
    * without awaiting them, so a fast resolution legitimately beats an
@@ -1728,6 +1742,17 @@ export class ChannelHost {
         : session.threadByKey(threadKey);
     }
     const scope = { orgId, userId, sessionId: session.id, channelType, conversationKey };
+    return serializeOn(this.destinationChains, `${session.id}:${userId}:${conversationKey}`, () =>
+      this.resolveConversationThread(session, scope, threadKey, create));
+  }
+
+  private async resolveConversationThread(
+    session: Session,
+    scope: ConversationScope,
+    threadKey: string,
+    create: boolean,
+  ): Promise<Thread | null> {
+    const { orgId, userId } = scope;
     let threadId = await findConversationBinding(this.deps.db, scope);
     if (!threadId) {
       let candidateId = await findPriorConversationThread(this.deps.db, scope, threadKey);
@@ -1987,14 +2012,7 @@ export class ChannelHost {
   }
 
   private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {
-    const previous = this.gateCallbackChains.get(key) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(callback);
-    this.gateCallbackChains.set(key, next);
-    try {
-      await next;
-    } finally {
-      if (this.gateCallbackChains.get(key) === next) this.gateCallbackChains.delete(key);
-    }
+    await serializeOn(this.gateCallbackChains, key, callback);
   }
 
   /**

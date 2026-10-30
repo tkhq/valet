@@ -608,6 +608,42 @@ describe("ChannelHost.handleUpdate", () => {
     }
   });
 
+  it("holds a group DM follow-up until the sender's mention has opened its chat", async () => {
+    const fetchThreadWindow = vi.fn(async () => null);
+    const { slackHost } = await startSlackHost({ fetchThreadWindow });
+    const ensureFreshThread = engineHost.ensureFreshThread.bind(engineHost);
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => { release = resolve; });
+    const creating = vi.spyOn(engineHost, "ensureFreshThread").mockImplementationOnce(async (...args) => {
+      await opened;
+      return ensureFreshThread(...args);
+    });
+    try {
+      const key = "slack:T1:C0RACE:666.1";
+      const mention = slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:race-1", conversationKey: key, text: "can you see this", threadTs: "666.1",
+        group: { channelId: "C0RACE", messageTs: "666.1" },
+      }));
+      await vi.waitFor(() => expect(creating).toHaveBeenCalled());
+      const followUp = slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:race-2", conversationKey: key, text: "and the logs too", threadTs: "666.1",
+        group: { channelId: "C0RACE", messageTs: "666.2", followUp: true },
+      }));
+      release();
+      await Promise.all([mention, followUp]);
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = await session.threadByKey("slack:C0RACE:666.1");
+      if (!thread) throw new Error("Expected the group conversation's thread");
+      const queued = await engineStore.listUnsettledSubmissions(session.id);
+      const entries = await engineStore.getEntries(session.id, thread.id);
+      const text = JSON.stringify([...queued.map((q) => q.content), ...entries.map((e) => e.type === "message" ? e.content : "")]);
+      expect(text).toContain("and the logs too");
+    } finally {
+      creating.mockRestore();
+      await slackHost.stop();
+    }
+  });
+
   it("leaves a group DM mention to a rule that listens there", async () => {
     const fetchThreadWindow = vi.fn(async () => null);
     const { slackHost } = await startSlackHost({ fetchThreadWindow }, true);

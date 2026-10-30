@@ -73,6 +73,11 @@ check, and gets no notice when the sender has no linked account or the group
 DM is shared with another organization. Other replies without a mention reach
 no assistant. They reach the next turn through the thread window.
 
+The host serializes destination lookups for one person and conversation. A
+follow-up that arrives while that person's mention still opens the chat waits
+for it, and then continues that chat. The lock is in one process only. A
+follow-up that the host handles before the mention reaches it opens nothing.
+
 Slack sends no `app_mention` event when an edit adds the mention, and the
 transport reads edits only in a 1:1 DM. A mention that a person adds by
 editing a reply therefore starts no turn. Their follow-up already reached

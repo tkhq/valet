@@ -142,6 +142,8 @@ export function buildOverheardDigest(items: QueueItem[]): {
     throw new ValidationError("buildOverheardDigest requires at least one signal-content item");
   }
   const lines = items.flatMap(overheardLines);
+  // The constituents settle as merged, so their media rides on the digest.
+  const attachments = items.flatMap((i) => (isSignalContent(i.content) ? i.content.attachments ?? [] : []));
   const attributes: Record<string, string> = { ...(newest.content.attributes ?? {}) };
   delete attributes.sender;
   attributes.digest = String(lines.length);
@@ -153,6 +155,7 @@ export function buildOverheardDigest(items: QueueItem[]): {
       body: `${OVERHEARD_DIGEST_HEADER}\n${lines.join("\n")}`,
       attributes,
       origin: newest.content.origin,
+      ...(attachments.length > 0 ? { attachments } : {}),
     },
     digest: { constituentIds: items.map((i) => i.id), lines },
   };
