@@ -13,6 +13,7 @@ import {
   type MessageEntry,
   type SignalContent,
 } from "../src/index.js";
+import { entryMessageTime, messageTimeLine } from "../src/model-context.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -104,7 +105,8 @@ describe("SignalContent admission", () => {
     expect(expectedXml).toBe(
       `<signal signalType="slack.message" channel="C1" sender="alice &amp; bob">&lt;b&gt;hi&lt;/b&gt; &amp; &quot;quote&quot; &apos;apos&apos;</signal>`,
     );
-    expect(userMessageText(captured[0])).toBe(expectedXml);
+    // A signal turn (a schedule, an event) carries its sent time like any message.
+    expect(userMessageText(captured[0])).toBe(`${messageTimeLine(entryMessageTime(userEntry!))}\n\n${expectedXml}`);
 
     faux.unregister();
   });
