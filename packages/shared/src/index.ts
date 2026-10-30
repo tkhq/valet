@@ -13,6 +13,7 @@ export * from './scope-key.js';
 export * from './schedule-run-id.js';
 export * from './resource-quantity.js';
 export * from './search-query.js';
+export * from './model-benchmarks.js';
 export * from './sandbox-resources.js';
 export * from './security-credentials.js';
 export * from './skill-block.js';
