@@ -19,6 +19,23 @@ function codeText(children: ReactNode): string {
   return "";
 }
 
+/** A cell with this much text or less holds a value: a name, a date, a
+ * status. More than `PROSE_CELL_CHARS` is a sentence. */
+const VALUE_CELL_CHARS = 12;
+const PROSE_CELL_CHARS = 24;
+
+/** Width rules for one table cell. A value stays on one line, so a name
+ * like `member-1` does not break at its hyphen. A sentence keeps at least
+ * 10rem, or 35% of a phone screen: without the floor, a table too wide to
+ * fit squeezes each column to its longest word, and the sentence stacks one
+ * word per line. Exported for tests. */
+export function tableCellClass(children: ReactNode): string | undefined {
+  const length = codeText(children).length;
+  if (length <= VALUE_CELL_CHARS) return "whitespace-nowrap";
+  if (length > PROSE_CELL_CHARS) return "min-w-[min(10rem,35vw)]";
+  return undefined;
+}
+
 function languageFromClassName(className: unknown): string | undefined {
   if (typeof className !== "string") return undefined;
   return /language-(\S+)/.exec(className)?.[1];
@@ -100,10 +117,16 @@ export function Markdown({
   children,
   className,
   memoryLinks,
+  wideTables = false,
 }: {
   children: string;
   className?: string;
   memoryLinks?: MemoryLinkHandling;
+  /** Let a table that needs more room grow past the text column, centered
+   * on it, up to the width of the nearest `@container` box or 64rem. The
+   * caller must give that container room on both sides of a centered
+   * column; without a container, `cqw` falls back to the viewport. */
+  wideTables?: boolean;
 }) {
   const publicOrigin = usePublicOrigin();
   return (
@@ -121,7 +144,8 @@ export function Markdown({
         // the pill styles don't also apply to `<code>` inside fenced blocks
         // (the inner code element there should be transparent + inherit).
         "[&_:not(pre)>code]:bg-neutral-100 dark:[&_:not(pre)>code]:bg-neutral-800",
-        "[&_:not(pre)>code]:text-ink [&_:not(pre)>code]:whitespace-pre-wrap [&_:not(pre)>code]:[overflow-wrap:anywhere]",
+        // Code inside a table cell keeps whole tokens (see the table below).
+        "[&_:not(pre)>code]:text-ink [&_:not(pre)>code]:whitespace-pre-wrap [&_:not(pre):not(td):not(th)>code]:[overflow-wrap:anywhere]",
         "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5",
         "[&_:not(pre)>code]:text-[0.85em] [&_:not(pre)>code]:font-normal",
         "prose-code:before:content-none prose-code:after:content-none",
@@ -150,10 +174,32 @@ export function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // Columns size to their content and wrap at spaces: a column is
+          // never narrower than its longest word, and only a word too long
+          // for the width breaks. The box is as wide as the table wants,
+          // from the text column up to its limit. A centering flex parent
+          // spreads extra width equally to both sides. The box scrolls
+          // only when the longest words of all columns do not fit.
           table: ({ children }) => (
-            <div className="max-w-full overflow-x-auto overscroll-x-contain" tabIndex={0} role="region" aria-label="Table">
-              <table className="w-max min-w-full [overflow-wrap:normal]">{children}</table>
+            <div className="flex justify-center">
+              <div
+                className={cn(
+                  "w-max min-w-full max-w-full shrink-0 overflow-x-auto overscroll-x-contain",
+                  wideTables && "max-w-[min(100cqw,64rem)]",
+                )}
+                tabIndex={0}
+                role="region"
+                aria-label="Table"
+              >
+                <table className="w-full [overflow-wrap:break-word]">{children}</table>
+              </div>
             </div>
+          ),
+          th: ({ node: _node, children, className, ...rest }) => (
+            <th className={cn(className, tableCellClass(children))} {...rest}>{children}</th>
+          ),
+          td: ({ node: _node, children, className, ...rest }) => (
+            <td className={cn(className, tableCellClass(children))} {...rest}>{children}</td>
           ),
           // External links open in a new tab and do not leak referrer.
           // Inside a memory document, a cross-reference to another memory

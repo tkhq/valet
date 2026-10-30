@@ -9,6 +9,8 @@ Page zoom can leave app controls outside the visible area. The user requested a 
 
 - Keep the conversation column within the available width. Wrap long words, URLs, and inline code without changing copied text.
 - Contain wide tables and fenced code within their own scrollers. The transcript itself scrolls vertically only.
+- Size table columns to their content and wrap cell text at spaces. A value of 12 characters or fewer stays on one line. A cell with more than 24 characters keeps at least 10rem, or 35% of the screen on a phone.
+  In an assistant message, a table can grow past the text column, centered on it, up to the message row width or 64rem. A table scrolls sideways only when the longest words of its columns do not fit. (Revised 2026-10-30: the first version sized every table to its longest line, so cells never wrapped.)
 - Reduce the phone navigation bar to 48 pixels. Use a compact single-row session header with the title, model, and one menu.
 - Move phone ratings, copy, and pause actions into that menu. Preserve permissions, pending states, errors, and confirmations.
 - Keep phone text entry at 16 pixels. On touchscreens, use inherited pan-x and pan-y touch actions to suppress page-scale gestures while preserving scrolling.
