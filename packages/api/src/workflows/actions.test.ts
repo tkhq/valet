@@ -885,7 +885,7 @@ describe("DB-backed actions", () => {
     if (!result.success) throw new Error("expected the mint to succeed");
     const { next } = result.data as { next: string };
     expect(next).toContain("register it in the source");
-    expect(next).toContain("offer a schedule");
+    expect(next).toContain("always end your reply with one sentence that offers a schedule");
   });
 
   it("create_webhook called twice rotates — second hookId differs from the first", async () => {
