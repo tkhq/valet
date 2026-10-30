@@ -902,6 +902,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       mdast-util-from-markdown:
         specifier: ^2.0.2
         version: 2.0.2

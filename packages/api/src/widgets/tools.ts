@@ -3,7 +3,7 @@
  * a table, meeting quotes, an event) instead of prose. The spec arrives as
  * the call's args and the web draws it from there, so the result only
  * confirms. A spec that does not match the catalog comes back as an error
- * that names what to fix.
+ * that names what to fix. A Slack turn gets the way to post a chart there.
  */
 import { Type, type TSchema } from "typebox";
 import type { ToolDef } from "@valet/engine";
@@ -29,9 +29,13 @@ export function buildWidgetTools(): ToolDef[] {
     }),
     // Drawing a card reads nothing and changes nothing.
     concurrencySafe: true,
-    execute: async ({ spec }) => {
+    execute: async ({ spec }, ctx) => {
       const problems = widgetSpecProblems(spec);
       if (problems) return { text: problems, ok: false };
+      // Slack shows no cards. Its native chart block takes the Chart props as they are.
+      if (ctx.origin?.channelType === "slack") {
+        return { text: "Slack does not show cards, so this turn's Slack thread does not see it. Answer in text there, and post each Chart element's { title, chart } with call_tool slack.reply_to_origin as charts (at most 2 per message)." };
+      }
       return { text: "The card is in the thread. Don't repeat what it shows." };
     },
   })];

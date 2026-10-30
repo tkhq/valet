@@ -336,6 +336,83 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
   });
 
+  const ticketsChart = {
+    title: 'Tickets opened',
+    chart: {
+      type: 'bar',
+      series: [{ name: 'Email', data: [{ label: 'Mon', value: 40 }, { label: 'Tue', value: 52 }] }],
+      axis_config: { categories: ['Mon', 'Tue'], y_label: 'Tickets' },
+    },
+  };
+  const slackOrigin = { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } as const;
+
+  it('reply_to_origin posts charts as native data_visualization blocks below the text', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets this week:', charts: [ticketsChart] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { text: string; blocks: Record<string, unknown>[] };
+    expect(body.text).toBe('Tickets this week:');
+    expect(body.blocks.at(-1)).toEqual({ type: 'data_visualization', title: 'Tickets opened', chart: ticketsChart.chart });
+    expect(body.blocks[0]).toMatchObject({ type: 'markdown' });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9', charts: 1 } });
+  });
+
+  it('reply_to_origin posts each chart as a table when Slack rejects the chart block', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets this week:', charts: [ticketsChart] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    const [, retry] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const blocks = JSON.stringify((JSON.parse(retry.body as string) as { blocks: unknown[] }).blocks);
+    expect(blocks).not.toContain('data_visualization');
+    expect(blocks).toContain('Tickets opened');
+    expect(blocks).toContain('Email');
+    expect(result).toMatchObject({ success: true });
+  });
+
+  // A label with a pipe and a newline passes the chart check. The table
+  // fallback put it into a cell unchanged, which split the row and added a
+  // forged one.
+  it('reply_to_origin keeps a label with pipes and newlines in one table cell', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const forged = { title: 'Share', chart: { type: 'pie', segments: [{ label: 'P|\n|forged|9|', value: 1 }] } };
+    await action('slack.reply_to_origin').execute({ text: 'Share:', charts: [forged] }, pluginCtx({ origin: slackOrigin }));
+    const [, retry] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const { blocks } = JSON.parse(retry.body as string) as { blocks: { text?: string }[] };
+    const table = blocks.map((block) => block.text ?? '').join('\n').split('\n').filter((line) => line.startsWith('|'));
+    expect(table).toEqual(['| Segment | Value |', '| --- | ---: |', '| P\\| \\|forged\\|9\\| | 1 |']);
+  });
+
+  // The table fallback is mrkdwn, where Slack reads <@U…> in a label as a
+  // mention. The mention check saw only the reply text.
+  it('reply_to_origin refuses a chart label that mentions an unknown user', async () => {
+    mockSlackMethods(fetchMock, (user) => user === 'U01ZZZZZZZ'
+      ? jsonResponse(200, { ok: false, error: 'user_not_found' })
+      : jsonResponse(200, { ok: true, user: { id: user } }));
+    const mention = { title: 'Owners', chart: { type: 'pie', segments: [{ label: '<@U01ZZZZZZZ>', value: 1 }] } };
+    const result = await action('slack.reply_to_origin').execute({ text: 'Owners:', charts: [mention] }, pluginCtx({ origin: slackOrigin }));
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('U01ZZZZZZZ') });
+    expect(messageWrites(fetchMock)).toHaveLength(0);
+  });
+
+  it('reply_to_origin refuses a chart Slack would reject, before it posts', async () => {
+    const tooLong = { ...ticketsChart, title: 'x'.repeat(51) };
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets', charts: [tooLong] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    expect(result).toEqual({ success: false, error: 'Chart 1: Give the chart a title of 1 to 50 characters.' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('reply_to_origin uses the current assistant identity', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
     await action('slack.reply_to_origin').execute(
