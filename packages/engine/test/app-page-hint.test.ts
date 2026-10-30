@@ -36,7 +36,7 @@ describe("Ask Valet page hints", () => {
     const live = renderReplyContext(entry.content, entry.metadata);
     expect(live).toContain("/settings/profile");
     const restored = entriesToAgentMessages([entry], { api: "anthropic", provider: "anthropic", id: "model" });
-    expect(restored).toEqual([{ role: "user", timestamp: 1, content: [{ type: "text", text: live }] }]);
+    expect(restored).toEqual([{ role: "user", timestamp: 1, content: [{ type: "text", text: `[sent: Thursday 1970-01-01 00:00 UTC]\n\n${live}` }] }]);
     expect(entry.content).toBe("Help here.");
   });
 });

@@ -129,10 +129,10 @@ describe("Image attachments", () => {
     expect(msg.role).toBe("user");
     expect(msg.content).toHaveLength(2);
 
-    // Text block first
+    // Text block first, after the `[sent: …]` line
     expect(msg.content[0]).toEqual({
       type: "text",
-      text: "What's in this image?",
+      text: expect.stringMatching(/^\[sent: [^\]]+\]\n\nWhat's in this image\?$/),
     });
 
     // Image block second (base64 encoded)
@@ -164,7 +164,7 @@ describe("Image attachments", () => {
     };
 
     expect(entriesToAgentMessages([entry], faux.getModel())).toEqual([
-      { role: "user", content: [{ type: "text", text: "Read the PDF" }], timestamp: expect.any(Number) },
+      { role: "user", content: [{ type: "text", text: expect.stringMatching(/^\[sent: [^\]]+\]\n\nRead the PDF$/) }], timestamp: expect.any(Number) },
     ]);
   });
 

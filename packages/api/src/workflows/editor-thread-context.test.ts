@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type ToolDef } from "@valet/engine";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, withoutSentLine } from "@valet/engine/test-helpers";
 import { isWorkflowRunThread, workflowConversationKey, workflowEditorThreadContext, workflowRunThreadContext, workflowThreadContext } from "./editor-thread-context.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
 describe("workflow editor context", () => {
@@ -89,7 +89,7 @@ describe("workflow run thread context", () => {
       expect(system).toContain("These rules apply to every signal message in this conversation, such as signalType `workflow.request` or `child.settled`.");
       expect(system).toContain("When a person writes in this conversation, use your normal rules for questions.");
       // The model can tell the two apart: only the run's request carries that signal type.
-      const asked = replyTurn.filter(message => message.role === "user").map(messageText);
+      const asked = replyTurn.filter(message => message.role === "user").map(message => withoutSentLine(messageText(message)));
       expect(asked).toHaveLength(2);
       expect(asked[0]).toMatch(/^<signal signalType="workflow\.request" runId="wfrun_abc">/);
       expect(asked[1]).toBe("Ask me which projects before you inspect them.");

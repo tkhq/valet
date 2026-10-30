@@ -180,6 +180,14 @@ export interface ThreadData {
 /** Key in `ThreadData.metadata` that holds the creation-time user timezone. */
 export const THREAD_USER_TIMEZONE_KEY = "userTimezone";
 
+/**
+ * Key in a user `MessageEntry.metadata` that holds the user timezone (string,
+ * or null when unknown) read when the entry was written. With `createdAt` it
+ * renders the entry's `[sent: …]` line (`messageTimeLine`). Written once, so
+ * the line never changes.
+ */
+export const ENTRY_USER_TIMEZONE_KEY = "userTimezone";
+
 export interface QueueState {
   threadId: string;
   mode: QueueMode;

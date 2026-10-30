@@ -538,7 +538,7 @@ half would put earlier covered entries back into the context.
 Head entries outside the window are not claimed. They keep their place in live
 context, and the next pass sees a shorter pending head. A head larger than the
 summarizer input budget is compacted over several passes. On a 400-entry head
-worth about 403,000 summarizer tokens, 62 entries fit one window;
+worth about 404,000 summarizer tokens, 62 entries fit one window;
 `compaction-pure.test.ts` pins that measurement.
 
 The chain converges. Each written checkpoint covers at least one head entry that

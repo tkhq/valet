@@ -432,6 +432,102 @@ describe("runtime model context delivered to the provider", () => {
       expect(marked(second)).toBe(1);
     });
 
+    describe("message sent time", () => {
+      const DAY = 24 * 3_600_000;
+      type Block = { type: string; text?: string };
+      const userTexts = (ctx: pi.Context) => ctx.messages
+        .filter((m) => m.role === "user")
+        .map((m) => typeof m.content === "string" ? m.content : (m.content as Block[]).map((b) => b.text ?? "").join(""));
+
+      function recordingSetup() {
+        const s = setup();
+        const ctxs: pi.Context[] = [];
+        const record = () => (ctx: pi.Context) => {
+          ctxs.push(structuredClone(ctx));
+          return pi.fauxAssistantMessage("done");
+        };
+        s.small.setResponses([record(), record(), record()]);
+        return { s, ctxs };
+      }
+
+      it("tells a later turn the current time in UTC and user local time, and keeps earlier stamps", async () => {
+        const { s, ctxs } = recordingSetup();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        const zone = "America/Los_Angeles";
+        const session = await s.engine.createSession({ ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone });
+        await run(session);
+        // The same thread three days later.
+        vi.setSystemTime(T0 + 3 * DAY);
+        await run(session);
+
+        expect(ctxs).toHaveLength(2);
+        const [first, second] = [userTexts(ctxs[0]!), userTexts(ctxs[1]!)];
+        expect(first[0]).toBe("[sent: Monday 2026-10-12 16:35 UTC; user local: Monday 2026-10-12 09:35 PDT (America/Los_Angeles)]\n\nwork");
+        expect(second.at(-1)).toBe("[sent: Thursday 2026-10-15 16:35 UTC; user local: Thursday 2026-10-15 09:35 PDT (America/Los_Angeles)]\n\nwork");
+        // The first message keeps its own stamp, so the cached history prefix does not change.
+        expect(second[0]).toBe(first[0]);
+        // The stamp is a model view only. The stored entry keeps the text the user sent.
+        const entries = await session.readEntries("web:default");
+        expect(JSON.stringify(entries)).not.toContain("[sent:");
+      });
+
+      it("renders the same history after a restart, so the cached prefix survives", async () => {
+        const { s, ctxs } = recordingSetup();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        const zone = "America/Los_Angeles";
+        const options = { ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone };
+        const session = await s.engine.createSession(options);
+        await run(session);
+        vi.setSystemTime(T0 + DAY);
+        await run(session);
+        vi.setSystemTime(T0 + 2 * DAY);
+        const restored = await new Engine({ providers: s.providers }).restoreSession({ sessionId: session.id, options });
+        await run(restored);
+
+        expect(ctxs).toHaveLength(3);
+        const [hot, cold] = [await anthropicPayload(ctxs[1]!), await anthropicPayload(ctxs[2]!)];
+        expect(JSON.stringify(withoutCacheMarkers(cold.messages.slice(0, hot.messages.length))))
+          .toBe(JSON.stringify(withoutCacheMarkers(hot.messages)));
+        expect(userTexts(ctxs[2]!).at(-1)).toContain("[sent: Wednesday 2026-10-14 16:35 UTC;");
+      });
+
+      it("uses the timezone current when each message was sent", async () => {
+        const { s, ctxs } = recordingSetup();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        let zone: string | undefined = "America/Los_Angeles";
+        const session = await s.engine.createSession({ ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone });
+        await run(session);
+        zone = "Asia/Tokyo";
+        await run(session);
+
+        const texts = userTexts(ctxs[1]!);
+        expect(texts[0]).toContain("(America/Los_Angeles)");
+        expect(texts.at(-1)).toBe("[sent: Monday 2026-10-12 16:35 UTC; user local: Tuesday 2026-10-13 01:35 GMT+9 (Asia/Tokyo)]\n\nwork");
+      });
+
+      it("shows UTC only when the user timezone is not known", async () => {
+        const { s, ctxs } = recordingSetup();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        const session = await s.engine.createSession(s.options);
+        await run(session);
+
+        expect(userTexts(ctxs[0]!)[0]).toBe("[sent: Monday 2026-10-12 16:35 UTC]\n\nwork");
+      });
+
+      it("tells the model that the newest sent line is the current time", async () => {
+        const { s } = recordingSetup();
+        s.small.setResponses([s.capture()]);
+        await run(await startedAt(s, "America/Los_Angeles"));
+
+        const b = block(s.prompts[0]);
+        expect(b).toContain("The newest [sent: …] line is the current time");
+      });
+    });
+
     it("keeps the whole Runtime model section unchanged between calls in steady state", async () => {
       const s = setup();
       const record = (reply: pi.AssistantMessage) => (ctx: pi.Context) => {

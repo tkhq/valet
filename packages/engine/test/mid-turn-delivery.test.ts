@@ -26,6 +26,7 @@ import {
   type QueueItem,
   type ToolDef,
 } from "../src/index.js";
+import { withoutSentLine } from "../src/test-helpers/sent-line.js";
 
 const PERSON = { id: "u1", interactive: true };
 
@@ -60,12 +61,12 @@ function blockingTool(): { tool: ToolDef; entered: Promise<void>; release: () =>
   return { tool, entered: entered.promise, release: gate.open };
 }
 
-/** The user-message texts the model received, in order. */
+/** The user-message texts the model received, in order, without the `[sent: …]` line. */
 function userTexts(context: { messages: Array<{ role: string; content: unknown }> }): string[] {
-  return context.messages.filter((m) => m.role === "user").map((m) =>
+  return context.messages.filter((m) => m.role === "user").map((m) => withoutSentLine(
     typeof m.content === "string"
       ? m.content
-      : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
+      : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join("")));
 }
 
 async function setup(provider: string, responses: FauxResponseStep[], tools: ToolDef[] = []) {
