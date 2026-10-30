@@ -25,6 +25,7 @@ import {
   type MessageEntry,
   type QueueItem,
   type ToolDef,
+  type WriteFence,
 } from "../src/index.js";
 
 const PERSON = { id: "u1", interactive: true };
@@ -68,11 +69,10 @@ function userTexts(context: { messages: Array<{ role: string; content: unknown }
       : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
 }
 
-async function setup(provider: string, responses: FauxResponseStep[], tools: ToolDef[] = []) {
+async function setup(provider: string, responses: FauxResponseStep[], tools: ToolDef[] = [], stream = new InMemoryEventStream()) {
   const faux = registerFauxProvider({ provider });
   faux.setResponses(responses);
   const store = new InMemorySessionStore();
-  const stream = new InMemoryEventStream();
   const events: BusEvent[] = [];
   stream.subscribe({}, (e) => events.push(e));
   const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
@@ -514,6 +514,34 @@ describe("a message while a question is open", () => {
     expect(await h.store.getDecisionGate(h.session.id, gateId)).toMatchObject({ status: "withdrawn" });
     expect(h.events.map((e) => e.event).find((e) => e.type === "decision_gate_withdrawn"))
       .toMatchObject({ gateId, reason: "message" });
+    h.faux.unregister();
+  });
+
+  it("withdraws the question for a message admitted before the question's waiter exists", async () => {
+    // Hold the question's announcement: the gate is saved and shown, but the
+    // waiter is not registered yet. A message sent now must still close it.
+    let reached!: () => void;
+    const announced = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    class HoldingStream extends InMemoryEventStream {
+      override async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
+        if (event.event.type === "decision_gate") { reached(); await held; }
+        return super.append(event, eventKey, fence);
+      }
+    }
+    const h = await setup("question-window", [askRepo, fauxAssistantMessage("web is the frontend")], [], new HoldingStream());
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await announced;
+    expect(h.thread.pendingDecisionGates()).toHaveLength(0);
+    const second = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
+    release();
+    await waitFor(() => h.settled(first.queueItemId));
+
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(h.events.map((e) => e.event).find((e) => e.type === "decision_gate_withdrawn")).toMatchObject({ reason: "message" });
     h.faux.unregister();
   });
 
