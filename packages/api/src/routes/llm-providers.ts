@@ -299,7 +299,10 @@ llmProvidersRouter.put("/:id/key", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (typeof body.apiKey !== "string" || body.apiKey.length === 0) {
+  // Whitespace-only is rejected here, not merely trimmed later: a stored
+  // blank would count as "has key" for catalog activation while the resolver
+  // treats it as absent, leaving a selectable row whose turns all fail.
+  if (typeof body.apiKey !== "string" || body.apiKey.trim().length === 0) {
     return c.json({ error: "apiKey is required" }, 400);
   }
 

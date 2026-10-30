@@ -343,6 +343,19 @@ describe("GET /api/org/llm-providers", () => {
     }
   });
 
+  it("rejects a whitespace-only key so a row can never look keyed but resolve as keyless", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "   " }),
+    });
+    expect(res.status).toBe(400);
+    const list = (await (await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS })).json()) as ListLlmProvidersResponse;
+    expect(list.providers[0]?.hasKey).toBe(false);
+  });
+
   it("names amazon-bedrock in the invalid-kind error", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
