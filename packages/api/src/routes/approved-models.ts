@@ -57,10 +57,12 @@ approvedModelsRouter.put("/", async (c) => {
   const validIds = catalogValidIds(catalog);
   const tierError = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
-    // The settings UI preserves saved approvals when adding a new model.
-    // Allow retaining retired Sol, but never introduce it into a new policy.
+    // The settings UI sends the saved list plus or minus one id, so an id
+    // approved while it was in the catalog (a retired model, or a Bedrock
+    // default the admin later dropped from the row's selection) may be
+    // RETAINED; only ids new to the policy must be in today's catalog.
     const previous = await getApprovedModels(tx, user.orgId);
-    if (previous?.includes("openai/gpt-5.6-sol")) validIds.add("openai/gpt-5.6-sol");
+    for (const id of previous ?? []) validIds.add(id);
     const error = validateApprovedModelsList(approved, validIds);
     if (error) return error;
     const validationError = validateTierTargetsRemainApproved(
