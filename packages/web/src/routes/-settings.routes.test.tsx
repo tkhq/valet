@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSyncExternalStore } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import {
   Outlet,
   RouterProvider,
@@ -248,6 +248,16 @@ describe("model comparison", () => {
     expect(within(content()).getByRole("textbox", { name: "Filter models" })).toBeTruthy();
     const rail = screen.getByRole("navigation", { name: "Settings" });
     expect(within(rail).getByRole("link", { name: "Model comparison" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("widens the content column for the comparison table and keeps it narrow elsewhere", async () => {
+    await mount("/settings/model-comparison");
+    await within(content()).findByRole("heading", { name: "Model comparison" });
+    expect(content().className).not.toContain("max-w-3xl");
+    cleanup();
+    await mount("/settings/policies");
+    await within(content()).findByText("policy overrides: personal");
+    expect(content().className).toContain("max-w-3xl");
   });
 
   it("is the Compare tab of Models and usage for an admin", async () => {

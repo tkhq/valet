@@ -148,3 +148,21 @@ The web page is the only consumer today, but the engine's model picker and the a
 - A Bedrock row model with no registry price shows dashes in the three price columns, not $0.
 - Removing a default from the snapshot fails the shared unit test.
 - Web and shared suites pass.
+
+## Amendment 2026-10-30 (b): layout, filters and the default view
+
+Conner's review of the first deployed page: the sticky Model column covered the price columns, long ids wrapped rows to three lines, and the settings column's 48rem cap wasted the screen. Changes:
+
+- **One Model cell.** Name on the first line with a small "reasoning" badge when the model reasons; provider and the bare id (namespace stripped, monospace, truncated with the full catalog id as the tooltip) on the second line. The Provider and Reasoning columns are gone. No sticky column; the table sits in a bordered, horizontally scrollable container that it rarely needs.
+- **Short headers.** Input, Output, Blended, Context, Intelligence, Coding, Valet eval, Quality, Value, Approved; the caption carries the unit ("$ per 1M tokens"). Value is set larger and bolder than its neighbours. First click on a price or context header sorts ascending, on a score header descending.
+- **Wide layout.** `/settings/model-comparison` and `/settings/organization/model-comparison` drop the settings column's `max-w-3xl`; other settings pages keep it (`WIDE_SETTINGS_ROUTES` in the settings layout).
+- **Default view hides what cannot be compared.** A row shows by default only when its public score is on the newest index version or it has a Valet eval result. Older-version scores and unscored or unknown models are hidden behind "Show N hidden (older index versions or not benchmarked)". When nothing in the catalog qualifies, the table shows everything and the toggle is absent, so the page is never empty by default.
+- **Filters.** Text filter (name, id, provider); provider chips (shown when more than one provider is present); "Approved only" (shown when the org restricts models). Filters compose, and the hidden count respects the other filters.
+
+- **Eval $/case.** The hard-suite run also measures mean cost per case per model, which captures verbosity and retries that list price cannot. It gets its own sortable column beside the pass rate (ascending first, like prices). Value stays on list price because only evaluated models have a measured cost; switching Value's cost basis to the measured number once every default is evaluated is an open option.
+
+`filterRows` takes a structured `RowFilter` (`needle`, `provider`, `approvedOnly`, `currentOnly` + `scoring`). Value is still rescaled over the whole catalog, not the filtered rows.
+
+## First recorded run, 2026-10-30
+
+Hard suite (15 cases, 3 runs each) against 16 models, total spend about $9. Recorded in the snapshot's `valetEval` blocks. Two harness findings: Llama 4 Maverick cannot run in Valet at all (Bedrock rejects tool use in streaming mode, 0/45) and left the Bedrock defaults; and the three `builder-*` cases require the `write` tool to have been called, which Claude Opus 5.5 and Sonnet 5.5 fail only because they write files through a bash heredoc while passing every functional `verify_command` check. Their recorded 82% and 80% are therefore understated by up to 20 points; relaxing that assertion to "the file exists" is a follow-up for the eval cases, not this page.

@@ -65,6 +65,13 @@ const FOUR = [
 function rowOf(name: string) {
   return screen.getByText(name).closest("tr")!;
 }
+/** The cell under the column whose header text starts with `label`. */
+function cellOf(row: HTMLElement, label: string): HTMLElement {
+  const headers = screen.getAllByRole("columnheader").map((h) => h.textContent ?? "");
+  const index = headers.findIndex((h) => h.trim().startsWith(label));
+  if (index === -1) throw new Error(`no column ${label}; have ${headers.join(" | ")}`);
+  return within(row).getAllByRole("cell")[index];
+}
 function rowNames(): string[] {
   return screen.getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].querySelector("[data-model-name]")?.textContent ?? "");
 }
@@ -82,8 +89,9 @@ describe("ModelComparisonTable", () => {
     expect(screen.getByRole("link", { name: MODEL_BENCHMARKS_SNAPSHOT.source.label }).getAttribute("href")).toBe(MODEL_BENCHMARKS_SNAPSHOT.source.url);
   });
 
-  it("shows prices, context and scores, and dashes where unknown", () => {
+  it("shows prices, context and scores, and dashes where unknown", async () => {
     render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
+    await userEvent.setup().click(screen.getByRole("checkbox", { name: /show 1 hidden/i }));
     const deepseek = within(rowOf("DeepSeek V3.2"));
     expect(deepseek.getByText("$0.62")).toBeTruthy();
     expect(deepseek.getByText("$1.85")).toBeTruthy();
@@ -92,22 +100,26 @@ describe("ModelComparisonTable", () => {
     expect(deepseek.getByText("42")).toBeTruthy();
     expect(deepseek.getByText("70")).toBeTruthy(); // quality 42/60
 
-    const unknown = within(rowOf("Brand New"));
-    const cells = unknown.getAllByRole("cell").map((c) => c.textContent);
-    // name, provider, input, output, blended, context, reasoning, intelligence, valet eval, quality, value
-    expect(cells.slice(2, 6)).toEqual(["–", "–", "–", "–"]);
-    expect(cells.slice(7)).toEqual(["–", "–", "–", "–"]);
+    const unknown = rowOf("Brand New");
+    for (const col of ["Input", "Output", "Blended", "Context", "Intelligence", "Valet eval", "Quality", "Value"]) {
+      expect(cellOf(unknown, col).textContent, col).toBe("–");
+    }
+    // Provider and id share the model cell's second line; no separate Provider column.
+    expect(screen.queryByRole("columnheader", { name: /^provider$/i })).toBeNull();
+    expect(within(unknown).getByText(/Amazon Bedrock/)).toBeTruthy();
+    expect(within(unknown).getByTitle("amazon-bedrock/vendor.brand-new-model")).toBeTruthy();
   });
 
-  it("shows an older-version score with its version and no Quality, and labels a known unscored family", () => {
+  it("shows an older-version score with its version and no Quality, and labels a known unscored family", async () => {
     modelsData = { models: [...FOUR, ...OLD_AND_UNSCORED] };
     render(<ModelComparisonTable lookupForTests={(id) => LOOKUP_EXTRA[id]} scoringForTests={SCORING} />);
+    await userEvent.setup().click(screen.getByRole("checkbox", { name: /show 3 hidden/i }));
     const glm5 = within(rowOf("GLM-5"));
     expect(glm5.getByText("50")).toBeTruthy();
     expect(glm5.getByText("v4.0")).toBeTruthy();
-    const glm5Cells = glm5.getAllByRole("cell").map((c) => c.textContent);
     // quality and value stay dashes: v4.0 is not the latest index version
-    expect(glm5Cells.slice(-2)).toEqual(["–", "–"]);
+    expect(cellOf(rowOf("GLM-5"), "Quality").textContent).toBe("–");
+    expect(cellOf(rowOf("GLM-5"), "Value").textContent).toBe("–");
     // a current-version score shows no version marker
     expect(within(rowOf("DeepSeek V3.2")).queryByText("v5.0")).toBeNull();
     expect(within(rowOf("Mistral Large 3")).getByText("not yet benchmarked")).toBeTruthy();
@@ -157,6 +169,7 @@ describe("ModelComparisonTable", () => {
     render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
     expect(screen.getByRole("columnheader", { name: /approved/i })).toBeTruthy();
     expect(rowOf("Claude Opus 5.5").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("checkbox", { name: /approved only/i })).toBeTruthy();
     expect(rowOf("DeepSeek V3.2").getAttribute("aria-disabled")).toBeNull();
   });
 
@@ -164,12 +177,12 @@ describe("ModelComparisonTable", () => {
     const user = userEvent.setup();
     render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
     // value: deepseek q70 → 4900/0.9275=5283 ; glm q53 → 2809/2.838=990 ; opus q97 → 9409/8=1176
-    expect(rowNames()).toEqual(["DeepSeek V3.2", "Claude Opus 5.5", "GLM-5.3", "Brand New"]);
-    const input = screen.getByRole("button", { name: /input \$\/M/i });
+    expect(rowNames()).toEqual(["DeepSeek V3.2", "Claude Opus 5.5", "GLM-5.3"]);
+    const input = screen.getByRole("button", { name: /^input/i });
     await user.click(input);
-    expect(rowNames()).toEqual(["DeepSeek V3.2", "GLM-5.3", "Claude Opus 5.5", "Brand New"]);
+    expect(rowNames()).toEqual(["DeepSeek V3.2", "GLM-5.3", "Claude Opus 5.5"]);
     await user.click(input);
-    expect(rowNames()).toEqual(["Claude Opus 5.5", "GLM-5.3", "DeepSeek V3.2", "Brand New"]);
+    expect(rowNames()).toEqual(["Claude Opus 5.5", "GLM-5.3", "DeepSeek V3.2"]);
   });
 
   it("filters by provider case-insensitively and reports an empty match", async () => {
@@ -187,12 +200,13 @@ describe("ModelComparisonTable", () => {
   it("renders an all-unknown catalog as dashes sorted by name, with no NaN", () => {
     modelsData = { models: [mk("amazon-bedrock/zeta", { name: "Zeta" }), mk("amazon-bedrock/alpha", { name: "Alpha" })] };
     const { container } = render(<ModelComparisonTable lookupForTests={() => undefined} scoringForTests={SCORING} />);
+    // Nothing has a current score, so the default view would be empty; the table falls back to showing everything.
     expect(rowNames()).toEqual(["Alpha", "Zeta"]);
     expect(container.textContent).not.toContain("NaN");
     expect(container.textContent).not.toContain("$0");
   });
 
-  it("shows the Valet eval pass rate with run details in the tooltip", () => {
+  it("shows the Valet eval pass rate with run details in the tooltip", async () => {
     render(
       <ModelComparisonTable
         lookupForTests={(id) =>
@@ -205,10 +219,52 @@ describe("ModelComparisonTable", () => {
     );
     const cell = within(rowOf("DeepSeek V3.2")).getByText("87%");
     expect(cell.getAttribute("title")).toContain("evals/cases/hard");
+    // Measured mean cost per case sits in its own sortable column.
+    expect(cellOf(rowOf("DeepSeek V3.2"), "Eval $/case").textContent).toBe("$0.1234");
+    await userEvent.setup().click(screen.getByRole("checkbox", { name: /show 3 hidden/i }));
+    expect(cellOf(rowOf("GLM-5.3"), "Eval $/case").textContent).toBe("–");
+    expect(screen.getByRole("button", { name: /^eval \$\/case/i })).toBeTruthy();
     expect(cell.getAttribute("title")).toContain("15 cases × 3 runs");
     expect(cell.getAttribute("title")).toContain("2026-10-30");
     // Quality from the Valet part alone.
     expect(within(rowOf("DeepSeek V3.2")).getByText("87", { exact: true })).toBeTruthy();
+  });
+
+  it("marks reasoning models with a badge in the model cell instead of a column", () => {
+    modelsData = { models: [mk("amazon-bedrock/deepseek.v3.2", { name: "DeepSeek V3.2", input: 0.62, output: 1.85, reasoning: true }), mk("amazon-bedrock/us.zai.glm-5.3", { name: "GLM-5.3", input: 1.848, output: 5.808, reasoning: false })] };
+    render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
+    expect(screen.queryByRole("columnheader", { name: /reasoning/i })).toBeNull();
+    expect(within(rowOf("DeepSeek V3.2")).getByText("reasoning")).toBeTruthy();
+    expect(within(rowOf("GLM-5.3")).queryByText("reasoning")).toBeNull();
+  });
+
+  it("keeps the price unit in the caption and short column labels", () => {
+    render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
+    expect(screen.getByText(/\$ per 1M tokens/)).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: /^blended/i })).toBeTruthy();
+  });
+
+  it("hides older-version and unscored models by default, with a toggle that reveals them", async () => {
+    const user = userEvent.setup();
+    modelsData = { models: [...FOUR, ...OLD_AND_UNSCORED] };
+    render(<ModelComparisonTable lookupForTests={(id) => LOOKUP_EXTRA[id]} scoringForTests={SCORING} />);
+    // Current v5.0 scores: DeepSeek, GLM-5.3, Opus. Hidden: Brand New (unknown), GLM-5 (v4.0), Mistral Large 3 (unscored).
+    expect(rowNames()).toEqual(["DeepSeek V3.2", "Claude Opus 5.5", "GLM-5.3"]);
+    const toggle = screen.getByRole("checkbox", { name: /show 3 hidden/i });
+    await user.click(toggle);
+    expect(rowNames()).toHaveLength(6);
+    expect(screen.getByText("GLM-5")).toBeTruthy();
+  });
+
+  it("filters by provider chip and approved-only", async () => {
+    const user = userEvent.setup();
+    modelsData = { models: [...FOUR.slice(0, 3), { ...FOUR[3], approved: false }] };
+    render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
+    await user.click(screen.getByRole("button", { name: "Anthropic" }));
+    expect(rowNames()).toEqual(["Claude Opus 5.5"]);
+    await user.click(screen.getByRole("button", { name: "All providers" }));
+    await user.click(screen.getByRole("checkbox", { name: /approved only/i }));
+    expect(rowNames()).toEqual(["DeepSeek V3.2", "GLM-5.3"]);
   });
 
   it("shows a spinner while loading and an error line on failure", () => {

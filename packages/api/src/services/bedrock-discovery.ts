@@ -38,6 +38,7 @@ import { registryModels } from "./model-registry.js";
  * (2026-10-30, US-profile $/M in-out): DeepSeek V3.2 0.62/1.85, Mistral
  * Large 3 0.50/1.50, GLM-5.3 1.85/5.81 — far below Kimi K3's 3.30/16.50 for
  * similar benchmark standing. The rest are cheaper coding / utility models.
+ * Every default must complete a streamed tool-calling turn through Converse.
  */
 export const BEDROCK_DEFAULT_MODEL_IDS: readonly string[] = [
   "deepseek.v3.2",
@@ -47,7 +48,8 @@ export const BEDROCK_DEFAULT_MODEL_IDS: readonly string[] = [
   "mistral.devstral-2-123b",
   "moonshotai.kimi-k2.5",
   "openai.gpt-oss-120b-1:0",
-  "us.meta.llama4-maverick-17b-instruct-v1:0",
+  // Not Llama 4 Maverick: Bedrock rejects tool use in streaming mode for
+  // it, and Valet streams every turn (0/45 hard-suite runs, 2026-10-30).
   "zai.glm-4.7",
   "minimax.minimax-m2.5",
 ];
