@@ -51,7 +51,11 @@ describe("engine: tool-call argument streaming", () => {
       expect(events.some(e => e.event.type === "message_end")).toBe(false);
       const finished = events.map(e => e.event).find(e => e.type === "thinking_update" && e.part.durationMs !== undefined);
       expect(finished?.type === "thinking_update" && finished.part.text).toBe("");
-      expect(JSON.stringify(events)).not.toContain("PRIVATE REASONING");
+      // The summary is for display: it rides the finished interval, never `text`
+      // and never a still-open interval.
+      expect(finished?.type === "thinking_update" && finished.part.summary).toBe("PRIVATE REASONING");
+      expect(events.map(e => e.event).filter(e => e.type === "thinking_update" && e.part.durationMs === undefined)
+        .every(e => e.type === "thinking_update" && e.part.summary === undefined)).toBe(true);
       release?.();
       await waitForStatus(events, receipt.threadId, "idle");
       const entries = await session.readEntries("web:default");
@@ -96,10 +100,9 @@ describe("engine: tool-call argument streaming", () => {
       expect(log.some(e => e.event.type === "thinking_update")).toBe(false);
       const canonical = log.map(e => e.event).find(e => e.type === "message_update");
       expect(canonical?.type === "message_update" && canonical.parts).toEqual(entry.parts);
-      for (const value of [events, log, entries]) {
-        expect(JSON.stringify(value)).not.toContain("first reasoning");
-        expect(JSON.stringify(value)).not.toContain("second reasoning");
-      }
+      // Summaries ride each block's end, not every delta.
+      expect(finished.map(e => e.part.summary)).toEqual(["first reasoning", "second reasoning"]);
+      expect(updates.filter(e => e.part.durationMs === undefined).every(e => e.part.summary === undefined)).toBe(true);
     } finally {
       faux.unregister();
     }

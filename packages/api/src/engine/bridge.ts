@@ -157,7 +157,7 @@ export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[
         });
         break;
       case "thinking":
-        out.push({ kind: "thinking", text: p.text, ...(p.startedAt !== undefined ? { startedAt: p.startedAt } : {}), ...(p.durationMs !== undefined ? { durationMs: p.durationMs } : {}) });
+        out.push({ kind: "thinking", text: p.text, ...(p.summary !== undefined ? { summary: p.summary } : {}), ...(p.startedAt !== undefined ? { startedAt: p.startedAt } : {}), ...(p.durationMs !== undefined ? { durationMs: p.durationMs } : {}) });
         break;
       // attachment, error parts: dropped on the wire (UI ignores).
       case "attachment":
@@ -321,7 +321,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
 
     case "thinking_update":
       return [{ type: "thinking_update", threadId: e.threadId, messageId: e.messageId, index: e.index,
-        part: { kind: "thinking", text: e.part.text, startedAt: e.part.startedAt, durationMs: e.part.durationMs } }];
+        part: { kind: "thinking", text: e.part.text, ...(e.part.summary !== undefined ? { summary: e.part.summary } : {}), startedAt: e.part.startedAt, durationMs: e.part.durationMs } }];
 
     case "text_delta":
       // Wire delta carries messageId so the client can target the right row.

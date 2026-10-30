@@ -93,6 +93,20 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual(parts);
   });
 
+  it("keeps a reasoning summary when a later timing-only update arrives", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const update = (part: { kind: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number }) => ingest(SESSION, {
+      type: "thinking_update", seq: 0, ts: 1000, threadId: THREAD, messageId: "m1", index: 0, part,
+    });
+    update({ kind: "thinking", text: "", startedAt: 1000 });
+    update({ kind: "thinking", text: "", summary: "plan", startedAt: 1000, durationMs: 2400 });
+    update({ kind: "thinking", text: "", startedAt: 1000, durationMs: 2400 });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual([
+      { kind: "thinking", text: "", summary: "plan", startedAt: 1000, durationMs: 2400 },
+    ]);
+  });
+
   it("drops the rows still streaming on a thread when its branch switches", () => {
     const { ingest, addUserMessage } = useStreamStore.getState();
     ingest(SESSION, messageStart("old-reply", 1));

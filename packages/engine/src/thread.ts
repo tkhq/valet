@@ -7164,10 +7164,14 @@ export class Thread {
           if (ev.type === "thinking_start") this.thinkingTiming.start(ev.contentIndex, Date.now());
           if (ev.type === "thinking_end") this.thinkingTiming.end(ev.contentIndex, Date.now());
           const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "thinking") this.thinkingTiming.summarize(ev.contentIndex, block);
           if (this.currentAssistantMessageId && block?.type === "thinking") {
+            // The summary rides the block's end, not every delta: a running
+            // summary resent per delta would grow the live stream quadratically.
+            const { summary, ...timing } = this.thinkingTiming.part(ev.contentIndex);
             await this.session.emit({
               type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
-              index: ev.contentIndex, part: this.thinkingTiming.part(ev.contentIndex),
+              index: ev.contentIndex, part: ev.type === "thinking_end" && summary !== undefined ? { ...timing, summary } : timing,
             });
           }
         } else if (ev.type === "text_delta") {
@@ -7231,7 +7235,10 @@ export class Thread {
           const parts: MessagePart[] = [];
           for (const [index, block] of event.message.content.entries()) {
             if (block.type === "text") parts.push({ type: "text", text: block.text });
-            else if (block.type === "thinking") parts.push(this.thinkingTiming.part(index));
+            else if (block.type === "thinking") {
+              this.thinkingTiming.summarize(index, block);
+              parts.push(this.thinkingTiming.part(index));
+            }
             else if (block.type === "toolCall") {
               const call = this.currentToolCalls.get(block.id);
               if (call) parts.push(call);

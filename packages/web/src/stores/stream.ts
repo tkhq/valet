@@ -408,7 +408,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const previous = m.parts[partIndex];
       if (previous?.kind === "thinking" && previous.durationMs !== undefined && ev.part.durationMs === undefined) return next;
       const parts = [...m.parts];
-      parts[partIndex] = ev.part;
+      // The summary arrives once, at the block's end; a later timing-only
+      // update for the same block keeps it.
+      const summary = ev.part.summary ?? (previous?.kind === "thinking" ? previous.summary : undefined);
+      parts[partIndex] = summary !== undefined ? { ...ev.part, summary } : ev.part;
       next.messages = replaceAt(slice.messages, idx, {
         ...m, parts, thinkingIndices: { ...m.thinkingIndices, [ev.index]: partIndex },
       });
