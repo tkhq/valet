@@ -13,6 +13,7 @@ import {
   User,
   Users,
   type LucideIcon,
+  BarChart3,
 } from "lucide-react";
 import { useOrg, useTeams } from "~/api/settings";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
@@ -67,6 +68,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     icon: Cpu,
     routes: [
       { to: "/settings/organization/models", label: "Models" },
+      { to: "/settings/organization/model-comparison", label: "Compare" },
       { to: "/settings/organization/proxy", label: "Proxy" },
     ],
   },
@@ -153,6 +155,9 @@ const PERSONAL_ITEMS: RailItem[] = [
   { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
   { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
+  // Read-only and backed by the member-visible models list, so every
+  // member sees it in both org and single-user mode.
+  { to: "/settings/model-comparison", label: "Model comparison", icon: BarChart3, active: exact("/settings/model-comparison") },
 ];
 
 /** Single-user-mode stand-in for Organization · Models — shown only while

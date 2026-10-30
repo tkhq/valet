@@ -110,6 +110,28 @@ The second run prints a comparison against the saved baselines:
 improvements, regressions, pass-rate movement, and token and cost deltas
 with noise-band labels when pass@k statistics exist.
 
+### Record a run in the model comparison snapshot
+
+The Settings → Model comparison page shows each model's hard-suite pass
+rate next to its public benchmark score and list price. The numbers come
+from `packages/shared/src/model-benchmarks.json`, refreshed by PR:
+
+```bash
+pnpm --silent --filter @valet/eval start -- --cases evals/cases/hard \
+  --model amazon-bedrock/deepseek.v3.2 --runs 3 --json > run.json
+node scripts/evals/snapshot-benchmarks.mjs --family deepseek-v3.2 \
+  --model amazon-bedrock/deepseek.v3.2 --suite evals/cases/hard < run.json
+```
+
+`--silent` matters: without it pnpm prints its `> @valet/eval start` banner
+to stdout and the file is not JSON (`make eval` has the same problem).
+The script writes the family's `valetEval` block (pass rate as passed
+runs over all runs, mean cost per single run of a priced case, runs per
+case, the date) and leaves every other field and the file's one-entry-
+per-line layout alone. `--family` must already exist in the snapshot's
+entries. The hard suite is a comparison instrument: record it here, never
+wire it into CI as pass/fail.
+
 ## Tests
 
 ```bash

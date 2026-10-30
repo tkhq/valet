@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatPerMillion, formatTokens, formatTurns, formatUsd, formatUsdPrecise } from "./format-usage";
+import { formatContext, formatPerMillion, formatRate, formatTokens, formatTurns, formatUsd, formatUsdPrecise } from "./format-usage";
 
 describe("formatTokens", () => {
   it("formats across magnitudes", () => {
@@ -57,5 +57,23 @@ describe("formatPerMillion", () => {
   });
   it("short form fits a chip", () => {
     expect(formatPerMillion({ input: 0.62, output: 1.85 }, "short")).toBe("$0.62 / $1.85");
+  });
+});
+
+describe("formatRate / formatContext", () => {
+  it("formats one per-million rate", () => {
+    expect(formatRate(0.62)).toBe("$0.62");
+    expect(formatRate(16.5)).toBe("$16.50");
+    expect(formatRate(0.005)).toBe("$0.005");
+    expect(formatRate(0)).toBeUndefined();
+    expect(formatRate(undefined)).toBeUndefined();
+  });
+  it("formats a context window", () => {
+    expect(formatContext(131072)).toBe("131k");
+    expect(formatContext(262144)).toBe("262k");
+    expect(formatContext(1_000_000)).toBe("1M");
+    expect(formatContext(1_048_576)).toBe("1M");
+    expect(formatContext(8192)).toBe("8k");
+    expect(formatContext(undefined)).toBeUndefined();
   });
 });

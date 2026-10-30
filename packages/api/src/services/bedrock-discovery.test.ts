@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MODEL_BENCHMARKS_SNAPSHOT, benchmarkFor } from "@valet/shared";
+import { registryModels } from "./model-registry.js";
 import {
   BEDROCK_DEFAULT_MODEL_IDS,
   bedrockRegistry,
@@ -283,6 +285,21 @@ describe("curated defaults", () => {
     for (const id of ["deepseek.v3.2", "mistral.mistral-large-3-675b-instruct", "us.zai.glm-5.3"]) {
       expect(BEDROCK_DEFAULT_MODEL_IDS, id).toContain(id);
     }
+  });
+  it("every benchmark snapshot id is a real id in some pi-ai registry", () => {
+    // A dead id (vendor renamed a model, or a geo profile that is not a model
+    // id) matches nothing and the page silently shows a dash for a scored
+    // model. Geo profiles are handled by benchmarkFor's prefix fallback and
+    // so must not be listed here.
+    const known = new Set<string>();
+    for (const kind of ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"] as const) {
+      for (const m of registryModels(kind)) known.add(m.id.toLowerCase());
+    }
+    const dead = MODEL_BENCHMARKS_SNAPSHOT.entries.flatMap((e) => e.ids.filter((id) => !known.has(id)).map((id) => `${e.family}: ${id}`));
+    expect(dead).toEqual([]);
+  });
+  it("every default has a benchmark snapshot entry", () => {
+    for (const id of BEDROCK_DEFAULT_MODEL_IDS) expect(benchmarkFor(`amazon-bedrock/${id}`), id).toBeDefined();
   });
   it("defaults contain no anthropic or global ids", () => {
     expect(BEDROCK_DEFAULT_MODEL_IDS.some((id) => id.includes("anthropic.") || id.startsWith("global."))).toBe(false);

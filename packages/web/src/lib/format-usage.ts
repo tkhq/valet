@@ -32,9 +32,16 @@ export function formatUsdPrecise(n: number): string {
   return `$${n.toFixed(Math.abs(n) >= 1 ? 2 : 4)}`;
 }
 
+/** One per-million list rate: "$0.62", a third decimal below a cent so a
+ * cheap model does not read as free ("$0.005"); undefined for a missing or
+ * non-positive number so callers render nothing. */
+export function formatRate(n: number | undefined): string | undefined {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return undefined;
+  return `$${n < 0.01 ? n.toFixed(3) : n.toFixed(2)}`;
+}
+
 /** List price per million tokens for a model picker: "$0.62 in / $1.85 out
- * per 1M tokens", or "$0.62 / $1.85" in `short` form for a chip. Rates below
- * a cent keep a third decimal so cheap models do not read as free; a missing
+ * per 1M tokens", or "$0.62 / $1.85" in `short` form for a chip. A missing
  * or all-zero price returns undefined so callers render nothing. */
 export function formatPerMillion(
   pricing: { input: number; output: number } | undefined,
@@ -44,10 +51,17 @@ export function formatPerMillion(
   const { input, output } = pricing;
   if (!Number.isFinite(input) || !Number.isFinite(output)) return undefined;
   if (input <= 0 && output <= 0) return undefined;
-  const rate = (n: number) => `$${n < 0.01 && n > 0 ? n.toFixed(3) : n.toFixed(2)}`;
+  const rate = (n: number) => formatRate(n) ?? "$0.00";
   return form === "short"
     ? `${rate(input)} / ${rate(output)}`
     : `${rate(input)} in / ${rate(output)} out per 1M tokens`;
+}
+
+/** A context window: 131072 → "131k", 1000000 and 1048576 → "1M". */
+export function formatContext(n: number | undefined): string | undefined {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return undefined;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
 }
 
 function trimZero(s: string): string {

@@ -66,6 +66,7 @@ vi.mock("~/api/settings", () => ({
     error: null,
   }),
   useModelTiers: () => ({ data: undefined, isLoading: true, error: null }),
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
 }));
 vi.mock("~/api/api-keys", () => ({
   useApiKeys: () => ({ data: [], isLoading: false, error: null }),
@@ -107,6 +108,7 @@ import { Route as PreferencesRoute } from "./settings.preferences";
 import { Route as PoliciesRoute } from "./settings.policies";
 import { Route as ApiKeysRoute } from "./settings.api-keys";
 import { Route as McpServersRoute } from "./settings.mcp-servers";
+import { Route as ModelComparisonRoute } from "./settings.model-comparison";
 import { TeamSettingsShell } from "./settings.teams.$teamId";
 import { Route as TeamAccessRoute } from "./settings.teams.$teamId.access";
 import { Route as TeamPoliciesRoute } from "./settings.teams.$teamId.policies";
@@ -152,12 +154,13 @@ async function mount(initial: string) {
       child("policies", componentOf(PoliciesRoute)),
       child("api-keys", componentOf(ApiKeysRoute)),
       child("mcp-servers", componentOf(McpServersRoute)),
+      child("model-comparison", componentOf(ModelComparisonRoute)),
       team.addChildren([
         createRoute({ getParentRoute: () => team, path: "/", component: stub("team general") }),
         createRoute({ getParentRoute: () => team, path: "access", component: componentOf(TeamAccessRoute) }),
         createRoute({ getParentRoute: () => team, path: "policies", component: componentOf(TeamPoliciesRoute) }),
       ]),
-      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack")]),
+      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack"), orgChild("model-comparison")]),
     ]),
   ]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [initial] }) });
@@ -234,6 +237,24 @@ describe("personal workspace pages", () => {
     expect(within(content()).getByText("grants: personal")).toBeTruthy();
     expect(within(content()).queryByText(/team policies/)).toBeNull();
     expect(document.title).toBe("Personal · Valet");
+  });
+});
+
+describe("model comparison", () => {
+  it("opens for a plain member from Personal workspace and lists the snapshot", async () => {
+    orgRole = "member";
+    await mount("/settings/model-comparison");
+    expect(await within(content()).findByRole("heading", { name: "Model comparison" })).toBeTruthy();
+    expect(within(content()).getByRole("textbox", { name: "Filter models" })).toBeTruthy();
+    const rail = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(rail).getByRole("link", { name: "Model comparison" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("is the Compare tab of Models and usage for an admin", async () => {
+    await mount("/settings/organization/model-comparison");
+    const tabs = await within(content()).findByRole("navigation", { name: "Models and usage" });
+    expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual(["Models", "Compare", "Proxy"]);
+    expect(within(tabs).getByRole("link", { name: "Compare" }).getAttribute("aria-current")).toBe("page");
   });
 });
 

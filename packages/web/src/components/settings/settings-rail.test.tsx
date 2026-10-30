@@ -33,7 +33,7 @@ vi.mock("~/api/settings", () => ({
 }));
 
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
-import { SettingsRail, orgSectionFor } from "./settings-rail";
+import { ORG_SECTIONS, SettingsRail, orgSectionFor } from "./settings-rail";
 
 beforeEach(() => {
   linkProps.length = 0;
@@ -83,12 +83,27 @@ describe("SettingsRail", () => {
     expect(within(rail()).getByRole("group", { name: "Your teams" })).toBeTruthy();
   });
 
-  it("keeps API keys, Agent access, and Policies under Personal workspace", () => {
+  it("keeps API keys, Agent access, Policies and Model comparison under Personal workspace", () => {
     render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
-    for (const label of ["API keys and proxy", "Agent access", "Policies"]) {
+    for (const label of ["API keys and proxy", "Agent access", "Policies", "Model comparison"]) {
       expect(within(personal).getByRole("link", { name: label })).toBeTruthy();
     }
+    expect(within(personal).getByRole("link", { name: "Model comparison" }).getAttribute("href")).toBe("/settings/model-comparison");
+  });
+
+  it("offers Model comparison to a plain member with organizations on", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    render(<SettingsRail />);
+    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    expect(within(personal).getByRole("link", { name: "Model comparison" })).toBeTruthy();
+    expect(within(personal).queryByRole("link", { name: "Models" })).toBeNull();
+  });
+
+  it("lists Compare between Models and Proxy in the Models and usage section", () => {
+    const section = ORG_SECTIONS.find((s) => s.label === "Models and usage");
+    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Compare", "Proxy"]);
+    expect(section?.routes[1]?.to).toBe("/settings/organization/model-comparison");
   });
 
   it("marks a team active on any of its tabs", () => {
