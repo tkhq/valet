@@ -692,6 +692,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         queueItemId: receipt.queueItemId,
         parentSessionId: ctx.parentSessionId,
         parentThreadId: ctx.parentThreadId,
+        parentQueueItemId: ctx.parentQueueItemId ?? null,
         actorUserId: ctx.actorUserId,
         orgId,
         settled: false,
@@ -1122,7 +1123,7 @@ export class ChildWatcher {
         queueItemId: receipt.queueItemId, completedAt: null, failedAt: null, attempts: 0, lastError: null, nextAttemptAt: Date.now(),
       }).where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
     }
-    await this.markSettled(watch.childSessionId, watch.queueItemId);
+    await this.markSettled(watch.childSessionId, watch.queueItemId, receipt.queueItemId);
     await this.parkChildSandbox(watch.childSessionId, digest !== undefined);
   }
 
@@ -1587,12 +1588,12 @@ export class ChildWatcher {
     return undefined;
   }
 
-  private async markSettled(childSessionId: string, queueItemId: string): Promise<void> {
+  private async markSettled(childSessionId: string, queueItemId: string, reportQueueItemId?: string): Promise<void> {
     // Only the reported delegation can acknowledge this generation.
     // A boot retry must not restart retention or reopen a reclaimed sandbox.
     await this.deps.db
       .update(childWatches)
-      .set({ settled: true, settledAt: Date.now() })
+      .set({ settled: true, settledAt: Date.now(), ...(reportQueueItemId !== undefined ? { reportQueueItemId } : {}) })
       .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId), eq(childWatches.settled, false)));
   }
 
