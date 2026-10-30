@@ -2,6 +2,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import { describe, expect, it } from "vitest";
 import type { CatalogService } from "~/components/events/subscription-match";
 import { line } from "../test-fixtures";
@@ -154,6 +155,32 @@ describe("DoSection", () => {
     const instructions = screen.getByLabelText("Instructions (optional)");
     expect(note.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(instructions.parentElement?.contains(note)).toBe(false);
+  });
+
+  it("counts the instructions near the api's limit and says what to do past it", () => {
+    render(<Harness initial={github()} />);
+    const box = screen.getByLabelText("Instructions (optional)") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "x".repeat(100) } });
+    expect(screen.queryByText(/of 4,000 characters/)).toBeNull();
+    fireEvent.change(box, { target: { value: "x".repeat(3_500) } });
+    expect(screen.getByText("3,500 of 4,000 characters")).toBeTruthy();
+    expect(box.getAttribute("aria-invalid")).not.toBe("true");
+    fireEvent.change(box, { target: { value: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 512) } });
+    const error = screen.getByText(
+      "Instructions are 4,512 characters, and the limit is 4,000. " +
+        "Shorten them, or move long guidance into a skill and name that skill in the instructions.",
+    );
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(box.getAttribute("aria-describedby")?.split(" ")).toContain(error.id);
+    // The note sits with the field, not in the footer.
+    expect(error.parentElement?.contains(box)).toBe(true);
+  });
+
+  it("counts no limit for a routine's instructions, which the api does not cap", () => {
+    const draft = setService(newDraft({ timezone: "UTC" }), "schedule");
+    render(<Harness initial={{ ...draft, doKind: "work", instructions: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1) }} mode={{ kind: "create", preselected: { schedule: true } }} />);
+    expect(screen.queryByText(/limit is 4,000/)).toBeNull();
+    expect(screen.queryByText(/of 4,000 characters/)).toBeNull();
   });
 
   it("gives the instructions six rows at least", () => {

@@ -6,7 +6,7 @@
  * reads its sentence from that body, so the sentence equals the stored
  * sentence (INV-H7).
  */
-import { type Appearance, type AssistantThreadPolicy, validateAppearance } from "@valet/shared";
+import { type Appearance, type AssistantThreadPolicy, MAX_PROMPT_TEMPLATE_CHARS, validateAppearance } from "@valet/shared";
 import type {
   CreateEventSubscriptionRequest,
   CreateWorkflowScheduleRequest,
@@ -875,12 +875,40 @@ function unknownVariable(name: string): string {
   return `{{${name}}} is not a variable. Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.`;
 }
 
+/** A character count as the editor writes it: `4,512`. */
+export function characterCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/** The instructions' length as the line stores it: `promptFieldsToTarget`
+ * trims the text before it sends it. */
+export function instructionsLength(draft: Draft): number {
+  return draft.instructions.trim().length;
+}
+
+/**
+ * The refusal for a line's instructions over the api's limit
+ * (`MAX_PROMPT_TEMPLATE_CHARS`), or null. The field and the footer both
+ * show it, so it names the field as the form labels it, the length, the
+ * limit, and what to do. A routine's instructions have no limit.
+ */
+export function instructionsTooLong(draft: Draft): string | null {
+  const length = instructionsLength(draft);
+  if (draft.service === "schedule" || length <= MAX_PROMPT_TEMPLATE_CHARS) return null;
+  return (
+    `Instructions are ${characterCount(length)} characters, and the limit is ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)}. ` +
+    "Shorten them, or move long guidance into a skill and name that skill in the instructions."
+  );
+}
+
 /**
  * The refusal the server gives for the line's two templates, in the
  * editor's words (`validatePromptTemplate` in prompt-template.ts).
  * `services` is the event catalog; while it is empty, the payload check waits.
  */
 function templateBlocker(draft: Draft, services: readonly CatalogService[]): string | null {
+  const tooLong = instructionsTooLong(draft);
+  if (tooLong !== null) return tooLong;
   const instructions = draft.instructions.trim();
   if (instructions.length > 0) {
     const names = placeholderNames(instructions);
@@ -892,6 +920,9 @@ function templateBlocker(draft: Draft, services: readonly CatalogService[]): str
     if (bad !== undefined) return `Instructions cannot use event variables. Move {{${bad}}} to the Event message.`;
   }
   const message = draft.promptTemplates.userPromptTemplate.trim();
+  if (message.length > MAX_PROMPT_TEMPLATE_CHARS) {
+    return `The Event message is ${characterCount(message.length)} characters, and the limit is ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)}. Shorten it.`;
+  }
   if (message.length > 0) {
     const names = placeholderNames(message);
     if (names === null) return "The Event message has an unclosed or nested {{. Close each {{ with }}.";
