@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BEDROCK_DEFAULT_MODEL_IDS,
   bedrockRegistry,
@@ -170,18 +170,99 @@ describe("discoverBedrockModels", () => {
     expect(client.calls.length).toBeGreaterThan(beforeExpiry);
   });
 
-  it("degrades to the registry list with live:false when the client throws", async () => {
+  it("degrades to a filtered registry list with live:false when the client throws", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const { models, live } = await discoverBedrockModels({ client: fakeClient({ fail: true }), region: "us-east-1" });
     expect(live).toBe(false);
-    expect(models.length).toBe(bedrockRegistry().size);
+    expect(models.length).toBeGreaterThan(0);
+    expect(models.length).toBeLessThan(bedrockRegistry().size);
   });
 
-  it("does not cache a failed discovery", async () => {
+  it("a failed discovery does not poison the hour-long positive cache", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 3_000_000;
     const failing = fakeClient({ fail: true });
-    await discoverBedrockModels({ client: failing, region: "us-east-1" });
+    await discoverBedrockModels({ client: failing, region: "us-east-1", now: () => now });
+    now += 200_000;
     const ok = fakeClient({ useCase: "ok" });
-    const { live } = await discoverBedrockModels({ client: ok, region: "us-east-1" });
+    const { live } = await discoverBedrockModels({ client: ok, region: "us-east-1", now: () => now });
     expect(live).toBe(true);
+  });
+});
+
+describe("discoverBedrockModels resilience (review fixes)", () => {
+  afterEach(() => { resetBedrockDiscoveryCache(); vi.restoreAllMocks(); });
+
+  it("caches a failure for a short window instead of retrying on every call", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 5_000_000;
+    const client = fakeClient({ fail: true });
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now });
+    const after1 = client.calls.length;
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now + 30_000 });
+    expect(client.calls.length).toBe(after1);
+    now += 200_000;
+    await discoverBedrockModels({ client, region: "us-east-1", now: () => now });
+    expect(client.calls.length).toBeGreaterThan(after1);
+  });
+
+  it("warns once per failure window, naming the error and region", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const client = fakeClient({ fail: true });
+    await discoverBedrockModels({ client, region: "us-east-1" });
+    await discoverBedrockModels({ client, region: "us-east-1" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/bedrock discovery.*us-east-1/i);
+    expect(String(warn.mock.calls[0]?.[0]) + String(warn.mock.calls[0]?.[1] ?? "")).toMatch(/boom/);
+  });
+
+  it("shares one in-flight lookup across concurrent cache misses", async () => {
+    const client = fakeClient({ useCase: "ok" });
+    await Promise.all([
+      discoverBedrockModels({ client, region: "us-east-1" }),
+      discoverBedrockModels({ client, region: "us-east-1" }),
+      discoverBedrockModels({ client, region: "us-east-1" }),
+    ]);
+    expect(client.calls.filter((c) => c === "ListFoundationModelsCommand").length).toBe(1);
+  });
+
+  it("a non-404 use-case failure hides anthropic only for a short window and logs it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 9_000_000;
+    const denied = fakeClient({ useCase: "denied" });
+    const r1 = await discoverBedrockModels({ client: denied, region: "us-east-1", now: () => now });
+    expect(r1.models.some((m) => m.id.includes("anthropic."))).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    // Within the hour but past the short TTL, a later call re-queries.
+    now += 200_000;
+    const ok = fakeClient({ useCase: "ok" });
+    const r2 = await discoverBedrockModels({ client: ok, region: "us-east-1", now: () => now });
+    expect(ok.calls.length).toBeGreaterThan(0);
+    expect(r2.models.some((m) => m.id.includes("anthropic."))).toBe(true);
+  });
+
+  it("a ResourceNotFoundException use-case answer is firm: cached for the full hour, no warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 7_000_000;
+    const missing = fakeClient({ useCase: "missing" });
+    await discoverBedrockModels({ client: missing, region: "us-east-1", now: () => now });
+    expect(warn).not.toHaveBeenCalled();
+    now += 200_000;
+    const ok = fakeClient({ useCase: "ok" });
+    await discoverBedrockModels({ client: ok, region: "us-east-1", now: () => now });
+    expect(ok.calls.length).toBe(0);
+  });
+
+  it("the registry fallback is filtered to bare and geo-prefixed ids, never global or anthropic", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { models, live } = await discoverBedrockModels({ client: fakeClient({ fail: true }), region: "us-east-1" });
+    expect(live).toBe(false);
+    expect(models.length).toBeGreaterThan(10);
+    expect(models.some((m) => m.id.startsWith("global."))).toBe(false);
+    expect(models.some((m) => m.id.startsWith("eu."))).toBe(false);
+    expect(models.some((m) => m.id.includes("anthropic."))).toBe(false);
+    expect(models.some((m) => m.id === "qwen.qwen3-coder-next")).toBe(true);
+    expect(models.some((m) => m.id === "us.meta.llama4-maverick-17b-instruct-v1:0")).toBe(true);
   });
 });
 

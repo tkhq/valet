@@ -163,11 +163,59 @@ export function setBedrockDiscoveryClientForTests(client: BedrockDiscoveryClient
 }
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
-const cache = new Map<string, { at: number; result: { models: LlmProviderModel[]; live: true } }>();
+/** How long a failed lookup, or an inconclusive use-case answer, is held
+ * before the account is asked again. Short enough that a fixed IAM policy
+ * takes effect quickly, long enough that a broken one does not add three
+ * AWS calls to every catalog build. */
+const NEGATIVE_TTL_MS = 2 * 60 * 1000;
+
+type Discovery = { models: LlmProviderModel[]; live: boolean };
+type CacheEntry = { at: number; ttl: number; result: Discovery; warned: boolean };
+const cache = new Map<string, CacheEntry>();
+const inflight = new Map<string, Promise<Discovery>>();
+const clients = new Map<string, BedrockDiscoveryClient>();
 
 export function resetBedrockDiscoveryCache(): void {
   cache.clear();
+  inflight.clear();
+  clients.clear();
 }
+
+function clientFor(region: string): BedrockDiscoveryClient {
+  let c = clients.get(region);
+  if (!c) {
+    // Discovery runs inside catalog builds that back /api/models and tier
+    // validation, so a hung endpoint must fail fast, not stall the api.
+    c = new BedrockClient({
+      region,
+      maxAttempts: 2,
+      requestHandler: { requestTimeout: 3_000, connectionTimeout: 1_000 },
+    });
+    clients.set(region, c);
+  }
+  return c;
+}
+
+/** Every cross-region profile prefix Bedrock uses, so a bare id is told apart
+ * from a profile id without guessing from the vendor segment. */
+const GEO_PREFIXES = ["us.", "eu.", "apac.", "ca.", "sa.", "au.", "jp.", "in.", "global.", "us-gov."];
+
+/** Registry entries plausible for this region: bare ids and this geo's
+ * profiles, never `global.*`, and never Anthropic (its gate cannot be
+ * checked when the account is unreachable, so it fails closed). */
+function registryFallback(registry: Map<string, BedrockRegistryModel>, geoPrefix: string): LlmProviderModel[] {
+  const out: LlmProviderModel[] = [];
+  for (const m of registry.values()) {
+    const geo = GEO_PREFIXES.find((g) => m.id.startsWith(g));
+    if (geo && geo !== geoPrefix) continue;
+    const bare = geo ? m.id.slice(geo.length) : m.id;
+    if (bare.startsWith("anthropic.")) continue;
+    out.push(toProviderModel(m));
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
+}
+
 
 async function listAll<T>(client: BedrockDiscoveryClient, make: (nextToken?: string) => unknown, key: string): Promise<T[]> {
   const items: T[] = [];
@@ -182,50 +230,94 @@ async function listAll<T>(client: BedrockDiscoveryClient, make: (nextToken?: str
   return items;
 }
 
+type UseCaseAnswer = "allowed" | "no-form" | "unknown";
+
+async function useCaseAnswer(client: BedrockDiscoveryClient): Promise<{ answer: UseCaseAnswer; error?: unknown }> {
+  try {
+    await client.send(new GetUseCaseForModelAccessCommand({}));
+    return { answer: "allowed" };
+  } catch (err) {
+    const name = record(err) && typeof err.name === "string" ? err.name : "";
+    return name === "ResourceNotFoundException" ? { answer: "no-form" } : { answer: "unknown", error: err };
+  }
+}
+
+function warnOnce(entry: CacheEntry, message: string, error: unknown): void {
+  if (entry.warned) return;
+  entry.warned = true;
+  console.warn(message, error instanceof Error ? error.message : error);
+}
+
 /**
  * Models the account can invoke, merged with registry metadata. Registry
  * entries win for name/context/pricing; ids the registry lacks keep Bedrock's
  * `modelName` and carry no pricing (resolution synthesizes them, decision 12).
+ *
+ * Caching: a successful lookup is held for an hour per region. A failed
+ * lookup, or an inconclusive Anthropic use-case answer, is held for
+ * NEGATIVE_TTL_MS and logged once. Concurrent misses share one lookup.
  */
 export async function discoverBedrockModels(opts: {
   client?: BedrockDiscoveryClient;
   region?: string;
   now?: () => number;
-} = {}): Promise<{ models: LlmProviderModel[]; live: boolean }> {
+} = {}): Promise<Discovery> {
   const region = opts.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1";
   const now = opts.now ?? Date.now;
   const hit = cache.get(region);
-  if (hit && now() - hit.at < CACHE_TTL_MS) return hit.result;
+  if (hit && now() - hit.at < hit.ttl) return hit.result;
+  const pending = inflight.get(region);
+  if (pending) return pending;
 
-  const registry = bedrockRegistry();
-  try {
-    const client = opts.client ?? clientOverride ?? new BedrockClient({ region });
-    const [modelSummaries, inferenceProfileSummaries, anthropicAllowed] = await Promise.all([
-      listAll<unknown>(client, (nextToken) => new ListFoundationModelsCommand({ byOutputModality: "TEXT", ...(nextToken ? { nextToken } : {}) }), "modelSummaries"),
-      listAll<unknown>(client, (nextToken) => new ListInferenceProfilesCommand({ typeEquals: "SYSTEM_DEFINED", ...(nextToken ? { nextToken } : {}) }), "inferenceProfileSummaries"),
-      // Anthropic models are usable only once the account's use-case form is
-      // on file. Any failure here hides them: a missing form is a
-      // ResourceNotFoundException, and we would rather hide than list models
-      // that fail on first use.
-      client.send(new GetUseCaseForModelAccessCommand({})).then(() => true, () => false),
-    ]);
-    const discovered = parseBedrockDiscovery({
-      foundationModels: { modelSummaries },
-      inferenceProfiles: { inferenceProfileSummaries },
-      geoPrefix: geoPrefixForRegion(region),
-      anthropicAllowed,
-    });
-    const models: LlmProviderModel[] = discovered.map((d) => {
-      const reg = registry.get(d.id);
-      return reg ? toProviderModel(reg) : { id: d.id, name: d.name };
-    });
-    models.sort((a, b) => a.id.localeCompare(b.id));
-    const result = { models, live: true as const };
-    cache.set(region, { at: now(), result });
-    return result;
-  } catch {
-    const models = Array.from(registry.values()).map(toProviderModel);
-    models.sort((a, b) => a.id.localeCompare(b.id));
-    return { models, live: false };
-  }
+  const run = (async (): Promise<Discovery> => {
+    const registry = bedrockRegistry();
+    const geoPrefix = geoPrefixForRegion(region);
+    try {
+      const client = opts.client ?? clientOverride ?? clientFor(region);
+      const [modelSummaries, inferenceProfileSummaries, useCase] = await Promise.all([
+        listAll<unknown>(client, (nextToken) => new ListFoundationModelsCommand({ byOutputModality: "TEXT", ...(nextToken ? { nextToken } : {}) }), "modelSummaries"),
+        listAll<unknown>(client, (nextToken) => new ListInferenceProfilesCommand({ typeEquals: "SYSTEM_DEFINED", ...(nextToken ? { nextToken } : {}) }), "inferenceProfileSummaries"),
+        useCaseAnswer(client),
+      ]);
+      const discovered = parseBedrockDiscovery({
+        foundationModels: { modelSummaries },
+        inferenceProfiles: { inferenceProfileSummaries },
+        geoPrefix,
+        // Anthropic is usable only once the account's use-case form is on
+        // file. "no-form" is a firm no; "unknown" (denied, throttled) also
+        // hides it, but only for the short window, and is logged.
+        anthropicAllowed: useCase.answer === "allowed",
+      });
+      const models: LlmProviderModel[] = discovered.map((d) => {
+        const reg = registry.get(d.id);
+        return reg ? toProviderModel(reg) : { id: d.id, name: d.name };
+      });
+      models.sort((a, b) => a.id.localeCompare(b.id));
+      const entry: CacheEntry = {
+        at: now(),
+        ttl: useCase.answer === "unknown" ? NEGATIVE_TTL_MS : CACHE_TTL_MS,
+        result: { models, live: true },
+        warned: false,
+      };
+      if (useCase.answer === "unknown") {
+        warnOnce(entry, `bedrock discovery (${region}): GetUseCaseForModelAccess failed; hiding anthropic.* for ${NEGATIVE_TTL_MS / 1000}s:`, useCase.error);
+      }
+      cache.set(region, entry);
+      return entry.result;
+    } catch (err) {
+      const entry: CacheEntry = {
+        at: now(),
+        ttl: NEGATIVE_TTL_MS,
+        result: { models: registryFallback(registry, geoPrefix), live: false },
+        warned: false,
+      };
+      warnOnce(entry, `bedrock discovery (${region}) failed; serving the bundled registry for ${NEGATIVE_TTL_MS / 1000}s:`, err);
+      cache.set(region, entry);
+      return entry.result;
+    } finally {
+      inflight.delete(region);
+    }
+  })();
+  inflight.set(region, run);
+  return run;
 }

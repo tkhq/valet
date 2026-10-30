@@ -107,6 +107,15 @@ describe("model catalog", () => {
       expect(await bedrockEntries()).toEqual([]);
     });
 
+    it("a Bedrock row with an EMPTY selection lists the default set (rows created before curation existed)", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      setBedrockDiscoveryClientForTests(fakeBedrock());
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      const entries = await bedrockEntries();
+      expect(entries.map((e) => e.id)).toEqual(["amazon-bedrock/qwen.qwen3-coder-next", "amazon-bedrock/deepseek.v3.2"]);
+      expect(entries[0]?.providerId).toBe(row.id);
+    });
+
     it("never lists anthropic ids unless an admin selected them", async () => {
       vi.stubEnv("AWS_PROFILE", "dev");
       setBedrockDiscoveryClientForTests(fakeBedrock());

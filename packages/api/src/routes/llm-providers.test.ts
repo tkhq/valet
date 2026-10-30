@@ -1012,7 +1012,9 @@ describe("amazon-bedrock curation", () => {
     api = await bootTestApi();
     const body = (await (await fetch(`${api.baseUrl}/api/org/llm-providers/amazon-bedrock/models`, { headers: HEADERS })).json()) as ProviderModelCatalogResponse;
     expect(body.live).toBe(false);
-    expect(body.models.length).toBeGreaterThan(100);
+    // Filtered registry: bare + us. ids only, no global.*, no anthropic.
+    expect(body.models.length).toBeGreaterThan(20);
+    expect(body.models.some((m) => m.id.startsWith("global.") || m.id.includes("anthropic."))).toBe(false);
   });
 
   it("creates an amazon-bedrock provider seeded with the curated default selection", async () => {

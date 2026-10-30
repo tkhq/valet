@@ -93,17 +93,21 @@ const CURATED_KINDS: readonly {
   label: string;
   registry: () => Map<string, Model<Api>>;
   zeroConfigDefaults: () => Promise<LlmProviderModel[]>;
+  /** Treat a row whose `models` is [] as the defaults (see the loop below). */
+  emptySelectionMeansDefaults: boolean;
 }[] = [
   {
     kind: "openrouter",
     label: "OpenRouter",
     registry: openrouterRegistry,
     zeroConfigDefaults: async () => curatedOpenrouterModels(),
+    emptySelectionMeansDefaults: false,
   },
   {
     kind: "amazon-bedrock",
     label: "Amazon Bedrock",
     registry: bedrockRegistry,
+    emptySelectionMeansDefaults: true,
     zeroConfigDefaults: async () => {
       const defaults = curatedBedrockModels();
       const discovered = await discoverBedrockModels();
@@ -221,7 +225,13 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       namespace = providerNamespace(row);
       providerId = row.id;
       providerName = row.name;
-      selection = row.models;
+      // An empty Bedrock selection means "the defaults": rows created before
+      // Bedrock accepted a selection (valet #1101) stored [] and would
+      // otherwise go blank. OpenRouter rows have always been seeded, so an
+      // empty selection there is an admin's deliberate choice.
+      selection = row.models.length === 0 && curated.emptySelectionMeansDefaults
+        ? await curated.zeroConfigDefaults()
+        : row.models;
     } else if (envCredentialFor(curated.kind).present) {
       resolvable = true;
       active = true;
