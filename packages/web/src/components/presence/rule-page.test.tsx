@@ -29,9 +29,12 @@ const navigate = vi.fn<(to: { to: string; ignoreBlocker?: boolean }) => Promise<
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => navigate,
-  Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children: ReactNode; className?: string }) => {
-    const href = Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to);
-    return <a href={href} className={className}>{children}</a>;
+  Link: ({ to, params, search, children, className }: {
+    to: string; params?: Record<string, string>; search?: Record<string, string>; children: ReactNode; className?: string;
+  }) => {
+    const path = Object.entries(params ?? {}).reduce((acc, [key, value]) => acc.replace(`$${key}`, value), to);
+    const query = new URLSearchParams(search ?? {}).toString();
+    return <a href={query.length > 0 ? `${path}?${query}` : path} className={className}>{children}</a>;
   },
 }));
 
@@ -310,6 +313,24 @@ describe("RulePage", () => {
     expect(activityRows()).toHaveLength(2);
   });
 
+  // The places list is empty in this file, so only the line's own place has
+  // a page. A skipped entry's place outside the line would 404 as a place
+  // page, and Activity has no event for it, so its token has no link.
+  it("links an entry's place to its page when Valet is there, else shows it with no link", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    getLineActivity.mockResolvedValue(activity([
+      acted("d-2", { place: "github:acme/api", placeLabel: "acme/api", outcome: { status: "delivered", attempts: 1 } }),
+      skipped("receipt:r-1", { place: "github:acme/web", placeLabel: "acme/web", reason: "filters", reasonText: "the repository filter" }),
+    ]));
+    renderPage();
+    const section = await screen.findByRole("region", { name: "Activity" });
+    await within(section).findByText(/skipped, not for this line/);
+    expect(within(section).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github:acme/api");
+    expect(within(section).queryByRole("link", { name: "acme/web" })).toBeNull();
+    const token = Array.from(section.querySelectorAll('[data-ref="place"]')).find((el) => el.textContent === "acme/web");
+    expect(token?.tagName).toBe("SPAN");
+  });
+
   it("reads the strip's acted count as the Acted chip's entries: a dead entry counts (S9)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     // The api counts every acted delivery, dead ones too, as the timeline lists them.
@@ -346,7 +367,10 @@ describe("RulePage", () => {
       skipped("receipt:r-2", { reason: "off" }),
     ]));
     renderPage();
-    expect(await screen.findByRole("link", { name: "acme/web#8" })).toBeTruthy();
+    // The place outside the line is a token with no link: Valet has no page for it.
+    const section = await screen.findByRole("region", { name: "Activity" });
+    await within(section).findByText("acme/web#8");
+    expect(within(section).queryByRole("link", { name: "acme/web#8" })).toBeNull();
     expect(activityRows()).toHaveLength(2);
     expect(screen.getByText("Diagnostics", { selector: "summary > span" })).toBeTruthy();
   });
