@@ -114,3 +114,7 @@ Discovery on agents-dev returned 67 invokable models. Comparing their US-profile
 ### Exit criteria
 
 A fresh Bedrock row seeds ten models with DeepSeek V3.2, Mistral Large 3 and GLM-5.3 first, each with a price. The picker and the chips on agents-dev show per-million prices for registry-known models and none for the account's unregistered ones. The engine, api and web suites pass on pi-ai 1.4.0.
+
+## Amendment 2026-10-30 (c): defaults must stream tool calls
+
+The first hard-suite run against the Bedrock defaults showed Llama 4 Maverick failing all 45 runs with Bedrock's "This model doesn't support tool use in streaming mode". Valet drives Bedrock through ConverseStream with tools on every turn, so the model cannot complete a single agent turn in Valet. It leaves `BEDROCK_DEFAULT_MODEL_IDS` (nine remain) and stays discoverable for admins who want it for non-tool use. New rule, enforced by a test: a default must complete a streamed tool-calling turn.

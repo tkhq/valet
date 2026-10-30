@@ -301,6 +301,12 @@ describe("curated defaults", () => {
   it("every default has a benchmark snapshot entry", () => {
     for (const id of BEDROCK_DEFAULT_MODEL_IDS) expect(benchmarkFor(`amazon-bedrock/${id}`), id).toBeDefined();
   });
+  it("defaults exclude models Bedrock cannot stream tool calls for", () => {
+    // Valet drives Bedrock through ConverseStream with tools. Llama 4 Maverick
+    // rejects that ("This model doesn't support tool use in streaming mode"),
+    // so it failed every hard-suite case on 2026-10-30 and must not be a default.
+    expect(BEDROCK_DEFAULT_MODEL_IDS.some((id) => id.includes("llama4-maverick"))).toBe(false);
+  });
   it("defaults contain no anthropic or global ids", () => {
     expect(BEDROCK_DEFAULT_MODEL_IDS.some((id) => id.includes("anthropic.") || id.startsWith("global."))).toBe(false);
   });
