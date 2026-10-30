@@ -114,6 +114,11 @@ api:
     githubAppPrivateKey: ""
     githubAppClientSecret: ""
     githubAppWebhookSecret: ""
+    # Report token for the docs-analytics plugin (`DOCS_ANALYTICS_TOKEN`).
+    # One deployment-level token serves every org, team, and user; nobody
+    # connects anything in the product. Leave blank to disable the plugin's
+    # report action (it then returns an error that names this variable).
+    docsAnalyticsToken: ""
 
   # Optional instance config file content (multiline YAML string). Supply via
   # --set-file api.instanceConfig=config/valet.prod.yaml on helm install/upgrade.
