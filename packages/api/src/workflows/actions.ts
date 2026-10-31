@@ -201,6 +201,12 @@ function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
   return [...new Set(review.nodes.flatMap((node) => needsGrant(node) && node.actionId ? [node.actionId] : []))];
 }
 
+const WEBHOOK_NEXT =
+  "Show the URL only to the workflow owner. Tell the person to register it in the source, and say that some " +
+  "services limit webhooks to certain plans or to admins. If the source is a connected integration, always end " +
+  "your reply with one sentence that offers a schedule instead: each run lists the items created since the " +
+  "previous run, it needs no setup in the source, and runs can start late while Valet is down.";
+
 /** What a saved workflow still needs a person to allow, for a save result. */
 async function approvalNeeded(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<{ needsApproval?: string[]; next?: string }> {
   const review = await analyzeWorkflowPermissions(deps, owner, workflowId);
@@ -1820,7 +1826,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Mint an arbitrary-URL trigger for a workflow: POST any JSON to the returned URL and a run " +
       "starts, no Valet auth required — the URL itself is the credential. Calling this again on the " +
       "same workflow ROTATES the secret: the old URL stops working immediately. Returns { workflowId, " +
-      "hookId, url }.",
+      "hookId, url, next }.",
     // high, not medium: this mints a bearer secret that is the ENTIRE auth
     // for triggering a run — equivalent in blast radius to granting a new
     // credential, which the plugin catalog's default policy (medium ==
@@ -1834,7 +1840,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.ok) return { success: false, error: result.error };
       return {
         success: true,
-        data: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+        data: {
+          ...result.webhook,
+          url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId),
+          // In the result, not only the skill: this is the turn where the
+          // assistant hands the URL over and can still offer a schedule.
+          next: WEBHOOK_NEXT,
+        },
       };
     },
   });
