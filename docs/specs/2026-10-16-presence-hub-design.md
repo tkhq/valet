@@ -708,7 +708,13 @@ Pass criterion: all steps, in one run, from a clean start.
    explanation line; `Run a workflow` shows the workflow picker. A routine offers `Work on it` and `Run a workflow`.
    Under the cards, **Instructions (optional)** as a multi-line field, at
    least six rows high and growing with its text, with the hint `Plain words. Valet also receives the event itself.` The
-   instructions take no inserts. Under `Advanced`, **Event message
+   instructions take no inserts. A line's instructions have the api's
+   limit, `MAX_PROMPT_TEMPLATE_CHARS` (4,000) in `@valet/shared`. From 80%
+   of the limit, the field shows a live count (`3,500 of 4,000
+   characters`). Past the limit, the field is marked invalid and reads
+   `Instructions are 4,512 characters, and the limit is 4,000. Shorten
+   them, or move long guidance into a skill and name that skill in the
+   instructions.` A routine's instructions have no limit. Under `Advanced`, **Event message
    (optional)** holds the message template, with a menu `Insert a detail
    from the event` that lists the event's summary, its text, and the
    fields the picked events carry, and inserts the template for the
@@ -755,8 +761,10 @@ Pass criterion: all steps, in one run, from a clean start.
    refuses what the api refuses, in UI words: a mention mixed with another
    Slack event, a `user` condition on a personal mention line, a variable
    other than `{{event.key}}` in Instructions, an Event message variable
-   whose event is not picked, `Any channel` with a channel condition, Reply
-   without a mention, and run input that is not JSON.
+   whose event is not picked, Instructions or an Event message over the
+   length limit, `Any channel` with a channel condition, Reply
+   without a mention, and run input that is not JSON. No reason names a
+   wire field such as `systemPrompt`.
 9. The sentence in the side pane equals the stored sentence (INV-H7 holds
    for the draft). After Create, the overview MUST show the new row and
    SHOULD scroll to and highlight it. After Save from a line's page, the

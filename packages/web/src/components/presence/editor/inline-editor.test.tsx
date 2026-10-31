@@ -189,6 +189,20 @@ describe("InlineEditor", () => {
     expect(bar()).toBeNull();
   });
 
+  it("holds Save on instructions over the limit, in UI words, before the api refuses them", () => {
+    render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
+    const box = screen.getByLabelText("Instructions (optional)") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "x".repeat(4_512) } });
+    const changes = bar();
+    if (changes === null) throw new Error("No bar after a change.");
+    expect(changes.textContent).toContain("Instructions are 4,512 characters, and the limit is 4,000.");
+    expect(changes.textContent).not.toContain("systemPrompt");
+    const save = within(changes).getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(patchSubscription).not.toHaveBeenCalled();
+  });
+
   it("edits a routine's instructions in a box that fits them, and saves them", () => {
     updateSchedule.mockImplementation((_vars: unknown, handlers: { onSuccess: () => void }) => handlers.onSuccess());
     render(<InlineEditor mode={{ kind: "edit-routine", routine: routine("S1") }} readOnly={false} />);

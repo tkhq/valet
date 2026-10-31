@@ -4,6 +4,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { EventCatalogEntry } from "@valet/engine";
+import { MAX_PROMPT_TEMPLATE_CHARS as SHARED_MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import {
   buildPromptValues,
   MAX_PROMPT_TEMPLATE_CHARS,
@@ -70,9 +71,20 @@ describe("validatePromptTemplate", () => {
     expect(validatePromptTemplate("   ", "systemPrompt", CATALOG)).toContain("must be a non-empty string");
   });
 
-  it("refuses a template over the length cap", () => {
+  it("refuses a template over the length cap with its length, the cap, and what to do", () => {
     const long = "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1);
-    expect(validatePromptTemplate(long, "systemPrompt", CATALOG)).toContain("too long");
+    expect(validatePromptTemplate(long, "systemPrompt", CATALOG)).toBe(
+      "systemPrompt is 4001 characters, and the limit is 4000. " +
+        "Shorten it, or move long guidance into a skill and name that skill in systemPrompt.",
+    );
+    expect(validatePromptTemplate(long, "userPromptTemplate", CATALOG)).toBe(
+      "userPromptTemplate is 4001 characters, and the limit is 4000. Shorten it.",
+    );
+    expect(validatePromptTemplate("x".repeat(MAX_PROMPT_TEMPLATE_CHARS), "systemPrompt", CATALOG)).toBeNull();
+  });
+
+  it("reads the cap from the constant the web editor counts against", () => {
+    expect(MAX_PROMPT_TEMPLATE_CHARS).toBe(SHARED_MAX_PROMPT_TEMPLATE_CHARS);
   });
 
   it("refuses an unclosed placeholder", () => {

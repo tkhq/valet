@@ -49,10 +49,12 @@
  * spec and the form both say so.
  */
 import type { EventCatalogEntry } from "@valet/engine";
+import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import { resolvePath } from "./match.js";
 
-/** Longest template one field may store. Bounds render cost per delivery. */
-export const MAX_PROMPT_TEMPLATE_CHARS = 4_000;
+/** Longest template one field may store. Bounds render cost per delivery.
+ * The web editor counts against the same constant (`@valet/shared`). */
+export { MAX_PROMPT_TEMPLATE_CHARS };
 /** Longest body a rendered template delivers. Payload values are unbounded. */
 export const MAX_RENDERED_PROMPT_CHARS = 8_000;
 /** Longest rendered instruction. A template is bounded, but its variables are
@@ -122,6 +124,14 @@ const VARIABLE_HELP: Record<PromptField, string> = {
     "Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.",
 };
 
+/** What to do with a field over the length cap. Long guidance in the
+ * instructions has a better home: a skill, which the assistant reads only
+ * when it needs it. */
+const LENGTH_HELP: Record<PromptField, string> = {
+  systemPrompt: "Shorten it, or move long guidance into a skill and name that skill in systemPrompt.",
+  userPromptTemplate: "Shorten it.",
+};
+
 /** The payload fields the events selected by this rule declare. */
 function declaredPayloadFields(entries: EventCatalogEntry[]): string[] {
   const fields = new Set<string>();
@@ -172,7 +182,7 @@ export function validatePromptTemplate(
     return `${field} must be a non-empty string. Remove the field, or enter a template.`;
   }
   if (value.length > MAX_PROMPT_TEMPLATE_CHARS) {
-    return `${field} is too long (max ${MAX_PROMPT_TEMPLATE_CHARS} characters). Shorten it.`;
+    return `${field} is ${value.length} characters, and the limit is ${MAX_PROMPT_TEMPLATE_CHARS}. ${LENGTH_HELP[field]}`;
   }
 
   const scanned = scanPlaceholders(value, field);

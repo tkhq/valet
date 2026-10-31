@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreateEventSubscriptionRequest } from "@valet/api/wire";
+import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import type { CatalogService } from "~/components/events/subscription-match";
 import { line, routine } from "../test-fixtures";
 import { presenceSentence, routineSentence, text } from "../sentences";
@@ -356,6 +357,25 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
       const inMessage = { ...mentionLine(), promptTemplates: { userPromptTemplate: `Read {{${name}}}.` } };
       expect(saveBlocker(inMessage, CREATE, { connected: true, services: SERVICES })).toBe(unknown(name));
     }
+  });
+
+  it("refuses instructions over the api's limit in UI words, with the length and what to do", () => {
+    const draft = { ...mentionLine(), instructions: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 512) };
+    const blocker = saveBlocker(draft, CREATE, { connected: true });
+    expect(blocker).toBe(
+      "Instructions are 4,512 characters, and the limit is 4,000. " +
+        "Shorten them, or move long guidance into a skill and name that skill in the instructions.",
+    );
+    expect(blocker).not.toContain("systemPrompt");
+    // The api stores the trimmed text, so surrounding space does not count.
+    expect(saveBlocker({ ...draft, instructions: ` ${"x".repeat(MAX_PROMPT_TEMPLATE_CHARS)}\n` }, CREATE, { connected: true })).toBeNull();
+  });
+
+  it("refuses an Event message over the api's limit in UI words", () => {
+    const draft = { ...mentionLine(), promptTemplates: { userPromptTemplate: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1) } };
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe(
+      "The Event message is 4,001 characters, and the limit is 4,000. Shorten it.",
+    );
   });
 
   it("refuses an Event message payload variable that no picked event carries", () => {

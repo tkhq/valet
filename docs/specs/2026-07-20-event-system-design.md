@@ -551,7 +551,8 @@ inside the dispatcher, before the existing assistant delivery path
 (`events/assistant-delivery.ts`) takes the signal.
 
 The write gate (`events/subscription-write.ts`) is what keeps the renderer
-total. It refuses an empty field, a field over 4000 characters, a malformed
+total. It refuses an empty field, a field over 4,000 characters (see Length
+limit below), a malformed
 placeholder, a name outside the set above, a `payload.<field>` that no event
 selected by `eventKeys` declares, and, in `systemPrompt`, a name outside that
 field's narrower column. A patch re-validates the stored templates against
@@ -590,6 +591,37 @@ reads as the event.
 
 Prompt configuration does not change what a rule matches, so a write that
 only changes a template runs no collision gate.
+
+### Length limit
+
+Each template field stores at most 4,000 characters. One constant,
+`MAX_PROMPT_TEMPLATE_CHARS` in `@valet/shared`, holds the number. The write
+gate refuses a longer field, and the Presence editor counts characters and
+holds Save against the same constant, so the two cannot drift.
+
+The refusal names the field, its length, the limit, and the corrective
+action: `systemPrompt is 4512 characters, and the limit is 4000. Shorten it,
+or move long guidance into a skill and name that skill in systemPrompt.` The
+editor shows the same refusal in its own words next to the Instructions
+field (presence hub spec, Part H).
+
+The limit stays at 4,000 (reviewed 2026-10-30). The reasons:
+
+- The model context is not the constraint. 4,000 characters is about 1,000
+  tokens, under 1% of a 200,000-token window.
+- The instruction repeats. It rides above the event in every delivery, so a
+  line that works in one thread adds it to that thread on each event.
+- The delivered body is capped at 8,000 characters, and the rendered
+  instruction at 4,000. A higher template limit would truncate the
+  instruction at render time, or take room from the event.
+- Comparable products sit in the same range. ChatGPT custom instructions
+  allow 1,500 characters for each field. GitHub Copilot code review reads
+  the first 4,000 characters of an instruction file. A custom GPT and a
+  Copilot Studio agent allow 8,000 characters, but those instructions cover
+  the whole agent and appear once in its context, not once for each event.
+- Long guidance has a better home: a skill. The assistant reads a skill only
+  when it needs it, so the guidance costs nothing on deliveries that do not
+  use it.
 
 ### Surfaces
 
