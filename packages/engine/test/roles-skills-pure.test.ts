@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
 import {
+  frontmatterBlock,
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
   parseMarkdownArtifact,
@@ -160,6 +161,23 @@ b
       version: "1.0",
     });
     expect(r.frontmatter.license).toBe("Apache-2.0");
+  });
+});
+
+describe("frontmatterBlock", () => {
+  it("gives the YAML text, the file line it starts on, and the body", () => {
+    expect(frontmatterBlock("---\nname: a\n---\nBody\n")).toEqual({ closed: true, text: "name: a", startLine: 2, body: "Body\n" });
+    // Blank lines after the opening fence belong to the fence.
+    expect(frontmatterBlock("---\n\nname: a\n---\n")).toMatchObject({ closed: true, startLine: 3 });
+  });
+
+  it("marks an opening fence with no closing fence", () => {
+    expect(frontmatterBlock("---\nname: a\nBody\n")).toEqual({ closed: false });
+    expect(parseMarkdownArtifact("---\nname: a\nBody\n").frontmatter).toEqual({});
+  });
+
+  it("is null for a file with no frontmatter", () => {
+    expect(frontmatterBlock("# Title\n---\n")).toBeNull();
   });
 });
 
