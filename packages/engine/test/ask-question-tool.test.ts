@@ -33,6 +33,9 @@ function makeCtx(requestDecision: (gate: DecisionGateRequest) => Promise<Decisio
   };
 }
 
+/** The `[answered: …]` line for `resolvedAt: 1` with no known timezone. */
+const ANSWERED_AT_1 = "[answered: Thursday 1970-01-01 00:00 UTC]";
+
 describe("ask_question tool", () => {
   it("opens a question gate with one button per option and returns the picked answer", async () => {
     let seen: DecisionGateRequest | undefined;
@@ -44,7 +47,8 @@ describe("ask_question tool", () => {
       type: "question", title: "Which workflow first?", body: "Both are drafted.",
       actions: [{ id: "option-0", label: "Linear sync" }, { id: "option-1", label: "PR review" }],
     });
-    expect(result.text).toBe('answer to "Which workflow first?": PR review');
+    // The answer time comes first: the stored resolvedAt is 1, and this context knows no timezone.
+    expect(result.text).toBe(`${ANSWERED_AT_1}\n\nanswer to "Which workflow first?": PR review`);
   });
 
   it("prefers a typed answer over an option", async () => {
@@ -52,7 +56,7 @@ describe("ask_question tool", () => {
       { question: "Which repo?", options: ["web"] },
       makeCtx(async () => ({ value: " api ", resolvedBy: "u1", resolvedAt: 1 })),
     );
-    expect(result.text).toBe('answer to "Which repo?": api');
+    expect(result.text).toBe(`${ANSWERED_AT_1}\n\nanswer to "Which repo?": api`);
   });
 
   it("ignores a stored answer that is not text, instead of crashing", async () => {
@@ -62,7 +66,7 @@ describe("ask_question tool", () => {
       { question: "Which repo?", options: ["web"] },
       makeCtx(async () => JSON.parse(stored)),
     );
-    expect(result.text).toBe('answer to "Which repo?": web');
+    expect(result.text).toBe(`${ANSWERED_AT_1}\n\nanswer to "Which repo?": web`);
   });
 
   it("holds work that depends on an expired question, and goes on with the rest", async () => {
@@ -83,4 +87,19 @@ it("returns question-answer images as model-visible tool attachments after JSON 
   const result = await askQuestionTool.execute({ question: "Which avatar?" }, makeCtx(async () => JSON.parse(JSON.stringify(resolution))));
   expect(result.text).toContain("See the attached images");
   expect(result.attachments).toEqual([{ type: "image", data: new Uint8Array([112, 104, 111, 116, 111]), mimeType: "image/png", name: "avatar.png" }]);
+});
+
+it("shows the answer time in the user's timezone, and no time for a stored answer without one", async () => {
+  const at = Date.UTC(2026, 9, 13, 16, 35);
+  const ctx = (resolvedAt: unknown) => ({
+    ...makeCtx(async () => JSON.parse(JSON.stringify({ value: "tomorrow", resolvedBy: "u1", resolvedAt }))),
+    currentUserTimezone: async () => "America/Los_Angeles",
+  });
+  const answered = await askQuestionTool.execute({ question: "When?" }, ctx(at));
+  expect(answered.text).toBe(
+    "[answered: Tuesday 2026-10-13 16:35 UTC; user local: Tuesday 2026-10-13 09:35 PDT (America/Los_Angeles)]\n\n" +
+    'answer to "When?": tomorrow',
+  );
+  const stored = await askQuestionTool.execute({ question: "When?" }, ctx("not a time"));
+  expect(stored.text).toBe('answer to "When?": tomorrow');
 });

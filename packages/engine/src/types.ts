@@ -827,6 +827,13 @@ export interface ToolContext {
   /** Nobody watches this workflow task. `requestDecision` refuses new gates,
    * and the decision tools return a fail-closed result instead of asking. */
   unattendedWorkflow?: boolean;
+  /**
+   * Read the user's current IANA timezone, as the `[sent: …]` line does. The
+   * decision tools use it for the `[answered: …]` line on their result.
+   * Absent on a context built by hand, and undefined when the timezone is
+   * not known.
+   */
+  currentUserTimezone?: () => Promise<string | undefined>;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;

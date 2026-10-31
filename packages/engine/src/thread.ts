@@ -7012,6 +7012,7 @@ export class Thread {
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
+      currentUserTimezone: () => session.currentUserTimezone(),
       cwd: session.options.workspace,
       // The turn's author picks whose account a team read uses first. A
       // channel sender with no Valet account acts for nobody.
