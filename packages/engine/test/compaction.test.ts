@@ -275,7 +275,7 @@ describe("compaction: rehydrate replaces covered entries with the summary", () =
     expect(messages[1]).toMatchObject({ role: "user" });
     if (messages[1].role === "user") {
       const text = messages[1].content[0];
-      if (text.type === "text") expect(text.text).toBe("new prompt");
+      if (text.type === "text") expect(text.text).toBe("[sent: Thursday 1970-01-01 00:00 UTC]\n\nnew prompt");
     }
   });
 });
@@ -371,7 +371,7 @@ describe("compaction: auto-continue", () => {
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
         );
       }
-      expect(autoContinue.metadata).toEqual({ compaction_continue: true, synthetic: true });
+      expect(autoContinue.metadata).toEqual({ compaction_continue: true, synthetic: true, userTimezone: null });
       // The continuation answers the same reader as the turn it continues:
       // it inherits the interrupted item's channel mark, so the outbound
       // channel path does not classify it as a web prompt (TKAI-323).

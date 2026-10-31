@@ -2,6 +2,7 @@ import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
+import { entryMessageTime, messageTimeLine } from "./model-context.js";
 import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
 
 /**
@@ -1049,9 +1050,13 @@ export function entriesToSummaryMessages(
       // sender). Without it the summary loses who asked for what.
       const senderLine = e.signal ? undefined : formatSenderLine(attributedAuthor(opts.attributeAuthors, e.author));
       const content = capProse(e.content);
+      const body = senderLine ? `${senderLine}\n\n${content}` : content;
+      // The `[sent: …]` line lets the summary keep when each request was made.
+      // An entry with no text gets none, so it still adds nothing to the
+      // summarizer input (the coverage check counts on that).
       out.push({
         role: "user",
-        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${content}` : content }],
+        content: [{ type: "text", text: body ? `${messageTimeLine(entryMessageTime(e))}\n\n${body}` : body }],
         timestamp: e.createdAt,
       });
       continue;

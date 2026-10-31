@@ -9,7 +9,7 @@
  * access rules hold for MCP callers.
  */
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
-import { fauxToolCall } from "@valet/engine/test-helpers";
+import { fauxToolCall, withoutSentLine } from "@valet/engine/test-helpers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
@@ -183,8 +183,8 @@ describe("MCP agent tools", () => {
     faux?.appendResponses([
       fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which color?", options: ["red", "blue"] }, { id: "tc-question" })], { stopReason: "toolUse" }),
       (context) => {
-        seen = context.messages.filter((m) => m.role === "user").map((m) =>
-          typeof m.content === "string" ? m.content : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join(""));
+        seen = context.messages.filter((m) => m.role === "user").map((m) => withoutSentLine(
+          typeof m.content === "string" ? m.content : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("")));
         return fauxAssistantMessage("Blue, and the tests pass");
       },
     ]);

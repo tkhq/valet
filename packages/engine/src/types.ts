@@ -180,6 +180,14 @@ export interface ThreadData {
 /** Key in `ThreadData.metadata` that holds the creation-time user timezone. */
 export const THREAD_USER_TIMEZONE_KEY = "userTimezone";
 
+/**
+ * Key in a user `MessageEntry.metadata` that holds the user timezone (string,
+ * or null when unknown) read when the entry was written. With `createdAt` it
+ * renders the entry's `[sent: …]` line (`messageTimeLine`). Written once, so
+ * the line never changes.
+ */
+export const ENTRY_USER_TIMEZONE_KEY = "userTimezone";
+
 export interface QueueState {
   threadId: string;
   mode: QueueMode;
@@ -819,6 +827,13 @@ export interface ToolContext {
   /** Nobody watches this workflow task. `requestDecision` refuses new gates,
    * and the decision tools return a fail-closed result instead of asking. */
   unattendedWorkflow?: boolean;
+  /**
+   * Read the user's current IANA timezone, as the `[sent: …]` line does. The
+   * decision tools use it for the `[answered: …]` line on their result.
+   * Absent on a context built by hand, and undefined when the timezone is
+   * not known.
+   */
+  currentUserTimezone?: () => Promise<string | undefined>;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;

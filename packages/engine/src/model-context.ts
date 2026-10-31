@@ -1,3 +1,5 @@
+import { ENTRY_USER_TIMEZONE_KEY, type MessageEntry } from "./types.js";
+
 /** Runtime facts for the outbound prompt. Selection tokens need not be wire model IDs. */
 export interface RuntimeModelContext {
   assignedSelection: string;
@@ -51,12 +53,56 @@ export function threadStartedSection(createdAtMs: number, userTimezone: string |
   const date = new Date(createdAtMs);
   const utc = `${date.toISOString().slice(0, 16)}:00Z`;
   const local = localTime(createdAtMs, userTimezone)
-    ?? "unknown, the user timezone is not known. Do not guess it.";
+    ?? "unknown, the user timezone was not known when this thread started. Do not guess it.";
   return `## Thread started
 
 This block shows when this thread started. It is not the current time.
 Thread started (UTC): ${utc} (${WEEKDAYS[date.getUTCDay()]})
 Thread started (user local): ${local}
+Each user message starts with a [sent: …] line: the time it was sent in UTC and, when known, in the user's local time. An answer to ask_question or ask_approval starts with an [answered: …] line in the same form. The newest of these lines is the current time, to within the length of this turn. Use it, not the thread start or dates in earlier messages, for "today", "tomorrow" and schedule times. A line with no user local time means the timezone was not known. Do not guess it.
 A memory snapshot header, if present, shows the date the snapshot was built. That date is separate from the thread start.
 If you have a shell tool, run \`date -u\` when you need the exact current time.`;
+}
+
+/**
+ * When a user message was sent: the persisted entry `createdAt`, and the
+ * user timezone the thread stamped on that entry (`ENTRY_USER_TIMEZONE_KEY`).
+ */
+export interface MessageTime {
+  at: number;
+  timezone?: string;
+}
+
+/**
+ * The `[sent: …]` line on each user message in the model's transcript. It
+ * gives every turn the current time without a per-call system prompt change:
+ * it depends only on persisted entry fields, so a message renders the same
+ * bytes on every later call and after a restart, and the cached prefix holds.
+ */
+export function messageTimeLine(time: MessageTime, label: "sent" | "answered" = "sent"): string {
+  const date = new Date(time.at);
+  const iso = date.toISOString();
+  const utc = `${WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+  const local = localTime(time.at, time.timezone);
+  return local ? `[${label}: ${utc}; user local: ${local}]` : `[${label}: ${utc}]`;
+}
+
+/**
+ * The `[answered: …]` line on an `ask_question` or `ask_approval` result.
+ * An answer comes back inside the turn that asked, as a tool result, and can
+ * come days later. No new user message follows, so without this line the
+ * newest time the model sees is the turn start. `resolvedAt` is persisted
+ * with the resolution, and the tool result is persisted once, so the line
+ * keeps its bytes on later calls. Returns undefined for a stored resolution
+ * with no valid time.
+ */
+export function answerTimeLine(resolvedAt: unknown, timezone: string | undefined): string | undefined {
+  if (typeof resolvedAt !== "number" || !Number.isFinite(resolvedAt)) return undefined;
+  return messageTimeLine({ at: resolvedAt, ...(timezone ? { timezone } : {}) }, "answered");
+}
+
+/** The `MessageTime` a persisted user entry renders. An entry written before the stamp existed shows UTC only. */
+export function entryMessageTime(entry: MessageEntry): MessageTime {
+  const timezone = entry.metadata?.[ENTRY_USER_TIMEZONE_KEY];
+  return { at: entry.createdAt, ...(typeof timezone === "string" ? { timezone } : {}) };
 }

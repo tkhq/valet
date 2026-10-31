@@ -955,6 +955,20 @@ export class Session {
     return this.thread("web:default");
   }
 
+  /**
+   * Read the user's current timezone for a new user entry's `[sent: …]` line.
+   * A failure keeps the last known value.
+   */
+  async currentUserTimezone(): Promise<string | undefined> {
+    await this.refreshUserTimezone();
+    return this.latestUserTimezone;
+  }
+
+  /** Last known user timezone, without a read. */
+  get lastKnownUserTimezone(): string | undefined {
+    return this.latestUserTimezone;
+  }
+
   /** Read the user's current timezone before a thread is created. A failure keeps the last value. */
   private async refreshUserTimezone(): Promise<void> {
     const resolve = this.options.resolveUserTimezone;
