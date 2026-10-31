@@ -518,13 +518,47 @@ describe("runtime model context delivered to the provider", () => {
         expect(userTexts(ctxs[0]!)[0]).toBe("[sent: Monday 2026-10-12 16:35 UTC]\n\nwork");
       });
 
-      it("tells the model that the newest sent line is the current time", async () => {
+      // A gate answer comes back inside the same turn, as a tool result, with
+      // no new user message. Without its own time the newest line stays the
+      // turn start, and "tomorrow" in the answer resolves to the wrong day.
+      it.each([
+        ["ask_question", { question: "When should it run?" }, { value: "tomorrow at 9am" }],
+        ["ask_approval", { title: "Schedule it for tomorrow?" }, { actionId: "approve" }],
+      ] as const)("stamps the time of an answer that comes a day later on the %s result", async (tool, args, answer) => {
+        const { s, ctxs } = recordingSetup();
+        s.small.setResponses([
+          pi.fauxAssistantMessage([fauxToolCall(tool, args, { id: "ask-1" })], { stopReason: "toolUse" }),
+          (ctx: pi.Context) => {
+            ctxs.push(structuredClone(ctx));
+            return pi.fauxAssistantMessage("done");
+          },
+        ]);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        const zone = "America/Los_Angeles";
+        const session = await s.engine.createSession({ ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone });
+        const gates: string[] = [];
+        s.providers.stream.subscribe({}, (e) => { if (e.event.type === "decision_gate") gates.push(e.event.gate.id); });
+        const thread = await session.ensureDefaultThread();
+        const receipt = await thread.submitPrompt("work", {});
+        await vi.waitFor(() => expect(gates).toHaveLength(1));
+        vi.setSystemTime(T0 + DAY);
+        await session.resolveDecision(gates[0]!, { ...answer, resolvedBy: "u1", resolvedAt: Date.now() });
+        expect((await thread.awaitResult(receipt.queueItemId, { timeoutMs: 3000 })).outcome).toBe("completed");
+
+        const results = ctxs[0]!.messages.filter((m) => m.role === "toolResult");
+        const text = (results.at(-1)!.content as Block[]).map((b) => b.text ?? "").join("");
+        expect(text.split("\n\n")[0])
+          .toBe("[answered: Tuesday 2026-10-13 16:35 UTC; user local: Tuesday 2026-10-13 09:35 PDT (America/Los_Angeles)]");
+      });
+
+      it("tells the model that the newest sent or answered line is the current time", async () => {
         const { s } = recordingSetup();
         s.small.setResponses([s.capture()]);
         await run(await startedAt(s, "America/Los_Angeles"));
 
         const b = block(s.prompts[0]);
-        expect(b).toContain("The newest [sent: …] line is the current time");
+        expect(b).toContain("An answer to ask_question or ask_approval starts with an [answered: …] line in the same form. The newest of these lines is the current time");
       });
     });
 

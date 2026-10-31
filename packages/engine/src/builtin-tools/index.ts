@@ -11,6 +11,7 @@ import {
 } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired, isDecisionGateWithdrawn, isUnattendedWorkflowRefusal } from "../decision-gate.js";
+import { answerTimeLine } from "../model-context.js";
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
@@ -43,6 +44,7 @@ import type {
   ChildSender,
   ChildSpawner,
   ChildStatusReader,
+  DecisionResolution,
   ExecJobHandle,
   ExecOpts,
   ExecResult,
@@ -840,13 +842,26 @@ export const askApprovalTool = defineTool({
       };
     }
     return {
-      text:
+      text: await withAnswerTime(
         resolution.actionId === "approve"
           ? `approved: ${args.title}`
           : `denied: ${args.title}. This denial is final for the current turn — do not ask again. Tell the user what was denied.`,
+        resolution,
+        ctx,
+      ),
     };
   },
 });
+
+/**
+ * Put the `[answered: …]` line (`answerTimeLine`) first on a decision tool's
+ * result. The answer can come days after the turn's newest `[sent: …]` line,
+ * and this line is the only new time the model gets.
+ */
+async function withAnswerTime(text: string, resolution: DecisionResolution, ctx: ToolContext): Promise<string> {
+  const line = answerTimeLine(resolution.resolvedAt, await ctx.currentUserTimezone?.());
+  return line ? `${line}\n\n${text}` : text;
+}
 
 export const askQuestionTool = defineTool({
   name: "ask_question",
@@ -919,8 +934,8 @@ export const askQuestionTool = defineTool({
     const typedNote = typed && options.length > 0 && !options.includes(typed)
       ? " The person typed this instead of picking an option. If it asks you something, reply to it first, then ask again if you still need a choice."
       : "";
-    return { text: answer ? `answer to "${args.question}": ${answer}${typedNote}` : `the question "${args.question}" was closed without an answer.`,
-      ...(attachments.length ? { attachments } : {}) };
+    const text = answer ? `answer to "${args.question}": ${answer}${typedNote}` : `the question "${args.question}" was closed without an answer.`;
+    return { text: await withAnswerTime(text, resolution, ctx), ...(attachments.length ? { attachments } : {}) };
   },
 });
 
