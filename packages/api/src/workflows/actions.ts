@@ -204,8 +204,8 @@ function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
 const WEBHOOK_NEXT =
   "Show the URL only to the workflow owner. Tell the person to register it in the source, and say that some " +
   "services limit webhooks to certain plans or to admins. If the source is a connected integration, always end " +
-  "your reply with one sentence that offers a schedule instead: it lists the items created since the previous " +
-  "run, needs no setup in the source, and runs up to one interval late.";
+  "your reply with one sentence that offers a schedule instead: each run lists the items created since the " +
+  "previous run, it needs no setup in the source, and runs can start late while Valet is down.";
 
 /** What a saved workflow still needs a person to allow, for a save result. */
 async function approvalNeeded(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<{ needsApproval?: string[]; next?: string }> {
