@@ -1971,12 +1971,11 @@ export async function duplicateThread(c: Context<AppEnv>, sessionId: string, thr
   const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
     .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
   // A copy of a copy keeps one suffix: "Plan (copy)", not "Plan (copy) (copy)".
-  // A long title gives up its end, never the suffix, so the copy's title differs.
+  // A long title gives up its end, never the suffix, and an untitled source
+  // gets a name, so the copy's title always differs from the source's.
   const suffix = " (copy)";
-  const base = titled?.title?.replace(/(?: \(copy\))+$/, "").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
-  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, {
-    destination: "here", ...(base ? { title: `${base}${suffix}` } : {}),
-  });
+  const base = (titled?.title?.replace(/(?: \(copy\))+$/, "") || "Untitled thread").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination: "here", title: `${base}${suffix}` });
   return result instanceof Response ? result : c.json(result, 201);
 }
 

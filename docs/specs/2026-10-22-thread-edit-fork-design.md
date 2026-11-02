@@ -277,7 +277,8 @@ thread asks; a team thread that sends to a member's private fork does not.
 
 Call: the sidebar row menu and the thread header menu offer "Duplicate
 thread". A duplicate is a fork of the whole thread into the same workspace,
-titled "<title> (copy)". The source stays as it is: no archive, no note, no
+titled "<title> (copy)", or "Untitled thread (copy)" when the source has no
+title. A long title loses its end, never the suffix. The source stays as it is: no archive, no note, no
 `movedTo`. The copy records `forkOf` and opens. The fork rules apply: only
 the thread owner or a team member can duplicate, the copy keeps the source's
 audience, and a thread with a running turn or an open approval does not

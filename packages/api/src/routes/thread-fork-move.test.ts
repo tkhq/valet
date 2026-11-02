@@ -195,6 +195,13 @@ describe("duplicate", () => {
     expect(((await (await read(copy.thread.id)).json()) as ListMessagesResponse).messages.map((m) => m.content).slice(0, 2)).toEqual(["my idea", "my answer"]);
   });
 
+  it("names the copy of an untitled thread", async () => {
+    await boot();
+    const { thread } = await personalThread();
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    expect(copy.thread.title).toBe("Untitled thread (copy)");
+  });
+
   it("keeps the copy suffix when the source title is at the length limit", async () => {
     await boot();
     const { thread, sessionId } = await personalThread();
