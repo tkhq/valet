@@ -33,6 +33,7 @@ import { assistantExecutions, sessionThreads, workflowDefinitions } from "../sch
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { workflowRunIdFromThreadKey } from "./run-conversations.js";
 import { endChildSubscriptions, selectWork } from "../engine/wakeups-admin.js";
+import { hasUnreportedChild } from "./delegated-work.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
@@ -408,6 +409,17 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           console.debug(
             `workflow run thread archive: run ${info.runId} settled with background work open on ` +
               `thread ${dispatch.threadId}; leaving the thread in the list.`,
+          );
+          continue;
+        }
+        // A child that has not reported back still delivers its result here.
+        // The step normally waits for that report, but a run can settle first
+        // (`wait: { mode: "none" }`, the strike cap). Keep the delivery and the
+        // thread. A cancelled run ends it: the person stopped the work.
+        if (info.outcome !== "cancelled" && await hasUnreportedChild(deps.db, dispatch.sessionId, thread.id)) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled while a child on ` +
+              `thread ${dispatch.threadId} has not reported back; leaving the thread in the list.`,
           );
           continue;
         }

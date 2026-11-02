@@ -327,10 +327,12 @@ describe("buildRunThreadArchive", () => {
       eventMatch: { childSessionId: "run-child", clauses: [{ key: "child.*" }], self: [], once: false },
       logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
 
+    // The child already reported back, so only its idle subscription is left.
     await db.insert(childWatches).values({ childSessionId: "run-child", queueItemId: "owed-result", parentSessionId: done.sessionId,
-      parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, createdAt: 1 });
+      parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, settled: true, createdAt: 1 });
     await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
-    expect((await db.select().from(eventDropLog)).some(row => row.reason === "child_delivery_cancelled")).toBe(true);
+    // Nothing was owed, so ending the subscription drops no result.
+    expect((await db.select().from(eventDropLog)).some(row => row.reason === "child_delivery_cancelled")).toBe(false);
     expect((await engineStore.getWakeup("wk_child_events:run-child"))?.status).toBe("cancelled");
 
     const rows = await db.select().from(sessionThreads);
@@ -338,6 +340,42 @@ describe("buildRunThreadArchive", () => {
       expect.objectContaining({ id: done.threadId, sessionId: done.sessionId, archivedAt: 5_000 }),
     ]);
     expect(rows.find((r) => r.id === live.threadId)).toBeUndefined();
+  });
+
+  it("keeps the thread and the delivery of a child that has not reported back", async () => {
+    // A run can settle before its step's child reports (`wait: { mode: "none" }`,
+    // the strike cap). Cancelling the delivery would drop the child's result.
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const archive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
+    for (const [runId, outcome] of [["run_owed", "completed"], ["run_stopped", "cancelled"]] as const) {
+      await seedRun(api, runId, "wf_archive");
+      const done = await deps.promptOrchestrator("report", {
+        dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+        ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+      });
+      await recordDispatch(api, runId, done);
+      await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+      const child = `${runId}-child`;
+      await engineStore.createWakeup({ id: `wk_child_events:${child}`, sessionId: done.sessionId, threadId: done.threadId,
+        kind: "event", status: "running", reason: "Child updates", subjects: [`valet:session:${child}`],
+        eventMatch: { childSessionId: child, clauses: [{ key: "child.*" }], self: [], once: false },
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
+      await db.insert(childWatches).values({ childSessionId: child, queueItemId: "child-item", parentSessionId: done.sessionId,
+        parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, createdAt: 1 });
+
+      await archive({ ...settledRun(runId, "wf_archive"), outcome });
+
+      const archived = (await db.select().from(sessionThreads)).some((row) => row.id === done.threadId);
+      const delivery = (await engineStore.getWakeup(`wk_child_events:${child}`))?.status;
+      // A cancelled run ends the delivery: the person stopped the work.
+      expect({ archived, delivery }).toEqual(outcome === "cancelled"
+        ? { archived: true, delivery: "cancelled" }
+        : { archived: false, delivery: "running" });
+    }
   });
 
   it("evicts only an idle archived report execution and retains its durable history", async () => {

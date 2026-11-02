@@ -2287,6 +2287,25 @@ describe("ChildWatcher", () => {
       expect((await c.engineStore.getWakeup(`wk_child_events:${c.watch.childSessionId}`))?.status).toBe("done");
     });
 
+    it("records the admitted report turn when boot recovery settles the watch", async () => {
+      // A workflow step finds its child's report turn from this column.
+      const c = await armedChild("restart-report");
+      const db = api!.providers.db;
+      const watchRow = async () => (await db.select().from(childWatches).where(eq(childWatches.childSessionId, c.child.id)))[0];
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const report = await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${c.watch.queueItemId}`);
+      expect(report).not.toBeNull();
+      expect((await watchRow())?.reportQueueItemId).toBe(report!.id);
+      // Simulate death after admission, before the watch settles.
+      await db.update(childWatches).set({ settled: false, reportQueueItemId: null }).where(eq(childWatches.childSessionId, c.child.id));
+      await testChildWatcher(c.deps).rearm();
+      expect(await watchRow()).toMatchObject({ settled: true, reportQueueItemId: report!.id });
+      const reports = (await c.engineStore.listUnsettledSubmissions(c.parent.id))
+        .filter(item => item.dispatchId === `${c.child.id}:settled:${c.child.id}:${c.watch.queueItemId}`);
+      expect(reports).toHaveLength(1);
+    });
+
     it("does not report an injected signal as a separate completed turn", async () => {
       const c = await armedChild("merged-signal");
       c.watcher.arm(c.watch);
