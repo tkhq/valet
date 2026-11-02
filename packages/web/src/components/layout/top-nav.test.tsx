@@ -236,6 +236,7 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
+    expect(within(screen.getByRole("navigation", { name: "Primary" })).getByRole("link", { name: "Home" }).getAttribute("href")).toBe("/");
     expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
     expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
     expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
@@ -248,6 +249,7 @@ describe("TopNav", () => {
       .getAllByRole("link")
       .map((el) => el.textContent);
     expect(labels).toEqual([
+      "Home",
       "Threads",
       "Artifacts",
       "Presence",
@@ -319,7 +321,7 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByLabelText("Valet — dashboard")).toBeNull();
+    expect(within(nav).queryByLabelText("Valet — Home")).toBeNull();
     expect(within(nav).queryByLabelText("Settings")).toBeNull();
     expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
@@ -375,7 +377,7 @@ describe("TopNav — sidebar toggle", () => {
   it("hides the logo on a phone, where the menu carries Home", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
-    const logo = screen.getByRole("link", { name: "Valet — dashboard" });
+    const logo = screen.getByRole("link", { name: "Valet — Home" });
     expect(logo.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "md:inline-flex"]));
     await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
     expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");

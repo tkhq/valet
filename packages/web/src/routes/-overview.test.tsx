@@ -1,0 +1,124 @@
+// @vitest-environment jsdom
+/** The workspace overview selects the personal or team dashboard from the
+ * workspace switcher, without profile setup. */
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+const infoMock = vi.fn();
+
+// The dashboard renders bare Links (Manage assistants), which need a router
+// — mock them to anchors, same as every other route test.
+vi.mock("@tanstack/react-router", () => ({
+  // `options` mirrors the real route, so a test reads `validateSearch` the same way.
+  createFileRoute: () => (config: object) => ({ ...config, options: config, useSearch: () => ({}) }),
+  useNavigate: () => vi.fn(),
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+}));
+
+vi.mock("~/api/workspace-runtime", () => ({
+  useWorkspaceRuntimeInfo: () => infoMock(),
+
+}));
+
+vi.mock("~/components/dashboard/workspace-catch-up", () => ({
+  WorkspaceCatchUp: () => <div data-testid="catch-up" />,
+}));
+vi.mock("~/components/assistant/memory-card", () => ({
+  MemoryCard: () => <div data-testid="memory-card" />,
+}));
+vi.mock("~/components/assistant/usage-card", () => ({
+  UsageCard: () => <div data-testid="usage-card" />,
+}));
+vi.mock("~/components/dashboard/team-dashboard", () => ({
+  TeamDashboard: ({ teamId }: { teamId: string }) => (
+    <div data-testid="team-dashboard" data-team={teamId} />
+  ),
+}));
+
+// The workspace branch (team dashboard design): `Overview` reads the scope and
+// picks a dashboard. Personal is the context default, so only the team
+// arm needs the mock to steer.
+const scopeMock = vi.fn((): { key: string; teamId: string | undefined; available: string[]; setKey: (next: string) => void } => ({
+  key: "user",
+  teamId: undefined,
+  available: ["user"],
+  setKey: vi.fn(),
+}));
+vi.mock("~/lib/workspace-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/workspace-scope")>();
+  return { ...actual, useWorkspaceScope: () => scopeMock() };
+});
+
+import { Dashboard, Overview } from "./overview";
+
+function renderDashboard() {
+  const queryClient = new QueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <Dashboard />
+    </QueryClientProvider>,
+  );
+}
+
+describe("Dashboard", () => {
+
+  it("shows the personal workspace header and cards", () => {
+    infoMock.mockReturnValue({
+      data: {
+        sessionId: "orchestrator:user-1",
+        presence: "idle",
+        activeChildren: 0,
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderDashboard();
+
+    expect(screen.getByText("Personal")).toBeTruthy();
+    expect(screen.getByTestId("catch-up")).toBeTruthy();
+    expect(screen.getByTestId("memory-card")).toBeTruthy();
+    expect(screen.getByTestId("usage-card")).toBeTruthy();
+    expect(screen.queryByText("Meet your assistant")).toBeNull();
+  });
+
+  it("shows a loading state while the info query is in flight", () => {
+    infoMock.mockReturnValue({ data: undefined, isLoading: true, error: null, refetch: vi.fn() });
+    renderDashboard();
+    expect(screen.queryByTestId("catch-up")).toBeNull();
+    expect(screen.queryByText("Meet your assistant")).toBeNull();
+  });
+});
+
+describe("Overview (workspace branch)", () => {
+  it("renders the personal dashboard when the scope is personal", () => {
+    scopeMock.mockReturnValue({ key: "user", teamId: undefined, available: ["user"], setKey: vi.fn() });
+    infoMock.mockReturnValue({
+      data: { sessionId: "orchestrator:user-1", presence: "idle", activeChildren: 0 },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Overview />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByTestId("team-dashboard")).toBeNull();
+  });
+
+  it("renders the team dashboard when the scope names a team", () => {
+    scopeMock.mockReturnValue({ key: "team_1", teamId: "team_1", available: ["user", "team_1"], setKey: vi.fn() });
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Overview />
+      </QueryClientProvider>,
+    );
+    const dash = screen.getByTestId("team-dashboard");
+    expect(dash.getAttribute("data-team")).toBe("team_1");
+  });
+});

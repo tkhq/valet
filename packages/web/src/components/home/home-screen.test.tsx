@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-/** The phone's Home is the person's conversation with Valet, with Tasks and
- * Make as tabs. */
+/** Home is the person's conversation with Valet, with Tasks and Make as tabs
+ * on a phone and beside the conversation on a wider screen. */
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,9 +16,9 @@ vi.mock("~/components/home/tasks-panel", () => ({
 vi.mock("~/components/home/make-panel", () => ({ MakePanel: () => <div data-testid="make" /> }));
 vi.mock("~/components/home/needs-you-dock", () => ({ NeedsYouDock: () => <div data-testid="dock" /> }));
 vi.mock("~/components/session/session-view", () => ({
-  SessionView: (props: { sessionId: string; activeThreadId: string; active: boolean; composerAccessory: React.ReactNode }) => {
+  SessionView: (props: { sessionId: string; activeThreadId: string; active?: boolean; composerAccessory: React.ReactNode }) => {
     sessionView(props);
-    return <div data-testid="chat" data-active={String(props.active)}>{props.composerAccessory}</div>;
+    return <div data-testid="chat" data-active={String(props.active ?? true)}>{props.composerAccessory}</div>;
   },
 }));
 
@@ -66,6 +66,25 @@ describe("Home", () => {
     expect(screen.getByTestId("make")).toBeTruthy();
     expect(screen.queryByTestId("tasks")).toBeNull();
     expect(screen.getByTestId("chat").dataset.active).toBe("false");
+  });
+
+  it("keeps the conversation in view on a wider screen, with Tasks or Make beside it", () => {
+    const onViewChange = vi.fn();
+    const { rerender } = render(<HomeScreen view="chat" wide onViewChange={onViewChange} />);
+    expect(sessionView).toHaveBeenLastCalledWith(expect.objectContaining({ activeThreadId: "th-home" }));
+    // The full thread header, not the phone's compact panel chrome.
+    expect(sessionView.mock.lastCall?.[0]).not.toHaveProperty("panel");
+    expect(screen.getByTestId("chat").dataset.active).toBe("true");
+    expect(screen.getByTestId("dock")).toBeTruthy();
+    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Tasks", "Make"]);
+    expect(screen.getByTestId("tasks")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Make" }));
+    expect(onViewChange).toHaveBeenCalledWith("make");
+    rerender(<HomeScreen view="make" wide onViewChange={onViewChange} />);
+    expect(screen.getByTestId("make")).toBeTruthy();
+    expect(screen.getByTestId("chat").dataset.active).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(onViewChange).toHaveBeenLastCalledWith("chat");
   });
 
   it("offers Retry when the conversation cannot open", () => {

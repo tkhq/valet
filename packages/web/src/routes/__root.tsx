@@ -41,17 +41,16 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  * (via `RootLayout`'s `<Outlet/>` boundary), so it isn't a bare white page.
  */
 function NotFound() {
-  const mobile = useMobileLayout();
   return (
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
         <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
-        <p className="text-sm text-muted">{mobile ? "Valet is on Home." : "The dashboard does."}</p>
+        <p className="text-sm text-muted">Valet is on Home.</p>
         <Link
           to="/"
           className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
         >
-          {mobile ? "Back to Home" : "Back to the dashboard"}
+          Back to Home
         </Link>
       </div>
     </div>

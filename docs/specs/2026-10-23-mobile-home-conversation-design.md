@@ -2,22 +2,24 @@
 
 ## Scope
 
-Valet opens to one ongoing, private conversation on a phone. The person can
-ask it to work across their personal workspace and teams they belong to.
+Valet opens to one ongoing, private conversation on a phone and, since
+2026-11-02, on desktop. The person can ask it to work across their personal
+workspace and teams they belong to.
 
-The shell change is limited to viewports below 768 CSS pixels. It uses the
-same breakpoint as Tailwind `md`. Resizing changes the shell, not the saved
-conversation or its access rules.
+The phone shell applies below 768 CSS pixels. It uses the same breakpoint as
+Tailwind `md`. Resizing changes the shell, not the saved conversation or its
+access rules.
 
 | Surface | Below 768px | At or above 768px |
 | --- | --- | --- |
-| Home route | Conversation with Chat, Tasks, and Make | Existing personal or team dashboard |
+| Home route | Conversation with Chat, Tasks, and Make | The same conversation, with Tasks or Make beside it |
+| Workspace dashboard | Make links to `/overview` | `/overview`, linked from Make |
 | Top navigation | Drawer toggle and account menu | Existing navigation, notifications, Settings, and Ask Valet |
 | Thread navigation | App drawer on signed-in pages | Existing conversation rail on chat routes |
 | Conversation components | Shared cards, plans, activity, and presence | The same shared components |
 | Backend and Slack | Shared services and access checks | The same services and access checks |
 
-The mobile-only boundary applies to Home and navigation. It does not apply
+The mobile-only boundary applies to navigation. It does not apply
 to conversation cards, approval previews, durable plans, measured thinking
 time, or agent processing feedback. These are shared thread features.
 Quick replies are shown only in the mobile layout.
@@ -53,14 +55,22 @@ to Presence and integrations. These browse the selected workspace. Settings
 and Security remain reachable through the account menu on a phone.
 
 The Home conversation stays mounted when switching between Chat, Tasks,
-and Make, so its draft survives. Wider screens keep the existing dashboard,
-notifications bell, and Ask Valet dock.
+and Make, so its draft survives. Wider screens keep the notifications bell
+and Ask Valet dock. See [Home on desktop](#home-on-desktop).
 
 ## Task access and reports
 
-`start_task` creates a normal work thread and submits the instruction as the
-person. Team tasks use a team execution session. Team membership is checked
-when starting work. `read_task`, `message_task`, task listing, and completion
+`start_task` creates a top-level assistant thread and submits the instruction
+as the person. Team tasks use a team execution session. Team membership is
+checked when starting work.
+
+A task thread has no repository checkout and no git credentials, because an
+assistant session has no sandbox spec. Only a `task` child with `repo` gets a
+clone, the git credential helper, and `gh`. The server adds a fixed note to
+the first message of every task. The note tells the thread to start a child
+with `repo` for work that reads or changes a repository. The `start_task`
+description and the Home context tell Home to name the repository and branch
+in the instructions. `read_task`, `message_task`, task listing, and completion
 reports also check the thread's current audience. A saved `home_tasks` row
 is a pointer to work, not permission to read it.
 
@@ -186,7 +196,7 @@ If initial provisioning fails, Home remains available and logs the failure witho
 
 Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
 The web checks persisted widget specs with the same validator before rendering them.
-Desktop keeps its dashboard. The web sidebar pins a Home row above the thread list in the person's own workspace, with the same unread, question, and work marks as a thread row. Home is never an ordinary row, but thread search finds it when its content matches.
+The web sidebar pins a Home row above the thread list in the person's own workspace, with the same unread, question, and work marks as a thread row. Home is never an ordinary row, but thread search finds it when its content matches.
 The API names the home thread Home in every thread response and never auto-titles it, so the web, the CLI, and agents show one name.
 
 The Home queue default persists before admission and survives engine restarts. Widgets use explicit elements; state-driven repeat expansion is rejected.
@@ -216,3 +226,22 @@ The pill opens the existing thread-scoped model settings. Context usage remains 
 People without model administration access retain the context control beside the composer.
 The phone thread menu omits sandbox configuration. Desktop retains those controls.
 Assistant reply, rating, copy, and branch actions appear together below the response on phones.
+
+### Home on desktop
+
+Added 2026-11-02. Desktop uses the same Home flow as a phone. This replaces
+the earlier rule that Home changes only below 768px.
+
+- `/` shows the Home conversation at every width. A phone switches between
+  Chat, Tasks, and Make. A wider screen keeps the conversation in view and
+  shows Tasks or Make in a panel beside it. Tasks is the default panel.
+- `?view=make` opens Make on both layouts. `?view=tasks` opens Tasks. On a
+  wider screen, selecting Tasks clears the parameter, so a phone that opens
+  the same URL starts in Chat.
+- The wider layout uses the full thread header. The model picker and thread
+  menu stay the same as on `/chat`.
+- The approvals dock stays above the composer. An expanded question does not
+  hide the desktop composer.
+- The personal and team dashboard moves to `/overview`. It still follows the
+  workspace switcher. Make links to it as "Workspace overview".
+- The top navigation starts with a Home link. The logo also opens Home.
