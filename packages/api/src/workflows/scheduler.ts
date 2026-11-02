@@ -18,8 +18,8 @@
  * `start()`/`stop()` from main.ts.
  */
 import { scheduledTriggerData, type RunHost, type RunParams, type WorkflowStore, type WorkflowTriggerPayload } from "@valet/workflow";
-import { scheduledRunId } from "@valet/shared";
-import { and, eq, lte, sql, type SQL } from "drizzle-orm";
+import { scheduleRunPrefix, scheduledRunId } from "@valet/shared";
+import { and, desc, eq, lte, sql, type SQL } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
 import { PinUnavailableError, type DeliveredThread } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
@@ -93,9 +93,21 @@ function policyUnchanged(policy: unknown): SQL {
     : sql`${workflowSchedules.threadPolicy} = ${JSON.stringify(policy)}::jsonb`;
 }
 
-/** The schedule's previous fire time, for "since the last run" polling. Empty before the first fire. */
-function previousFire(lastFiredAt: number | null): { previousFiredAt?: string } {
-  return lastFiredAt === null ? {} : { previousFiredAt: new Date(lastFiredAt).toISOString() };
+/** A previous fire time, for "since the last run" polling. Empty when there is none. */
+function previousFire(firedAt: number | null): { previousFiredAt?: string } {
+  return firedAt === null ? {} : { previousFiredAt: new Date(firedAt).toISOString() };
+}
+
+/** The slot of this schedule's newest workflow run that completed, read from its run id. */
+async function lastCompletedSlot(db: AppDb, workflowId: string, scheduleId: string): Promise<number | null> {
+  const prefix = scheduleRunPrefix(scheduleId);
+  const [row] = await db.select({ id: workflowRuns.id }).from(workflowRuns)
+    .where(and(eq(workflowRuns.workflowId, workflowId), eq(workflowRuns.outcome, "completed"),
+      sql`left(${workflowRuns.id}, ${prefix.length}) = ${prefix}`))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(1);
+  const slot = row ? Number(row.id.slice(prefix.length)) : NaN;
+  return Number.isFinite(slot) ? slot : null;
 }
 
 export class WorkflowScheduler {
@@ -228,9 +240,11 @@ export class WorkflowScheduler {
         triggerId: schedule.id,
         timestamp: new Date(slotMs).toISOString(),
         data: scheduledTriggerData(def.definition, { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} }),
-        // The previous fire lets a polling step ask a source for "items
-        // since the last run". Absent on the first fire.
-        metadata: { scheduleId: schedule.id, timezone: schedule.timezone, ...previousFire(schedule.lastFiredAt) },
+        // The slot of the last run that completed lets a polling step ask a
+        // source for "items since the last run". A failed or cancelled run
+        // does not move it, so its items are polled again. Absent until a
+        // run completes.
+        metadata: { scheduleId: schedule.id, timezone: schedule.timezone, ...previousFire(await lastCompletedSlot(db, schedule.workflowId, schedule.id)) },
       };
       const params: RunParams = {
         workflowId: schedule.workflowId,
