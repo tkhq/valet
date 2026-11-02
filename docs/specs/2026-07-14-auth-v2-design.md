@@ -59,6 +59,8 @@ packages/api/src/auth/
 |---|---|
 | `BETTER_AUTH_SECRET` | Required to enable real auth. Absent → stub-only mode (today's behavior). |
 | `BETTER_AUTH_URL` | External base URL of the api. Default `http://localhost:8788`. |
+| `AUTH_METHODS` | Comma list of the sign-in methods to turn on: `password`, `oidc`, `google`, `github`. Unset or empty turns every method off, so nobody can sign in. A provider with credentials stays off until it is listed. A listed provider without credentials, or an unknown name, stops the boot. Example: `password` for password sign-in only; `oidc` for SSO only. |
+| `AUTH_PRIMARY_METHOD` | The method the login page shows first. It must be in `AUTH_METHODS`. Default: the first listed method. |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Enterprise OIDC (Keycloak). All three required together. |
 | `AUTH_OIDC_NAME` | Login button label (default `SSO`). |
 | `AUTH_OIDC_DOMAIN` | Email domain for the SSO provider registration (the sso plugin requires one; also enables domain-matched sign-in). |
@@ -193,7 +195,8 @@ Two credentials, one file, both independent of better-auth:
 
 ## Frontend (`packages/web`)
 
-- New public routes `/login` and `/signup` (and `/signup?invite=…`), designed under the frontend-design skill in the app's established idiom. Login: email/password form, then social buttons (Google/GitHub) and "Continue with {AUTH_OIDC_NAME}" as configured. A tiny unauthenticated `GET /api/auth-config` returns `{ stub: boolean, social: ("google"|"github")[], sso?: { name } }` and drives which controls render.
+- New public routes `/login` and `/signup` (and `/signup?invite=…`), designed under the frontend-design skill in the app's established idiom. Login shows only the methods `AUTH_METHODS` turns on: the email/password form when `password` is on, social buttons (Google/GitHub), and "Continue with {AUTH_OIDC_NAME}". The primary method comes first and takes the primary button style. With no method on, the page says sign-in is not set up. A tiny unauthenticated `GET /api/auth-config` returns `{ stub, password, primary, social: ("google"|"github")[], sso: { name } | null }` and drives which controls render. better-auth also refuses `/sign-up/email` and `/sign-in/email` when `password` is off, so hiding the form is not the only guard.
+- When `password` is off, `/signup` says the deployment does not use passwords and links to `/login`: an account comes from the SSO or social provider.
 - Signup accepts the invite code (prefilled from the URL); social/SSO buttons appear there too (social signup succeeds only with an email-targeted invite; copy explains a rejected social signup).
 - Route guard: api 401 + stub off → redirect to `/login`. Stub on → unchanged (no login wall in `make dev-local`).
 - Signed-in chrome: user menu gains Sign out (`authClient.signOut()`).

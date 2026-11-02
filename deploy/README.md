@@ -177,8 +177,15 @@ silently fails. To use the ingress:
 2. Open `https://valet.localdev` and accept the self-signed certificate
    warning once per browser profile.
 
-Real auth is on in the cluster — there is no dev bypass. The first sign-up
+Real auth is on in the cluster — there is no dev bypass. `make k8s-up`
+turns on password sign-in (`api.auth.methods=password`). The first sign-up
 becomes the org admin.
+
+Sign-in methods are off by default. Set `api.auth.methods` to a comma list
+of `password`, `oidc`, `google`, and `github`. If `methods` is empty and
+`api.auth.oidcIssuer` is set, the chart turns on `oidc` alone: SSO with no
+password. Set `api.auth.primaryMethod` to choose the method the login page
+shows first.
 
 ## Observability (Grafana + OpenTelemetry)
 

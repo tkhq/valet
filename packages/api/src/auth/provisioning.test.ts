@@ -51,6 +51,8 @@ function middlewareCtx(partial: { path: string; body?: Record<string, unknown> }
 
 function baseConfig(overrides: Partial<AuthConfig> = {}): AuthConfig {
   return {
+    methods: ["password"],
+    primaryMethod: "password",
     secret: "test-secret",
     baseUrl: "http://localhost:8788",
     trustedOrigins: [],
