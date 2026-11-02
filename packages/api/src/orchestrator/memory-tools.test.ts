@@ -148,6 +148,33 @@ describe("mem_* tools: apiBaseUrl/internalToken not configured", () => {
   });
 });
 
+describe("mem_* tools: workflow step reads", () => {
+  it("name the step's session, so the route resolves the step's memory audience", async () => {
+    const seen: Headers[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      seen.push(new Headers(init?.headers));
+      return new Response(JSON.stringify({ kind: "file", rendered: "x", results: [] }));
+    };
+    try {
+      const ctx = makeCtx({
+        sessionId: "wf:run1:node1",
+        owner: { type: "team", id: "t1" },
+        config: { apiBaseUrl: "http://api.test", internalToken: "t", workflowStep: true },
+      });
+      await memReadTool.execute({ path: "notes/a.md" }, ctx);
+      await memSearchTool.execute({ query: "a" }, ctx);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toHaveLength(2);
+    for (const headers of seen) {
+      expect(headers.get("x-valet-session-id")).toBe("wf:run1:node1");
+      expect(headers.get("x-valet-source")).toBeNull();
+    }
+  });
+});
+
 describe("mem_* tools: network-level failure", () => {
   it("mem_read against an unreachable port returns [memory_error] instead of throwing", async () => {
     const ctx = makeCtx({

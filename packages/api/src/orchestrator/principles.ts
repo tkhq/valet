@@ -31,6 +31,16 @@ Applies when a person tells you how they want the work done.
 - Before you make a choice in open-ended work, check the index below. Read a principle with mem_read before you follow it. Say which principle you followed.
 - Do not write secrets, credentials, or one-time facts as principles.`;
 
+/** The base principle for a session that cannot write memory: a child
+ * session or a workflow step. It reads and follows principles, and hands a
+ * stated rule back instead of saving it. */
+export const READ_ONLY_BASE_PRINCIPLE = `### ${BASE_PRINCIPLE_NAME} (built in)
+
+Applies when a person tells you how they want the work done.
+
+- Before you make a choice in open-ended work, check the index below. Read a principle with mem_read before you follow it. Say which principle you followed.
+- You cannot write memory in this session. If a person corrects you or states a rule for your work, put the rule in your result, so an assistant can save it as a principle.`;
+
 /** True for a principle file, in the own scope or under a team's `team:{id}/` prefix. */
 export function isPrincipleFile(path: string): boolean {
   const own = path.replace(/^team:[^/]+\//, "");
@@ -72,7 +82,7 @@ export function selectIndexedPrinciples<T extends PrincipleIndexEntry>(files: T[
 
 /** The Principles section of the memory snapshot. It always renders, so the
  * slot exists before the first principle does. */
-export function renderPrinciplesSection(files: PrincipleIndexEntry[]): string {
+export function renderPrinciplesSection(files: PrincipleIndexEntry[], opts: { readOnly?: boolean } = {}): string {
   const principles = files.filter((file) => isPrincipleFile(file.path));
   const index = selectIndexedPrinciples(principles).map(indexLine);
   const hidden = principles.length - index.length;
@@ -88,7 +98,7 @@ export function renderPrinciplesSection(files: PrincipleIndexEntry[]): string {
     "",
     "Principles guide open-ended work. Read one with mem_read before you follow it.",
     "",
-    BASE_PRINCIPLE,
+    opts.readOnly ? READ_ONLY_BASE_PRINCIPLE : BASE_PRINCIPLE,
     "",
     "### Index",
     "",

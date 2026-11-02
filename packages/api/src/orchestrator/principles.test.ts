@@ -13,6 +13,15 @@ function file(path: string, title = "", description = ""): PrincipleIndexEntry {
 }
 
 describe("principles", () => {
+  it("tells a session that cannot write memory to report a rule instead", () => {
+    const section = renderPrinciplesSection([file("principles/a.md", "A")], { readOnly: true });
+    expect(section).toContain("learn-from-the-org (built in)");
+    expect(section).not.toContain(BASE_PRINCIPLE);
+    expect(section).not.toContain("mem_write");
+    expect(section).toContain("Read a principle with mem_read before you follow it.");
+    expect(section).toContain("- principles/a.md — A");
+  });
+
   it("finds principle files in the own scope and under a team prefix", () => {
     expect(isPrincipleFile("principles/prove-it-works.md")).toBe(true);
     expect(isPrincipleFile("team:t1/principles/ship-small.md")).toBe(true);

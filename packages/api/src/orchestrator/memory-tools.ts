@@ -62,12 +62,22 @@ function resolveOwner(ctx: ToolContext): Principal {
   return ctx.owner ?? { type: "user", id: ctx.userId };
 }
 
-function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext, json: boolean): Record<string, string> {
+/** Which agent session a request comes from. A workflow step has no
+ * `agent_sessions` row, so a write names no source. A read still names the
+ * step's session: the route resolves a team step's memory audience from
+ * it, and without it a channel-scoped run would read the whole team's
+ * memory. */
+function sourceHeaders(cfg: MemoryToolConfig, ctx: ToolContext, read: boolean): Record<string, string> {
+  if (!cfg.workflowStep) return { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId };
+  return read ? { "x-valet-session-id": ctx.sessionId } : { "x-valet-source": "none" };
+}
+
+function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext, json: boolean, read = false): Record<string, string> {
   const headers: Record<string, string> = {
     "x-valet-internal": cfg.internalToken,
     "x-valet-owner": serializePrincipal(owner),
     "x-valet-actor": ctx.userId,
-    ...(cfg.workflowStep ? { "x-valet-source": "none" } : { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId }),
+    ...sourceHeaders(cfg, ctx, read),
     "x-valet-org-id": ctx.orgId,
   };
   if (json) headers["Content-Type"] = "application/json";
@@ -305,7 +315,7 @@ export const memReadTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false, true) }, async (res) => {
       const body = asReadResultBody(await parseJsonBody(res));
       return { text: body?.rendered ?? "" };
     });
@@ -363,7 +373,7 @@ export const memSearchTool = defineTool({
     const url = new URL("/api/memory/search", cfg.apiBaseUrl);
     url.searchParams.set("q", args.query);
     if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false, true) }, async (res) => {
       const body = asSearchResultBody(await parseJsonBody(res));
       const results = body?.results ?? [];
       if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
@@ -843,6 +853,13 @@ export const memRmTool = defineTool({
     }));
   },
 });
+
+/** The tools a child session or a workflow step gets: it reads its
+ * owner's memory, such as a principle its snapshot lists, and writes none.
+ * Its assistant curates memory. */
+export function buildReadOnlyMemoryTools(): ToolDef[] {
+  return [memReadTool, memSearchTool];
+}
 
 /** The `mem_*` ToolDefs plus the `artifact_*` tools (same transport, same
  * publish chokepoint — see the artifact-pages design), in registration

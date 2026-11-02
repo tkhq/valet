@@ -18,10 +18,18 @@ import { renderPrinciplesSection, selectIndexedPrinciples } from "./principles.j
 
 export interface AssembleMemorySnapshotOptions {
   budgetChars?: number;
+  /** The session has only the read-only memory tools, so the base
+   * principle must not tell it to write. */
+  readOnly?: boolean;
 }
 
 /** Default snapshot budget, in characters (decision 18). */
 export const DEFAULT_SNAPSHOT_BUDGET_CHARS = 48_000;
+
+/** Budget for a child session or a workflow step. These run often and in
+ * parallel, so their snapshot drops journals and older pinned files sooner.
+ * The Principles section and the root index are never dropped. */
+export const DELEGATED_SNAPSHOT_BUDGET_CHARS = 16_000;
 
 const RECENT_JOURNAL_COUNT = 3;
 
@@ -108,7 +116,7 @@ export async function assembleMemorySnapshot(
   // The principle index reads the whole read-union: a team's principles
   // guide its members too. It is never dropped for the budget, so
   // `renderPrinciplesSection` caps it.
-  const principles = renderPrinciplesSection(summaries);
+  const principles = renderPrinciplesSection(summaries, { readOnly: opts?.readOnly });
 
   const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (the date the snapshot was built, not the current date)\n`;
 
