@@ -160,6 +160,19 @@ describe("overheard digest: pure helpers", () => {
     expect(second.content.attributes?.digest).toBe("3");
     expect(second.digest.constituentIds).toEqual(["q3", "q4"]);
   });
+
+  it("keeps every constituent's attachments, across a re-merge", () => {
+    const image = { type: "image" as const, data: new Uint8Array([1]), mimeType: "image/png", name: "shot.png" };
+    const pdf = { type: "image" as const, data: new Uint8Array([2]), mimeType: "application/pdf", name: "spec.pdf" };
+    const a = queueItemOf({ ...overheardSignal({ body: "see this", sender: "Alice" }), attachments: [image] }, "q1", 1);
+    const b = queueItemOf(overheardSignal({ body: "thoughts?", sender: "Alice" }), "q2", 2);
+    const first = buildOverheardDigest([a, b]);
+    expect(first.content.attachments).toEqual([image]);
+    const digestItem: QueueItem = { ...queueItemOf(first.content, "q3", 3), metadata: { overheardDigest: first.digest } };
+    const c = queueItemOf({ ...overheardSignal({ body: "and this", sender: "Alice" }), attachments: [pdf] }, "q4", 4);
+    expect(buildOverheardDigest([digestItem, c]).content.attachments).toEqual([image, pdf]);
+    expect(buildOverheardDigest([b]).content).not.toHaveProperty("attachments");
+  });
 });
 
 function makeEngine() {
