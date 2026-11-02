@@ -2036,7 +2036,7 @@ async function forkThreadAt(
   const sourceTeam = loaded.session.ownerType === "team";
   const audience = sourceTeam || typeof destination === "object" ? await threadAudience(db, sessionId, threadId) : undefined;
   if (destination === "here" && sourceTeam && audience?.privateTo !== undefined) {
-    return c.json({ error: "This thread is private to you, and a branch would show its history to your team. Branch it privately instead." }, 400);
+    return c.json({ error: "This thread is private to you, and a copy here would show its history to your team. Branch it privately instead." }, 400);
   }
   if (destination === "private" && !sourceTeam) {
     return c.json({ error: "This thread is already private to you. Use Branch to copy it here." }, 400);

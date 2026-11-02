@@ -281,7 +281,8 @@ titled "<title> (copy)", or "Untitled thread (copy)" when the source has no
 title. A long title loses its end, never the suffix. The source stays as it is: no archive, no note, no
 `movedTo`. The copy records `forkOf` and opens. The fork rules apply: only
 the thread owner or a team member can duplicate, the copy keeps the source's
-audience, and a thread with a running turn or an open approval does not
+audience (so a team thread private to one person, such as an Ask Valet or
+workflow editor thread, does not duplicate; its owner branches it privately), and a thread with a running turn or an open approval does not
 duplicate until it settles. Background work does not block it, because the
 source keeps running.
 

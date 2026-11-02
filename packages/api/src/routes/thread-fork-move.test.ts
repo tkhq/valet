@@ -195,6 +195,16 @@ describe("duplicate", () => {
     expect(((await (await read(copy.thread.id)).json()) as ListMessagesResponse).messages.map((m) => m.content).slice(0, 2)).toEqual(["my idea", "my answer"]);
   });
 
+  it("refuses a copy of a team thread that is private to one person", async () => {
+    await boot();
+    // An Ask Valet or workflow editor thread in a team is its owner's alone;
+    // a copy in the team would show it to everyone, so it stays one thread.
+    const { thread } = await teamThread("app-assistant:local-user");
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("Branch it privately instead");
+  });
+
   it("names the copy of an untitled thread", async () => {
     await boot();
     const { thread } = await personalThread();
