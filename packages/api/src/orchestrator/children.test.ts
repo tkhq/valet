@@ -5644,6 +5644,32 @@ describe("child batches and child_stop", () => {
     ]));
   });
 
+  it("holds a batch while its spawning turn runs, then releases it when that turn ends", async () => {
+    const p = await batchParent("spawning");
+    const { engineStore, db } = api!.providers;
+    // The parent's turn that spawned the batch, still running: it may spawn more members.
+    await engineStore.admitSubmission(p.parent.id, p.parentThread.id, queuedItem("qi-spawning-turn", p.parentThread.id, "start the reviews"));
+    const a = await batchChild(p, "child-spawning-a", "review", "Review A");
+    const b = await batchChild(p, "child-spawning-b", "review", "Review B");
+    await db.update(childWatches).set({ parentQueueItemId: "qi-spawning-turn" }).where(eq(childWatches.parentSessionId, p.parent.id));
+
+    await a.settle();
+    await b.settle();
+    expect(await parentSignals(p.parent.id)).toHaveLength(0);
+
+    await engineStore.settleUnclaimed(p.parent.id, p.parentThread.id, "qi-spawning-turn", { outcome: "completed" });
+    await p.watcher.releaseBatchesAfterTurn(p.parent.id, "qi-spawning-turn");
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).attributes?.batch_children).toBe("child-spawning-a,child-spawning-b");
+    const rows = await db.select().from(childWatches).where(eq(childWatches.parentSessionId, p.parent.id));
+    expect(rows.every((r) => r.batchHeldJson === null && r.reportQueueItemId === signals[0]!.id)).toBe(true);
+
+    // A second turn-end event finds nothing left to release.
+    await p.watcher.releaseBatchesAfterTurn(p.parent.id, "qi-spawning-turn");
+    expect(await parentSignals(p.parent.id)).toHaveLength(1);
+  });
+
   it("reports a child without a batch at once while a batch is still running", async () => {
     const p = await batchParent("mixed");
     const a = await batchChild(p, "child-mixed-a", "review", "Review A");
