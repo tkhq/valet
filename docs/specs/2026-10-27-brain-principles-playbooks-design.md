@@ -122,7 +122,7 @@ The subscriber appends one `principle_cited` thread event per submission, with t
 
 ### The memory page
 
-The memory page has a Usage view beside Files and Graph. It lists every file of the workspace with its last use, its use count, its last load at wake, and its last edit. It filters to never-used or stale files and sorts by least recent use, most uses, or path. A file is stale when no agent used it and nobody edited it for 30 days. So a new file that no agent used yet is not stale. A person selects files and deletes them after one confirm. A file under `lib/` mirrors a repository, so the view offers no delete for it.
+The memory page has a Usage view beside Files and Graph. It lists every file of the workspace with its last use, its use count, its last load at wake, and its last edit. It filters to never-used or stale files and sorts by least recent use, most uses, or path. A file is stale when no agent used it and nobody edited it for 30 days. So a new file that no agent used yet is not stale. Tracking starts when the `memory_usage_tracking` table is created, and the tree reports that time as `usageSince`. Before it, "never used" only means "not seen". So no file is stale until tracking has run for 30 days, and the view says how long it has run. A person selects files and deletes them after one confirm. A file under `lib/` mirrors a repository, so the view offers no delete for it.
 
 ## Batched patch sets
 

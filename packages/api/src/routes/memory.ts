@@ -62,7 +62,7 @@ import {
   type MemoryScope,
   type WriteSource,
 } from "../services/memory.js";
-import { memoryUsageRecorder, readMemoryUsage } from "../services/memory-usage.js";
+import { memoryUsageRecorder, memoryUsageSince, readMemoryUsage } from "../services/memory-usage.js";
 
 export const memoryRouter = new Hono<AppEnv>();
 
@@ -529,7 +529,7 @@ memoryRouter.get("/tree", async (c) => {
     })
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  const body: GetMemoryTreeResponse = { entries };
+  const body: GetMemoryTreeResponse = { entries, usageSince: await memoryUsageSince(db) };
   return c.json(body);
 });
 

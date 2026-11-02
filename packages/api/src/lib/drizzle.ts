@@ -443,6 +443,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "last_cited_at" bigint,
   PRIMARY KEY ("owner_type", "owner_id", "namespace", "path")
 )` },
+  // Tracking starts when this repair runs on a deployed database.
+  { describe: "memory_usage_tracking table", probe: { kind: "table", table: "memory_usage_tracking" }, sql: `DO $repair$ BEGIN
+  CREATE TABLE IF NOT EXISTS "memory_usage_tracking" ("id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"), "started_at" bigint NOT NULL);
+  INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint) ON CONFLICT DO NOTHING;
+END $repair$` },
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
   { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (

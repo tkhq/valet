@@ -114,7 +114,11 @@ describe("api integration: memory routes", () => {
 
       const res = await fetch(`${api.baseUrl}/api/memory/tree`);
       expect(res.status).toBe(200);
-      const byPath = new Map(((await res.json()) as GetMemoryTreeResponse).entries.map((e) => [e.path, e]));
+      const tree = (await res.json()) as GetMemoryTreeResponse;
+      // When tracking started. Before that, "never used" means "not seen".
+      expect(tree.usageSince).toBeGreaterThan(0);
+      expect(tree.usageSince).toBeLessThanOrEqual(Date.now());
+      const byPath = new Map(tree.entries.map((e) => [e.path, e]));
       expect(byPath.get("notes/used.md")).toMatchObject({ lastUsedAt: 3_000, useCount: 2, lastLoadedAt: null });
       expect(byPath.get("notes/never.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: null });
       // Loading at wake is not a use the agent chose.

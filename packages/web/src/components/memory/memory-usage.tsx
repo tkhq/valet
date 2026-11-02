@@ -18,22 +18,31 @@ import { useListOwner } from "~/lib/use-list-owner";
  * not choose it, so a load alone is not a use.
  */
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /** A file with no use and no edit for this long is stale. */
-export const STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+export const STALE_AFTER_MS = 30 * DAY_MS;
 
 export type UsageFilter = "all" | "never" | "stale";
 export type UsageSort = "least-recent" | "most-used" | "path";
 
 /** No use and no edit for 30 days. A new file that no agent used yet is
- * not stale: it has not had the chance. */
-export function isStale(entry: MemoryTreeEntry, now: number): boolean {
-  return Math.max(entry.lastUsedAt ?? 0, entry.updatedAt) < now - STALE_AFTER_MS;
+ * not stale: it has not had the chance. Nor is any file before tracking
+ * (`usageSince`) has run for 30 days: an old file can be in daily use. */
+export function isStale(entry: MemoryTreeEntry, now: number, usageSince: number): boolean {
+  return Math.max(entry.lastUsedAt ?? 0, entry.updatedAt, usageSince) < now - STALE_AFTER_MS;
 }
 
-export function filterUsage(entries: MemoryTreeEntry[], filter: UsageFilter, now: number): MemoryTreeEntry[] {
+export function filterUsage(entries: MemoryTreeEntry[], filter: UsageFilter, now: number, usageSince: number): MemoryTreeEntry[] {
   if (filter === "never") return entries.filter((e) => e.lastUsedAt === null);
-  if (filter === "stale") return entries.filter((e) => isStale(e, now));
+  if (filter === "stale") return entries.filter((e) => isStale(e, now, usageSince));
   return entries;
+}
+
+function trackedFor(now: number, usageSince: number): string {
+  const days = Math.floor((now - usageSince) / DAY_MS);
+  if (days < 1) return "Valet started to track use today.";
+  return `Valet has tracked use for ${days} ${days === 1 ? "day" : "days"}.`;
 }
 
 /** `least-recent` puts never-used files first (oldest edit first), then
@@ -94,7 +103,12 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
   const [failed, setFailed] = useState<string[]>([]);
 
   const entries = useMemo(() => treeQ.data?.entries ?? [], [treeQ.data]);
-  const visible = useMemo(() => sortUsage(filterUsage(entries, filter, now), sort), [entries, filter, sort, now]);
+  // An unknown start reads as now, so nothing looks stale.
+  const usageSince = treeQ.data?.usageSince ?? now;
+  const visible = useMemo(
+    () => sortUsage(filterUsage(entries, filter, now, usageSince), sort),
+    [entries, filter, sort, now, usageSince],
+  );
   // Act only on what the filter shows, so a hidden row is never deleted.
   const chosen = visible.filter((e) => selected.has(e.path)).map((e) => e.path);
   const neverUsed = entries.filter((e) => e.lastUsedAt === null).length;
@@ -135,7 +149,7 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
       <div className="flex flex-col gap-3 border-b border-line p-4">
         <p className="text-sm text-muted">
           {fileCount(entries.length)}, {neverUsed} never used. A file is used when an agent reads it or a
-          turn cites it. Stale means no use and no edit for 30 days.
+          turn cites it. Stale means no use and no edit for 30 days. {trackedFor(now, usageSince)}
         </p>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <div className="flex items-center gap-2">
@@ -159,7 +173,11 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
         </div>
       </div>
       {visible.length === 0 ? (
-        <p className="p-8 text-center text-sm text-muted">No files match this filter.</p>
+        <p className="p-8 text-center text-sm text-muted">
+          {filter === "stale" && now - usageSince < STALE_AFTER_MS
+            ? "No file can be stale before Valet has tracked use for 30 days."
+            : "No files match this filter."}
+        </p>
       ) : (
         <ul className="min-h-0 flex-1 divide-y divide-line overflow-y-auto">
           {visible.map((entry) => (

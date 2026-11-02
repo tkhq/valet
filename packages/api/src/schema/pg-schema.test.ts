@@ -1060,6 +1060,18 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("repairs the memory usage start time, set once to the repair time", async () => {
+      await db.query('DROP TABLE "memory_usage_tracking"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_usage_tracking table");
+      const before = Date.now();
+      await applyAppMigrations(db);
+      await applyAppMigrations(db);
+      // One row, however often the repair runs, and set when it first ran.
+      expect((await db.query("SELECT started_at >= $1 AS fresh FROM memory_usage_tracking", [before - 1_000])).rows)
+        .toEqual([{ fresh: true }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);

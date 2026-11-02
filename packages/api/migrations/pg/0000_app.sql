@@ -614,6 +614,16 @@ CREATE TABLE "memory_file_usage" (
 	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
 );
 --> statement-breakpoint
+-- When usage tracking started. One row. Before this time, "never used" only
+-- means "not seen", so the memory page calls no file stale until tracking
+-- has run for 30 days.
+CREATE TABLE "memory_usage_tracking" (
+	"id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"),
+	"started_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint);
+--> statement-breakpoint
 CREATE TABLE "artifacts" (
 	"id" text PRIMARY KEY NOT NULL,
 	"token" text NOT NULL,

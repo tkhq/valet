@@ -996,6 +996,13 @@ export const memoryFileUsage = pgTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
 
+// When memory usage tracking started: one row, set when the table is
+// created. The memory page calls no file stale before 30 days of tracking.
+export const memoryUsageTracking = pgTable("memory_usage_tracking", {
+  id: boolean("id").primaryKey().default(true),
+  startedAt: bigint("started_at", { mode: "number" }).notNull(),
+});
+
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
 // Published pages (2026-08-22 artifacts design; extended by the 2026-09-02

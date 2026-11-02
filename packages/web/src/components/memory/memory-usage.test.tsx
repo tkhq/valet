@@ -19,13 +19,14 @@ function entry(path: string, overrides: Partial<MemoryTreeEntry> = {}): MemoryTr
 }
 
 let treeEntries: MemoryTreeEntry[] = [];
+let usageSince = 0;
 const deleteMemoryDoc = vi.fn<(path: string) => Promise<unknown>>();
 
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
 }));
 vi.mock("~/api/memory", () => ({
-  useMemoryTree: () => ({ data: { entries: treeEntries }, isLoading: false, error: null, refetch: vi.fn() }),
+  useMemoryTree: () => ({ data: { entries: treeEntries, usageSince }, isLoading: false, error: null, refetch: vi.fn() }),
 }));
 vi.mock("~/api/client", () => ({
   api: { deleteMemoryDoc: (path: string) => deleteMemoryDoc(path) },
@@ -40,18 +41,24 @@ describe("usage helpers", () => {
   const newNever = entry("notes/new.md", { updatedAt: NOW - DAY });
 
   it("calls a file stale when nothing used or edited it for 30 days", () => {
-    expect(isStale(recent, NOW)).toBe(false);
-    expect(isStale(old, NOW)).toBe(true);
-    expect(isStale(never, NOW)).toBe(true);
+    expect(isStale(recent, NOW, 0)).toBe(false);
+    expect(isStale(old, NOW, 0)).toBe(true);
+    expect(isStale(never, NOW, 0)).toBe(true);
     // Never used, but written yesterday: it has not had the chance yet.
-    expect(isStale(newNever, NOW)).toBe(false);
+    expect(isStale(newNever, NOW, 0)).toBe(false);
+  });
+
+  it("calls nothing stale until tracking has run for 30 days", () => {
+    // Tracking began 10 days ago: an old file may be in daily use.
+    expect(isStale(never, NOW, NOW - 10 * DAY)).toBe(false);
+    expect(isStale(old, NOW, NOW - 10 * DAY)).toBe(false);
   });
 
   it("filters to never-used and stale files", () => {
     const all = [recent, old, never, newNever];
-    expect(filterUsage(all, "never", NOW).map((e) => e.path)).toEqual(["notes/never.md", "notes/new.md"]);
-    expect(filterUsage(all, "stale", NOW).map((e) => e.path)).toEqual(["notes/old.md", "notes/never.md"]);
-    expect(filterUsage(all, "all", NOW)).toHaveLength(4);
+    expect(filterUsage(all, "never", NOW, 0).map((e) => e.path)).toEqual(["notes/never.md", "notes/new.md"]);
+    expect(filterUsage(all, "stale", NOW, 0).map((e) => e.path)).toEqual(["notes/old.md", "notes/never.md"]);
+    expect(filterUsage(all, "all", NOW, 0)).toHaveLength(4);
   });
 
   it("sorts least recently used first, never-used files at the top", () => {
@@ -79,6 +86,7 @@ function renderPanel() {
 
 describe("MemoryUsagePanel", () => {
   beforeEach(() => {
+    usageSince = NOW - 90 * DAY;
     deleteMemoryDoc.mockReset();
     deleteMemoryDoc.mockResolvedValue({ ok: true });
     treeEntries = [
@@ -96,6 +104,14 @@ describe("MemoryUsagePanel", () => {
     const pinnedRow = screen.getByRole("listitem", { name: "preferences/pinned.md" });
     expect(within(pinnedRow).getByText("Never used")).toBeTruthy();
     expect(within(pinnedRow).getByText("Loaded at wake 1d ago")).toBeTruthy();
+  });
+
+  it("says when tracking began, and that nothing is stale before 30 days of it", () => {
+    usageSince = NOW - 3 * DAY;
+    renderPanel();
+    expect(screen.getByText(/Valet has tracked use for 3 days/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stale" }));
+    expect(screen.getByText("No file can be stale before Valet has tracked use for 30 days.")).toBeTruthy();
   });
 
   it("filters to never-used files", () => {

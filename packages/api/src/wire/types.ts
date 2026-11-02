@@ -3508,6 +3508,9 @@ export interface GetWorkflowTriggerCatalogResponse {
 
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
+  /** When Valet started to track memory use, in ms epoch. Before it, a
+   * file's "never used" only means "not seen". */
+  usageSince: number;
 }
 
 // ── REST: plugins + credentials (plugin-system-v2 plan Task 15) ───────────

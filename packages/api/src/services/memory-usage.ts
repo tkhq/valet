@@ -19,7 +19,7 @@
  */
 import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { memoryFileUsage, type MemoryFileUsageRow } from "../schema/index.js";
+import { memoryFileUsage, memoryUsageTracking, type MemoryFileUsageRow } from "../schema/index.js";
 import type { MemoryFileKey, MemoryScope } from "./memory.js";
 
 export type { MemoryFileKey };
@@ -193,4 +193,11 @@ export async function readMemoryUsage(db: AppDb, scope: MemoryScope): Promise<Ma
       eq(memoryFileUsage.namespace, scope.namespace ?? ""),
     ));
   return new Map(rows.map((row) => [row.path, row]));
+}
+
+/** When usage tracking started, in ms epoch. A missing row reads as now,
+ * so a damaged table can make no file look stale. */
+export async function memoryUsageSince(db: AppDb): Promise<number> {
+  const [row] = await db.select({ startedAt: memoryUsageTracking.startedAt }).from(memoryUsageTracking).limit(1);
+  return row?.startedAt ?? Date.now();
 }
