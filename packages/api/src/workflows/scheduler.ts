@@ -93,6 +93,11 @@ function policyUnchanged(policy: unknown): SQL {
     : sql`${workflowSchedules.threadPolicy} = ${JSON.stringify(policy)}::jsonb`;
 }
 
+/** The schedule's previous fire time, for "since the last run" polling. Empty before the first fire. */
+function previousFire(lastFiredAt: number | null): { previousFiredAt?: string } {
+  return lastFiredAt === null ? {} : { previousFiredAt: new Date(lastFiredAt).toISOString() };
+}
+
 export class WorkflowScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -180,6 +185,7 @@ export class WorkflowScheduler {
               scheduleName: schedule.name,
               cron: schedule.cron,
               firedAt: new Date(slotMs).toISOString(),
+              ...previousFire(schedule.lastFiredAt),
             },
           },
           dispatchId: `schedule:${schedule.id}:${slotMs}`,
@@ -222,7 +228,9 @@ export class WorkflowScheduler {
         triggerId: schedule.id,
         timestamp: new Date(slotMs).toISOString(),
         data: scheduledTriggerData(def.definition, { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} }),
-        metadata: { scheduleId: schedule.id, timezone: schedule.timezone },
+        // The previous fire lets a polling step ask a source for "items
+        // since the last run". Absent on the first fire.
+        metadata: { scheduleId: schedule.id, timezone: schedule.timezone, ...previousFire(schedule.lastFiredAt) },
       };
       const params: RunParams = {
         workflowId: schedule.workflowId,

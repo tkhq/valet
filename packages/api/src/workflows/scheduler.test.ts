@@ -249,6 +249,33 @@ describe("WorkflowScheduler thread policy", () => {
     });
   });
 
+  it("gives a workflow run the schedule's previous fire time, and none on the first fire", async () => {
+    await db.insert(workflowDefinitions).values({
+      id: "wf-poll", orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Poll notes",
+      definition: { version: "dag/v1", nodes: [{ id: "list", type: "tool", service: "granola", action: "list", params: { since: "{{trigger.metadata.previousFiredAt}}" } }], edges: [] },
+      createdAt: 100, updatedAt: 100,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched-poll", orgId: "org-1", ownerType: "user", ownerId: "user-1", targetKind: "workflow",
+      workflowId: "wf-poll", name: "Poll notes", cron: "0 * * * *", timezone: "UTC", enabled: true,
+      input: {}, nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+    });
+    let now = 1_000;
+    const host = new RecordingRunHost();
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: host,
+      deliverToAssistant: async () => LANDED, now: () => now,
+    });
+    await scheduler.tick();
+    expect(host.started[0]?.params.input).toMatchObject({ metadata: { scheduleId: "sched-poll" } });
+    expect((host.started[0]?.params.input as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty("previousFiredAt");
+
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-poll"));
+    now = (row?.nextFireAt ?? 0) + 1;
+    await scheduler.tick();
+    expect(host.started[1]?.params.input).toMatchObject({ metadata: { previousFiredAt: new Date(1_000).toISOString() } });
+  });
+
   it("keys a new-policy firing on its slot", async () => {
     await seedPromptSchedule("sched-new", { mode: "new" });
     const destinations: DeliveryDestination[] = [];
