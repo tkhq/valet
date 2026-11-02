@@ -70,8 +70,12 @@ better-auth OAuth tables. Tools are scoped to the token's user. Registration
 needs no session, as the MCP spec expects. Every redirect URI must be
 `https://` with a full host name, `http://` loopback, or a listed app scheme
 such as `claude://`, without wildcards, user names, or fragments.
-Registrations are limited per address and by a daily cap on unapproved
-clients. The consent page labels the app name as unverified and shows the
+Registrations are limited per address (`AUTH_MCP_REGISTRATION_RATE_PER_HOUR`,
+default 10 an hour) and by a daily cap on unapproved clients
+(`AUTH_MCP_UNCONSENTED_CLIENT_CAP`, default 200). Each registration holds at
+most `AUTH_MCP_MAX_REDIRECT_URIS` (default 5). `AUTH_MCP_APP_SCHEMES` lists
+the allowed app schemes (default `claude,cursor`), and
+`AUTH_MCP_REGISTRATION=off` refuses new registrations. The consent page labels the app name as unverified and shows the
 redirect host.
 
 ## Authorization

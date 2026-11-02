@@ -6,7 +6,7 @@ import { account, invites, orgMembers, users } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import { createInvite } from "./invites.js";
 import { evaluateAdmission } from "./provisioning.js";
-import type { AuthConfig } from "./config.js";
+import { DEFAULT_MCP_REGISTRATION, type AuthConfig } from "./config.js";
 import { AdminBootstrapError, BOOTSTRAP_INVITE_CREATOR, ensureAdminAccess, ensureBootstrapAdminInvite } from "./bootstrap-admin.js";
 
 function codeOf(link: string): string {
@@ -19,7 +19,7 @@ function config(overrides: Partial<AuthConfig> = {}): AuthConfig {
   return {
     methods: ["password"], primaryMethod: "password",
     secret: "test-secret", baseUrl: "http://localhost:8788", trustedOrigins: [], allowedEmailDomains: [],
-    social: {}, sandboxJwtMaster: "test-secret", mcpAppSchemes: [], ...overrides,
+    social: {}, sandboxJwtMaster: "test-secret", mcp: DEFAULT_MCP_REGISTRATION, ...overrides,
   };
 }
 

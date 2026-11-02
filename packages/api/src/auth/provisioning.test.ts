@@ -23,7 +23,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
 import { ensureOrg } from "../services/org.js";
-import type { AuthConfig } from "./config.js";
+import { DEFAULT_MCP_REGISTRATION, type AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { CLIENT_TEAM_KEY_METADATA_MESSAGE, PERSONAL_TEAM_KEY_MUTATION_MESSAGE } from "./api-key-hooks.js";
 import { ADMIN_EMAIL_RESERVED_MESSAGE, buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
@@ -59,7 +59,7 @@ function baseConfig(overrides: Partial<AuthConfig> = {}): AuthConfig {
     allowedEmailDomains: [],
     social: {},
     sandboxJwtMaster: "test-secret",
-    mcpAppSchemes: [],
+    mcp: DEFAULT_MCP_REGISTRATION,
     ...overrides,
   };
 }

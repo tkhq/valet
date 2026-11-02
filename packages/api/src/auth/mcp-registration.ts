@@ -3,19 +3,21 @@
  * before better-auth's `mcp` plugin. Registration stays open: MCP clients
  * such as Claude Code and claude.ai register before anyone signs in, as the
  * MCP authorization spec expects. The plugin itself stores any redirect URI
- * from any caller, so this gate adds two rules:
+ * from any caller, so this gate adds two rules. Every number and list below
+ * is a setting (`McpRegistrationConfig`, from the `AUTH_MCP_*` variables),
+ * and `AUTH_MCP_REGISTRATION=off` refuses every registration:
  *
  * 1. Redirect URIs: `https://` with a full host name, `http://` loopback
  *    (`localhost`, `127.0.0.1`, `[::1]`) with any port, or
  *    `<app scheme>://<host>` for a scheme in `AUTH_MCP_APP_SCHEMES` (the
  *    Claude app registers `claude://claude.ai/mcp-auth-callback/sdk`). No
  *    wildcards, user names, fragments, or commas (the plugin stores the list
- *    comma-joined). At most `MAX_REDIRECT_URIS`. `mcpAuthorizeGate` applies
+ *    comma-joined). At most `maxRedirectUris`. `mcpAuthorizeGate` applies
  *    the same check, so a client stored before this gate gets no code.
- * 2. Limits: each address may register `PER_ADDRESS_PER_HOUR` clients an
- *    hour (in memory, for each api process). Clients from the last day that
- *    nobody approved (no consent and no token) count toward
- *    `MAX_UNAPPROVED_PER_DAY`. Over a limit, the gate returns 429. Nothing
+ * 2. Limits: each address may register `ratePerHour` clients an hour (in
+ *    memory, for each api process). Clients from the last day that nobody
+ *    approved (no consent and no token) count toward `unconsentedCap`. 0
+ *    turns either limit off. Over a limit, the gate returns 429. Nothing
  *    deletes unapproved clients: the `valet.mcp.client_registration` counter
  *    and a log line make refusals visible, and the auth spec ("MCP client
  *    registration") has a query that lists unapproved clients.
@@ -27,11 +29,9 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { clientKey, peerAddress } from "../routes/cli-device.js";
 import { oauthAccessToken, oauthApplication, oauthConsent } from "../schema/index.js";
+import type { McpRegistrationConfig } from "./config.js";
 
-export const MAX_REDIRECT_URIS = 5;
 const MAX_REDIRECT_URI_LENGTH = 2048;
-export const MAX_UNAPPROVED_PER_DAY = 200;
-export const PER_ADDRESS_PER_HOUR = 10;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -43,12 +43,12 @@ const DNS_NAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](
 export type RedirectCheck = { ok: true; uris: string[] } | { ok: false; error: string };
 
 /** Validates a registration's `redirect_uris`. Each entry must pass `redirectUriProblem`. */
-export function checkRedirectUris(value: unknown, appSchemes: readonly string[]): RedirectCheck {
+export function checkRedirectUris(value: unknown, appSchemes: readonly string[], maxUris: number): RedirectCheck {
   if (!Array.isArray(value) || value.length === 0) {
     return { ok: false, error: "Send redirect_uris as a list with at least one URI." };
   }
-  if (value.length > MAX_REDIRECT_URIS) {
-    return { ok: false, error: `Send at most ${MAX_REDIRECT_URIS} redirect URIs.` };
+  if (value.length > maxUris) {
+    return { ok: false, error: `Send at most ${maxUris} redirect URI${maxUris === 1 ? "" : "s"}.` };
   }
   const uris: string[] = [];
   for (const entry of value) {
@@ -92,7 +92,7 @@ export function redirectUriProblem(uri: string, appSchemes: readonly string[]): 
 type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
 let registrationCounter: Counter | undefined;
 
-type Outcome = "registered" | "bad_request" | "redirect_rejected" | "rate_limited" | "unapproved_limit";
+type Outcome = "registered" | "off" | "bad_request" | "redirect_rejected" | "rate_limited" | "unapproved_limit";
 
 function recordRegistration(outcome: Outcome): void {
   registrationCounter ??= metrics.getMeter("@valet/api").createCounter("valet.mcp.client_registration", {
@@ -103,7 +103,7 @@ function recordRegistration(outcome: Outcome): void {
 
 const addressWindows = new Map<string, { windowStart: number; count: number }>();
 
-function allowAddress(key: string, now: number): boolean {
+function allowAddress(key: string, now: number, perHour: number): boolean {
   const entry = addressWindows.get(key);
   if (!entry || now - entry.windowStart >= HOUR_MS) {
     // Drop finished windows now and then, so the map stays small.
@@ -112,7 +112,7 @@ function allowAddress(key: string, now: number): boolean {
     return true;
   }
   entry.count += 1;
-  return entry.count <= PER_ADDRESS_PER_HOUR;
+  return entry.count <= perHour;
 }
 
 /** Test seam: forget the per-address windows. */
@@ -131,7 +131,7 @@ async function countRecentUnapproved(db: AppDb): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-function refuse(c: Context<AppEnv>, status: 400 | 429, error: string, description: string) {
+function refuse(c: Context<AppEnv>, status: 400 | 403 | 429, error: string, description: string) {
   return c.json({ error, error_description: description }, status);
 }
 
@@ -141,8 +141,12 @@ function refuse(c: Context<AppEnv>, status: 400 | 429, error: string, descriptio
  * and refuses any other media type, so the plugin cannot read a body this
  * gate did not check.
  */
-export function mcpRegisterGate(db: AppDb, appSchemes: readonly string[]) {
+export function mcpRegisterGate(db: AppDb, cfg: McpRegistrationConfig) {
   return async (c: Context<AppEnv>, next: () => Promise<void>): Promise<void | Response> => {
+    if (!cfg.open) {
+      recordRegistration("off");
+      return refuse(c, 403, "access_denied", "This Valet does not accept new MCP app registrations (AUTH_MCP_REGISTRATION=off). Ask your Valet administrator to set AUTH_MCP_REGISTRATION=open, or connect with an API key (valet mcp setup --token).");
+    }
     const media = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
     let body: unknown;
     try {
@@ -154,18 +158,18 @@ export function mcpRegisterGate(db: AppDb, appSchemes: readonly string[]) {
       recordRegistration("bad_request");
       return refuse(c, 400, "invalid_client_metadata", "Send the registration as a JSON object with Content-Type: application/json.");
     }
-    const check = checkRedirectUris((body as Record<string, unknown>).redirect_uris, appSchemes);
+    const check = checkRedirectUris((body as Record<string, unknown>).redirect_uris, cfg.appSchemes, cfg.maxRedirectUris);
     if (!check.ok) {
       recordRegistration("redirect_rejected");
       return refuse(c, 400, "invalid_redirect_uri", check.error);
     }
-    if (!allowAddress(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), Date.now())) {
+    if (cfg.ratePerHour > 0 && !allowAddress(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), Date.now(), cfg.ratePerHour)) {
       recordRegistration("rate_limited");
       return refuse(c, 429, "slow_down", "Too many MCP apps registered from this address. Wait an hour, then connect again.");
     }
-    if (await countRecentUnapproved(db) >= MAX_UNAPPROVED_PER_DAY) {
+    if (cfg.unconsentedCap > 0 && await countRecentUnapproved(db) >= cfg.unconsentedCap) {
       recordRegistration("unapproved_limit");
-      console.warn(`[mcp-register] refused: ${MAX_UNAPPROVED_PER_DAY} MCP clients registered in the last day have no consent or token`);
+      console.warn(`[mcp-register] refused: ${cfg.unconsentedCap} MCP clients registered in the last day have no consent or token`);
       return refuse(c, 429, "slow_down", "Valet has too many new MCP apps that were never approved. Try again later. If this continues, ask your Valet administrator to check MCP registrations.");
     }
     recordRegistration("registered");

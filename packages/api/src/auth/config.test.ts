@@ -4,7 +4,7 @@
  * with correct defaults, validations, and error cases.
  */
 import { describe, it, expect } from "vitest";
-import { authModeConflict, loadAuthConfig, parseAdminEmails } from "./config.js";
+import { DEFAULT_MCP_REGISTRATION, authModeConflict, loadAuthConfig, parseAdminEmails } from "./config.js";
 
 /**
  * The boot refusal (`main.ts`): stub auth beside real auth resolves every
@@ -445,7 +445,7 @@ describe("loadAuthConfig", () => {
         },
       },
       sandboxJwtMaster: "sandbox-key",
-      mcpAppSchemes: ["claude", "cursor"],
+      mcp: DEFAULT_MCP_REGISTRATION,
     });
   });
 });
@@ -534,13 +534,33 @@ describe("AUTH_ADMIN_EMAILS", () => {
   });
 });
 
-describe("AUTH_MCP_APP_SCHEMES", () => {
-  it("reads AUTH_MCP_APP_SCHEMES and refuses a scheme that runs content or leaves the computer", () => {
-    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s" })?.mcpAppSchemes).toEqual(["claude", "cursor"]);
-    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: " Claude ,claude" })?.mcpAppSchemes).toEqual(["claude"]);
-    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: "" })?.mcpAppSchemes).toEqual([]);
-    for (const bad of ["javascript", "https", "data", "claude://"]) {
-      expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: bad })).toThrow(/AUTH_MCP_APP_SCHEMES has/);
-    }
+describe("MCP registration settings", () => {
+  const mcp = (env: Record<string, string>) => loadAuthConfig({ BETTER_AUTH_SECRET: "s", ...env })?.mcp;
+
+  it("defaults to open registration with the documented limits", () => {
+    expect(mcp({})).toEqual({ open: true, ratePerHour: 10, unconsentedCap: 200, maxRedirectUris: 5, appSchemes: ["claude", "cursor"] });
+  });
+
+  it("reads each setting, with 0 turning a limit off", () => {
+    expect(mcp({
+      AUTH_MCP_REGISTRATION: " OFF ", AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "0", AUTH_MCP_UNCONSENTED_CLIENT_CAP: "0",
+      AUTH_MCP_MAX_REDIRECT_URIS: "2", AUTH_MCP_APP_SCHEMES: " Claude ,claude",
+    })).toEqual({ open: false, ratePerHour: 0, unconsentedCap: 0, maxRedirectUris: 2, appSchemes: ["claude"] });
+    expect(mcp({ AUTH_MCP_REGISTRATION: "open", AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "", AUTH_MCP_APP_SCHEMES: "" }))
+      .toMatchObject({ open: true, ratePerHour: 10, appSchemes: [] });
+  });
+
+  it("stops boot on an invalid value, naming the variable", () => {
+    const cases: Array<[Record<string, string>, RegExp]> = [
+      [{ AUTH_MCP_REGISTRATION: "anyone" }, /AUTH_MCP_REGISTRATION is "anyone". Use open or off/],
+      [{ AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "ten" }, /AUTH_MCP_REGISTRATION_RATE_PER_HOUR is "ten"/],
+      [{ AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "-1" }, /AUTH_MCP_REGISTRATION_RATE_PER_HOUR is "-1"/],
+      [{ AUTH_MCP_UNCONSENTED_CLIENT_CAP: "1.5" }, /AUTH_MCP_UNCONSENTED_CLIENT_CAP is "1.5"/],
+      [{ AUTH_MCP_MAX_REDIRECT_URIS: "0" }, /AUTH_MCP_MAX_REDIRECT_URIS is "0". Set a whole number of 1 or more/],
+      [{ AUTH_MCP_APP_SCHEMES: "javascript" }, /AUTH_MCP_APP_SCHEMES has "javascript"/],
+      [{ AUTH_MCP_APP_SCHEMES: "https" }, /AUTH_MCP_APP_SCHEMES has "https"/],
+      [{ AUTH_MCP_APP_SCHEMES: "claude://" }, /AUTH_MCP_APP_SCHEMES has "claude:\/\/"/],
+    ];
+    for (const [env, message] of cases) expect(() => mcp(env), JSON.stringify(env)).toThrow(message);
   });
 });
