@@ -13,11 +13,14 @@ import { PRINCIPLES_DIR, type MemoryFileSummary } from "../services/memory.js";
 export const PRINCIPLE_INDEX_MAX_ENTRIES = 40;
 export const PRINCIPLE_INDEX_MAX_CHARS = 4000;
 
+/** The base principle's name. A turn cites it by this name. */
+export const BASE_PRINCIPLE_NAME = "learn-from-the-org";
+
 /**
  * The base principle. Valet ships it, so every brain starts with it. It is
  * the base case and the inductive case: a principle that makes principles.
  */
-export const BASE_PRINCIPLE = `### learn-from-the-org (built in)
+export const BASE_PRINCIPLE = `### ${BASE_PRINCIPLE_NAME} (built in)
 
 Applies when a person tells you how they want the work done.
 

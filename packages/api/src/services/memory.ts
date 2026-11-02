@@ -916,6 +916,40 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
   return out;
 }
 
+/** Most principle files `listPrincipleFiles` reads from each owner. More
+ * than the snapshot index lists, so a principle past the index cap still
+ * resolves, but bounded. */
+export const MAX_PRINCIPLE_FILES = 200;
+
+export type PrincipleFileSummary = Pick<MemoryFileSummary, "path" | "key" | "title" | "description">;
+
+/** The principle files `scope` can read across its read-union, projected
+ * like `listFiles`, without their bodies. */
+export async function listPrincipleFiles(db: AppDb, scope: MemoryScope): Promise<PrincipleFileSummary[]> {
+  const owners = await resolveReadableOwners(db, scope);
+  const out: PrincipleFileSummary[] = [];
+  for (const owner of owners) {
+    const rows = await db
+      .select({ path: memoryFiles.path, title: memoryFiles.title, description: memoryFiles.description })
+      .from(memoryFiles)
+      .where(and(
+        eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace),
+        sql`${memoryFiles.path} LIKE ${`${PRINCIPLES_DIR}%`}`,
+      ))
+      .orderBy(asc(memoryFiles.path))
+      .limit(MAX_PRINCIPLE_FILES);
+    for (const row of rows) {
+      out.push({
+        path: `${owner.prefix}${row.path}`,
+        key: { ownerType: owner.ownerType, ownerId: owner.ownerId, namespace: owner.namespace, path: row.path },
+        title: row.title,
+        description: row.description,
+      });
+    }
+  }
+  return out;
+}
+
 // ─── searchFiles ───────────────────────────────────────────────────────
 
 export interface SearchFilesParams {

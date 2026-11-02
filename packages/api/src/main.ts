@@ -44,6 +44,7 @@ import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
 import { memoryUsageRecorder } from "./services/memory-usage.js";
+import { wirePrincipleCitations } from "./orchestrator/principle-citations.js";
 import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
 import { initSandboxMetrics } from "@valet/engine";
@@ -340,6 +341,7 @@ wireAttentionRouter({
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
 wireThreadPullRequests(providers.eventStream, providers.db);
+wirePrincipleCitations(providers.eventStream, providers.db);
 // A task started from home reports back to home when its first run ends.
 wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
