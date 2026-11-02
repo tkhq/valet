@@ -1388,6 +1388,28 @@ it("keeps scoped discovery and direct pinned calls inside the same action ceilin
   expect(writes).toBe(0);
 });
 
+it("shows integrations outside a focused thread's focus instead of reporting none", async () => {
+  // A workflow editor thread starts focused on workflows.* actions. A
+  // dynamic integration such as Granola is allowed by the ceiling but not
+  // by the focus, so a focused search used to report "no integration action".
+  const granola: ActionPlugin = { service: "granola", actions: [], resolveActions: async () => [
+    { id: "granola.list_notes", name: "List notes", description: "List recent meeting notes", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+  ] };
+  const tools = pluginCatalogTools({ plugins: [granola] });
+  const list = tools.find((tool) => tool.name === "list_tools");
+  if (!list) throw new Error("list_tools missing");
+  const ctx = makeCtx({ toolScope: { actions: ["workflows.get_workflow"] } });
+  const found = await list.execute({ service: "granola" }, ctx);
+  expect(found.text).toContain("outside_focus");
+  expect(found.text).toContain("granola.list_notes");
+  expect(found.text).toContain("call focus_tools");
+  expect(found.text).not.toContain("no integration action matched");
+  // Without focus, the same search lists the action normally.
+  const unfocused = await list.execute({ service: "granola" }, makeCtx({}));
+  expect(unfocused.text).toContain("granola.list_notes");
+  expect(unfocused.text).not.toContain("outside_focus");
+});
+
 it("refuses a guessed dynamic action before discovering or executing it", async () => {
   let discoveries = 0;
   const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };

@@ -19,7 +19,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
+import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -195,7 +195,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
@@ -833,6 +833,31 @@ export class Thread {
     });
   }
 
+  /**
+   * A person who writes while the running turn waits on a question wants to
+   * talk first, for example to ask what an option means. Withdraw the
+   * question with reason `message`: the tool returns, the message joins the
+   * turn after the tool batch, and the model answers it and can ask again.
+   * Only a message that a person typed and that joins the turn at its next
+   * step does this: it must be in the run that `takeMidTurnItems` delivers
+   * (`midTurnRun`). An event, a token caller, or a message queued behind an
+   * item that cannot join leaves the question open.
+   *
+   * `submitPrompt` calls this after it admits a typed message. The gate
+   * cycle saves and announces a question before it registers the waiter, so
+   * it also calls this once the waiter exists, for a message admitted in
+   * between.
+   */
+  private async withdrawQuestionForMessage(): Promise<void> {
+    const running = this.runningItem;
+    if (!running || this.session.isThreadExecutionFenced(this.id)) return;
+    const questions = this.pendingDecisionGates().filter((gate) => gate.type === "question" && gate.queueItemId === running.id);
+    if (questions.length === 0) return;
+    const run = this.midTurnRun(await this.session.providers.store.listUnsettledSubmissions(this.session.id), running);
+    if (!run.some(typedByPerson)) return;
+    for (const gate of questions) this.withdrawDecision(gate.id, "message");
+  }
+
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): boolean {
     const ok = this.gates.withdraw(gateId, reason);
     if (ok) {
@@ -958,6 +983,7 @@ export class Thread {
         receiptItem = (await run) ?? admitted;
       }
     }
+    if (wasAdmitted && typedByPerson(admitted)) await this.withdrawQuestionForMessage();
     await this.emitQueueState();
     void this.kick();
     return {
@@ -2243,6 +2269,7 @@ export class Thread {
         );
       });
       if (this.session.isExecutionFenced) this.handoffParkedGate();
+      if (gate.type === "question") await this.withdrawQuestionForMessage();
       const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
@@ -4647,7 +4674,7 @@ export class Thread {
    */
   private async appendUserEntry(
     item: QueueItem,
-  ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
+  ): Promise<{ text: string; attachments: MessageEntry["attachments"]; time: MessageTime }> {
     // Every path that appends the user entry moves an edit's leaf first, the
     // claim loop's credential-cap path included. It runs once per item.
     await this.applyEdit(item);
@@ -4753,6 +4780,7 @@ export class Thread {
       return {
         text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
+        time: entryMessageTime(existingUserEntry),
       };
     }
 
@@ -4788,9 +4816,14 @@ export class Thread {
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
     const baseMetadata = stripSignalStamp(item.metadata);
-    const metadata = spilledInputPath
-      ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
-      : baseMetadata;
+    // The timezone read now, written once with `createdAt`: together they
+    // render this entry's `[sent: …]` line on every later call.
+    const userTimezone = await this.session.currentUserTimezone();
+    const metadata = {
+      ...(baseMetadata ?? {}),
+      ...(spilledInputPath ? { [SPILLED_INPUT_PATH_KEY]: spilledInputPath } : {}),
+      [ENTRY_USER_TIMEZONE_KEY]: userTimezone ?? null,
+    };
 
     text = renderReplyContext(text, metadata);
 
@@ -4819,7 +4852,7 @@ export class Thread {
       this.appendEntry(userEntry, this.fence),
     );
     this.turnUserEntryId ??= userEntry.id;
-    return { text, attachments };
+    return { text, attachments, time: entryMessageTime(userEntry) };
   }
 
   /**
@@ -5056,7 +5089,7 @@ export class Thread {
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
     // `agent.state.messages` across subsequent turns: the LLM sees the image
     // on every downstream call, not just the turn it was uploaded on.
-    const { text, attachments } = await this.appendUserEntry(item);
+    const { text, attachments, time } = await this.appendUserEntry(item);
     const queuedSkillFact = item.metadata?.skillInvocation;
     if (isSkillInvocationFact(queuedSkillFact)) {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
@@ -5104,7 +5137,7 @@ export class Thread {
       if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
 
       try {
-        await this.runAgent(text, attachments, sender);
+        await this.runAgent(text, attachments, sender, time);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -5322,11 +5355,12 @@ export class Thread {
    */
   private async runAgent(
     text: string,
-    attachments?: MessageEntry["attachments"],
-    sender?: PromptAuthor,
+    attachments: MessageEntry["attachments"] | undefined,
+    sender: PromptAuthor | undefined,
+    time: MessageTime,
   ): Promise<void> {
     if (!(await this.canRunCurrentSubmission())) return;
-    const content = userContentBlocks(text, attachments, sender);
+    const content = userContentBlocks(text, attachments, sender, time);
     // Delivery steers only inside finishTurn, just before the loop reads the
     // steered messages, so this queue is empty here. Clearing it keeps an
     // interrupted boundary from replaying a delivered message into a later
@@ -5627,13 +5661,13 @@ export class Thread {
       role: "user",
       content: prompt,
       channel: item.channel,
-      metadata: { compaction_continue: true, synthetic: true },
+      metadata: { compaction_continue: true, synthetic: true, [ENTRY_USER_TIMEZONE_KEY]: this.session.lastKnownUserTimezone ?? null },
       queueItemId: item.id,
       createdAt: Date.now(),
     };
     await this.fencedWrite(() => this.appendEntry(entry, this.fence));
     if (this.staleFenceDetected) return;
-    await this.runAgent(prompt);
+    await this.runAgent(prompt, undefined, undefined, entryMessageTime(entry));
   }
 
   /**
@@ -6680,7 +6714,7 @@ export class Thread {
     // first and the item is not delivered, or it finds the item settled.
     // An item is in `taken` once it settles `merged`, so a failure on a
     // later item still delivers the earlier ones; nothing else would run them.
-    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }> = [];
+    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }> = [];
     const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running, taken));
     this.overheardCoalesceChain = run.then(() => null, () => null);
     try {
@@ -6688,25 +6722,19 @@ export class Thread {
     } catch (err) {
       this.emitError("mid_turn_delivery_failed", err instanceof Error ? err.message : String(err));
     }
-    for (const { text, attachments, sender } of taken) {
-      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender), timestamp: Date.now() });
+    for (const { text, attachments, sender, time } of taken) {
+      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() });
     }
   }
 
   /**
-   * Take the leading run of queued items that may join `running`, in
-   * admission order. The first item that cannot join stops the run, so
-   * delivery never reorders the queue. Each item's user entry is written
-   * first, after the entries of the turn so far, then the item settles
-   * `merged`. An item a claim or cancel settled first is not delivered.
+   * The leading run of this thread's queued items that may join `running`
+   * (`canDeliverMidTurn`), in admission order. The first item that cannot
+   * join ends the run, so delivery never reorders the queue. An item that a
+   * digest lists also ends it: the digest already carries its text (see
+   * settleCanceled).
    */
-  private async takeMidTurnItems(
-    running: QueueItem,
-    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>,
-  ): Promise<void> {
-    const store = this.session.providers.store;
-    const unsettled = await store.listUnsettledSubmissions(this.session.id);
-    // A digest that lists an item already carries its text (see settleCanceled).
+  private midTurnRun(unsettled: QueueItem[], running: QueueItem): QueueItem[] {
     const digested = new Set(unsettled.flatMap((d) => {
       const meta = d.metadata?.overheardDigest;
       return d.threadId === this.id && isOverheardDigestMeta(meta) ? meta.constituentIds : [];
@@ -6714,19 +6742,34 @@ export class Thread {
     const queued = unsettled
       .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const end = queued.findIndex((item) => digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId()));
+    return end === -1 ? queued : queued.slice(0, end);
+  }
+
+  /**
+   * Take the run of queued items that may join `running` (`midTurnRun`).
+   * Each item's user entry is written first, after the entries of the turn
+   * so far, then the item settles `merged`. An item a claim or cancel
+   * settled first is not delivered.
+   */
+  private async takeMidTurnItems(
+    running: QueueItem,
+    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }>,
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const run = this.midTurnRun(await store.listUnsettledSubmissions(this.session.id), running);
     const before = taken.length;
     // A Stop, an abort, or a successor attempt can land while an earlier item
     // is written. The item then stays queued and runs as a followup.
     const stopped = () => this.aborted || running.abortRequestedAt !== undefined || this.staleFenceDetected || this.runningItem !== running;
     try {
-      for (const item of queued) {
+      for (const item of run) {
         if (stopped()) break;
-        if (digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId())) break;
         // An entry that an earlier process wrote before it crashed is already
         // in the transcript this turn was rebuilt from, so it is settled but
         // not steered again. An entry this process wrote is steered.
         const recovered = !this.midTurnAppended.has(item.id) && await this.hasUserEntry(item.id);
-        const { text, attachments } = await this.appendUserEntry(item);
+        const { text, attachments, time } = await this.appendUserEntry(item);
         if (stopped()) break;
         this.midTurnAppended.add(item.id);
         // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
@@ -6742,6 +6785,7 @@ export class Thread {
           taken.push({
             text,
             attachments,
+            time,
             ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
           });
         }
@@ -7004,6 +7048,7 @@ export class Thread {
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
+      currentUserTimezone: () => session.currentUserTimezone(),
       cwd: session.options.workspace,
       // The turn's author picks whose account a team read uses first. A
       // channel sender with no Valet account acts for nobody.
@@ -7027,6 +7072,7 @@ export class Thread {
       pluginStoreFactory: session.options.pluginStoreFactory,
       browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
+      threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
@@ -7206,10 +7252,14 @@ export class Thread {
           if (ev.type === "thinking_start") this.thinkingTiming.start(ev.contentIndex, Date.now());
           if (ev.type === "thinking_end") this.thinkingTiming.end(ev.contentIndex, Date.now());
           const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "thinking") this.thinkingTiming.summarize(ev.contentIndex, block);
           if (this.currentAssistantMessageId && block?.type === "thinking") {
+            // The summary rides the block's end, not every delta: a running
+            // summary resent per delta would grow the live stream quadratically.
+            const { summary, ...timing } = this.thinkingTiming.part(ev.contentIndex);
             await this.session.emit({
               type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
-              index: ev.contentIndex, part: this.thinkingTiming.part(ev.contentIndex),
+              index: ev.contentIndex, part: ev.type === "thinking_end" && summary !== undefined ? { ...timing, summary } : timing,
             });
           }
         } else if (ev.type === "text_delta") {
@@ -7281,7 +7331,10 @@ export class Thread {
           const parts: MessagePart[] = [];
           for (const [index, block] of event.message.content.entries()) {
             if (block.type === "text") parts.push({ type: "text", text: block.text });
-            else if (block.type === "thinking") parts.push(this.thinkingTiming.part(index));
+            else if (block.type === "thinking") {
+              this.thinkingTiming.summarize(index, block);
+              parts.push(this.thinkingTiming.part(index));
+            }
             else if (block.type === "toolCall") {
               const call = this.currentToolCalls.get(block.id);
               if (call) parts.push(call);
@@ -8192,11 +8245,17 @@ function findMostRecentCompaction(
  * model can tell which person sent the message. Callers pass it only on
  * shared (team/org-owned) sessions — on a personal session every prompt has
  * the same author and the line would be noise.
+ *
+ * `time` renders as the first line, `[sent: …]` (`messageTimeLine`). Every
+ * engine caller passes the persisted entry's `entryMessageTime`, so the
+ * newest message tells the model the current time and older messages keep
+ * their bytes.
  */
 export function userContentBlocks(
   text: string,
   attachments: MessageEntry["attachments"] | undefined,
   sender?: PromptAuthor,
+  time?: MessageTime,
 ): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   const files = (attachments ?? []).filter(
     (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
@@ -8204,7 +8263,8 @@ export function userContentBlocks(
   );
   const note = formatFileAttachmentsNote(files);
   const senderLine = formatSenderLine(sender);
-  const prefixed = [senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
+  const timeLine = time ? messageTimeLine(time) : undefined;
+  const prefixed = [timeLine, senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
   return [
     { type: "text" as const, text: prefixed },
     ...attachmentsToImageBlocks(attachments),
@@ -8246,6 +8306,16 @@ export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultAc
   if (channelTargetKey(item.channel) !== channelTargetKey(running.channel)) return false;
   if (channelTargetKey(item.replyTarget) !== channelTargetKey(running.replyTarget)) return false;
   return (item.model === undefined || item.model === running.model) && item.role === running.role;
+}
+
+/**
+ * Whether a person typed `item`, in the web composer or a direct channel.
+ * Only such a message closes the person's open question
+ * (`Thread.withdrawQuestionForMessage`).
+ */
+function typedByPerson(item: QueueItem): boolean {
+  const author = item.author;
+  return author !== undefined && !author.externalSender && (author.interactive === true || author.directChannel === true);
 }
 
 /** Item metadata that sets how its turn runs. A joined item runs under the running item's values. */
@@ -8461,7 +8531,7 @@ export function entriesToAgentMessages(
           ? renderSignalEnvelope(e.signal, e.content)
           : renderReplyContext(e.content, e.metadata);
       const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
-      const contentBlocks = userContentBlocks(text, e.attachments, sender);
+      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
       out.push({
         role: "user",
         content: contentBlocks,

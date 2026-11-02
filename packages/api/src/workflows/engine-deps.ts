@@ -88,6 +88,10 @@ import { resolveWorkflowReportTarget } from "./report-target.js";
 import { definitionVersionId } from "./definition-version.js";
 import { submissionWorkflowStep } from "./step-grants.js";
 import { recordLlmStepUsage } from "./step-usage.js";
+import { delegatedWorkOpen, lastStepTurn, openStepWork } from "./delegated-work.js";
+
+/** How often a step wait re-reads a delegated child's watch row. */
+const DELEGATED_WORK_POLL_MS = 2_000;
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -442,13 +446,33 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!thread) {
         throw new Error(`workflow engine-deps: thread not found: ${threadId} on session ${sessionId}`);
       }
-      const result = await thread.awaitResult(queueItemId, {
+      await thread.awaitResult(queueItemId);
+      // A turn that delegated with `task` ends before its child reports back.
+      // The turn that the report starts finishes the step, so wait for it
+      // and report its result.
+      const item = await opts.engineStore.getQueueItem(sessionId, queueItemId);
+      if (!item) throw new Error(`workflow engine-deps: queue item not found: ${queueItemId} on session ${sessionId}`);
+      for (;;) {
+        const work = await openStepWork(opts.db, opts.engineStore, sessionId, item);
+        if (work.reportTurn) {
+          await thread.awaitResult(work.reportTurn.id);
+          continue;
+        }
+        if (!work.childPending) break;
+        // The child watcher publishes no event this wait can subscribe to.
+        // Poll its durable watch row, like the engine's own settlement wait.
+        await new Promise((resolve) => setTimeout(resolve, DELEGATED_WORK_POLL_MS));
+      }
+      const lastTurn = await lastStepTurn(opts.db, opts.engineStore, sessionId, item);
+      const result = await thread.awaitResult(lastTurn, {
         resultSchema: awaitOpts?.resultSchema,
       });
       if (result.outcome !== "completed") return result;
       // A step whose approval was refused skipped that action, so the run must
       // not report success. Failing the step notifies the run's owner.
-      const refused = (await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId))
+      const gates = await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId);
+      if (lastTurn !== queueItemId) gates.push(...await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, lastTurn));
+      const refused = gates
         .filter((gate) => gate.resolution !== undefined && isUnattendedWorkflowRefusal(gate.resolution));
       if (refused.length === 0) return result;
       // A run an agent started never uses saved permissions in agent steps
@@ -478,7 +502,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
 
     async isSettled(sessionId: string, queueItemId: string): Promise<boolean> {
       const item = await opts.engineStore.getQueueItem(sessionId, queueItemId);
-      return item?.status === "settled";
+      if (item?.status !== "settled") return false;
+      // The step is not done while a child it spawned still owes its report.
+      return !(await delegatedWorkOpen(opts.db, opts.engineStore, sessionId, item));
     },
 
     async llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult> {

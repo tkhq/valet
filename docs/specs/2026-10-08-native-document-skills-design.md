@@ -80,6 +80,11 @@ Downloads do not wake a sandbox and remain available after the source file is re
 The chat renderer provides a Download link from live and persisted tool results.
 `artifact_publish` rejects native document paths and directs the agent to `file_attach`.
 
+Plugin actions reach the same store through `ToolContext.threadFiles`, bound to the calling thread.
+`save` applies the same limits, deduplication, and reservations as `file_attach`. `read` returns a ready file of the same thread only.
+`drive.export_file` saves through it, and Gmail attachments read through it.
+See `2026-10-30-gmail-attachments-drive-export-design.md`.
+
 ### Storage lifetime
 
 Generated files use the host's existing `FsBlobStore`, as browser evidence does.

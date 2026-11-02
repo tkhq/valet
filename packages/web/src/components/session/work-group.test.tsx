@@ -120,6 +120,24 @@ describe("ReasoningLine", () => {
     expect(screen.queryByText("Thought for 5s")).toBeNull();
   });
 
+  it("opens a measured thought to its reasoning summary", () => {
+    render(<WorkGroup parts={[{ kind: "thinking", text: "", summary: "Check the failing test first.", durationMs: 2400 }]} live={false} />);
+    expect(screen.queryByText("Check the failing test first.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show the thought process" }));
+    expect(screen.getByText("Check the failing test first.")).toBeTruthy();
+  });
+
+  it("opens a thought inside a work group to its summary, next to a failed call", () => {
+    render(<WorkGroup parts={[
+      { kind: "thinking", text: "", summary: "The command failed; read the log.", durationMs: 6000 },
+      call("bash", { command: "pnpm test" }, { status: "error" }),
+      call("read_file", { path: "a.ts" }),
+    ]} live={false} />);
+    fireEvent.click(screen.getAllByRole("button")[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "Show the thought process" }));
+    expect(screen.getByText("The command failed; read the log.")).toBeTruthy();
+  });
+
   it("keeps adjacent blocks thinking until all measured intervals finish", () => {
     render(<WorkGroup parts={[
       { kind: "thinking", text: "", durationMs: 2400 },

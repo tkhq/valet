@@ -358,6 +358,8 @@ CREATE TABLE "child_watches" (
 	"queue_item_id" text NOT NULL,
 	"parent_session_id" text NOT NULL,
 	"parent_thread_id" text NOT NULL,
+	"parent_queue_item_id" text,
+	"report_queue_item_id" text,
 	"actor_user_id" text NOT NULL,
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,

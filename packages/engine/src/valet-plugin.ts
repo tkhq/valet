@@ -337,8 +337,11 @@ export interface InboundChannelEvent {
    * there, it reads the thread's messages before `messageTs` as context.
    * `external` is set when the conversation includes people from another
    * organization (Slack Connect); the host refuses such a conversation.
+   * `followUp` is set when the message is a thread reply that does not
+   * mention the app. The host delivers it, with no automatic reply, only to
+   * a chat that the sender's own mention opened in that thread.
    */
-  group?: { channelId: string; messageTs: string; external?: boolean };
+  group?: { channelId: string; messageTs: string; external?: boolean; followUp?: true };
   /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the

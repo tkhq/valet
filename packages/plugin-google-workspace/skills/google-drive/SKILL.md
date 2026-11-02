@@ -28,6 +28,7 @@ Google Drive access depends on the connected account, granted scopes, file permi
 - **`drive.rename_file`** — Rename a file or folder.
 - **`drive.delete_file`** — Move a file to trash by default. Set `permanent: true` only for an explicitly requested, irreversible deletion.
 - **`drive.download_file`** — Download text content of a file. Auto-exports Google Workspace files (Docs to Markdown, Sheets to CSV). Reads PDF and DOCX as text. Rejects other binary files.
+- **`drive.export_file`** — Save a Drive file to this thread as a file the person can download. Converts Docs, Sheets, and Slides to PDF (default), docx, xlsx, pptx, or csv. Saves other files unchanged. Returns `threadFileId` and a download URL.
 - **`drive.create_from_template`** — Copy a template document and optionally replace placeholder text (e.g. `{{name}}` to `Alice`).
 
 ## Common Patterns
@@ -145,6 +146,19 @@ drive.download_file({ fileId: "file-id" })
 ```
 
 Google Workspace files are auto-exported: Docs become Markdown, Sheets become CSV, and Slides become plain text.
+
+### Saving a File for Download or Email
+
+Save a Google Doc as a PDF in the thread:
+
+```
+drive.export_file({ fileId: "doc-id", format: "pdf" })
+```
+
+The result has `threadFileId`, `url`, and `webUrl`. Give the person the URL as a Markdown link.
+To email the file, pass `{ "threadFileId": "<id>" }` in the `attachments` of `gmail.create_draft` or `gmail.send_email`.
+Thread files are limited to 50 MB. Drive cannot export more than 10 MB from a Docs, Sheets, or Slides file.
+If either limit refuses the file, share the Drive link instead.
 
 ### Organizing Files
 

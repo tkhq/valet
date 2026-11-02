@@ -278,6 +278,12 @@ function listText(items: readonly string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
 }
 
+/** What a thought row opens to: the provider's reasoning summary, or the
+ * reasoning text older messages stored before summaries existed. */
+export function reasoningText(part: ThinkingPart): string {
+  return part.summary || part.text;
+}
+
 function reasoningTitle(part: ThinkingPart): string {
   return part.durationMs !== undefined && Number.isFinite(part.durationMs) && part.durationMs >= 0
     ? `Thought for ${Math.round(part.durationMs / 1000)}s`
@@ -287,9 +293,10 @@ function reasoningTitle(part: ThinkingPart): string {
 /** A model's reasoning, as one quiet line: "Thinking…" while it streams, then it opens to the text. */
 export function ReasoningLine({ part, live }: { part: ThinkingPart; live: boolean }) {
   const running = live && part.durationMs === undefined;
-  if (!part.text && !running && part.durationMs === undefined) return null;
+  const text = reasoningText(part);
+  if (!text && !running && part.durationMs === undefined) return null;
   return <TraceLine icon={<Lightbulb />} title={running ? "Thinking…" : reasoningTitle(part)} status={running ? "running" : "done"} label={running ? undefined : "Show the thought process"}>
-    {part.text ? <div className="border-l border-line pl-3 text-sm text-muted"><Markdown>{part.text}</Markdown></div> : undefined}
+    {text ? <div className="border-l border-line pl-3 text-sm text-muted"><Markdown>{text}</Markdown></div> : undefined}
   </TraceLine>;
 }
 
@@ -307,7 +314,7 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
     const measured = thinking.every(part => part.durationMs !== undefined && Number.isFinite(part.durationMs) && part.durationMs >= 0);
     const combined: ThinkingPart = {
       kind: "thinking",
-      text: thinking.map(part => part.text).filter(Boolean).join("\n\n"),
+      text: thinking.map(reasoningText).filter(Boolean).join("\n\n"),
       ...(measured ? { durationMs: thinking.reduce((sum, part) => sum + (part.durationMs ?? 0), 0) } : {}),
     };
     return <ReasoningLine part={combined} live={live} />;
@@ -327,8 +334,8 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
     defaultOpen={expanded}>
     <TraceList>
       {parts.map((part, i) => part.kind === "thinking"
-        ? part.text || part.durationMs !== undefined ? <TraceStep key={`t-${i}`} icon={<Lightbulb />} title={reasoningTitle(part)} label="Show the thought process">
-          {part.text ? <div className="border-l border-line pl-3 text-sm text-muted"><Markdown>{part.text}</Markdown></div> : undefined}
+        ? reasoningText(part) || part.durationMs !== undefined ? <TraceStep key={`t-${i}`} icon={<Lightbulb />} title={reasoningTitle(part)} label="Show the thought process">
+          {reasoningText(part) ? <div className="border-l border-line pl-3 text-sm text-muted"><Markdown>{reasoningText(part)}</Markdown></div> : undefined}
         </TraceStep> : null
         : <CallStep key={part.callId} part={part} childTitles={childTitles} readOnly={readOnly} />)}
     </TraceList>

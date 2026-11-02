@@ -17,7 +17,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type RunParams } from "@valet/workflow";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { WorkflowScheduler } from "./scheduler.js";
 import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveryDestination } from "../events/assistant-delivery.js";
 import { eq } from "drizzle-orm";
@@ -247,6 +247,49 @@ describe("WorkflowScheduler thread policy", () => {
       type: "schedule",
       data: { lookback: "17h", scheduleName: "Morning scan", cron: "0 * * * *", input: { lookback: "17h" } },
     });
+  });
+
+  it("gives a workflow run the slot of the schedule's last completed run, and skips failed runs", async () => {
+    await db.insert(workflowDefinitions).values({
+      id: "wf-poll", orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Poll notes",
+      definition: { version: "dag/v1", nodes: [{ id: "list", type: "tool", service: "granola", action: "list", params: { since: "{{trigger.metadata.previousFiredAt}}" } }], edges: [] },
+      createdAt: 100, updatedAt: 100,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched-poll", orgId: "org-1", ownerType: "user", ownerId: "user-1", targetKind: "workflow",
+      workflowId: "wf-poll", name: "Poll notes", cron: "0 * * * *", timezone: "UTC", enabled: true,
+      input: {}, nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+    });
+    let now = 1_000;
+    const host = new RecordingRunHost();
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: host,
+      deliverToAssistant: async () => LANDED, now: () => now,
+    });
+    const metadataOf = (i: number) => (host.started[i]?.params.input as { metadata: Record<string, unknown> }).metadata;
+    const settle = async (runId: string, outcome: "completed" | "failed", createdAt: number) => {
+      await db.insert(workflowRuns).values({ id: runId, workflowId: "wf-poll", definitionVersionId: "v1",
+        definition: {}, params: {}, status: "settled", outcome, createdAt, updatedAt: createdAt });
+    };
+    const fireNext = async () => {
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-poll"));
+      now = (row?.nextFireAt ?? 0) + 1;
+      await scheduler.tick();
+    };
+
+    // First fire: no run has completed.
+    await scheduler.tick();
+    expect(metadataOf(0)).not.toHaveProperty("previousFiredAt");
+    await settle(host.started[0]!.runId, "completed", 1_000);
+
+    // Second fire reads the completed slot; that run then fails.
+    await fireNext();
+    expect(metadataOf(1)).toMatchObject({ previousFiredAt: new Date(500).toISOString() });
+    await settle(host.started[1]!.runId, "failed", now);
+
+    // A failed run does not move the cursor, so its items are polled again.
+    await fireNext();
+    expect(metadataOf(2)).toMatchObject({ previousFiredAt: new Date(500).toISOString() });
   });
 
   it("keys a new-policy firing on its slot", async () => {

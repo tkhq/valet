@@ -6,8 +6,9 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
-import { gmailFetch, decodeBase64Url, encodeBase64Url } from "./api.js";
-import { renderMarkdownToHtml } from "./markdown.js";
+import { gmailFetch, decodeBase64Url, decodeBase64UrlBytes, submitRawMessage } from "./api.js";
+import { appendAttachments, buildMimeMessage, type MimeAttachment } from "./mime.js";
+import { attachmentList, attachmentsParam, describeAttachments, resolveAttachments } from "./attachments.js";
 
 // ─── Internal Types ──────────────────────────────────────────────────────────
 
@@ -20,6 +21,8 @@ interface GmailMessage {
   internalDate?: string;
   sizeEstimate?: number;
   payload?: GmailMessagePayload;
+  /** Base64url RFC 5322 bytes, present only for `format=raw`. */
+  raw?: string;
 }
 
 interface GmailMessagePayload {
@@ -58,83 +61,6 @@ async function gmailError(res: Response): Promise<PluginActionResult> {
   return { success: false, error: `Gmail API ${res.status}: ${detail}` };
 }
 
-// ─── MIME Helpers ─────────────────────────────────────────────────────────────
-
-/**
- * Strip header-injection vectors from a caller-supplied header value: fold
- * CR/LF runs (plus any folding whitespace after them) into a single space
- * and drop the remaining control characters. Without this, a subject or
- * recipient like "Hi\r\nBcc: mole@evil.com" would inject a Bcc header into
- * the raw MIME message.
- */
-function sanitizeHeaderValue(value: string): string {
-  return value
-    .replace(/[\r\n]+[ \t]*/g, ' ')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-}
-
-function encodeHeader(value: string): string {
-  // RFC 2047 encoded-word for any non-ASCII content in headers.
-  if (/^[\x00-\x7F]*$/.test(value)) return value;
-  // Use encodeBase64Url for the encoded portion; we need standard base64 here
-  // so use btoa directly after encoding to UTF-8.
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  bytes.forEach((b) => (binary += String.fromCharCode(b)));
-  return `=?UTF-8?B?${btoa(binary)}?=`;
-}
-
-/** Normalize bare LF/CR to CRLF so multipart part bodies stay RFC 5322 clean. */
-function toCrlf(value: string): string {
-  return value.replace(/\r\n|\r|\n/g, '\r\n');
-}
-
-function buildMimeMessage(opts: {
-  to: string[];
-  cc?: string[];
-  bcc?: string[];
-  subject: string;
-  body: string;
-  bodyHtml?: string;
-  inReplyTo?: string | null;
-  references?: string | null;
-}): string {
-  const addressList = (addresses: string[]) =>
-    addresses.map(sanitizeHeaderValue).join(', ');
-  const lines: string[] = [];
-  lines.push(`To: ${addressList(opts.to)}`);
-  if (opts.cc && opts.cc.length > 0) lines.push(`Cc: ${addressList(opts.cc)}`);
-  if (opts.bcc && opts.bcc.length > 0) lines.push(`Bcc: ${addressList(opts.bcc)}`);
-  lines.push(`Subject: ${encodeHeader(sanitizeHeaderValue(opts.subject))}`);
-  lines.push('MIME-Version: 1.0');
-
-  // An explicit non-blank bodyHtml overrides Markdown rendering. The schemas
-  // reject blank bodyHtml, but preserve the safe Markdown path if a caller
-  // bypasses validation.
-  const bodyHtml = opts.bodyHtml?.trim() ? opts.bodyHtml : renderMarkdownToHtml(opts.body);
-  const boundary = `valet-${crypto.randomUUID()}`;
-  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-  if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
-  if (opts.references) lines.push(`References: ${opts.references}`);
-  lines.push('');
-  lines.push(`--${boundary}`);
-  lines.push('Content-Type: text/plain; charset="UTF-8"');
-  lines.push('Content-Transfer-Encoding: 8bit');
-  lines.push('');
-  lines.push(toCrlf(opts.body));
-  lines.push(`--${boundary}`);
-  lines.push('Content-Type: text/html; charset="UTF-8"');
-  lines.push('Content-Transfer-Encoding: 8bit');
-  lines.push('');
-  lines.push(toCrlf(bodyHtml));
-  lines.push(`--${boundary}--`);
-  return lines.join('\r\n');
-}
-
-function encodeRawMessage(mime: string): string {
-  return encodeBase64Url(mime);
-}
-
 /** Fetch reply threading headers for a message. */
 async function getReplyContext(
   messageId: string,
@@ -170,7 +96,8 @@ async function prepareMimeRequest(
     replyToMessageId?: string;
   },
   token: string,
-): Promise<{ raw: string; threadId: string | undefined; toList: string[] }> {
+  attachments: MimeAttachment[] = [],
+): Promise<{ message: Uint8Array; threadId: string | undefined; toList: string[] }> {
   const toList = Array.isArray(args.to) ? args.to : [args.to];
   let threadId: string | undefined;
   let inReplyTo: string | null = null;
@@ -183,19 +110,18 @@ async function prepareMimeRequest(
     references = ctx.references;
   }
 
-  const raw = encodeRawMessage(
-    buildMimeMessage({
-      to: toList,
-      cc: args.cc,
-      bcc: args.bcc,
-      subject: args.subject,
-      body: args.body,
-      bodyHtml: args.bodyHtml,
-      inReplyTo,
-      references,
-    }),
-  );
-  return { raw, threadId, toList };
+  const mime = buildMimeMessage({
+    to: toList,
+    cc: args.cc,
+    bcc: args.bcc,
+    subject: args.subject,
+    body: args.body,
+    bodyHtml: args.bodyHtml,
+    inReplyTo,
+    references,
+    attachments,
+  });
+  return { message: new Uint8Array(Buffer.from(mime, 'utf8')), threadId, toList };
 }
 
 // ─── Body Extraction Helpers ──────────────────────────────────────────────────
@@ -245,6 +171,13 @@ function collectAttachments(payload?: GmailMessagePayload): Array<{
   };
   walk(payload);
   return out;
+}
+
+/** Bytes of every named file part, the total Gmail counts against its attachment limit. */
+function attachedBytes(payload?: GmailMessagePayload): number {
+  if (!payload) return 0;
+  const own = payload.filename ? payload.body?.size ?? 0 : 0;
+  return own + (payload.parts ?? []).reduce((sum, part) => sum + attachedBytes(part), 0);
 }
 
 function extractDomain(fromHeader: string | null): string | null {
@@ -309,23 +242,23 @@ const sendEmail = action(
           'Optional Gmail message ID to reply to. When set, the new email is threaded with the original and uses In-Reply-To/References headers.',
       }),
     ),
+    attachments: attachmentsParam('Optional files to attach.'),
   }, { additionalProperties: false }),
 )({
   id: 'gmail.send_email',
   name: 'Send Email',
   description:
-    'Sends an email from the authenticated Gmail account. Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
+    'Sends an email from the authenticated Gmail account. Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Supports cc/bcc, file attachments (thread files or working-directory paths), and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
     if (!token) return { success: false, error: 'Missing access token' };
     try {
-      const { raw, threadId, toList } = await prepareMimeRequest(p, token);
-      const res = await gmailFetch('/users/me/messages/send', token, {
-        method: 'POST',
-        body: JSON.stringify({ raw, ...(threadId ? { threadId } : {}) }),
-      });
+      const files = await resolveAttachments(p.attachments, ctx);
+      if (!files.ok) return { success: false, error: files.error };
+      const { message, threadId, toList } = await prepareMimeRequest(p, token, files.attachments);
+      const res = await submitRawMessage({ path: '/users/me/messages/send', method: 'POST', token, message, threadId, draft: false, signal: ctx.signal });
       if (!res.ok) return gmailError(res);
       const data = (await res.json()) as GmailMessage;
       return {
@@ -336,6 +269,7 @@ const sendEmail = action(
           labelIds: data.labelIds ?? [],
           to: toList,
           subject: p.subject,
+          ...(files.attachments.length > 0 ? { attachments: describeAttachments(files.attachments) } : {}),
           message: `Email sent to ${toList.join(', ')}.`,
         },
       };
@@ -625,23 +559,23 @@ const createDraft = action(
         description: 'Optional Gmail message ID to draft a reply to. The draft is threaded with the original.',
       }),
     ),
+    attachments: attachmentsParam('Optional files to attach.'),
   }, { additionalProperties: false }),
 )({
   id: 'gmail.create_draft',
   name: 'Create Draft',
   description:
-    'Creates a Gmail draft (does NOT send). Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
+    'Creates a Gmail draft (does NOT send). Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, given more files with add_draft_attachments, or deleted with delete_draft. Supports file attachments (thread files or working-directory paths) and threading via replyToMessageId.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
     if (!token) return { success: false, error: 'Missing access token' };
     try {
-      const { raw, threadId, toList } = await prepareMimeRequest(p, token);
-      const res = await gmailFetch('/users/me/drafts', token, {
-        method: 'POST',
-        body: JSON.stringify({ message: { raw, ...(threadId ? { threadId } : {}) } }),
-      });
+      const files = await resolveAttachments(p.attachments, ctx);
+      if (!files.ok) return { success: false, error: files.error };
+      const { message, threadId, toList } = await prepareMimeRequest(p, token, files.attachments);
+      const res = await submitRawMessage({ path: '/users/me/drafts', method: 'POST', token, message, threadId, draft: true, signal: ctx.signal });
       if (!res.ok) return gmailError(res);
       const data = (await res.json()) as GmailDraft;
       return {
@@ -652,6 +586,7 @@ const createDraft = action(
           threadId: data.message?.threadId,
           to: toList,
           subject: p.subject,
+          ...(files.attachments.length > 0 ? { attachments: describeAttachments(files.attachments) } : {}),
           message: `Draft created. Use send_draft with draftId="${data.id}" to send it, or update_draft to edit it first.`,
         },
       };
@@ -808,6 +743,7 @@ const updateDraft = action(
     replyToMessageId: Type.Optional(
       Type.String({ description: 'Optional Gmail message ID to thread the draft with.' }),
     ),
+    attachments: attachmentsParam('Optional files to attach. The update replaces all attachments, so list every file the draft should keep.'),
   }, { additionalProperties: false }),
 )({
   id: 'gmail.update_draft',
@@ -820,11 +756,10 @@ const updateDraft = action(
     const token = await getAccessToken(ctx);
     if (!token) return { success: false, error: 'Missing access token' };
     try {
-      const { raw, threadId, toList } = await prepareMimeRequest(p, token);
-      const res = await gmailFetch(`/users/me/drafts/${p.draftId}`, token, {
-        method: 'PUT',
-        body: JSON.stringify({ message: { raw, ...(threadId ? { threadId } : {}) } }),
-      });
+      const files = await resolveAttachments(p.attachments, ctx);
+      if (!files.ok) return { success: false, error: files.error };
+      const { message, threadId, toList } = await prepareMimeRequest(p, token, files.attachments);
+      const res = await submitRawMessage({ path: `/users/me/drafts/${encodeURIComponent(p.draftId)}`, method: 'PUT', token, message, threadId, draft: true, signal: ctx.signal });
       if (!res.ok) return gmailError(res);
       const data = (await res.json()) as GmailDraft;
       return {
@@ -835,7 +770,61 @@ const updateDraft = action(
           threadId: data.message?.threadId,
           to: toList,
           subject: p.subject,
+          ...(files.attachments.length > 0 ? { attachments: describeAttachments(files.attachments) } : {}),
           message: `Draft ${p.draftId} updated.`,
+        },
+      };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  },
+});
+
+const addDraftAttachments = action(
+  Type.Object({
+    draftId: Type.String({ description: 'The Gmail draft ID to add files to (from create_draft or list_drafts).' }),
+    attachments: attachmentList('Files to add to the draft.'),
+  }, { additionalProperties: false }),
+)({
+  id: 'gmail.add_draft_attachments',
+  name: 'Add Draft Attachments',
+  description:
+    'Adds files to an existing Gmail draft. Keeps the recipients, subject, body, threading, and files the draft already has. Files come from thread files (threadFileId from drive.export_file or file_attach) or working-directory paths. Gmail limits attachments to 25 MB in total.',
+  riskLevel: 'medium',
+  execute: async (args, ctx) => {
+    const p = args;
+    const token = await getAccessToken(ctx);
+    if (!token) return { success: false, error: 'Missing access token' };
+    try {
+      const draftPath = `/users/me/drafts/${encodeURIComponent(p.draftId)}`;
+      // format=full reports each existing file's size; format=raw has the bytes to keep.
+      const [fullRes, rawRes] = await Promise.all([
+        gmailFetch(`${draftPath}?format=full`, token, { signal: ctx.signal }),
+        gmailFetch(`${draftPath}?format=raw`, token, { signal: ctx.signal }),
+      ]);
+      if (!fullRes.ok) return gmailError(fullRes);
+      if (!rawRes.ok) return gmailError(rawRes);
+      const full = (await fullRes.json()) as GmailDraft;
+      const rawDraft = (await rawRes.json()) as GmailDraft;
+      const raw = rawDraft.message?.raw;
+      if (!raw) {
+        return { success: false, error: `Draft ${p.draftId} has no message content. Recreate it with create_draft and attachments.` };
+      }
+      const files = await resolveAttachments(p.attachments, ctx, attachedBytes(full.message?.payload));
+      if (!files.ok) return { success: false, error: files.error };
+      const message = appendAttachments(decodeBase64UrlBytes(raw), files.attachments);
+      const threadId = rawDraft.message?.threadId ?? full.message?.threadId;
+      const res = await submitRawMessage({ path: draftPath, method: 'PUT', token, message, threadId, draft: true, signal: ctx.signal });
+      if (!res.ok) return gmailError(res);
+      const data = (await res.json()) as GmailDraft;
+      return {
+        success: true,
+        data: {
+          draftId: data.id,
+          messageId: data.message?.id,
+          threadId: data.message?.threadId,
+          added: describeAttachments(files.attachments),
+          message: `Added ${files.attachments.length} file(s) to draft ${data.id}. Use send_draft to send it.`,
         },
       };
     } catch (error) {
@@ -1108,6 +1097,7 @@ export const gmailPlugin: ActionPlugin = {
     listDrafts,
     getDraft,
     updateDraft,
+    addDraftAttachments,
     sendDraft,
     deleteDraft,
     listLabels,
