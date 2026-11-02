@@ -167,12 +167,21 @@ function renderHeader(
   return render(headerElement(sandbox, threadId, session, modelControlTarget));
 }
 
+/** The header with the composer slot that holds its model control, as the
+ * thread view wires them. */
+function HeaderWithComposerSlot({ sandbox, threadId, session }: { sandbox?: { state: string; epoch: number }; threadId?: string; session: SessionDetail }) {
+  const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  return <>{headerElement(sandbox, threadId, session, target)}<div ref={setTarget} data-testid="composer-model" /></>;
+}
+
+/** Without a `modelControlTarget`, the header renders beside a composer slot. */
 function headerElement(
   sandbox?: { state: string; epoch: number },
   threadId?: string,
   session = baseSession(),
   modelControlTarget?: HTMLElement | null,
-) {
+): ReactNode {
+  if (modelControlTarget === undefined) return <HeaderWithComposerSlot sandbox={sandbox} threadId={threadId} session={session} />;
   return (
     <TooltipProvider>
       <SessionHeader
@@ -348,6 +357,40 @@ describe("SessionHeader: duplicate", () => {
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     await screen.findByRole("menuitem", { name: /copy transcript/i });
     expect(screen.queryByRole("menuitem", { name: "Duplicate thread" })).toBeNull();
+  });
+});
+
+describe("SessionHeader: desktop actions", () => {
+  afterEach(() => { headerThreads = []; meData = undefined; });
+
+  it("puts the model control in the composer slot and the thread actions in the menu", async () => {
+    meData = { id: "u1" };
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, key: "web:t1" }];
+    renderHeader(undefined, "t1");
+    const picker = screen.getByRole("button", { name: /^Choose model:/ });
+    expect(screen.getByTestId("composer-model").contains(picker)).toBe(true);
+    // Share and Copy transcript are menu items now, not header buttons.
+    expect(screen.queryByRole("button", { name: "Share thread" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy transcript" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    for (const name of ["Copy transcript", "Share thread"]) {
+      const item = await screen.findByRole("menuitem", { name });
+      expect(item.closest(".md\\:hidden")).toBeNull();
+    }
+  });
+
+  it("shows the menu on every screen to a team member who is not an admin", async () => {
+    meData = { id: "u1" };
+    teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "member", defaultModel: null }] };
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
+    renderHeader(undefined, "team-thread", { ...baseSession(), id: "assistant:asst_team", isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } });
+    // Only an admin changes a team thread's model.
+    expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Thread menu" });
+    expect(trigger.className).not.toContain("md:hidden");
+    await userEvent.click(trigger);
+    expect(await screen.findByRole("menuitem", { name: "Copy transcript" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Share thread" })).toBeNull();
   });
 });
 
@@ -1056,7 +1099,8 @@ describe("SessionHeader — team assistant", () => {
     headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
     threadModelVariables = { threadId: "team-thread", model: "test-model" };
     threadModelError = new Error("Model unavailable. Choose another model.");
-    renderHeader(undefined, "team-thread", teamSession());
+    // No composer slot: the phone menu offers the settings instead.
+    renderHeader(undefined, "team-thread", teamSession(), null);
     const menu = screen.getByRole("button", { name: "Thread menu" });
     await userEvent.click(menu);
     await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));

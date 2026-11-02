@@ -17,6 +17,7 @@ import { ApiError } from "~/api/client";
 import type {
   ArtifactListItem,
   BackgroundWorkConflict,
+  ListTeamsResponse,
   DecisionGate,
   GetModelTiersResponse,
   ModelInfo,
@@ -48,6 +49,8 @@ let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 let wakeups: ListSessionWakeupsResponse | undefined;
+/** The person's teams, which the Move to menu offers as workspaces. */
+let teamsData: ListTeamsResponse = { teams: [] };
 // The phone drawer and the web sidebar share this component. Most tests
 // cover the web sidebar; a phone test sets `mobile`.
 let mobile = false;
@@ -124,6 +127,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useMe: () => ({ data: { id: "user-1" }, error: null }),
+    useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
     useModels: () => ({ data: { models }, isLoading: false, error: null }),
     useModelTiers: () => ({ data: tierMap, isLoading: false, error: null }),
   };
@@ -231,6 +235,7 @@ beforeEach(() => {
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
   wakeups = undefined;
+  teamsData = { teams: [] };
   workflows = [];
   artifacts = [];
   listReads.length = 0;
@@ -1118,6 +1123,47 @@ describe("ThreadTree: Needs you section", () => {
     threads = [thread()];
     renderTree();
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+  });
+});
+
+describe("ThreadTree: one Move to menu", () => {
+  const team = (id: string, name: string, callerRole: "admin" | "member" | null): ListTeamsResponse["teams"][number] =>
+    ({ id, orgId: "org-1", name, origin: "local", externalId: null, createdAt: 1, memberCount: 2, callerRole, defaultModel: null });
+
+  it("lists this sidebar's projects and every other workspace the person is on", async () => {
+    saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
+    teamsData = { teams: [team("team-a", "Platform", "member"), team("team-b", "Design", "admin"), team("team-c", "Sales", null)] };
+    threads = [thread({ key: "web:t1" })];
+    const user = userEvent.setup();
+    render(<TooltipProvider><ThreadTree workspace="team-a" /></TooltipProvider>);
+
+    await user.click(screen.getByRole("button", { name: /thread menu: plan the launch/i }));
+    expect(screen.queryByRole("menuitem", { name: /Move to (project|workspace)/ })).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: "Move to" }));
+    const sub = (await screen.findByRole("menuitem", { name: "ACME" })).closest<HTMLElement>('[role="menu"]')!;
+    expect(within(sub).getByRole("menuitem", { name: "Recents" })).toBeTruthy();
+    expect(within(sub).getByRole("menuitem", { name: "Private" })).toBeTruthy();
+    expect(within(sub).getByRole("menuitem", { name: "Design" })).toBeTruthy();
+    // Not the team it is in, and not a team the person is not on.
+    expect(within(sub).queryByRole("menuitem", { name: "Platform" })).toBeNull();
+    expect(within(sub).queryByRole("menuitem", { name: "Sales" })).toBeNull();
+
+    // A submenu item selects on click; userEvent's pointer sequence does not reach it in jsdom.
+    fireEvent.click(within(sub).getByRole("menuitem", { name: "Design" }));
+    expect(await screen.findByText(/Everyone on Design will see this thread's messages and files.*Your teammates here will no longer see it/)).toBeTruthy();
+  });
+
+  it("offers only projects for a thread that cannot change workspace", async () => {
+    teamsData = { teams: [team("team-b", "Design", "admin")] };
+    threads = [thread({ key: "slack:C1:1.1" })];
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu: plan the launch/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to" }));
+    const sub = (await screen.findByRole("menuitem", { name: "Recents" })).closest<HTMLElement>('[role="menu"]')!;
+    expect(within(sub).queryByText("Workspace")).toBeNull();
+    expect(within(sub).queryByRole("menuitem", { name: "Design" })).toBeNull();
   });
 });
 

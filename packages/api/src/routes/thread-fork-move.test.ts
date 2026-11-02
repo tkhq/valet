@@ -144,6 +144,34 @@ describe("move", () => {
     expect(note?.content).toContain(`/chat?workspace=fork-team&thread=${moved.thread.id}`);
   });
 
+  it("moves a team thread into another team the person is on, under the same rules", async () => {
+    await boot();
+    await api!.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 });
+    await api!.providers.db.insert(teamMembers).values({ teamId: "other-team", userId: "local-user", role: "member" });
+    const { thread, sessionId } = await teamThread();
+    expect((await post(`/threads/${thread.id}/move`, { to: { teamId: "fork-team" }, confirm: true })).status).toBe(400);
+    // The other team reads it after the move, so the request confirms.
+    const unconfirmed = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" } });
+    expect(((await unconfirmed.json()) as { code: string }).code).toBe("confirm_required");
+    // A teammate who wrote nothing there cannot take it from its author, and
+    // cannot move it into a team they are not on.
+    const teammate = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" }, confirm: true }, MEMBER);
+    expect(teammate.status).toBe(403);
+
+    const res = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" }, confirm: true });
+    expect(res.status).toBe(201);
+    const moved = (await res.json()) as ForkThreadResponse;
+    expect(moved.workspace).toBe("other-team");
+    expect((await read(moved.thread.id)).status).toBe(200);
+    expect((await read(moved.thread.id, MEMBER)).status).toBe(404);
+    const [row] = await api!.providers.db.select().from(sessionThreads).where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, thread.id)));
+    expect(row?.archivedAt).toBeTypeOf("number");
+    // Teammates left behind learn where it went, without a link they cannot open.
+    const note = ((await (await read(thread.id, MEMBER)).json()) as ListMessagesResponse).messages.at(-1);
+    expect(note?.content).toContain("moved this thread to Other");
+    expect(note?.content).not.toContain("/chat?");
+  });
+
   it("refuses a team the person is not on, and a thread not started in Valet", async () => {
     await boot();
     await api!.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 });

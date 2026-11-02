@@ -204,7 +204,9 @@ summarizer prompt.
 
 - The session-header model picker becomes thread-scoped: it shows the active
   thread's effective model and PATCHes the thread. The session default stays
-  API-patchable and governs new threads.
+  API-patchable and governs new threads. Changed 2026-11-02: the picker
+  renders in the composer beside Send on every screen size, as a quiet
+  "Model · effort" control that opens upward. The header no longer shows it.
 - Thread rows show a pin chip when the thread's pin differs from the session
   default (full model id in the tooltip).
 - The message list renders a compaction divider for messages with

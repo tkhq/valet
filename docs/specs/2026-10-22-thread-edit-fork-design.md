@@ -247,17 +247,20 @@ metadata (`forkOf`).
 
 ### 14. Move is a fork of the whole thread plus an archive
 
-Call: the thread menu offers "Move to workspace". A move copies the whole
-conversation and its files into the destination as a fork does, archives the
-source, records the copy in the source's metadata (`movedTo`), and adds a
-note to the source.
+Call: the sidebar row menu offers one "Move to" submenu. Its Project group
+files the thread under a project in this sidebar. Its Workspace group lists
+Private and every other team the person is on (changed 2026-11-02; it was
+two submenus). A move copies the whole conversation and its files into the
+destination as a fork does, archives the source, records the copy in the
+source's metadata (`movedTo`), and adds a note to the source.
 
-- A team thread moves only to the mover's private threads. Teammates lose
-  it, so only a person who wrote every message in it, or a team admin, can
-  move it. The note says where it went, with no link that teammates cannot
-  open.
-- A private thread moves only into a team the person is on. The team then
-  reads it, so the request must confirm. Slack channel gates come along.
+- A team thread moves to the mover's private threads or to another team the
+  mover is on. Teammates lose it, so only a person who wrote every message in
+  it, or a team admin, can move it. The note says where it went, with no
+  link that teammates cannot open.
+- A private thread moves into a team the person is on.
+- A move into a team shows the thread to that team, so the request must
+  confirm. Slack channel gates come along.
 - Only a `web:` thread with no running turn, open approval, or background
   work moves. A Slack, workflow, or Home thread keeps its connection.
 

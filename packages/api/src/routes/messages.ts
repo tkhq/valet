@@ -1887,12 +1887,13 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
 /**
  * Moves a thread to another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md):
  * the whole conversation and its files are copied there, as a fork is, and
- * the source is archived with a pointer to the copy. A team thread moves to
- * the mover's private threads; teammates lose it, so only a person who wrote
- * every message in it, or a team admin, may move it. A private thread moves
- * to a team the mover is on; the team then reads it, so the request must
- * confirm. A thread with a running turn, an open approval, or background
- * work does not move, and nor does one bound to Slack, a workflow, or Home.
+ * the source is archived with a pointer to the copy. A thread moves to the
+ * mover's private threads or to any team the mover is on. When a team thread
+ * leaves its team, teammates lose it, so only a person who wrote every
+ * message in it, or a team admin, may move it. A move into a team shows the
+ * thread to that team, so the request must confirm. A thread with a running
+ * turn, an open approval, or background work does not move, and nor does one
+ * bound to Slack, a workflow, or Home.
  */
 export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
   const body = await readOptionalJsonObject(c);
@@ -1913,12 +1914,12 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   const sourceTeam = loaded.session.ownerType === "team";
   if (destination === "private" && !sourceTeam) return c.json({ error: "This thread is already private to you." }, 400);
   if (typeof destination === "object") {
-    if (sourceTeam) return c.json({ error: "A team thread moves to your private threads only. Branch it to copy it into another team." }, 400);
+    if (sourceTeam && destination.teamId === loaded.session.ownerId) return c.json({ error: "This thread is already in that team." }, 400);
     if (body?.confirm !== true) {
       return c.json({ error: "Moving shows this thread's messages and files to everyone on the team. Send confirm: true to move it.", code: "confirm_required" }, 409);
     }
   }
-  if (destination === "private" && !await canAdministerTeam(db, loaded.session.ownerId, c.var.user.id)) {
+  if (sourceTeam && !await canAdministerTeam(db, loaded.session.ownerId, c.var.user.id)) {
     const others = (await thread.readEntries()).some((entry) => entry.type === "message" && entry.role === "user" && !entry.signal
       && entry.author?.id !== undefined && entry.author.id !== c.var.user.id);
     if (others) {
@@ -1940,7 +1941,7 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   // open it: a private thread moved to a team. Teammates who lose a team
   // thread are told where it went, not given a link they cannot open.
   const owner = await threadOwner(db, result.thread.sessionId);
-  const where = sourceTeam ? "their private threads" : owner ? await workspaceName(db, owner) : "another workspace";
+  const where = destination === "private" ? "their private threads" : owner ? await workspaceName(db, owner) : "another workspace";
   const link = sourceTeam ? "" : ` [Open it](/chat?workspace=${encodeURIComponent(result.workspace)}&thread=${encodeURIComponent(result.thread.id)}).`;
   await thread.appendEntry({
     id: `e-${randomUUID()}`, sessionId, threadId, parentId: null, type: "message", role: "system",
