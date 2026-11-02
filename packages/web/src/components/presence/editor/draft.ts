@@ -896,8 +896,7 @@ export function instructionsTooLong(draft: Draft): string | null {
   const length = instructionsLength(draft);
   if (draft.service === "schedule" || length <= MAX_PROMPT_TEMPLATE_CHARS) return null;
   return (
-    `Instructions are ${characterCount(length)} characters, and the limit is ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)}. ` +
-    "Shorten them, or move long guidance into a skill and name that skill in the instructions."
+    `Too long: ${characterCount(length)} of ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)} characters. Shorten it or move details into a skill.`
   );
 }
 
@@ -921,7 +920,7 @@ function templateBlocker(draft: Draft, services: readonly CatalogService[]): str
   }
   const message = draft.promptTemplates.userPromptTemplate.trim();
   if (message.length > MAX_PROMPT_TEMPLATE_CHARS) {
-    return `The Event message is ${characterCount(message.length)} characters, and the limit is ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)}. Shorten it.`;
+    return `Event message too long: ${characterCount(message.length)} of ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)} characters.`;
   }
   if (message.length > 0) {
     const names = placeholderNames(message);

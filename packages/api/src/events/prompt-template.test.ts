@@ -74,11 +74,10 @@ describe("validatePromptTemplate", () => {
   it("refuses a template over the length cap with its length, the cap, and what to do", () => {
     const long = "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1);
     expect(validatePromptTemplate(long, "systemPrompt", CATALOG)).toBe(
-      "systemPrompt is 4001 characters, and the limit is 4000. " +
-        "Shorten it, or move long guidance into a skill and name that skill in systemPrompt.",
+      "systemPrompt is too long: 4001 of 4000 characters. Shorten it or move details into a skill.",
     );
     expect(validatePromptTemplate(long, "userPromptTemplate", CATALOG)).toBe(
-      "userPromptTemplate is 4001 characters, and the limit is 4000. Shorten it.",
+      "userPromptTemplate is too long: 4001 of 4000 characters. Shorten it.",
     );
     expect(validatePromptTemplate("x".repeat(MAX_PROMPT_TEMPLATE_CHARS), "systemPrompt", CATALOG)).toBeNull();
   });

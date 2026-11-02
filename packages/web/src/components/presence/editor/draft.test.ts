@@ -363,8 +363,7 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
     const draft = { ...mentionLine(), instructions: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 512) };
     const blocker = saveBlocker(draft, CREATE, { connected: true });
     expect(blocker).toBe(
-      "Instructions are 4,512 characters, and the limit is 4,000. " +
-        "Shorten them, or move long guidance into a skill and name that skill in the instructions.",
+      "Too long: 4,512 of 4,000 characters. Shorten it or move details into a skill.",
     );
     expect(blocker).not.toContain("systemPrompt");
     // The api stores the trimmed text, so surrounding space does not count.
@@ -374,7 +373,7 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
   it("refuses an Event message over the api's limit in UI words", () => {
     const draft = { ...mentionLine(), promptTemplates: { userPromptTemplate: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1) } };
     expect(saveBlocker(draft, CREATE, { connected: true })).toBe(
-      "The Event message is 4,001 characters, and the limit is 4,000. Shorten it.",
+      "Event message too long: 4,001 of 4,000 characters.",
     );
   });
 

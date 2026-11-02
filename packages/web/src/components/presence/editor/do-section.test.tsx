@@ -167,8 +167,7 @@ describe("DoSection", () => {
     expect(box.getAttribute("aria-invalid")).not.toBe("true");
     fireEvent.change(box, { target: { value: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 512) } });
     const error = screen.getByText(
-      "Instructions are 4,512 characters, and the limit is 4,000. " +
-        "Shorten them, or move long guidance into a skill and name that skill in the instructions.",
+      "Too long: 4,512 of 4,000 characters. Shorten it or move details into a skill.",
     );
     expect(box.getAttribute("aria-invalid")).toBe("true");
     expect(box.getAttribute("aria-describedby")?.split(" ")).toContain(error.id);

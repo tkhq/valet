@@ -128,7 +128,7 @@ const VARIABLE_HELP: Record<PromptField, string> = {
  * instructions has a better home: a skill, which the assistant reads only
  * when it needs it. */
 const LENGTH_HELP: Record<PromptField, string> = {
-  systemPrompt: "Shorten it, or move long guidance into a skill and name that skill in systemPrompt.",
+  systemPrompt: "Shorten it or move details into a skill.",
   userPromptTemplate: "Shorten it.",
 };
 
@@ -182,7 +182,7 @@ export function validatePromptTemplate(
     return `${field} must be a non-empty string. Remove the field, or enter a template.`;
   }
   if (value.length > MAX_PROMPT_TEMPLATE_CHARS) {
-    return `${field} is ${value.length} characters, and the limit is ${MAX_PROMPT_TEMPLATE_CHARS}. ${LENGTH_HELP[field]}`;
+    return `${field} is too long: ${value.length} of ${MAX_PROMPT_TEMPLATE_CHARS} characters. ${LENGTH_HELP[field]}`;
   }
 
   const scanned = scanPlaceholders(value, field);

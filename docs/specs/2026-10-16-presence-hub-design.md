@@ -712,9 +712,8 @@ Pass criterion: all steps, in one run, from a clean start.
    limit, `MAX_PROMPT_TEMPLATE_CHARS` (4,000) in `@valet/shared`. From 80%
    of the limit, the field shows a live count (`3,500 of 4,000
    characters`). Past the limit, the field is marked invalid and reads
-   `Instructions are 4,512 characters, and the limit is 4,000. Shorten
-   them, or move long guidance into a skill and name that skill in the
-   instructions.` A routine's instructions have no limit. Under `Advanced`, **Event message
+   `Too long: 4,512 of 4,000 characters. Shorten it or move details into
+   a skill.` A routine's instructions have no limit. Under `Advanced`, **Event message
    (optional)** holds the message template, with a menu `Insert a detail
    from the event` that lists the event's summary, its text, and the
    fields the picked events carry, and inserts the template for the

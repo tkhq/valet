@@ -600,8 +600,8 @@ gate refuses a longer field, and the Presence editor counts characters and
 holds Save against the same constant, so the two cannot drift.
 
 The refusal names the field, its length, the limit, and the corrective
-action: `systemPrompt is 4512 characters, and the limit is 4000. Shorten it,
-or move long guidance into a skill and name that skill in systemPrompt.` The
+action: `systemPrompt is too long: 4512 of 4000 characters. Shorten it or
+move details into a skill.` The
 editor shows the same refusal in its own words next to the Instructions
 field (presence hub spec, Part H).
 

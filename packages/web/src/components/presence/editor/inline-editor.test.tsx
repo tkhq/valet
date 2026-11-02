@@ -195,7 +195,7 @@ describe("InlineEditor", () => {
     fireEvent.change(box, { target: { value: "x".repeat(4_512) } });
     const changes = bar();
     if (changes === null) throw new Error("No bar after a change.");
-    expect(changes.textContent).toContain("Instructions are 4,512 characters, and the limit is 4,000.");
+    expect(changes.textContent).toContain("Too long: 4,512 of 4,000 characters.");
     expect(changes.textContent).not.toContain("systemPrompt");
     const save = within(changes).getByRole("button", { name: "Save" }) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
