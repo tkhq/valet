@@ -64,6 +64,15 @@ const WIDE_TABLE = [
   `| #1110 | Tool parity spec | member-3 | Changes requested | \`${HEX_300.slice(80, 120)}\` | Two comments open about the approval card copy and one about naming. |`,
 ].join("\n");
 
+/** An unbroken URL and an unbroken long word in prose cells. Both should
+ * break to fit at phone width, with no side scroll. */
+const LINK_TABLE = [
+  "| Item | Where it is |",
+  "| --- | --- |",
+  "| Pricing | https://docs.example.com/workspace/pricing/2026-q4/enterprise-and-team-plan-comparison |",
+  "| Build | The ConfigurationValidationPreflightCheckForDeployment step timed out after 30 minutes. |",
+].join("\n");
+
 export const workTurnMessages: Message[] = [
   turnMessage(0, { role: "user", content: "What did Teammate say about pricing, and is the retry fix ready?", parts: [], author: { id: stressMe.id, name: stressMe.name } }),
   turnMessage(1, { role: "assistant", content: "", parts: [
@@ -89,7 +98,7 @@ export const workTurnMessages: Message[] = [
     { kind: "text", text: "Teammate wants the starter plan generous and paid tiers to win on collaboration. The retry fix passes its tests, but the push failed: I don't have write access to the branch." },
   ] }),
   turnMessage(8, { role: "assistant", content: "", parts: [
-    { kind: "text", text: `Here is where each goal stands.\n\n${PROSE_TABLE}\n\nAnd the open pull requests:\n\n${WIDE_TABLE}` },
+    { kind: "text", text: `Here is where each goal stands.\n\n${PROSE_TABLE}\n\nThe two open items:\n\n${LINK_TABLE}\n\nAnd the open pull requests:\n\n${WIDE_TABLE}` },
   ] }),
 ];
 

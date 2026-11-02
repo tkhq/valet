@@ -28,11 +28,18 @@ const PROSE_CELL_CHARS = 24;
  * like `member-1` does not break at its hyphen. A sentence keeps at least
  * 10rem, or 35% of a phone screen: without the floor, a table too wide to
  * fit squeezes each column to its longest word, and the sentence stacks one
- * word per line. Exported for tests. */
+ * word per line.
+ *
+ * Above the floor, a word or URL in a sentence cell breaks at any
+ * character. Auto table layout never makes a column narrower than its
+ * min-content width. `overflow-wrap: anywhere` lowers that width to the
+ * floor; `break-word` does not, so one long URL keeps the table wider than
+ * a phone. Inline code keeps `normal`, so a hash does not break and the
+ * table scrolls instead. Exported for tests. */
 export function tableCellClass(children: ReactNode): string | undefined {
   const length = codeText(children).length;
   if (length <= VALUE_CELL_CHARS) return "whitespace-nowrap";
-  if (length > PROSE_CELL_CHARS) return "min-w-[min(10rem,35vw)]";
+  if (length > PROSE_CELL_CHARS) return "min-w-[min(10rem,35vw)] [overflow-wrap:anywhere] [&_code]:[overflow-wrap:normal]";
   return undefined;
 }
 
@@ -174,12 +181,13 @@ export function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // Columns size to their content and wrap at spaces: a column is
-          // never narrower than its longest word, and only a word too long
-          // for the width breaks. The box is as wide as the table wants,
-          // from the text column up to its limit. A centering flex parent
-          // spreads extra width equally to both sides. The box scrolls
-          // only when the longest words of all columns do not fit.
+          // Columns size to their content and wrap at spaces. A sentence
+          // column can shrink to its floor, and a longer word or URL in it
+          // breaks (see `tableCellClass`). Other columns keep their longest
+          // word or code. The box is as wide as the table wants, from the
+          // text column up to its limit. A centering flex parent spreads
+          // extra width equally to both sides. The box scrolls only when
+          // the code, short values, and floors of all columns do not fit.
           table: ({ children }) => (
             <div className="flex justify-center">
               <div

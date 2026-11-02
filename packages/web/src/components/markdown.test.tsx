@@ -57,7 +57,32 @@ describe("Markdown", () => {
   it("picks a cell width rule from the length of its text", () => {
     expect(tableCellClass("member-1")).toBe("whitespace-nowrap");
     expect(tableCellClass("Changes requested")).toBeUndefined();
-    expect(tableCellClass(["Needs one more review ", <code key="c">before</code>, " it lands"])).toBe("min-w-[min(10rem,35vw)]");
+    expect(tableCellClass(["Needs one more review ", <code key="c">before</code>, " it lands"])).toBe(
+      "min-w-[min(10rem,35vw)] [overflow-wrap:anywhere] [&_code]:[overflow-wrap:normal]",
+    );
+  });
+
+  // jsdom does no layout, so this checks the rules that the 375px browser
+  // check in the gallery (/dev/ui-stress, "thread-work") depends on. Auto
+  // table layout never makes a column narrower than its min-content width.
+  // `overflow-wrap: break-word` does not lower that width, so an unbroken URL
+  // or word keeps the table wider than a phone. `anywhere` lowers it to the
+  // 10rem floor. Inline code keeps `normal`, so a hash still does not break.
+  it("lets a long URL or word in a cell break so the table fits a phone", () => {
+    const url = "https://docs.example.com/workspace/pricing/2026-q4/enterprise-and-team-plan-comparison";
+    const word = "ConfigurationValidationPreflightCheckForDeployment";
+    const hash = "14827038440abcee14b0ede8020ef0bd4117d510";
+    const step = `The ${word} step timed out.`;
+    render(
+      <Markdown wideTables>{`| Item | Detail |\n| --- | --- |\n| Pricing | ${url} |\n| Build | ${step} |\n| Commit | \`${hash}\` |`}</Markdown>,
+    );
+    for (const name of [url, step, hash]) {
+      const cell = screen.getByRole("cell", { name });
+      expect(cell.className).toContain("[overflow-wrap:anywhere]");
+      expect(cell.className).toContain("[&_code]:[overflow-wrap:normal]");
+      expect(cell.className).toContain("min-w-[min(10rem,35vw)]");
+    }
+    expect(screen.getByRole("link", { name: url }).closest("td")).toBe(screen.getByRole("cell", { name: url }));
   });
 
   it("lets a table grow past the text column only with wideTables", () => {
