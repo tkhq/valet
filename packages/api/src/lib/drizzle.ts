@@ -430,6 +430,19 @@ const CONTRACT_BACKFILL_SQL = `WITH base AS (
 SELECT id FROM base UNION ALL SELECT id FROM repo`;
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "memory_file_usage table", probe: { kind: "table", table: "memory_file_usage" }, sql: `CREATE TABLE IF NOT EXISTS "memory_file_usage" (
+  "owner_type" text NOT NULL,
+  "owner_id" text NOT NULL,
+  "namespace" text DEFAULT '' NOT NULL,
+  "path" text NOT NULL,
+  "read_count" integer DEFAULT 0 NOT NULL,
+  "last_read_at" bigint,
+  "inject_count" integer DEFAULT 0 NOT NULL,
+  "last_injected_at" bigint,
+  "cite_count" integer DEFAULT 0 NOT NULL,
+  "last_cited_at" bigint,
+  PRIMARY KEY ("owner_type", "owner_id", "namespace", "path")
+)` },
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
   { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (

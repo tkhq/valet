@@ -11,9 +11,10 @@
  * directly. Don't "fix" this to go over HTTP; there's no tool boundary to
  * preserve here.
  */
-import { listFiles, readFile, type MemoryScope } from "../services/memory.js";
+import { listFiles, readFile, type MemoryFileKey, type MemoryScope } from "../services/memory.js";
+import { memoryUsageRecorder } from "../services/memory-usage.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { renderPrinciplesSection } from "./principles.js";
+import { renderPrinciplesSection, selectIndexedPrinciples } from "./principles.js";
 
 export interface AssembleMemorySnapshotOptions {
   budgetChars?: number;
@@ -26,6 +27,7 @@ const RECENT_JOURNAL_COUNT = 3;
 
 interface SnapshotBlock {
   path: string;
+  key: MemoryFileKey;
   content: string;
   updatedAt: number;
 }
@@ -88,7 +90,7 @@ export async function assembleMemorySnapshot(
   for (const s of pinnedSummaries) {
     const result = await readFile(db, scope, s.path);
     if (result.kind === "file") {
-      pinnedBlocks.push({ path: s.path, content: result.rendered, updatedAt: s.updatedAt });
+      pinnedBlocks.push({ path: s.path, key: s.key, content: result.rendered, updatedAt: s.updatedAt });
     }
   }
 
@@ -96,7 +98,7 @@ export async function assembleMemorySnapshot(
   for (const s of journalSummaries) {
     const result = await readFile(db, scope, s.path);
     if (result.kind === "file") {
-      journalBlocks.push({ path: s.path, content: result.rendered, updatedAt: s.updatedAt });
+      journalBlocks.push({ path: s.path, key: s.key, content: result.rendered, updatedAt: s.updatedAt });
     }
   }
 
@@ -140,6 +142,14 @@ export async function assembleMemorySnapshot(
   if (droppedCount > 0) {
     rendered += `\n\n---\n_[snapshot truncated: ${droppedCount} file(s) omitted to fit the ${budgetChars}-char budget]_\n`;
   }
+
+  // Usage: the files this prompt carries, and the principles its index
+  // lists. The model did not choose them, so they count as injections, not
+  // reads. A block the budget dropped never reached the prompt.
+  const usage = memoryUsageRecorder(db);
+  const injectedAt = Date.now();
+  for (const block of [...remainingPinned, ...remainingJournals]) usage.record(block.key, "inject", injectedAt);
+  for (const principle of selectIndexedPrinciples(summaries)) usage.record(principle.key, "inject", injectedAt);
 
   return rendered;
 }

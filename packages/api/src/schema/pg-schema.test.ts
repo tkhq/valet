@@ -1050,6 +1050,16 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("repairs the memory usage table on an already-migrated database", async () => {
+      await db.query('DROP TABLE "memory_file_usage"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_file_usage table");
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO memory_file_usage (owner_type, owner_id, path, read_count) VALUES ($1, $2, $3, $4)", ["user", "u1", "notes/a.md", 2]);
+      expect((await db.query("SELECT namespace, read_count, last_read_at FROM memory_file_usage")).rows)
+        .toEqual([{ namespace: "", read_count: 2, last_read_at: null }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);

@@ -34,7 +34,7 @@ import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import type { RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { journalHasEntries } from "../orchestrator/bootstrap.js";
 import { ReservedPathError } from "../lib/okf.js";
@@ -61,6 +61,7 @@ import {
   type MemoryScope,
   type WriteSource,
 } from "../services/memory.js";
+import { memoryUsageRecorder } from "../services/memory-usage.js";
 
 export const memoryRouter = new Hono<AppEnv>();
 
@@ -354,6 +355,16 @@ for (const [route, copy] of [
   });
 }
 
+/** True when an agent, not a person, made this request: a session tool
+ * (internal token), a sandbox, or an MCP or CLI client. Only an agent's
+ * read counts as usage. A person opening a file on the memory page does
+ * not make it "used". */
+function isAgentRead(c: Context<AppEnv>): boolean {
+  if (isValidInternalToken(c.req.header("x-valet-internal")) || c.var.sandbox) return true;
+  const via = c.var.authVia;
+  return via !== undefined && isAgentCaller(via);
+}
+
 memoryRouter.get("/", async (c) => {
   let scope: MemoryScope;
   try {
@@ -368,6 +379,12 @@ memoryRouter.get("/", async (c) => {
   try {
     const { db } = c.var.providers;
     const result = await readFile(db, scope, path);
+    // A directory read lists files without opening them, so it is no use
+    // of any one file. The recorder buffers: the response never waits on it.
+    if (result.kind === "file" && isAgentRead(c)) {
+      const { ownerType, ownerId, namespace, path: stored } = result.file;
+      memoryUsageRecorder(db).record({ ownerType, ownerId, namespace, path: stored }, "read");
+    }
     return c.json(result);
   } catch (err) {
     const mapped = handleServiceError(err);

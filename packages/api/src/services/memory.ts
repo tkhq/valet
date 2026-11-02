@@ -21,7 +21,7 @@ import type { Principal } from "@valet/engine";
 import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
-import { memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
+import { memoryFileUsage, memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser, canAdministerTeam, lockTeamForOwnership } from "./teams.js";
 import {
   assertWritablePath,
@@ -403,15 +403,29 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
   if (existingRows.length === 0) {
     throw new NotFoundError("memory file", normalized);
   }
-  await db
-    .delete(memoryFiles)
-    .where(
-      and(
-        eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
-        eq(memoryFiles.path, normalized),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(memoryFiles)
+      .where(
+        and(
+          eq(memoryFiles.ownerType, scope.owner.type),
+          eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
+          eq(memoryFiles.path, normalized),
+        ),
+      );
+    // Usage belongs to the file. A later file at this path starts unused.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, normalized));
+  });
+}
+
+/** The `memory_file_usage` row for one own-scope path. */
+function usageKey(scope: MemoryScope, path: string): SQL | undefined {
+  return and(
+    eq(memoryFileUsage.ownerType, scope.owner.type),
+    eq(memoryFileUsage.ownerId, scope.owner.id),
+    eq(memoryFileUsage.namespace, scope.namespace ?? ""),
+    eq(memoryFileUsage.path, path),
+  );
 }
 
 // ─── moveFile ──────────────────────────────────────────────────────────
@@ -478,6 +492,10 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
         actorUserId: scope.actorUserId,
       })
       .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, from)));
+    // Usage moves with the file. A row left at `to` by a file that a
+    // repository sync removed would block the move, so it goes first.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, to));
+    await tx.update(memoryFileUsage).set({ path: to }).where(usageKey(scope, from));
     for (const ref of referencers) {
       await tx
         .update(memoryFiles)
@@ -849,9 +867,19 @@ async function copyTeamFile(
 
 // ─── listFiles ─────────────────────────────────────────────────────────
 
+/** One stored memory file: its owner tuple and its real (unprefixed) path. */
+export interface MemoryFileKey {
+  ownerType: string;
+  ownerId: string;
+  namespace: string;
+  path: string;
+}
+
 export interface MemoryFileSummary {
   /** Caller-facing path, including any `team:{id}/` virtual prefix. */
   path: string;
+  /** The stored row this entry projects. */
+  key: MemoryFileKey;
   title: string;
   description: string;
   type: string;
@@ -875,6 +903,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
       if (opts?.prefix && !virtualPath.startsWith(opts.prefix)) continue;
       out.push({
         path: virtualPath,
+        key: { ownerType: row.ownerType, ownerId: row.ownerId, namespace: row.namespace, path: row.path },
         title: row.title,
         description: row.description,
         type: row.type,

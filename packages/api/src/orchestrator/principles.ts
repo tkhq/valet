@@ -34,7 +34,11 @@ export function isPrincipleFile(path: string): boolean {
   return own.startsWith(PRINCIPLES_DIR) && own.length > PRINCIPLES_DIR.length;
 }
 
-function indexLine(file: MemoryFileSummary): string {
+/** What an index line shows. The snapshot passes full summaries, so the
+ * selection below hands back each one's owner key with it. */
+export type PrincipleIndexEntry = Pick<MemoryFileSummary, "path" | "title" | "description">;
+
+function indexLine(file: PrincipleIndexEntry): string {
   const title = file.title ? ` — ${file.title}` : "";
   const when = file.description ? `: ${file.description}` : "";
   return `- ${file.path}${title}${when}`;
@@ -42,24 +46,32 @@ function indexLine(file: MemoryFileSummary): string {
 
 /** Own principles first, then team principles. Each group is in path
  * order, so team entries group by team id. */
-function comparePrinciples(a: MemoryFileSummary, b: MemoryFileSummary): number {
+function comparePrinciples(a: PrincipleIndexEntry, b: PrincipleIndexEntry): number {
   const aTeam = a.path.startsWith("team:") ? 1 : 0;
   const bTeam = b.path.startsWith("team:") ? 1 : 0;
   return aTeam - bTeam || a.path.localeCompare(b.path);
 }
 
-/** The Principles section of the memory snapshot. It always renders, so the
- * slot exists before the first principle does. */
-export function renderPrinciplesSection(files: MemoryFileSummary[]): string {
+/** The principle files the index lists, in index order, within the caps.
+ * The snapshot records an injection for each one. */
+export function selectIndexedPrinciples<T extends PrincipleIndexEntry>(files: T[]): T[] {
   const principles = files.filter((file) => isPrincipleFile(file.path)).sort(comparePrinciples);
-  const index: string[] = [];
+  const listed: T[] = [];
   let chars = 0;
   for (const file of principles) {
     const line = indexLine(file);
-    if (index.length >= PRINCIPLE_INDEX_MAX_ENTRIES || chars + line.length + 1 > PRINCIPLE_INDEX_MAX_CHARS) break;
-    index.push(line);
+    if (listed.length >= PRINCIPLE_INDEX_MAX_ENTRIES || chars + line.length + 1 > PRINCIPLE_INDEX_MAX_CHARS) break;
+    listed.push(file);
     chars += line.length + 1;
   }
+  return listed;
+}
+
+/** The Principles section of the memory snapshot. It always renders, so the
+ * slot exists before the first principle does. */
+export function renderPrinciplesSection(files: PrincipleIndexEntry[]): string {
+  const principles = files.filter((file) => isPrincipleFile(file.path));
+  const index = selectIndexedPrinciples(principles).map(indexLine);
   const hidden = principles.length - index.length;
   if (principles.length === 0) {
     index.push("(No principles yet. The base principle tells you when to write one.)");

@@ -11,6 +11,8 @@ import { internalToken } from "../lib/internal-auth.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, securityCells, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { GetMemoryTreeResponse } from "../wire/types.js";
+import { writeFile, type MemoryScope } from "../services/memory.js";
+import { memoryUsageRecorder, readMemoryUsage } from "../services/memory-usage.js";
 
 describe("api integration: memory routes", () => {
   it("session user can write/read/search/patch/export their own scope", async () => {
@@ -55,6 +57,42 @@ describe("api integration: memory routes", () => {
 
       const getAfterDelete = await fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path: "notes/hello.md" })}`);
       expect(getAfterDelete.status).toBe(404);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("records an agent's file read as usage, but not a person's read or a directory read", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      const team: MemoryScope = { owner: { type: "team", id: "team-use" }, actorUserId: "local-user" };
+      await db.insert(teams).values({ id: "team-use", orgId: "local-org", name: "Use", createdAt: Date.now() });
+      await db.insert(teamMembers).values({ teamId: "team-use", userId: "local-user", role: "member" });
+      await writeFile(db, own, { path: "notes/a.md", content: "# A\n" });
+      await writeFile(db, own, { path: "notes/person.md", content: "# Person\n" });
+      await writeFile(db, team, { path: "notes/t.md", content: "# T\n" });
+      const agent = {
+        "x-valet-internal": internalToken(),
+        "x-valet-owner": "user:local-user",
+        "x-valet-actor": "local-user",
+        "x-valet-session-id": "sess-use",
+      };
+      const read = (path: string, headers: Record<string, string> = {}) =>
+        fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path })}`, { headers });
+
+      expect((await read("notes/a.md", agent)).status).toBe(200);
+      expect((await read("notes/", agent)).status).toBe(200);
+      expect((await read("team:team-use/notes/t.md", agent)).status).toBe(200);
+      // The browser session is a person looking at the memory page.
+      expect((await read("notes/person.md")).status).toBe(200);
+      await memoryUsageRecorder(db).flush();
+
+      const ownUsage = await readMemoryUsage(db, own);
+      expect(ownUsage.get("notes/a.md")).toMatchObject({ readCount: 1, injectCount: 0 });
+      expect(ownUsage.has("notes/person.md")).toBe(false);
+      expect((await readMemoryUsage(db, team)).get("notes/t.md")).toMatchObject({ readCount: 1 });
     } finally {
       await api.cleanup();
     }

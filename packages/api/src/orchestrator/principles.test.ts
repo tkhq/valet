@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { MemoryFileSummary } from "../services/memory.js";
 import {
   BASE_PRINCIPLE,
   isPrincipleFile,
   PRINCIPLE_INDEX_MAX_CHARS,
   PRINCIPLE_INDEX_MAX_ENTRIES,
   renderPrinciplesSection,
+  type PrincipleIndexEntry,
 } from "./principles.js";
 
-function file(path: string, title = "", description = ""): MemoryFileSummary {
-  return { path, title, description, type: "principle", pinned: false, updatedAt: 0 };
+function file(path: string, title = "", description = ""): PrincipleIndexEntry {
+  return { path, title, description };
 }
 
 describe("principles", () => {

@@ -43,6 +43,7 @@ import { wireHomeTaskReports } from "./home/service.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
+import { memoryUsageRecorder } from "./services/memory-usage.js";
 import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
 import { initSandboxMetrics } from "@valet/engine";
@@ -789,6 +790,12 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    // Write the memory reads and injections still in the buffer.
+    await memoryUsageRecorder(providers.db).stop();
+  } catch (err) {
+    console.error("memory usage flush failed:", err);
   }
   try {
     // Flush any batched spans before the process goes away.
