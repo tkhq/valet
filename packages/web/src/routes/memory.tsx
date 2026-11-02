@@ -31,8 +31,11 @@ function MemoryLayout() {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isGraph = pathname === "/memory/graph";
+  const isUsage = pathname === "/memory/usage";
+  // The graph and usage views own the right pane, like an open file.
+  const isView = isGraph || isUsage;
   const activePath =
-    !isGraph && pathname.startsWith(MEMORY_PREFIX)
+    !isView && pathname.startsWith(MEMORY_PREFIX)
       ? decodeURIComponent(pathname.slice(MEMORY_PREFIX.length))
       : undefined;
 
@@ -44,17 +47,18 @@ function MemoryLayout() {
     <div className="flex flex-1 min-h-0 min-w-0 flex-col md:flex-row">
       <aside className={cn(
         "flex min-h-0 min-w-0 flex-col border-b border-line md:h-auto md:w-72 md:shrink-0 md:border-b-0 md:border-r",
-        activePath || isGraph ? "shrink-0" : "flex-1 md:flex-none",
+        activePath || isView ? "shrink-0" : "flex-1 md:flex-none",
       )}>
         <PageHeader title="Memory" clause={<WorkspaceClause />} className="px-4 pt-4" />
         <div className="flex min-w-0 items-center gap-1 px-2 pt-2">
-          <ViewTab to="/memory" label="Files" active={!isGraph} back={Boolean(activePath) || isGraph} />
+          <ViewTab to="/memory" label="Files" active={!isView} back={Boolean(activePath) || isView} />
           <ViewTab to="/memory/graph" label="Graph" active={isGraph} />
+          <ViewTab to="/memory/usage" label="Usage" active={isUsage} />
         </div>
-        <div className={cn("flex-1 min-h-0 overflow-y-auto", (activePath || isGraph) && "hidden md:block")}>
+        <div className={cn("flex-1 min-h-0 overflow-y-auto", (activePath || isView) && "hidden md:block")}>
           <MemorySearchPane activePath={activePath} onSelect={onSelect} />
         </div>
-        <div className={cn((activePath || isGraph) && "hidden md:block")}>
+        <div className={cn((activePath || isView) && "hidden md:block")}>
           <MemoryImportExport />
         </div>
       </aside>

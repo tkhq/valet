@@ -61,7 +61,7 @@ import {
   type MemoryScope,
   type WriteSource,
 } from "../services/memory.js";
-import { memoryUsageRecorder } from "../services/memory-usage.js";
+import { memoryUsageRecorder, readMemoryUsage } from "../services/memory-usage.js";
 
 export const memoryRouter = new Hono<AppEnv>();
 
@@ -507,17 +507,25 @@ memoryRouter.get("/tree", async (c) => {
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
+  const usage = await readMemoryUsage(db, scope);
 
   const entries: MemoryTreeEntry[] = rows
-    .map((r) => ({
-      path: r.path,
-      title: r.title,
-      type: r.type,
-      pinned: r.pinned,
-      updatedAt: r.updatedAt,
-      dir: false,
-      sizeBytes: r.content.length,
-    }))
+    .map((r) => {
+      const u = usage.get(r.path);
+      const used = [u?.lastReadAt ?? null, u?.lastCitedAt ?? null].filter((t): t is number => t !== null);
+      return {
+        path: r.path,
+        title: r.title,
+        type: r.type,
+        pinned: r.pinned,
+        updatedAt: r.updatedAt,
+        dir: false,
+        sizeBytes: r.content.length,
+        lastUsedAt: used.length > 0 ? Math.max(...used) : null,
+        useCount: (u?.readCount ?? 0) + (u?.citeCount ?? 0),
+        lastLoadedAt: u?.lastInjectedAt ?? null,
+      };
+    })
     .sort((a, b) => a.path.localeCompare(b.path));
 
   const body: GetMemoryTreeResponse = { entries };

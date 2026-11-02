@@ -98,6 +98,32 @@ describe("api integration: memory routes", () => {
     }
   });
 
+  it("lists each file's last use, use count and last load in the tree", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      await writeFile(db, own, { path: "notes/used.md", content: "# Used\n" });
+      await writeFile(db, own, { path: "notes/never.md", content: "# Never\n" });
+      await writeFile(db, own, { path: "preferences/pinned.md", content: "# Pinned\n", pinned: true });
+      const usage = memoryUsageRecorder(db);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "read", 1_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "cite", 3_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "preferences/pinned.md" }, "inject", 2_000);
+      await usage.flush();
+
+      const res = await fetch(`${api.baseUrl}/api/memory/tree`);
+      expect(res.status).toBe(200);
+      const byPath = new Map(((await res.json()) as GetMemoryTreeResponse).entries.map((e) => [e.path, e]));
+      expect(byPath.get("notes/used.md")).toMatchObject({ lastUsedAt: 3_000, useCount: 2, lastLoadedAt: null });
+      expect(byPath.get("notes/never.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: null });
+      // Loading at wake is not a use the agent chose.
+      expect(byPath.get("preferences/pinned.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: 2_000 });
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("rejects without a valid session or internal token", async () => {
     const api = await bootTestApi();
     try {

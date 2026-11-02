@@ -2497,6 +2497,14 @@ export interface MemoryTreeEntry {
   /** Stored content length in UTF-16 code units — display-grade size, not
    * exact UTF-8 bytes. */
   sizeBytes: number;
+  /** The last time an agent chose to read the file or a turn cited it, in
+   * ms epoch. Null when no agent has used it. */
+  lastUsedAt: number | null;
+  /** Agent reads plus citations. */
+  useCount: number;
+  /** The last time the memory snapshot loaded the file into a prompt. A
+   * load is not a use: the agent did not choose it. */
+  lastLoadedAt: number | null;
 }
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
