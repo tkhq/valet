@@ -384,7 +384,8 @@ memoryRouter.get("/", async (c) => {
     const result = await readFile(db, scope, path);
     // A directory read lists files without opening them, so it is no use
     // of any one file. The recorder buffers: the response never waits on it.
-    if (result.kind === "file" && isAgentRead(c)) {
+    // A built-in principle with no file (version 0) has no row to count against.
+    if (result.kind === "file" && result.file.version > 0 && isAgentRead(c)) {
       const { ownerType, ownerId, namespace, path: stored } = result.file;
       memoryUsageRecorder(db).record({ ownerType, ownerId, namespace, path: stored }, "read");
     }

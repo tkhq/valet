@@ -18,7 +18,7 @@
 import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
+import { builtinPrincipleAt, builtinPrincipleBody, NotFoundError, parseSearchQuery, ValidationError, type BuiltinPrinciple } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
 import { memoryFileUsage, memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
@@ -56,6 +56,23 @@ const DIRECTORY_DEFAULT_TYPE: Record<string, string> = {
 
 /** The memory directory that holds principles. */
 export const PRINCIPLES_DIR = "principles/";
+
+/** Where content sync mounts a repository's `.valet/memory/principles/`.
+ * The files there are principles too, and `lib/` keeps them read-only. */
+export const SYNCED_PRINCIPLES_DIR = "lib/principles/";
+
+/** The row a built-in principle reads as while the scope has no file at its
+ * path. Version 0 marks it: no write made it, and no table holds it. */
+export function builtinPrincipleRow(scope: MemoryScope, principle: BuiltinPrinciple): MemoryFileRow {
+  return {
+    ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "",
+    path: `principles/${principle.name}.md`, title: principle.rule, content: builtinPrincipleBody(principle),
+    type: "principle", description: principle.when, tags: "[]", resource: "", extras: "{}",
+    sensitivity: "private", origin: "built-in", expires: null, pinned: false, actorUserId: "",
+    sourceSessionId: "", orgId: "", version: 0, sourceId: null, upstreamPath: null, contentSha: null,
+    createdAt: 0, updatedAt: 0,
+  };
+}
 
 /** True for a stored (own-scope, normalized) path at or under `principles/`. */
 export function isPrinciplePath(path: string): boolean {
@@ -355,7 +372,10 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
-  const existing = existingRows[0];
+  // A built-in principle with no file yet patches from its shipped text. The
+  // write creates the file, which then replaces the built-in for this scope.
+  const builtin = existingRows[0] ? undefined : builtinPrincipleAt(path);
+  const existing = existingRows[0] ?? (builtin ? builtinPrincipleRow(scope, builtin) : undefined);
 
   if (!existing) {
     if (params.oldString !== "") {
@@ -376,7 +396,10 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   const newContent =
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
-  return writeFile(db, scope, { path, content: newContent, source: params.source });
+  return writeFile(db, scope, {
+    path, content: newContent, source: params.source,
+    ...(builtin ? { type: existing.type, description: existing.description, origin: existing.origin } : {}),
+  });
 }
 
 // ─── patchFiles ────────────────────────────────────────────────────────
@@ -750,6 +773,15 @@ export async function readFile(
     .limit(1);
   const row = rowRows[0];
 
+  // An own-scope read of a built-in principle's path returns the shipped text
+  // until the scope writes a file there.
+  const builtin = !row && target.ownerType === scope.owner.type && target.ownerId === scope.owner.id
+    && target.namespace === (scope.namespace ?? "") ? builtinPrincipleAt(normalized) : undefined;
+  if (builtin) {
+    const file = builtinPrincipleRow(scope, builtin);
+    return { kind: "file", path, rendered: renderFile(file), file };
+  }
+
   if (!row) {
     // Fall back to a directory read: a path prefix that matches existing
     // files but has no exact-match row is treated as an implicit directory.
@@ -974,7 +1006,7 @@ export async function listPrincipleFiles(db: AppDb, scope: MemoryScope): Promise
       .from(memoryFiles)
       .where(and(
         eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace),
-        sql`${memoryFiles.path} LIKE ${`${PRINCIPLES_DIR}%`}`,
+        or(sql`${memoryFiles.path} LIKE ${`${PRINCIPLES_DIR}%`}`, sql`${memoryFiles.path} LIKE ${`${SYNCED_PRINCIPLES_DIR}%`}`),
       ))
       .orderBy(asc(memoryFiles.path))
       .limit(MAX_PRINCIPLE_FILES);

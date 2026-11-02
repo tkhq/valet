@@ -1,6 +1,6 @@
 # Brain: principles and playbooks
 
-Design. 2026-10-27. Status: pilot. Updated 2026-11-02: memory usage, principle citations, principles in child sessions and workflow steps, and batched patch sets.
+Design. 2026-10-27. Status: pilot. Updated 2026-11-02: memory usage, principle citations, principles in child sessions and workflow steps, batched patch sets, built-in principles, and synced principles.
 
 ## Summary
 
@@ -48,6 +48,25 @@ The `save_principle` tool saves a principle (amended 2026-11-02). It takes a fil
 ### The Principles view
 
 The memory page has a Principles view beside Files, Graph and Usage. It lists the built-in principle first, then each saved principle with its rule, a Team badge for a team principle, how often agents used it, and when it was last edited. A row opens the file.
+
+### Built-in principles
+
+Valet ships a set of principles that every brain starts with (`BUILTIN_PRINCIPLES` in `packages/shared/src/builtin-principles.ts`). A built-in principle has no memory file:
+
+- The index lists each built-in principle as `principles/<name>.md`, marked "(built in)", after the saved principles. The built-in lines are a fixed set outside the index cap.
+- A read of that path in the own scope returns the shipped text while the scope has no file there. The read result has version 0, and it records no usage.
+- An edit writes the file. `save_principle` with the same name, `mem_write`, and `mem_patch` all work; `mem_patch` patches the shipped text. The file then replaces the built-in for that scope only, and the index stops listing the built-in line.
+- The Principles view lists each built-in principle that no saved file replaces, with a Built in badge.
+
+So the defaults reach everyone, and each brain changes them as it learns. A change to the shipped text reaches every scope that has not replaced the principle.
+
+### Changing principles over time
+
+The base principle tells the agent to update a principle when it turns out wrong or incomplete in use, or when a person corrects how the agent applied it. The agent updates it with `save_principle` under the same name, or patches it with `mem_patch`.
+
+### Synced principles
+
+Content sync mounts a repository's `.valet/memory/**` at `lib/**`, so `.valet/memory/principles/<name>.md` lands at `lib/principles/<name>.md` in the source owner's memory. The index and the Principles view treat `lib/principles/` as a principle directory. A synced principle shows with a Synced badge. It is read-only, because `lib/` refuses product writes. The base principle tells the agent to send changes to the repository, or to save a personal principle that refines it. The source must collect the `memories` kind.
 
 ### Who can write a principle
 

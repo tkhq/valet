@@ -913,9 +913,9 @@ export const savePrincipleTool = defineTool({
   name: "save_principle",
   ownerOnly: true,
   description:
-    "Save a rule a person gave you for how to do the work, so you follow it in every later conversation. Use it when a person corrects you or states a standing rule. Search principles/ with mem_search first, and pass the same name to update a principle that covers the same rule. Pass teamId only when the person asks you to add the rule to that team; only a team admin can save a team principle.",
+    "Save a rule a person gave you for how to do the work, so you follow it in every later conversation. Use it when a person corrects you or states a standing rule. Search principles/ with mem_search first, and pass the same name to update a principle that covers the same rule. Also update a principle when it turns out wrong or incomplete in use. A built-in principle (built in, in the index) is updated the same way, and your version then replaces it. Pass teamId only when the person asks you to add the rule to that team; only a team admin can save a team principle.",
   parameters: Type.Object({
-    name: Type.String({ pattern: "^[a-z0-9][a-z0-9-]{1,62}$", description: "Short file name in kebab case, e.g. 'prove-it-works'. The principle is saved at principles/<name>.md." }),
+    name: Type.String({ pattern: "^[a-z0-9][a-z0-9-]{1,62}$", description: "Short file name in kebab case, e.g. 'prove-it-works'. Use an existing principle's name to update it. The principle is saved at principles/<name>.md." }),
     rule: Type.String({ minLength: 3, maxLength: 120, description: "The rule in a few words, e.g. 'Prove a fix works before saying it is done'." }),
     when: Type.String({ minLength: 3, maxLength: 200, description: "When the rule applies, in one line." }),
     details: Type.String({ minLength: 3, maxLength: 4000, description: "The rule, the reason for it, and one example." }),

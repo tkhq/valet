@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { memoryFiles, orgMembers, orgs, users } from "../schema/index.js";
+import { BUILTIN_PRINCIPLES } from "@valet/shared";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import {
@@ -9,6 +10,7 @@ import {
   importFiles,
   linksForFile,
   listFiles,
+  listPrincipleFiles,
   moveFile,
   MAX_PATCH_BATCH,
   patchFile,
@@ -463,6 +465,55 @@ describe("memory service", () => {
 
     it("throws NotFound for a path with no file behind it", async () => {
       await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
+    });
+  });
+
+  describe("built-in and synced principles", () => {
+    const builtin = BUILTIN_PRINCIPLES[0];
+    const path = `principles/${builtin.name}.md`;
+
+    it("reads a built-in principle's text until the scope writes its own file", async () => {
+      const scope = scopeFor("u1");
+      const shipped = await readFile(db, scope, path);
+      expect(shipped.kind).toBe("file");
+      if (shipped.kind !== "file") return;
+      expect(shipped.rendered).toContain(`# ${builtin.rule}`);
+      expect(shipped.rendered).toContain(builtin.when);
+      expect(shipped.file.version).toBe(0);
+      expect(await listFiles(db, scope)).toEqual([]);
+
+      await writeFile(db, scope, { path, content: "# My rule\n\nMine.", type: "principle", description: "Always" });
+      const own = await readFile(db, scope, path);
+      expect(own.kind === "file" && own.rendered).toContain("# My rule");
+      // Another user still reads the shipped text.
+      const other = await readFile(db, scopeFor("u2"), path);
+      expect(other.kind === "file" && other.rendered).toContain(`# ${builtin.rule}`);
+    });
+
+    it("patches a built-in principle into an own file that keeps its rule metadata", async () => {
+      const scope = scopeFor("u1");
+      const firstLine = builtin.details.split("\n")[0];
+      const { file } = await patchFile(db, scope, { path, oldString: firstLine, newString: `${firstLine} Also attach the output.` });
+      expect(file.version).toBe(1);
+      expect(file.type).toBe("principle");
+      expect(file.description).toBe(builtin.when);
+      expect(file.title).toBe(builtin.rule);
+      expect(file.content).toContain("Also attach the output.");
+      const listed = await listPrincipleFiles(db, scope);
+      expect(listed.map((entry) => entry.path)).toEqual([path]);
+    });
+
+    it("lists a principle synced from a repository under lib/principles/", async () => {
+      const now = Date.now();
+      await db.insert(memoryFiles).values({
+        ownerType: "user", ownerId: "u1", path: "lib/principles/canonical-source-wins.md", title: "The canonical source wins",
+        content: "# The canonical source wins\n", type: "principle", description: "When two sources disagree.",
+        sourceId: "src1", upstreamPath: ".valet/memory/principles/canonical-source-wins.md", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => [entry.path, entry.title])).toEqual([["lib/principles/canonical-source-wins.md", "The canonical source wins"]]);
+      await expect(writeFile(db, scopeFor("u1"), { path: "lib/principles/canonical-source-wins.md", content: "# Changed\n" }))
+        .rejects.toThrow(/lib\/ is reserved/);
     });
   });
 

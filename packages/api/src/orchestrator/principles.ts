@@ -6,7 +6,8 @@
  * one index line per principle file the scope can read. Bodies stay out of
  * the prompt; the model reads one with `mem_read` when it applies.
  */
-import { PRINCIPLES_DIR, type MemoryFileSummary } from "../services/memory.js";
+import { BUILTIN_PRINCIPLES, builtinPrinciplePath } from "@valet/shared";
+import { PRINCIPLES_DIR, SYNCED_PRINCIPLES_DIR, type MemoryFileSummary } from "../services/memory.js";
 
 /** Index caps. The section is never dropped for the snapshot budget, so it
  * must stay bounded. The index stops at whichever cap it reaches first. */
@@ -27,6 +28,8 @@ Applies when a person tells you how they want the work done.
 - If a person corrects you or states a rule for your work, write a personal principle in your own memory.
 - Save a principle with save_principle. Give the rule in a few words, when it applies in one line, and the details: the rule, the reason, and one example.
 - Before you write, search \`principles/\` with mem_search. If a principle covers the same rule, update it. Do not make a duplicate.
+- Principles change as you learn. If a principle you followed was wrong or incomplete, or a person corrects how you applied it, update it: call save_principle with the same name, or patch it with mem_patch. A built-in principle has no file until you change it. Your change replaces the built-in for this scope.
+- A principle under \`lib/principles/\` comes from a synced repository and is read-only. To change one, tell the person to change it in that repository, or save a personal principle that refines it.
 - Write a team principle only when a person in this conversation asks you to add the rule to a team. Then pass that team's \`teamId\`. Only a team admin or an organization admin can write a team principle. If the write is refused, tell the person and offer to save the rule as a personal principle.
 - Before you make a choice in open-ended work, check the index below. Read a principle with mem_read before you follow it. Say which principle you followed.
 - Do not write secrets, credentials, or one-time facts as principles.`;
@@ -41,10 +44,19 @@ Applies when a person tells you how they want the work done.
 - Before you make a choice in open-ended work, check the index below. Read a principle with mem_read before you follow it. Say which principle you followed.
 - You cannot write memory in this session. If a person corrects you or states a rule for your work, put the rule in your result, so an assistant can save it as a principle.`;
 
-/** True for a principle file, in the own scope or under a team's `team:{id}/` prefix. */
+/** True for a principle file, in the own scope or under a team's `team:{id}/` prefix.
+ * A principle synced from a repository's `.valet/memory/principles/` mounts at
+ * `lib/principles/`, so that directory holds principles too. */
 export function isPrincipleFile(path: string): boolean {
   const own = path.replace(/^team:[^/]+\//, "");
-  return own.startsWith(PRINCIPLES_DIR) && own.length > PRINCIPLES_DIR.length;
+  return [PRINCIPLES_DIR, SYNCED_PRINCIPLES_DIR].some((dir) => own.startsWith(dir) && own.length > dir.length);
+}
+
+/** Index lines for the built-in principles that no own file replaces. */
+function builtinIndexLines(files: PrincipleIndexEntry[]): string[] {
+  const own = new Set(files.map((file) => file.path));
+  return BUILTIN_PRINCIPLES.filter((principle) => !own.has(builtinPrinciplePath(principle)))
+    .map((principle) => `- ${builtinPrinciplePath(principle)} — ${principle.rule} (built in): ${principle.when}`);
 }
 
 /** What an index line shows. The snapshot passes full summaries, so the
@@ -84,13 +96,12 @@ export function selectIndexedPrinciples<T extends PrincipleIndexEntry>(files: T[
  * slot exists before the first principle does. */
 export function renderPrinciplesSection(files: PrincipleIndexEntry[], opts: { readOnly?: boolean } = {}): string {
   const principles = files.filter((file) => isPrincipleFile(file.path));
-  const index = selectIndexedPrinciples(principles).map(indexLine);
-  const hidden = principles.length - index.length;
-  if (principles.length === 0) {
-    index.push("(No principles yet. The base principle tells you when to write one.)");
-  } else if (hidden > 0) {
+  const listed = selectIndexedPrinciples(principles).map(indexLine);
+  const hidden = principles.length - listed.length;
+  const index = [...listed, ...builtinIndexLines(principles)];
+  if (hidden > 0) {
     index.push(
-      `(${hidden} more principles are not listed. To see all of them, read the directory with mem_read \`principles/\` or \`team:<id>/principles/\`.)`,
+      `(${hidden} more principles are not listed. To see all of them, read the directory with mem_read \`principles/\`, \`lib/principles/\`, or \`team:<id>/principles/\`.)`,
     );
   }
   return [
