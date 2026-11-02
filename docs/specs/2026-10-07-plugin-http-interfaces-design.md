@@ -254,3 +254,27 @@ The binding then loads the session's engagement and calls the plugin's exported 
 The existing tables, services, and action invoker do the work. Security storage stays relational pending TKAI-378.
 
 For these two routes, the mount adds three limits. A former organization member gets 403. A body above 16 KiB or 256 KiB gets 413. When the Security plugin is not loaded, both URLs answer 404.
+
+## Plugin agents and event handlers
+
+A plugin runs AI work on the assistant's own primitives. The contract is in `packages/engine/src/plugin-agents.ts`; the host side is `packages/api/src/plugins/plugin-threads.ts`. A plugin never receives a `Session`, `AppDb` or a model client.
+
+Threads:
+
+- `threads.ensure(key)` returns the thread `plugin:<plugin>:<key>` in the owner's assistant. It uses `ensureAssistantExecution`, the path workflow thread steps use, so people see it as an ordinary conversation.
+- `threads.post` adds a signal to that thread. The turn is marked as an unattended delivery, so it refuses decision cards.
+- `threads.spawnChild` starts a child session under the thread with a role the plugin declares, a tool scope, and an optional repository at a ref. The child id is `child_plg_<sha256(plugin, thread key, dispatch id)>`, so a retried dispatch returns the first child.
+- A plugin child has `child_watches.report_to_parent = false`. Its settlement does not start a turn in the parent thread. The watch row still links the child to the parent for usage.
+- `threads.awaitChild` polls the child's queue item and reads the result with `settledSubmissionResult`. With a result schema it returns the validated JSON of the child's final message.
+
+Event handlers:
+
+- `ValetPlugin.eventHandlers` declares handlers with an id, a description and the event keys each accepts.
+- A subscription target `{ kind: "plugin", plugin, handler, teamId? }` routes matching events to a handler. The validator refuses an unknown handler, event keys the handler does not accept, and assistant-only fields. A team target needs the caller's team membership.
+- The dispatcher runs a handler beside its loop and renews the delivery's claim lease while it runs. Each process runs at most 8 handlers; a busy process leaves the row for a later poll.
+- A throw records a failed delivery with the usual backoff. If the process stops, the lease lapses and a later poll runs the handler again. Handlers must be idempotent per event; dispatch ids give that for threads and children.
+- The handler context carries the owner, the subscription creator as the actor, the plugin store scoped to the owner, and `appToken(service, { owner })`. Only GitHub app tokens are available.
+
+Keep plugin state to pointers, such as a reviewed commit sha and posted comment ids. The thread and the provider hold the content.
+
+Not yet implemented: `threads` on action contexts, a UI for choosing a plugin handler (the API accepts the target), Linear app tokens for handlers, and usage attribution to the plugin itself.
