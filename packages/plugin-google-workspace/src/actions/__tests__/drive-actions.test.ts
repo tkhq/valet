@@ -540,7 +540,7 @@ describe('drive actions', () => {
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
     const [exportUrl] = fetchMock.mock.calls[1] as [string];
-    expect(exportUrl).toContain('/files/f1/export?mimeType=text%2Fmarkdown');
+    expect(exportUrl).toContain('/files/f1/export?mimeType=text%2Fmarkdown&supportsAllDrives=true');
     expect(result).toEqual({
       success: true,
       data: {
@@ -947,6 +947,8 @@ describe('drive.export_file', () => {
     const exportUrl = new URL(String(fetchMock.mock.calls[1][0]));
     expect(exportUrl.pathname).toBe('/drive/v3/files/doc1/export');
     expect(exportUrl.searchParams.get('mimeType')).toBe('application/pdf');
+    // Shared-drive files fail without this flag on files.export.
+    expect(exportUrl.searchParams.get('supportsAllDrives')).toBe('true');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer test-token');
     expect(saved).toHaveLength(1);
     expect(saved[0].data).toEqual(pdfBytes);

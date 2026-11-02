@@ -1043,7 +1043,8 @@ const downloadFile = action(
           };
         }
         const maxBytes = maxSizeBytes ?? 1_048_576;
-        const exportQs = new URLSearchParams({ mimeType: exportMime });
+        // A shared-drive file needs supportsAllDrives on files.export too, not only on the metadata read.
+        const exportQs = new URLSearchParams({ mimeType: exportMime, supportsAllDrives: 'true' });
         const exportRes = await driveFetch(
           `/files/${encodeURIComponent(fileId)}/export?${exportQs}`,
           token,
@@ -1307,7 +1308,8 @@ const exportFile = action(
           };
         }
         mimeType = exportMime;
-        const exportQs = new URLSearchParams({ mimeType: exportMime });
+        // A shared-drive file needs supportsAllDrives on files.export too, not only on the metadata read.
+        const exportQs = new URLSearchParams({ mimeType: exportMime, supportsAllDrives: 'true' });
         response = await driveFetch(`/files/${encodeURIComponent(args.fileId)}/export?${exportQs}`, token, { signal: ctx.signal });
         if (!response.ok) {
           const failure = await driveError(response);
