@@ -224,8 +224,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
   const prevLocalAuth = process.env.VALET_LOCAL_AUTH;
+  const prevAuthMethods = process.env.AUTH_METHODS;
   if (opts.auth) {
     process.env.BETTER_AUTH_SECRET = "test-secret";
+    // Login is off until a deployment lists a method. Real-auth tests sign up
+    // with a password unless the test lists its own methods.
+    process.env.AUTH_METHODS ??= "password";
     // Stub auth and real auth are mutually exclusive — the boot check in
     // `main.ts` refuses the pair. A real-auth test must see production's
     // answer to a credential-less request (401), so the stub var comes OFF
@@ -687,6 +691,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
         else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
         if (prevLocalAuth === undefined) delete process.env.VALET_LOCAL_AUTH;
         else process.env.VALET_LOCAL_AUTH = prevLocalAuth;
+        if (prevAuthMethods === undefined) delete process.env.AUTH_METHODS;
+        else process.env.AUTH_METHODS = prevAuthMethods;
       }
     },
   };

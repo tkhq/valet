@@ -124,6 +124,12 @@ data:
   VALET_PREBUILD_BUILD_CPU_LIMIT: {{ .Values.build.resources.limits.cpu | quote }}
   VALET_PREBUILD_BUILD_MEMORY_REQUEST: {{ .Values.build.resources.requests.memory | quote }}
   VALET_PREBUILD_BUILD_MEMORY_LIMIT: {{ .Values.build.resources.limits.memory | quote }}
+  {{- if .Values.api.auth.methods }}
+  AUTH_METHODS: {{ .Values.api.auth.methods | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.primaryMethod }}
+  AUTH_PRIMARY_METHOD: {{ .Values.api.auth.primaryMethod | quote }}
+  {{- end }}
   {{- if .Values.api.auth.oidcIssuer }}
   AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidcIssuer | quote }}
   {{- end }}

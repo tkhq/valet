@@ -73,7 +73,27 @@ describe("real better-auth instance + mounting", () => {
     const configRes = await fetch(`${api.baseUrl}/api/auth-config`);
     expect(configRes.status).toBe(200);
     const configBody = (await configRes.json()) as AuthConfigResponse;
-    expect(configBody).toEqual({ stub: false, social: [], sso: null });
+    expect(configBody).toEqual({ stub: false, password: true, primary: "password", social: [], sso: null });
+  });
+
+  it("refuses email sign-up and sign-in when AUTH_METHODS does not list password", async () => {
+    vi.stubEnv("AUTH_METHODS", "");
+    try {
+      api = await bootTestApi({ auth: true });
+      const body = JSON.stringify({ name: "Someone", email: "someone@nowhere.test", password: "correct-horse-battery" });
+      const headers = { "Content-Type": "application/json" };
+      const signUp = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers, body });
+      expect(signUp.ok).toBe(false);
+      const signIn = await fetch(`${api.baseUrl}/api/auth/sign-in/email`, { method: "POST", headers, body });
+      expect(signIn.ok).toBe(false);
+      const config = (await (await fetch(`${api.baseUrl}/api/auth-config`)).json()) as AuthConfigResponse;
+      expect(config).toEqual({ stub: false, password: false, primary: null, social: [], sso: null });
+    } finally {
+      // Clean up before unstubbing: cleanup restores the env it saw at boot.
+      await api?.cleanup();
+      api = undefined;
+      vi.unstubAllEnvs();
+    }
   });
 
   it("GET /api/auth-config reports stub:true on a default (stub-only) boot", async () => {
@@ -82,7 +102,7 @@ describe("real better-auth instance + mounting", () => {
     const res = await fetch(`${api.baseUrl}/api/auth-config`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as AuthConfigResponse;
-    expect(body).toEqual({ stub: true, social: [], sso: null });
+    expect(body).toEqual({ stub: true, password: false, primary: null, social: [], sso: null });
   });
 
   it("GET /api/auth-config reports the public origin that generated file links use", async () => {

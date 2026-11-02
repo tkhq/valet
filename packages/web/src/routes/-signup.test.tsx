@@ -30,12 +30,30 @@ vi.mock("~/lib/auth-client", () => ({
   signUpEmailWithInvite: (...args: unknown[]) => signUpEmailWithInvite(...args),
 }));
 
+let passwordOn = true;
+vi.mock("~/api/auth-config", () => ({
+  useAuthConfig: () => ({
+    data: { stub: false, password: passwordOn, primary: passwordOn ? "password" : "oidc", social: [], sso: passwordOn ? null : { name: "Keycloak" } },
+    isLoading: false,
+    error: null,
+  }),
+}));
+
 import { SignupPage } from "./signup";
 
 describe("SignupPage", () => {
   beforeEach(() => {
     navigate.mockClear();
     signUpEmailWithInvite.mockClear();
+    passwordOn = true;
+  });
+
+  it("sends people to sign in when password sign-in is off", () => {
+    passwordOn = false;
+    render(<SignupPage invite={undefined} />);
+    expect(screen.getByText(/This Valet does not use passwords/)).toBeTruthy();
+    expect(screen.getByText("Go to sign in")).toBeTruthy();
+    expect(screen.queryByLabelText("Password")).toBeNull();
   });
 
   it("hides the invite code field when no ?invite= param is present", () => {

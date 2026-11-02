@@ -41,6 +41,10 @@ export interface ApiError {
  */
 export interface AuthConfigResponse {
   stub: boolean;
+  /** True when email and password sign-in is on (`AUTH_METHODS` lists `password`). */
+  password: boolean;
+  /** The method the login page shows first. Null when no method is on, or in stub mode. */
+  primary: "password" | "oidc" | "google" | "github" | null;
   social: ("google" | "github")[];
   sso: { name: string } | null;
   /** The configured public origin that generated file links use. Absent

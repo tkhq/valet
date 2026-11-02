@@ -59,6 +59,9 @@ describe("loadAuthConfig", () => {
       allowedEmailDomains: [],
       social: {},
       sandboxJwtMaster: "test-secret",
+      // Login is off until AUTH_METHODS lists a method.
+      methods: [],
+      primaryMethod: null,
     });
     expect(result?.oidc).toBeUndefined();
   });
@@ -208,6 +211,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
     });
 
     expect(result?.oidc).toMatchObject({
@@ -225,6 +229,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
     });
 
     expect(result?.oidc).toMatchObject({
@@ -240,6 +245,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
       AUTH_OIDC_TEAM_CLAIM: "  valet_teams  ",
       AUTH_OIDC_TEAM_ASSERTED_CLAIM: "valet_teams_sent",
       AUTH_OIDC_TEAM_ADMIN_GROUP: "   ",
@@ -258,6 +264,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
       AUTH_OIDC_NAME: "Corporate SSO",
     });
 
@@ -268,6 +275,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
     });
 
     expect(withoutName?.oidc?.name).toBe("SSO");
@@ -279,6 +287,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com:8443/auth",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
     });
 
     expect(result?.oidc?.domain).toBe("oidc.example.com");
@@ -290,6 +299,7 @@ describe("loadAuthConfig", () => {
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
       AUTH_OIDC_CLIENT_ID: "client-id",
       AUTH_OIDC_CLIENT_SECRET: "client-secret",
+      AUTH_METHODS: "oidc",
       AUTH_OIDC_DOMAIN: "custom.domain.com",
     });
 
@@ -323,6 +333,7 @@ describe("loadAuthConfig", () => {
   it("includes google config when both clientId and clientSecret are set", () => {
     const result = loadAuthConfig({
       BETTER_AUTH_SECRET: "secret",
+      AUTH_METHODS: "google",
       AUTH_GOOGLE_CLIENT_ID: "google-id",
       AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
     });
@@ -360,6 +371,7 @@ describe("loadAuthConfig", () => {
   it("includes github config when both clientId and clientSecret are set", () => {
     const result = loadAuthConfig({
       BETTER_AUTH_SECRET: "secret",
+      AUTH_METHODS: "github",
       AUTH_GITHUB_CLIENT_ID: "github-id",
       AUTH_GITHUB_CLIENT_SECRET: "github-secret",
     });
@@ -390,6 +402,7 @@ describe("loadAuthConfig", () => {
     const result = loadAuthConfig({
       BETTER_AUTH_SECRET: "secret",
       BETTER_AUTH_URL: "https://auth.example.com",
+      AUTH_METHODS: "oidc,password,google,github",
       AUTH_TRUSTED_ORIGINS: "https://app.example.com",
       AUTH_ALLOWED_EMAIL_DOMAINS: "example.com, corp.example.com",
       AUTH_OIDC_ISSUER: "https://oidc.example.com",
@@ -405,6 +418,8 @@ describe("loadAuthConfig", () => {
     });
 
     expect(result).toEqual({
+      methods: ["oidc", "password", "google", "github"],
+      primaryMethod: "oidc",
       secret: "secret",
       baseUrl: "https://auth.example.com",
       trustedOrigins: ["http://localhost:5173", "https://app.example.com"],
@@ -438,6 +453,70 @@ it("only explicitly enabled unrestricted signup changes admission configuration"
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "1" })?.allowSignup).toBe(true);
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test" })?.allowSignup).toBeUndefined();
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "0" })?.allowSignup).toBeUndefined();
+});
+
+describe("AUTH_METHODS", () => {
+  const oidcEnv = {
+    BETTER_AUTH_SECRET: "secret",
+    AUTH_OIDC_ISSUER: "https://oidc.example.com",
+    AUTH_OIDC_CLIENT_ID: "client-id",
+    AUTH_OIDC_CLIENT_SECRET: "client-secret",
+  };
+
+  it("turns off every method, credentials included, when AUTH_METHODS is unset and no SSO is configured", () => {
+    const result = loadAuthConfig({ BETTER_AUTH_SECRET: "secret", AUTH_GOOGLE_CLIENT_ID: "g", AUTH_GOOGLE_CLIENT_SECRET: "s" });
+    expect(result?.methods).toEqual([]);
+    expect(result?.primaryMethod).toBeNull();
+    expect(result?.social).toEqual({});
+  });
+
+  it("turns on SSO alone when AUTH_METHODS is unset and OIDC is configured", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_GOOGLE_CLIENT_ID: "g", AUTH_GOOGLE_CLIENT_SECRET: "s" });
+    expect(result?.methods).toEqual(["oidc"]);
+    expect(result?.primaryMethod).toBe("oidc");
+    expect(result?.oidc?.issuer).toBe("https://oidc.example.com");
+    expect(result?.social).toEqual({});
+  });
+
+  it("turns everything off when AUTH_METHODS is empty, OIDC included", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_METHODS: "" });
+    expect(result?.methods).toEqual([]);
+    expect(result?.oidc).toBeUndefined();
+  });
+
+  it("keeps a configured provider off unless it is listed", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_METHODS: "password" });
+    expect(result?.methods).toEqual(["password"]);
+    expect(result?.oidc).toBeUndefined();
+  });
+
+  it("turns on SSO alone, with no password", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_METHODS: "oidc" });
+    expect(result?.methods).toEqual(["oidc"]);
+    expect(result?.primaryMethod).toBe("oidc");
+    expect(result?.oidc?.issuer).toBe("https://oidc.example.com");
+  });
+
+  it("reads a primary method and normalizes case, spaces, and repeats", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_METHODS: " Password , oidc,password ", AUTH_PRIMARY_METHOD: "OIDC" });
+    expect(result?.methods).toEqual(["password", "oidc"]);
+    expect(result?.primaryMethod).toBe("oidc");
+  });
+
+  it("refuses an unknown method and names the valid ones", () => {
+    expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "secret", AUTH_METHODS: "password,saml" }))
+      .toThrow("AUTH_METHODS has unknown methods: saml. Use password, oidc, google, github.");
+  });
+
+  it("refuses a listed provider that has no credentials", () => {
+    expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "secret", AUTH_METHODS: "oidc" }))
+      .toThrow(/AUTH_METHODS turns on oidc, but it is not configured\. Set AUTH_OIDC_ISSUER/);
+  });
+
+  it("refuses a primary method that AUTH_METHODS does not turn on", () => {
+    expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "secret", AUTH_METHODS: "password", AUTH_PRIMARY_METHOD: "oidc" }))
+      .toThrow(/AUTH_PRIMARY_METHOD is oidc, which AUTH_METHODS does not turn on/);
+  });
 });
 
 describe("AUTH_ADMIN_EMAILS", () => {

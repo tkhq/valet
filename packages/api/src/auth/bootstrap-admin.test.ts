@@ -17,6 +17,7 @@ function codeOf(link: string): string {
 
 function config(overrides: Partial<AuthConfig> = {}): AuthConfig {
   return {
+    methods: ["password"], primaryMethod: "password",
     secret: "test-secret", baseUrl: "http://localhost:8788", trustedOrigins: [], allowedEmailDomains: [],
     social: {}, sandboxJwtMaster: "test-secret", ...overrides,
   };
