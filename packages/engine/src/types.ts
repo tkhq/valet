@@ -3296,6 +3296,12 @@ export interface SpawnChildRequest {
   /** Role name applied to the spawn prompt's turn (`PromptOptions.role`
    * — the session must register the role in its `roles` option). */
   role?: string;
+  /**
+   * Batch name. Children spawned on one parent thread with the same batch
+   * report together: the host holds each result until the last child in the
+   * batch settles, then admits one `child.settled` signal with all of them.
+   */
+  batch?: string;
 }
 
 export interface SpawnChildResult {
@@ -3389,6 +3395,21 @@ export type ChildSender = (
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean; parentQueueItemId?: string },
 ) => Promise<{ queueItemId: string } | null>;
+
+/**
+ * Stops a child session on behalf of its parent: aborts the child's running
+ * turn and its queued work. The child's partial result still reaches the
+ * parent as a `child.settled` signal, alone or with the rest of its batch.
+ * A later `child_send` starts the child again.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
+ * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
+ * `stopped` counts the submissions it aborted; 0 means the child was idle.
+ */
+export type ChildStopper = (
+  req: { childSessionId: string },
+  ctx: { parentSessionId: string; parentThreadId: string },
+) => Promise<{ stopped: number } | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

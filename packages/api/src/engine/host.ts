@@ -20,6 +20,7 @@ import { join, resolve, sep } from "node:path";
 import {
   Engine,
   builtinTools,
+  childStopTool,
   assistantSessionId,
   parseAssistantSessionId,
   NoCredentialsError,
@@ -27,6 +28,7 @@ import {
   type BlobStore,
   type ChildReader,
   type ChildSender,
+  type ChildStopper,
   type ChildSpawner,
   type ChildStatusReader,
   type CredentialStore,
@@ -392,6 +394,12 @@ export interface EngineHostOpts {
    * session that may check on them.
    */
   childStatusReader?: ChildStatusReader;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childStopper`,
+   * the backend of the `child_stop` built-in. Same authority as
+   * `childSender`: a session that can steer a child may also stop it.
+   */
+  childStopper?: ChildStopper;
   /**
    * Tools a personal assistant gets for its person's home conversation:
    * start, list, and steer work across their workspaces (`home/tools.ts`).
@@ -3376,7 +3384,8 @@ export class EngineHost {
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
-      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...(this.opts.threadLinkTools?.() ?? []), ...extras.tools],
+      tools: [...buildMemoryTools(), ...buildWidgetTools(), ...(principal.type === "user" && this.opts.homeTools ? this.opts.homeTools() : []), ...(this.opts.threadLinkTools?.() ?? []),
+        ...(this.opts.childStopper ? [childStopTool] : []), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       // The orchestrator lives in the host cache indefinitely, so this
@@ -3390,6 +3399,7 @@ export class EngineHost {
         ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
         ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
         ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
+        ...(this.opts.childStopper ? { childStopper: this.opts.childStopper } : {}),
       },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
