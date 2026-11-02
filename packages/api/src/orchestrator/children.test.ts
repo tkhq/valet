@@ -5673,6 +5673,36 @@ describe("child batches and child_stop", () => {
     expect(await parentSignals(p.parent.id)).toHaveLength(1);
   });
 
+  it("delivers a re-opened member's first held report with its follow-up", async () => {
+    const p = await batchParent("reopen");
+    const { db, engineStore } = api!.providers;
+    const a = await batchChild(p, "child-reopen-a", "review", "Review A");
+    const b = await batchChild(p, "child-reopen-b", "review", "Review B");
+    await a.settle();
+    // child_send re-opens A while its first report is held and B still runs.
+    const followUp = "qi-child-reopen-a-2";
+    await engineStore.admitSubmission("child-reopen-a", a.childThread.id, queuedItem(followUp, a.childThread.id, "follow up"));
+    await engineStore.appendEntries("child-reopen-a", a.childThread.id, [{
+      id: `terminal-${followUp}`, sessionId: "child-reopen-a", threadId: a.childThread.id, queueItemId: followUp, parentId: null,
+      type: "message", role: "assistant", content: "follow-up done", stopReason: "end_turn", createdAt: Date.now(),
+    }]);
+    await engineStore.settleUnclaimed("child-reopen-a", a.childThread.id, followUp, { outcome: "completed" });
+    await db.update(childWatches).set({ queueItemId: followUp, settled: false }).where(eq(childWatches.childSessionId, "child-reopen-a"));
+    p.watcher.arm({ ...a.watch, queueItemId: followUp });
+    await waitFor(async () => (await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-reopen-a")))[0]?.settled === true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await parentSignals(p.parent.id)).toHaveLength(0);
+
+    await b.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    const content = signals[0]!.content as SignalContent;
+    expect(content.body).toContain('All 2 children in batch "review" have settled.');
+    expect(content.body.match(/## Review A \(child-reopen-a\): completed/g)).toHaveLength(2);
+    expect(content.body).toContain("follow-up done");
+    expect(content.attributes?.batch_children).toBe("child-reopen-a,child-reopen-b");
+  });
+
   it("replies manually for a batch when a held report's route is manual", async () => {
     const p = await batchParent("route");
     const { db, engineStore } = api!.providers;

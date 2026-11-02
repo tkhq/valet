@@ -1135,9 +1135,10 @@ export class ChildWatcher {
         eq(childWatches.batchKey, batchKey), isNotNull(childWatches.batchHeldJson), isNull(childWatches.dismissedAt)))
         .orderBy(desc(childWatches.settledAt)).limit(1);
       if (!last?.batchHeldJson) return;
+      const report = heldReports(last.batchHeldJson).at(-1);
       const child = await this.deps.engineStore.getSession(last.childSessionId);
-      if (!child) return;
-      await this.admitSettlement(watchRowToArgs(last), child.owner, JSON.parse(last.batchHeldJson) as BatchReport, batchKey, false);
+      if (!report || !child) return;
+      await this.admitSettlement(watchRowToArgs(last), child.owner, report, batchKey, false);
     });
   }
 
@@ -1175,6 +1176,10 @@ export class ChildWatcher {
         eq(childWatches.parentSessionId, watch.parentSessionId), eq(childWatches.parentThreadId, watch.parentThreadId),
         eq(childWatches.batchKey, batchKey), isNull(childWatches.dismissedAt)));
       const others = members.filter(member => member.child !== watch.childSessionId);
+      // A member re-opened with child_send while its report was held keeps
+      // that report: it is undelivered work, delivered with the batch.
+      const mine = heldReports(members.find(member => member.child === watch.childSessionId)?.heldJson ?? null)
+        .filter(held => held.itemId !== report.itemId);
       const spawning = new Set(members.flatMap(member => member.spawnedBy ? [member.spawnedBy] : []));
       let spawnerRunning = false;
       for (const turn of spawning) {
@@ -1182,13 +1187,13 @@ export class ChildWatcher {
       }
       if (others.some(member => !member.settled) || spawnerRunning) {
         if (!fresh) return;
-        await this.deps.db.update(childWatches).set({ batchHeldJson: JSON.stringify(report) })
+        await this.deps.db.update(childWatches).set({ batchHeldJson: JSON.stringify([...mine, report]) })
           .where(eq(childWatches.childSessionId, watch.childSessionId));
         await this.markSettled(watch.childSessionId, watch.queueItemId);
         await this.parkChildSandbox(watch.childSessionId, true);
         return;
       }
-      held = others.flatMap(member => member.heldJson ? [JSON.parse(member.heldJson) as BatchReport] : []);
+      held = [...others.flatMap(member => heldReports(member.heldJson)), ...mine];
     }
 
     const reports = [...held, report];
@@ -1213,7 +1218,7 @@ export class ChildWatcher {
           ...(report.continuationCheckpointId !== undefined
             ? { continuation_checkpoint_entry_id: report.continuationCheckpointId }
             : {}),
-          ...(batchKey !== null ? { batch: batchKey, batch_children: reports.map(r => r.childSessionId).join(",") } : {}),
+          ...(batchKey !== null ? { batch: batchKey, batch_children: [...new Set(reports.map(r => r.childSessionId))].join(",") } : {}),
         },
         // Preserve the spawning turn's route and reply policy for the parent's update.
         ...(origin !== undefined ? { origin } : {}),
@@ -2530,6 +2535,14 @@ interface BatchReport {
   toolScope?: ToolScope;
 }
 
+/** A member's held reports, oldest first. A row holds more than one when
+ * child_send re-opened the member before its batch released. */
+function heldReports(json: string | null): BatchReport[] {
+  if (!json) return [];
+  const held = JSON.parse(json) as BatchReport | BatchReport[];
+  return Array.isArray(held) ? held : [held];
+}
+
 /** One in-process lock per batch of one parent thread. */
 function batchLockKey(watch: Pick<ArmArgs, "parentSessionId" | "parentThreadId">, batchKey: string): string {
   return `batch:${watch.parentSessionId}:${watch.parentThreadId}:${batchKey}`;
@@ -2558,7 +2571,8 @@ export function batchBody(batchKey: string, reports: BatchReport[]): string {
         `\n\n[Shortened to fit the batch. Call child_read with child_session_id "${report.childSessionId}" for the full result.]`;
     return `## ${report.title ?? report.childSessionId} (${report.childSessionId}): ${report.outcome}\n\n${body}`;
   });
-  return `All ${reports.length} children in batch "${batchKey}" have settled. Their results follow.\n\n${sections.join("\n\n")}`;
+  const children = new Set(reports.map(report => report.childSessionId)).size;
+  return `All ${children} children in batch "${batchKey}" have settled. Their results follow.\n\n${sections.join("\n\n")}`;
 }
 
 function codePointPrefix(text: string, maxUnits: number): string {
