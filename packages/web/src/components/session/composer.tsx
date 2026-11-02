@@ -133,7 +133,7 @@ export function Composer({
   statusLine?: ReactNode;
   /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
   active?: boolean;
-  /** The shared thread header renders its model control in this phone slot. */
+  /** The thread header renders its model and thinking control in this slot. */
   modelControlRef?: (target: HTMLDivElement | null) => void;
   /** The sender opens a shared thread as a guest: no file or image intake
    * (uploads land in the owner's working directory) and no slash commands
@@ -1251,7 +1251,6 @@ export function Composer({
                 </Button>
               </>
             )}
-            {modelControlRef && <div ref={modelControlRef} className="hidden min-w-0 flex-1 md:hidden max-md:block" />}
             {/* The box's width decides, not the viewport's: the Ask Valet dock
                 is narrow on a wide screen, and a wrapped hint stacked one word
                 per line between the buttons. */}
@@ -1261,6 +1260,9 @@ export function Composer({
                 {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
+            {/* The model and thinking control. A phone gives it the row; a
+                wider screen keeps it beside Send. */}
+            {modelControlRef && <div ref={modelControlRef} className="min-w-0 max-md:flex-1 md:ml-auto md:max-w-64" />}
             {active && !guest && threadId && <div className={modelControlRef ? "max-md:hidden" : "contents"}><ContextMeter sessionId={sessionId} threadId={threadId} working={working} /></div>}
             {working && queueState?.activeItemId && (
               <Button
