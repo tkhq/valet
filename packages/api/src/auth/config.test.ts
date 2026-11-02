@@ -463,12 +463,25 @@ describe("AUTH_METHODS", () => {
     AUTH_OIDC_CLIENT_SECRET: "client-secret",
   };
 
-  it("turns off every method, credentials included, when AUTH_METHODS is unset", () => {
-    const result = loadAuthConfig({ ...oidcEnv, AUTH_GOOGLE_CLIENT_ID: "g", AUTH_GOOGLE_CLIENT_SECRET: "s" });
+  it("turns off every method, credentials included, when AUTH_METHODS is unset and no SSO is configured", () => {
+    const result = loadAuthConfig({ BETTER_AUTH_SECRET: "secret", AUTH_GOOGLE_CLIENT_ID: "g", AUTH_GOOGLE_CLIENT_SECRET: "s" });
     expect(result?.methods).toEqual([]);
     expect(result?.primaryMethod).toBeNull();
-    expect(result?.oidc).toBeUndefined();
     expect(result?.social).toEqual({});
+  });
+
+  it("turns on SSO alone when AUTH_METHODS is unset and OIDC is configured", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_GOOGLE_CLIENT_ID: "g", AUTH_GOOGLE_CLIENT_SECRET: "s" });
+    expect(result?.methods).toEqual(["oidc"]);
+    expect(result?.primaryMethod).toBe("oidc");
+    expect(result?.oidc?.issuer).toBe("https://oidc.example.com");
+    expect(result?.social).toEqual({});
+  });
+
+  it("turns everything off when AUTH_METHODS is empty, OIDC included", () => {
+    const result = loadAuthConfig({ ...oidcEnv, AUTH_METHODS: "" });
+    expect(result?.methods).toEqual([]);
+    expect(result?.oidc).toBeUndefined();
   });
 
   it("keeps a configured provider off unless it is listed", () => {

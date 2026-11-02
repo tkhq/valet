@@ -183,7 +183,7 @@ becomes the org admin.
 
 Sign-in methods are off by default. Set `api.auth.methods` to a comma list
 of `password`, `oidc`, `google`, and `github`. If `methods` is empty and
-`api.auth.oidcIssuer` is set, the chart turns on `oidc` alone: SSO with no
+`api.auth.oidcIssuer` is set, the api turns on `oidc` alone: SSO with no
 password. Set `api.auth.primaryMethod` to choose the method the login page
 shows first.
 

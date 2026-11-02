@@ -263,7 +263,8 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
 /**
  * Reads `AUTH_METHODS` (a comma list of `password`, `oidc`, `google`,
  * `github`) and `AUTH_PRIMARY_METHOD`. Login is off by default: a deployment
- * turns on each method by name, so credentials alone never open a door. A
+ * turns on each method by name, so credentials alone never open a door. The
+ * one default: with `AUTH_METHODS` unset and OIDC configured, SSO alone is on. A
  * listed provider without its credentials stops the boot, so a typo cannot
  * leave everyone locked out without a message.
  */
@@ -271,7 +272,11 @@ export function parseLoginMethods(
   env: NodeJS.ProcessEnv,
   configured: { oidc: boolean; google: boolean; github: boolean },
 ): { methods: LoginMethod[]; primaryMethod: LoginMethod | null } {
-  const listed = (env.AUTH_METHODS ?? "").split(",").map((m) => m.trim().toLowerCase()).filter((m) => m.length > 0);
+  // Unset (not empty) with SSO configured means SSO alone: an SSO deployment
+  // keeps working, with no password, before its config names a method. Any
+  // other unset case turns login off, and an empty value always does.
+  const raw = env.AUTH_METHODS ?? (configured.oidc ? "oidc" : "");
+  const listed = raw.split(",").map((m) => m.trim().toLowerCase()).filter((m) => m.length > 0);
   const unknown = listed.filter((m) => !LOGIN_METHODS.includes(m as LoginMethod));
   if (unknown.length > 0) {
     throw new Error(`AUTH_METHODS has unknown methods: ${unknown.join(", ")}. Use ${LOGIN_METHODS.join(", ")}.`);

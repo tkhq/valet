@@ -664,12 +664,10 @@ echo "== sign-in methods =="
 if grep -q 'AUTH_METHODS:' "$TMP_DIR/bundled.yaml"; then
   fail "default values must leave every sign-in method off"
 fi
-SSO_ONLY=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.oidcIssuer=https://sso.example.com/realms/x)
-grep -q 'AUTH_METHODS: "oidc"' <<<"$SSO_ONLY" || fail "an OIDC issuer with no methods must turn on SSO alone"
 EXPLICIT=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.oidcIssuer=https://sso.example.com/realms/x \
   --set 'api.auth.methods=oidc\,password' --set api.auth.primaryMethod=oidc)
 grep -q 'AUTH_METHODS: "oidc,password"' <<<"$EXPLICIT" || fail "explicit methods must override the SSO default"
 grep -q 'AUTH_PRIMARY_METHOD: "oidc"' <<<"$EXPLICIT" || fail "primaryMethod must render AUTH_PRIMARY_METHOD"
-pass "sign-in methods are off by default, SSO-only with an issuer, explicit when listed"
+pass "sign-in methods render only when listed"
 
 echo "All golden assertions passed."

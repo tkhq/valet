@@ -59,7 +59,7 @@ packages/api/src/auth/
 |---|---|
 | `BETTER_AUTH_SECRET` | Required to enable real auth. Absent → stub-only mode (today's behavior). |
 | `BETTER_AUTH_URL` | External base URL of the api. Default `http://localhost:8788`. |
-| `AUTH_METHODS` | Comma list of the sign-in methods to turn on: `password`, `oidc`, `google`, `github`. Unset or empty turns every method off, so nobody can sign in. A provider with credentials stays off until it is listed. A listed provider without credentials, or an unknown name, stops the boot. Example: `password` for password sign-in only; `oidc` for SSO only. |
+| `AUTH_METHODS` | Comma list of the sign-in methods to turn on: `password`, `oidc`, `google`, `github`. Empty turns every method off, so nobody can sign in. Unset turns on `oidc` alone when OIDC is configured (SSO with no password), and turns every method off otherwise. A provider with credentials stays off until it is listed. A listed provider without credentials, or an unknown name, stops the boot. Example: `password` for password sign-in only; `oidc` for SSO only. |
 | `AUTH_PRIMARY_METHOD` | The method the login page shows first. It must be in `AUTH_METHODS`. Default: the first listed method. |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Enterprise OIDC (Keycloak). All three required together. |
 | `AUTH_OIDC_NAME` | Login button label (default `SSO`). |
