@@ -167,12 +167,32 @@ export function mcpRegisterGate(db: AppDb, cfg: McpRegistrationConfig) {
       recordRegistration("rate_limited");
       return refuse(c, 429, "slow_down", "Too many MCP apps registered from this address. Wait an hour, then connect again.");
     }
-    if (cfg.unconsentedCap > 0 && await countRecentUnapproved(db) >= cfg.unconsentedCap) {
-      recordRegistration("unapproved_limit");
-      console.warn(`[mcp-register] refused: ${cfg.unconsentedCap} MCP clients registered in the last day have no consent or token`);
-      return refuse(c, 429, "slow_down", "Valet has too many new MCP apps that were never approved. Try again later. If this continues, ask your Valet administrator to check MCP registrations.");
+    if (cfg.unconsentedCap === 0) {
+      recordRegistration("registered");
+      return next();
     }
-    recordRegistration("registered");
-    return next();
+    // Count and insert one registration at a time, or a burst could pass the
+    // count together and overshoot the cap. This holds for one api process;
+    // with N replicas a burst can exceed the cap by at most N - 1.
+    return oneAtATime(async () => {
+      if (await countRecentUnapproved(db) >= cfg.unconsentedCap) {
+        recordRegistration("unapproved_limit");
+        console.warn(`[mcp-register] refused: ${cfg.unconsentedCap} MCP clients registered in the last day have no consent or token`);
+        return refuse(c, 429, "slow_down", "Valet has too many new MCP apps that were never approved. Try again later. If this continues, ask your Valet administrator to check MCP registrations.");
+      }
+      recordRegistration("registered");
+      // `next` runs better-auth's handler, which inserts the client.
+      await next();
+      return undefined;
+    });
   };
+}
+
+let registrationTail: Promise<unknown> = Promise.resolve();
+
+/** Runs `fn` after every earlier call has settled. */
+function oneAtATime<T>(fn: () => Promise<T>): Promise<T> {
+  const run = registrationTail.then(fn, fn);
+  registrationTail = run.catch(() => undefined);
+  return run;
 }

@@ -4,13 +4,16 @@
  * registrations are limited, and the consent page shows where the code goes.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AppEnv } from "../env.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { oauthApplication } from "../schema/index.js";
 import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import { DEFAULT_MCP_REGISTRATION } from "./config.js";
-import { clearMcpRegistrationLimits } from "./mcp-registration.js";
+import { clearMcpRegistrationLimits, mcpRegisterGate } from "./mcp-registration.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -196,6 +199,31 @@ describe("MCP client registration", () => {
     const uncapped = await boot();
     await seedUnapproved(uncapped.testApi, DEFAULT_MCP_REGISTRATION.unconsentedCap + 5);
     expect((await register(uncapped.testApi.baseUrl, [LOOPBACK])).status).toBe(201);
+  });
+
+  it("holds the unapproved cap under a concurrent burst", async () => {
+    // In process, so the requests truly overlap: the test server above
+    // handles one HTTP request at a time. The slow insert stands in for
+    // better-auth's handler.
+    const { appDb: db } = await freshTestPgDb();
+    const now = new Date();
+    const insert = async () => {
+      const clientId = randomUUID();
+      await db.insert(oauthApplication).values({ id: `app-${clientId}`, name: "burst", clientId, redirectUrls: LOOPBACK, type: "public", createdAt: now, updatedAt: now });
+    };
+    await insert();
+    await insert();
+    const app = new Hono<AppEnv>();
+    app.post("/register", mcpRegisterGate(db, { ...DEFAULT_MCP_REGISTRATION, unconsentedCap: 3, ratePerHour: 0 }), async (c) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await insert();
+      return c.json({}, 201);
+    });
+    const results = await Promise.all(Array.from({ length: 8 }, () => app.request("/register", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ redirect_uris: [LOOPBACK] }),
+    })));
+    expect(results.map((r) => r.status).sort()).toEqual([201, 429, 429, 429, 429, 429, 429, 429]);
+    expect((await db.select().from(oauthApplication)).length).toBe(3);
   });
 
   it("refuses to authorize a client stored earlier with a wildcard or user-name redirect", async () => {
