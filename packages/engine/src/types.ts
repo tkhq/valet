@@ -3399,6 +3399,9 @@ export type ChildSpawner = (
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */
     origin?: ChannelOrigin;
+    /** False: the child's settlement does not wake the parent thread. A
+     * plugin that spawned the child reads its result itself. Default true. */
+    reportToParent?: boolean;
   },
 ) => Promise<SpawnChildResult>;
 

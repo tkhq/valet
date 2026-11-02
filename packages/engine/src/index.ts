@@ -103,6 +103,16 @@ export {
   parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export {
+  pluginHandlerAccepts,
+  type PluginChild,
+  type PluginChildRequest,
+  type PluginEvent,
+  type PluginEventContext,
+  type PluginEventHandler,
+  type PluginThreadRef,
+  type PluginThreads,
+} from "./plugin-agents.js";
 export { encodeToolOutput } from "./tool-output.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
 export {
@@ -415,6 +425,7 @@ export {
   parseProviderRetryHintMs,
   turnRetryWaitMs,
   resolveModelId,
+  settledSubmissionResult,
   type CompactionOutcome,
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";

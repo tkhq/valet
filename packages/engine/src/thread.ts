@@ -184,6 +184,7 @@ import type {
   QueueState,
   ResolvedModel,
   SessionEntry,
+  SessionStore,
   SignalContent,
   SkillContextAttributionFact,
   SkillInvocationFact,
@@ -7961,22 +7962,7 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    // Every reader below looks at this submission only.
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
-    const text =
-      outcome.outcome === "superseded"
-        ? resolvePartialSubmissionText(entries, item.id)
-        : resolveSubmissionText(entries, item.id);
-    // Check terminal semantics before applying the caller's optional output contract.
-    const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
-    const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
-    if (validated.error !== undefined) result.error = validated.error;
-    if (opts.resultSchema && validated.outcome === "completed") {
-      const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
-      if (extracted.output !== undefined) result.output = extracted.output;
-      if (extracted.error !== undefined) result.error = extracted.error;
-    }
-    return result;
+    return settledSubmissionResult(this.session.providers.store, this.session.id, item, outcome, opts);
   }
 
   /**
@@ -8767,4 +8753,34 @@ function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsag
     if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
   }
   return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
+}
+
+/**
+ * The result of a settled, non-merged submission, read from the store alone.
+ * `Thread.awaitResult` uses it after waiting; a host that only has the
+ * session id (a plugin reading its child's result) uses it directly.
+ */
+export async function settledSubmissionResult(
+  store: SessionStore,
+  sessionId: string,
+  item: QueueItem,
+  outcome: SubmissionOutcome,
+  opts: Pick<AwaitResultOptions, "resultSchema"> = {},
+): Promise<SubmissionResult> {
+  // Every reader below looks at this submission only.
+  const entries = await store.getEntries(sessionId, item.threadId, { queueItemId: item.id });
+  const text =
+    outcome.outcome === "superseded"
+      ? resolvePartialSubmissionText(entries, item.id)
+      : resolveSubmissionText(entries, item.id);
+  // Check terminal semantics before applying the caller's optional output contract.
+  const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
+  const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
+  if (validated.error !== undefined) result.error = validated.error;
+  if (opts.resultSchema && validated.outcome === "completed") {
+    const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
+    if (extracted.output !== undefined) result.output = extracted.output;
+    if (extracted.error !== undefined) result.error = extracted.error;
+  }
+  return result;
 }

@@ -398,7 +398,8 @@ CREATE TABLE "child_watches" (
 	"origin_json" text,
 	"reply_route" text,
 	"batch_key" text,
-	"batch_held_json" text
+	"batch_held_json" text,
+	"report_to_parent" boolean DEFAULT true NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;

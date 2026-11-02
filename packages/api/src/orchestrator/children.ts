@@ -514,6 +514,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       origin?: ChannelOrigin;
       unattendedWorkflow?: boolean;
       parentQueueItemId?: string;
+      reportToParent?: boolean;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -708,6 +709,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         originJson: ctx.origin !== undefined ? JSON.stringify(ctx.origin) : null,
         replyRoute: ctx.origin !== undefined ? ("origin" satisfies ChildReplyRoute) : null,
         batchKey: req.batch?.trim() || null,
+        reportToParent: ctx.reportToParent ?? true,
       })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
@@ -991,7 +993,7 @@ export class ChildWatcher {
     const rows = await this.deps.db
       .select({
         queueItemId: childWatches.queueItemId, settled: childWatches.settled,
-        originJson: childWatches.originJson, replyRoute: childWatches.replyRoute,
+        originJson: childWatches.originJson, replyRoute: childWatches.replyRoute, reportToParent: childWatches.reportToParent,
         batchKey: childWatches.batchKey, parentQueueItemId: childWatches.parentQueueItemId,
       })
       .from(childWatches)
@@ -1048,6 +1050,13 @@ export class ChildWatcher {
     }
 
     if (result.outcome === "superseded" || result.outcome === "merged") return;
+
+    if (!digest && !row.reportToParent) {
+      // A plugin's child: the plugin reads the result (`awaitChild`), so
+      // the parent thread gets no child.settled turn.
+      await this.markSettled(watch.childSessionId, watch.queueItemId);
+      return;
+    }
 
     if (!digest) {
       const work = await this.backgroundWork(watch.childSessionId, itemId, row.originJson !== null,
