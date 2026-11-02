@@ -429,8 +429,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
     version: "0.1.0",
-    description: "Agent-facing tool failure and request latency diagnostics.",
-    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }))],
+    description: "Agent-facing tool failure, thread outcome and request latency diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({
+      engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
+    }))],
   };
 
   // Plugin filter: config file `plugins` block takes precedence over
