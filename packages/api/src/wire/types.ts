@@ -5565,6 +5565,9 @@ export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignor
  */
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string; appearance?: Appearance; oncePerHours?: number }
+  /** A plugin's event handler (`ValetPlugin.eventHandlers`). With `teamId`
+   * the handler acts for that team; without it, for the person who arms it. */
+  | { kind: "plugin"; plugin: string; handler: string; teamId?: string; appearance?: Appearance; oncePerHours?: number }
   /** `teamId` is required when `assistant` is `"team"`, and refused
    * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */

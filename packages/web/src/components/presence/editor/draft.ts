@@ -265,7 +265,7 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     anyChannel: storedAnyChannel(sub.eventKeys, sub.filters),
     threadFollow: followsSlackThread(sub),
     threadLink: "",
-    doKind: target.kind === "workflow" ? "workflow" : target.follow === true ? "reply" : "work",
+    doKind: target.kind === "workflow" ? "workflow" : target.kind === "assistant" && target.follow === true ? "reply" : "work",
     workflowId: target.kind === "workflow" ? target.workflowId : "",
     assistant: assistant ? target.assistant ?? "user" : sub.ownerType === "team" ? "team" : sub.ownerType === "org" ? "org" : "user",
     teamId: assistant ? target.teamId ?? (sub.ownerType === "team" ? sub.ownerId : null) : null,
@@ -738,8 +738,12 @@ export function applyLinePatch(sub: EventSubscriptionWire, patch: PatchEventSubs
     if (appearance === undefined) delete next.appearance;
     else next.appearance = appearance;
     target = next;
-  } else {
+  } else if (sub.target.kind === "workflow") {
     target = { kind: "workflow", workflowId: sub.target.workflowId, ...(appearance !== undefined ? { appearance } : {}) };
+  } else {
+    // A plugin handler line: only its appearance is editable here.
+    const { plugin, handler, teamId } = sub.target;
+    target = { kind: "plugin", plugin, handler, ...(teamId !== undefined ? { teamId } : {}), ...(appearance !== undefined ? { appearance } : {}) };
   }
   return {
     ...sub,

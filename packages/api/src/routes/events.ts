@@ -966,6 +966,16 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = owned.ownerId;
     }
+  } else if (body.target.kind === "plugin") {
+    // Like a team assistant line: a team handler acts for the team, so the
+    // caller must be on it.
+    if (body.target.teamId !== undefined) {
+      if (!(await isTeamMember(db, body.target.teamId, user.id))) {
+        return c.json({ error: "team not found" }, 404);
+      }
+      ownerType = "team";
+      ownerId = body.target.teamId;
+    }
   } else if (body.target.kind === "assistant") {
     const who = body.target.assistant ?? "user";
     if (who === "org") {
