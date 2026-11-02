@@ -78,6 +78,11 @@ api:
     githubClientId: ""
     trustedOrigins: ""
     allowedEmailDomains: ""
+    # Comma-separated administrator emails (AUTH_ADMIN_EMAILS). Each becomes
+    # an org admin on SSO sign-in, or on Google/GitHub sign-in with a verified
+    # email. With SSO on, the api refuses to boot until an admin exists or one
+    # is listed here.
+    adminEmails: ""
 
   # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
   # env fallback). Set these three plus the api.secrets.githubApp* values

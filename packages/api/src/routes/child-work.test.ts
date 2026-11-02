@@ -4,6 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, resolveDefaultAssistant } from "../assistants/service.js";
 import { agentSessions, assistants, childWatches, teams, teamMembers } from "../schema/index.js";
 import type { ChildWorkResponse, CreateTeamResponse, CreateTeamApiKeyResponse, GetSessionResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 const local = { type: "user", id: "local-user" } as const;
@@ -136,7 +137,7 @@ describe("parent-scoped child work", () => {
   });
   it("admits team keys only to their own parent", async () => {
     api = await bootTestApi({ auth: true });
-    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "child@nowhere.test", name: "Admin", password: "correct-horse-battery" }) });
+    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "child@nowhere.test", name: "Admin", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }) });
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
     if (!cookie) throw new Error("Missing session cookie");
     const team = await (await fetch(`${api.baseUrl}/api/teams`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ name: "Child team" }) })).json() as CreateTeamResponse;

@@ -208,8 +208,8 @@ export interface NodeProviderOpts {
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
    * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * the one-time admin invite (`auth/bootstrap-admin.ts`) is minted only
+   * while there are no users, so with a local user pre-seeded a
    * fresh real deployment could never mint its first admin and every real
    * signup would land in the seeded "Local Dev" org. The stub identity is an
    * admin, so seeding it next to real auth also leaves an admin row nobody
