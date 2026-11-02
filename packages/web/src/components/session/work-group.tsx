@@ -235,6 +235,7 @@ export function summaryPhrase(part: ToolCallPart): Phrase {
     case "task": return { key: "task", text: n => n === 1 ? "started an agent" : `started ${n} agents` };
     case "child_send": return { key: "child-send", text: n => n === 1 ? "messaged an agent" : `messaged ${n} agents` };
     case "child_read": case "child_status": return { key: "child-read", text: () => "checked on agents" };
+    case "child_stop": return { key: "child-stop", text: n => n === 1 ? "stopped an agent" : `stopped ${n} agents` };
     case "update_plan": return { key: "plan", text: () => "updated the plan" };
     case "thread_read": return { key: "thread", text: n => n === 1 ? "read a thread" : `read ${n} threads` };
     default: return { key: `tool:${part.toolName}`, text: n => `used ${prettyToolName(part.toolName)}${n > 1 ? ` ${n} times` : ""}` };

@@ -369,7 +369,9 @@ CREATE TABLE "child_watches" (
 	"sandbox_reclaimed_at" bigint,
 	"parked_sandbox_id" text,
 	"origin_json" text,
-	"reply_route" text
+	"reply_route" text,
+	"batch_key" text,
+	"batch_held_json" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;

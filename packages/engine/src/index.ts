@@ -215,6 +215,7 @@ export { NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
 export {
   builtinTools,
+  childStopTool,
   DEFAULT_WAKEUP_LIMITS,
   readTool,
   writeTool,

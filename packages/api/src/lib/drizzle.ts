@@ -1040,6 +1040,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "events_started_at" bigint',
   },
   {
+    describe: "child_watches.batch_key column",
+    probe: { kind: "column", table: "child_watches", column: "batch_key" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "batch_key" text',
+  },
+  {
+    describe: "child_watches.batch_held_json column",
+    probe: { kind: "column", table: "child_watches", column: "batch_held_json" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "batch_held_json" text',
+  },
+  {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
     // keep the old no-origin behavior.
