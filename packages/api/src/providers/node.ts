@@ -10,7 +10,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ChildStopper, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -29,6 +29,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -516,6 +517,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   let homeDepsRef: HomeDeps | undefined;
   const engineHost = new EngineHost({
     engineStore,
@@ -565,6 +567,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
     homeTools: () => buildHomeTools(() => {
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
       return homeDepsRef;
@@ -613,6 +619,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // Destroys sandboxes hibernated past the retention window; `start()`/
   // `stop()` are called from `main.ts`, next to the child retention sweep.

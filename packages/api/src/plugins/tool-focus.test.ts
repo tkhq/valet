@@ -48,6 +48,12 @@ describe("workflow tool focus", () => {
     expect(toolInScope(scope, "bash")).toBe(false);
     expect(toolInScope(scope, "update_plan")).toBe(true);
   });
+  it("lets repair include the integration actions a workflow's steps use", () => {
+    const scope = workflowToolFocus("repair", ["granola.list_notes"]);
+    expect(actionInScope(scope, "granola.list_notes")).toBe(true);
+    expect(actionInScope(scope, "workflows.start_run")).toBe(false);
+  });
+
   it("adds editing and preview for repair without starting runs", () => {
     const scope = workflowToolFocus("repair");
     expect(actionInScope(scope, "workflows.patch_workflow")).toBe(true);

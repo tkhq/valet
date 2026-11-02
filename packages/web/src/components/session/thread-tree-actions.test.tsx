@@ -31,6 +31,7 @@ const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 const replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
+const duplicateMutateAsync = vi.fn();
 
 let threads: ThreadSummary[] = [];
 let searchMatches: ThreadSummary[] = [];
@@ -108,6 +109,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useCreateThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
     useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
+    useDuplicateThread: () => ({ mutateAsync: duplicateMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
     useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
@@ -214,6 +216,7 @@ beforeEach(() => {
   replaceMutateAsync.mockClear();
   dismissMutateAsync.mockClear();
   renameMutateAsync.mockClear();
+  duplicateMutateAsync.mockReset();
   threads = [thread()];
   archivedThreads = [];
   searchMatches = [];
@@ -442,6 +445,34 @@ describe("ThreadTree — thread context menu", () => {
     await user.click(screen.getByRole("menuitem", { name: "Pin thread" }));
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
     expect(await screen.findByRole("menuitem", { name: "Unpin thread" })).toBeTruthy();
+  });
+
+  it("duplicates a thread into this workspace and opens the copy", async () => {
+    duplicateMutateAsync.mockResolvedValueOnce({ thread: thread({ id: "thread-copy", title: "Plan the launch (copy)" }), workspace: "user" });
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Duplicate thread" }));
+
+    expect(duplicateMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    const call = navigate.mock.calls[0]?.[0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(call.search({ thread: "thread-1", child: "c" })).toEqual({ thread: "thread-copy", workspace: "user", child: undefined });
+    expect(setArchivedMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's reason when a thread does not duplicate", async () => {
+    const busy = "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it.";
+    duplicateMutateAsync.mockRejectedValueOnce(new ApiError(409, "POST → 409", { error: busy }));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Duplicate thread" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(busy);
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("offers a session-wide Replace sandbox action", async () => {

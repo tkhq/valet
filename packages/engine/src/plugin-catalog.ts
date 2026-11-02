@@ -20,7 +20,7 @@ import type {
   ToolResult,
 } from "./types.js";
 import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "./decision-gate.js";
-import { encodeToolOutput } from "./tool-output.js";
+import { decodeToolOutput, encodeToolOutput } from "./tool-output.js";
 import { reportError } from "./error-report.js";
 
 /**
@@ -1238,7 +1238,7 @@ function makeListTool(
       : "",
     gatedServices.length > 0 ? ` Unavailable services: ${gatedServices.join(", ")}.` : "",
   ].join("");
-  return {
+  const listTool: ToolDef = {
     name: "list_tools",
     sideEffect: "none",
     description:
@@ -1422,8 +1422,20 @@ function makeListTool(
       });
 
       const total = entries.length;
+      // A focused thread (a workflow editor starts in one) sees only its focus.
+      // When nothing in focus matches, search the ceiling too, so an
+      // integration such as Granola is not reported as missing.
+      const outsideFocus = total === 0 && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
+        ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true }, ctx))
+        : [];
       const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
-      if (total === 0) {
+      if (outsideFocus.length > 0) {
+        warnings.push({
+          service: "catalog",
+          reason: "these actions are outside this thread's focus. To use them, call focus_tools with your phase and actions: " +
+            JSON.stringify(outsideFocus.map((t) => t.tool_id)) + ", then call list_tools again for their schemas.",
+        });
+      } else if (total === 0) {
         const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
         warnings.push({
           service: "catalog",
@@ -1435,11 +1447,28 @@ function makeListTool(
           tools,
           total,
           ...(total > limit ? { truncated: total - limit } : {}),
+          ...(outsideFocus.length > 0 ? { outside_focus: outsideFocus } : {}),
           ...(warnings.length > 0 ? { warnings } : {}),
         }),
       };
     },
   };
+  return listTool;
+}
+
+/** The tool summaries from a list_tools result run with `outside_focus` (TOON or JSON text). */
+function outsideFocusMatches(result: ToolResult): Array<{ tool_id: string; name?: string; description?: string }> {
+  try {
+    const text = typeof result.text === "string" ? result.text : "";
+    const parsed: unknown = text.trimStart().startsWith("{") ? JSON.parse(text) : decodeToolOutput(text);
+    if (typeof parsed !== "object" || parsed === null || !("tools" in parsed) || !Array.isArray(parsed.tools)) return [];
+    return parsed.tools.flatMap((t: unknown) =>
+      typeof t === "object" && t !== null && "tool_id" in t && typeof t.tool_id === "string"
+        ? [{ tool_id: t.tool_id, ...("name" in t && typeof t.name === "string" ? { name: t.name } : {}), ...("description" in t && typeof t.description === "string" ? { description: t.description } : {}) }]
+        : []);
+  } catch {
+    return [];
+  }
 }
 
 function nativeToolMatches(query: string | undefined, names: readonly string[]): string[] {

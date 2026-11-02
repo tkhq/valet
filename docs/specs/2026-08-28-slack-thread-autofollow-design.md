@@ -184,6 +184,8 @@ constituent `merged` pointing at it. Properties:
 - The envelope drops the per-message `sender` attribute and gains
   `digest="<N>"`. The origin (and `messageTs`) comes from the newest
   constituent, so `react_to_origin` targets the latest message.
+- The digest carries the attachments of every constituent, oldest first,
+  because the constituents settle as merged and never reach the model.
 - Constituents are never claimed, so they write no user entries, and a Slack
   redelivery of a constituent's `dispatchId` dedups against its settled row.
   A dedup replay never re-digests.

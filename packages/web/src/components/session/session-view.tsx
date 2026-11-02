@@ -411,6 +411,7 @@ export function SessionView({
       modelControlTarget={mobileConversation ? composerModelTarget : null}
       viewers={viewers}
       scopeNotice={scopeNotice}
+      onOpenThread={onOpenThread}
     />
   );
   const sandboxTabs = (!hideBrowser || mobileConversation) && (

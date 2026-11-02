@@ -8,7 +8,7 @@ vi.mock("../send-as-person", async (importOriginal) => ({
   useSendAsPerson: () => ({ reply, pending: false, error: undefined }),
 }));
 
-import { eventWidget, meetingMemoryWidget, statusWidget, transactionsWidget } from "~/dev/ui-stress/fixtures/widgets";
+import { chartsWidget, eventWidget, meetingMemoryWidget, statusWidget, transactionsWidget } from "~/dev/ui-stress/fixtures/widgets";
 import { ThreadReplyContext } from "../send-as-person";
 import { drawableSpec, widgetRenderer } from "../tool-renderers/widget";
 import { WidgetView } from "./widget-view";
@@ -24,6 +24,16 @@ describe("WidgetView", () => {
     const cell = within(figure).getByText("$428.60");
     expect(cell.className).toContain("text-right");
     expect(within(figure).getAllByRole("columnheader").map(h => h.textContent)).toEqual(["Merchant", "Card", "Date", "Amount"]);
+  });
+
+  it("draws charts with a legend, hover titles, and a table for screen readers", () => {
+    const { container } = render(<WidgetView spec={chartsWidget} />);
+    expect(container.querySelector("figcaption")?.textContent).toBe("Merged pull requests per week");
+    expect(screen.getAllByText("Platform").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll("rect title")[0]?.textContent).toBe("Platform · Sep 15: 12");
+    expect(container.querySelectorAll("path title")[0]?.textContent).toBe("Urgent: 4 (9%)");
+    const table = screen.getByRole("table", { name: "Merged pull requests per week" });
+    expect(within(table).getAllByRole("columnheader").map(h => h.textContent)).toEqual(["", "Platform", "Web"]);
   });
 
   it("draws quotes with their speaker, source, and takeaway", () => {

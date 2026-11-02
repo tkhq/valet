@@ -6,7 +6,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { agentSessions, orgs, generatedFiles, workflowDefinitions, workflowRuns, teams, teamMembers } from "../schema/index.js";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 import { VirtualSandboxProvider, type Principal, type Sandbox, type ToolContext } from "@valet/engine";
-import { buildFileAttachTool, generatedFileKey, generatedFileOrigin, readGeneratedFile } from "./generated-files.js";
+import { buildFileAttachTool, generatedFileKey, generatedFileOrigin, generatedFileStore, readGeneratedFile } from "./generated-files.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PGlite } from "@electric-sql/pglite";
@@ -56,6 +56,27 @@ describe("file_attach", () => {
     const fallback = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/report.docx" }, ctx);
     expect(parseOutput(fallback.text).url).toMatch(/^\/api\/sessions\//);
     expect(fallback.text).toContain("configure VALET_PUBLIC_URL");
+  });
+
+  it("lets plugin actions save and read files scoped to one thread", async () => {
+    if (!api) throw new Error("missing fixture");
+    const { db, blobs } = api.providers;
+    const store = generatedFileStore(db, blobs, "https://valet.example");
+    const scope = { orgId: "local-org", sessionId: "session", threadId: "thread" };
+    const saved = await store(scope).save({ name: "Agreement.pdf", mimeType: "application/pdf", data: bytes });
+    expect(saved).toMatchObject({ name: "Agreement.pdf", mimeType: "application/pdf", bytes: bytes.length, webUrl: `/api/sessions/session/threads/thread/files/${saved.id}` });
+    expect(saved.url).toBe(`https://valet.example${saved.webUrl}`);
+    const read = await store(scope).read(saved.id);
+    expect(read?.data).toEqual(bytes);
+    expect(read?.name).toBe("Agreement.pdf");
+    expect(await store({ ...scope, threadId: "other-thread" }).read(saved.id)).toBeNull();
+    expect(await store(scope).read("not-a-file-id")).toBeNull();
+    await expect(store(scope).save({ name: "../escape.pdf", mimeType: "application/pdf", data: bytes })).rejects.toThrow("without slashes");
+    const sandbox = await testSandbox();
+    await sandbox.writeBinary("/workspace/Agreement.pdf", bytes);
+    const attached = await buildFileAttachTool(db, blobs).execute({ path: "/workspace/Agreement.pdf" }, context(sandbox));
+    const output: unknown = JSON.parse(attached.text);
+    expect(output).toMatchObject({ id: saved.id });
   });
 
   it.each(["javascript:alert(1)", "//other.example", "https://user:secret@other.example", "invalid"])("rejects unsafe configured origins: %s", value => {

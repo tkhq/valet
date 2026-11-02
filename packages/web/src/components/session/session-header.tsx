@@ -6,6 +6,7 @@ import {
   Check,
   ClipboardCopy,
   Code2,
+  Copy,
   FolderInput,
   Globe,
   Moon,
@@ -21,6 +22,7 @@ import { useWorkspaceChannels } from "~/api/channels";
 import { placeOfSubject } from "~/api/presence";
 import {
   useDeleteSession,
+  useDuplicateThread,
   usePauseSession,
   useRenameSession,
   useReplaceSandbox,
@@ -172,6 +174,7 @@ export function SessionHeader({
   scopeNotice,
   compact = false,
   modelControlTarget,
+  onOpenThread,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -192,6 +195,8 @@ export function SessionHeader({
   compact?: boolean;
   /** Place the mobile model pill in the active conversation composer. */
   modelControlTarget?: HTMLElement | null;
+  /** Opens a thread in this workspace. Omit it to hide Duplicate. */
+  onOpenThread?: (threadId: string) => void;
 }) {
   const navigate = useNavigate();
   const mobile = useMobileLayout();
@@ -417,6 +422,19 @@ export function SessionHeader({
   // Anyone who sees it on may turn it off.
   const canEnableBypass = activeThread !== undefined && (owner.type === "user" ? owner.id === me.data?.id : owner.type === "team" && canAdminister);
   const bypassOn = activeThread?.approvalBypass === true;
+  // The server's rule: the thread owner or a team member. A copy stays in
+  // this workspace, so the reader opens it here.
+  const duplicate = useDuplicateThread();
+  const canDuplicate = onOpenThread !== undefined && activeThread !== undefined && !isAppAssistantThread(activeThread)
+    && (owner.type === "user" ? owner.id === me.data?.id : team !== undefined && team.callerRole !== null);
+  function duplicateActive() {
+    if (!activeThread || !onOpenThread || duplicate.isPending) return;
+    setActionError(null);
+    duplicate.mutate({ threadId: activeThread.id }, {
+      onSuccess: (result) => onOpenThread(result.thread.id),
+      onError: (err) => setActionError(extractActionError(err, "Could not duplicate the thread. Try again.")),
+    });
+  }
   function setBypass(on: boolean) {
     if (!activeThread) return;
     setActionError(null);
@@ -618,7 +636,7 @@ export function SessionHeader({
         </div>
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "md:hidden")} aria-label="Thread menu">
+            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && !canDuplicate && "md:hidden")} aria-label="Thread menu">
               {del.isPending || replace.isPending || setProfile.isPending ? (
                 <Spinner size={14} />
               ) : (
@@ -671,6 +689,14 @@ export function SessionHeader({
               )}
               <DropdownMenuSeparator />
             </div>
+            {canDuplicate && (
+              <>
+                <DropdownMenuItem disabled={duplicate.isPending} onSelect={duplicateActive}>
+                  <Copy className="h-4 w-4" aria-hidden />{duplicate.isPending ? "Duplicating…" : "Duplicate thread"}
+                </DropdownMenuItem>
+                {(bypassOn || canEnableBypass || canAdminister) && <DropdownMenuSeparator />}
+              </>
+            )}
             {(bypassOn || canEnableBypass) && (
               <>
                 <DropdownMenuCheckboxItem checked={bypassOn} disabled={bypass.isPending}

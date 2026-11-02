@@ -29,6 +29,7 @@ import {
   type ToolDef,
 } from "../src/index.js";
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
+import { withoutSentLine } from "../src/test-helpers/sent-line.js";
 
 const PERSON = { id: "u1", name: "Owner", interactive: true };
 const TEAMMATE = { id: "u2", name: "Teammate", interactive: true };
@@ -92,12 +93,12 @@ const actionTool: ToolDef = {
   execute: async () => ({ text: "posted", outcome: { kind: "pull_request_created", url: "https://example.test/pr/7" } }),
 };
 
-/** The user-message texts the model received, in order. */
+/** The user-message texts the model received, in order, without the `[sent: …]` line. */
 function userTexts(context: { messages: Array<{ role: string; content: unknown }> }): string[] {
-  return context.messages.filter((m) => m.role === "user").map((m) =>
+  return context.messages.filter((m) => m.role === "user").map((m) => withoutSentLine(
     typeof m.content === "string"
       ? m.content
-      : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
+      : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join("")));
 }
 
 /** One transcript entry as a short line: `role:text`, a note as `note:<kind>`. */

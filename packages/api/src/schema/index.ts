@@ -631,6 +631,13 @@ export const childWatches = pgTable(
     queueItemId: text("queue_item_id").notNull(),
     parentSessionId: text("parent_session_id").notNull(),
     parentThreadId: text("parent_thread_id").notNull(),
+    // The parent's queue item whose turn spawned this child. A workflow step
+    // waits only for children its own turns spawned. Null for rows from
+    // before this column.
+    parentQueueItemId: text("parent_queue_item_id"),
+    // The parent-thread queue item that this child's latest report started.
+    // A workflow step returns the result of its newest report turn.
+    reportQueueItemId: text("report_queue_item_id"),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
     deliveryActive: boolean("delivery_active").notNull().default(false),
@@ -665,6 +672,12 @@ export const childWatches = pgTable(
     // engine session row's sandbox_id is only written at creation, before
     // any sandbox provisions, so it cannot serve as the handle.
     parkedSandboxId: text("parked_sandbox_id"),
+    // The `task` batch this child reports with. Children of one parent
+    // thread with the same batch report together, after the last settles.
+    batchKey: text("batch_key"),
+    // A settled batch member's report, held as JSON until the last member
+    // settles and one signal carries every report. Null when nothing is held.
+    batchHeldJson: text("batch_held_json"),
   },
   (t) => [
     index("child_watches_delivery").on(t.childSessionId).where(sql`${t.deliveryActive} = true OR ${t.settled} = false`),

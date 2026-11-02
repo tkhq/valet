@@ -30,6 +30,7 @@ Replace the 16 current `drive.*` actions in `packages/plugin-google-workspace/` 
 | `drive.delete_file` | `fileId` | Permanently delete a file (cannot be undone) | critical | WRITE_MODIFY |
 | `drive.download_file` | `fileId`, `maxSizeBytes?` | Download file content as text (with Google Workspace export) | low | READ_GET |
 | `drive.create_from_template` | `templateId`, `title`, `folderId?`, `replacements?` | Create a new document from a template with placeholder substitution | medium | CREATE |
+| `drive.export_file` | `fileId`, `format?`, `fileName?` | Save a Drive file as a thread file; convert Docs, Sheets, and Slides to PDF or Office formats (added 2026-10-30, see `2026-10-30-gmail-attachments-drive-export-design.md`) | low | READ_GET |
 
 ## Tools Being Dropped
 
@@ -37,7 +38,7 @@ Replace the 16 current `drive.*` actions in `packages/plugin-google-workspace/` 
 |-------------------|--------|-------------|
 | `drive.get_file` | Replaced by `drive.get_document_info` | No |
 | `drive.read_file` | Not in reference repo (text reading with PDF extraction) | **Yes** -- agents lose the ability to read file contents via Drive |
-| `drive.export_file` | Not in reference repo | **Yes** -- agents lose explicit format export; `download_file` covers some cases |
+| `drive.export_file` | Not in reference repo | Restored 2026-10-30 with new behavior: it saves a thread file instead of returning content |
 | `drive.create_file` | Replaced by `drive.create_document` (Docs-specific) | Partial -- generic file creation (text, CSV) is lost |
 | `drive.update_metadata` | Subsumed by `drive.rename_file` + `drive.move_file` | No -- dedicated single-purpose tools are cleaner |
 | `drive.update_content` | Not in reference repo | **Yes** -- agents lose the ability to update file content via Drive |

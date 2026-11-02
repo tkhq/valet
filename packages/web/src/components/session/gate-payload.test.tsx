@@ -96,6 +96,19 @@ describe("GatePayloadPreview — email", () => {
     expect(within(group).getByText("up").tagName).toBe("STRONG");
   });
 
+  it("names each attached file", () => {
+    const group = preview({
+      id: "gmail.send_email",
+      args: {
+        to: "a@example.com",
+        subject: "Contract",
+        body: "Attached.",
+        attachments: [{ path: "/workspace/out/SOW.pdf" }, { threadFileId: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", filename: "MSA.pdf" }, "junk"],
+      },
+    });
+    expect(rows(group)).toEqual([["To", "a@example.com"], ["Subject", "Contract"], ["Attachments", "SOW.pdf, MSA.pdf"]]);
+  });
+
   it("labels drafts and skips empty Cc", () => {
     const group = preview({ id: "gmail.create_draft", args: { to: "a@example.com", cc: [], subject: "", body: "" } });
     expect(within(group).getByText("Email draft")).toBeTruthy();

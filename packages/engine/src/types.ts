@@ -180,6 +180,14 @@ export interface ThreadData {
 /** Key in `ThreadData.metadata` that holds the creation-time user timezone. */
 export const THREAD_USER_TIMEZONE_KEY = "userTimezone";
 
+/**
+ * Key in a user `MessageEntry.metadata` that holds the user timezone (string,
+ * or null when unknown) read when the entry was written. With `createdAt` it
+ * renders the entry's `[sent: …]` line (`messageTimeLine`). Written once, so
+ * the line never changes.
+ */
+export const ENTRY_USER_TIMEZONE_KEY = "userTimezone";
+
 export interface QueueState {
   threadId: string;
   mode: QueueMode;
@@ -453,7 +461,12 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
+  /**
+   * `text` stays empty for new parts: it is what a rebuilt transcript sends
+   * back to the model. `summary` is the provider's reasoning summary, for
+   * display only; nothing that builds model input reads it.
+   */
+  | { type: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;
@@ -790,6 +803,26 @@ export type ToolArtifact =
   | { type: "link"; url: string; title: string }
   | { type: "diff"; path?: string; content: string };
 
+/** One durable download saved in a thread (the `file_attach` store). */
+export interface ThreadFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  bytes: number;
+  /** Absolute when the host has a public origin, else the same as `webUrl`. */
+  url: string;
+  /** Download path relative to the Valet web app. */
+  webUrl: string;
+}
+
+/** `ToolContext.threadFiles`, bound to the calling thread. */
+export interface ThreadFileStore {
+  /** Save bytes as a download in this thread. Throws an Error whose message names the fix. */
+  save(file: { name: string; mimeType: string; data: Uint8Array }): Promise<ThreadFile>;
+  /** Read a file saved in this thread. Null when no ready file of this thread has the id. */
+  read(id: string): Promise<(ThreadFile & { data: Uint8Array }) | null>;
+}
+
 export interface ToolContext {
   /** Effective session, submission, and thread restrictions. This may change after a focus call. */
   readonly toolScope?: ToolScope;
@@ -819,6 +852,13 @@ export interface ToolContext {
   /** Nobody watches this workflow task. `requestDecision` refuses new gates,
    * and the decision tools return a fail-closed result instead of asking. */
   unattendedWorkflow?: boolean;
+  /**
+   * Read the user's current IANA timezone, as the `[sent: …]` line does. The
+   * decision tools use it for the `[answered: …]` line on their result.
+   * Absent on a context built by hand, and undefined when the timezone is
+   * not known.
+   */
+  currentUserTimezone?: () => Promise<string | undefined>;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
@@ -899,6 +939,14 @@ export interface ToolContext {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Host seam for this thread's durable downloads, the store `file_attach`
+   * writes. A plugin action saves bytes a person can download from the
+   * thread, and reads back a file saved earlier in the same thread. Absent
+   * on hosts that wire no blob store and in workflow tool nodes; callers
+   * must name that limit, not fail silently.
+   */
+  threadFiles?: ThreadFileStore;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /** Host seam for wakeups and leases (spec 2026-10-08). Absent === the host
    * wires no wakeups, and tools that need it must degrade or refuse. */
@@ -1074,7 +1122,7 @@ export interface CredentialStore {
 
 export type DecisionGateType = "approval" | "question" | "credential_request";
 export type DecisionGateStatus = "pending" | "resolved" | "expired" | "withdrawn";
-export type DecisionWithdrawReason = "steer" | "abort" | "cancel";
+export type DecisionWithdrawReason = "steer" | "abort" | "cancel" | "message";
 
 export interface DecisionAction {
   id: string;
@@ -2929,6 +2977,11 @@ export interface CreateSessionOptions {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Binds `ToolContext.threadFiles` to each thread in `buildToolContext`.
+   * Absent === tools and plugin actions get no thread file store.
+   */
+  threadFiles?: (scope: { orgId: string; sessionId: string; threadId: string }) => ThreadFileStore;
   /** Threaded onto `ToolContext.wakeups` via `buildToolContext`. Absent ===
    * plugin actions and tools get no wakeups seam. */
   wakeups?: WakeupsSeam;
@@ -3243,6 +3296,12 @@ export interface SpawnChildRequest {
   /** Role name applied to the spawn prompt's turn (`PromptOptions.role`
    * — the session must register the role in its `roles` option). */
   role?: string;
+  /**
+   * Batch name. Children spawned on one parent thread with the same batch
+   * report together: the host holds each result until the last child in the
+   * batch settles, then admits one `child.settled` signal with all of them.
+   */
+  batch?: string;
 }
 
 export interface SpawnChildResult {
@@ -3336,6 +3395,21 @@ export type ChildSender = (
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean; parentQueueItemId?: string },
 ) => Promise<{ queueItemId: string } | null>;
+
+/**
+ * Stops a child session on behalf of its parent: aborts the child's running
+ * turn and its queued work. The child's partial result still reaches the
+ * parent as a `child.settled` signal, alone or with the rest of its batch.
+ * A later `child_send` starts the child again.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
+ * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
+ * `stopped` counts the submissions it aborted; 0 means the child was idle.
+ */
+export type ChildStopper = (
+  req: { childSessionId: string },
+  ctx: { parentSessionId: string; parentThreadId: string },
+) => Promise<{ stopped: number } | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

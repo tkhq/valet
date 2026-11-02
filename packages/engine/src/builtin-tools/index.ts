@@ -10,7 +10,8 @@ import {
   ScratchRequestError,
 } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
-import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "../decision-gate.js";
+import { isDecisionGateExpired, isDecisionGateWithdrawn, isUnattendedWorkflowRefusal } from "../decision-gate.js";
+import { answerTimeLine } from "../model-context.js";
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
@@ -43,6 +44,8 @@ import type {
   ChildSender,
   ChildSpawner,
   ChildStatusReader,
+  ChildStopper,
+  DecisionResolution,
   ExecJobHandle,
   ExecOpts,
   ExecResult,
@@ -550,6 +553,9 @@ const EXTERNAL_SENDER_CHILDREN = {
   text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
 };
 
+/** Longest `task` batch name. It is a label the model picks, not content. */
+export const TASK_BATCH_MAX_CHARS = 64;
+
 /**
  * Byte ceiling on one `child_read` result. Matches the api's
  * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
@@ -727,6 +733,50 @@ export const childStatusTool = defineTool({
   },
 });
 
+/**
+ * Not in `builtinTools`: the host registers it only on sessions that can
+ * spawn children, so child and workflow sessions do not carry a tool they
+ * cannot use.
+ */
+export const childStopTool = defineTool({
+  name: "child_stop",
+  description:
+    "Stop a child you spawned: abort its running and queued work. Its partial result " +
+    "still arrives as a child.settled signal. child_send starts it again.",
+  parameters: Type.Object({
+    child_session_id: Type.String({ description: "The child to stop." }),
+  }),
+  execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
+    // Same `toolConfig` passthrough convention as `child_send`'s childSender.
+    const rawStopper = ctx.config?.childStopper;
+    if (typeof rawStopper !== "function") {
+      return { text: "[child_stop_unavailable] this session cannot stop child sessions" };
+    }
+    const stopper = rawStopper as ChildStopper; // narrowed by typeof check above
+
+    const result = await stopper(
+      { childSessionId: args.child_session_id },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    if (result.stopped === 0) {
+      return { text: `child ${args.child_session_id} had no running or queued work to stop.` };
+    }
+    return {
+      text:
+        `stopped child ${args.child_session_id} (${result.stopped} submission${result.stopped === 1 ? "" : "s"} aborted). ` +
+        `Its partial result will arrive as a child.settled signal; you do not need to wait for anything else from it.`,
+    };
+  },
+});
+
 export const listThreadsTool = defineTool({
   name: "list_threads",
   concurrencySafe: true,
@@ -840,13 +890,26 @@ export const askApprovalTool = defineTool({
       };
     }
     return {
-      text:
+      text: await withAnswerTime(
         resolution.actionId === "approve"
           ? `approved: ${args.title}`
           : `denied: ${args.title}. This denial is final for the current turn — do not ask again. Tell the user what was denied.`,
+        resolution,
+        ctx,
+      ),
     };
   },
 });
+
+/**
+ * Put the `[answered: …]` line (`answerTimeLine`) first on a decision tool's
+ * result. The answer can come days after the turn's newest `[sent: …]` line,
+ * and this line is the only new time the model gets.
+ */
+async function withAnswerTime(text: string, resolution: DecisionResolution, ctx: ToolContext): Promise<string> {
+  const line = answerTimeLine(resolution.resolvedAt, await ctx.currentUserTimezone?.());
+  return line ? `${line}\n\n${text}` : text;
+}
 
 export const askQuestionTool = defineTool({
   name: "ask_question",
@@ -885,6 +948,13 @@ export const askQuestionTool = defineTool({
             "say what was missing. Continue with the rest of the work, and say what you assumed.",
         };
       }
+      if (isDecisionGateWithdrawn(err) && err.reason === "message") {
+        return {
+          text:
+            `The person wrote a message instead of answering "${args.question}". It follows this result. ` +
+            "Reply to it first. If you still need the answer, ask the question again after your reply.",
+        };
+      }
       throw err;
     }
     if (isUnattendedWorkflowRefusal(resolution)) {
@@ -907,8 +977,13 @@ export const askQuestionTool = defineTool({
       }
     }
     const answer = typed || picked || (attachments.length ? "See the attached images." : undefined);
-    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.`,
-      ...(attachments.length ? { attachments } : {}) };
+    // A typed reply can be a question back, such as what an option means.
+    // Say so, or the model reads it as an off-list choice and asks again.
+    const typedNote = typed && options.length > 0 && !options.includes(typed)
+      ? " The person typed this instead of picking an option. If it asks you something, reply to it first, then ask again if you still need a choice."
+      : "";
+    const text = answer ? `answer to "${args.question}": ${answer}${typedNote}` : `the question "${args.question}" was closed without an answer.`;
+    return { text: await withAnswerTime(text, resolution, ctx), ...(attachments.length ? { attachments } : {}) };
   },
 });
 
@@ -961,6 +1036,13 @@ export const taskTool = defineTool({
     docker: Type.Optional(
       Type.Boolean({
         description: "Provision the child's sandbox with a rootless docker daemon (docker-in-sandbox).",
+      }),
+    ),
+    batch: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: TASK_BATCH_MAX_CHARS,
+        description: "Children with the same batch report together, in one child.settled signal after the last settles.",
       }),
     ),
   }),
@@ -1031,6 +1113,7 @@ export const taskTool = defineTool({
       resources,
       profile: args.profile,
       docker: args.docker,
+      ...(args.batch?.trim() ? { batch: args.batch.trim() } : {}),
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
     let result;
@@ -1054,7 +1137,10 @@ export const taskTool = defineTool({
     }
     return {
       text: [
-        `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+        req.batch
+          ? `spawned child session ${result.childSessionId} (submission ${result.queueItemId}) in batch "${req.batch}". ` +
+            `Its result will arrive with the rest of the batch, in one child.settled signal, after the last child in the batch settles.`
+          : `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
         ...(result.warnings ?? []).map((warning) => `Warning: ${warning}`),
       ].join("\n"),
     };

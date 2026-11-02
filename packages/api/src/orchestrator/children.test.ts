@@ -45,6 +45,8 @@ import {
   parentDelegationMetadata,
   buildChildSpawner,
   buildChildStatusReader,
+  buildChildStopper,
+  batchOrigin,
   ChildWatcher,
   CHILD_TERMINAL_SIGNAL_GRACE_MS,
   ChildLimitError,
@@ -2285,6 +2287,25 @@ describe("ChildWatcher", () => {
       await waitFor(c.settled);
       expect(await c.settledSignal()).toBeDefined();
       expect((await c.engineStore.getWakeup(`wk_child_events:${c.watch.childSessionId}`))?.status).toBe("done");
+    });
+
+    it("records the admitted report turn when boot recovery settles the watch", async () => {
+      // A workflow step finds its child's report turn from this column.
+      const c = await armedChild("restart-report");
+      const db = api!.providers.db;
+      const watchRow = async () => (await db.select().from(childWatches).where(eq(childWatches.childSessionId, c.child.id)))[0];
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const report = await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${c.watch.queueItemId}`);
+      expect(report).not.toBeNull();
+      expect((await watchRow())?.reportQueueItemId).toBe(report!.id);
+      // Simulate death after admission, before the watch settles.
+      await db.update(childWatches).set({ settled: false, reportQueueItemId: null }).where(eq(childWatches.childSessionId, c.child.id));
+      await testChildWatcher(c.deps).rearm();
+      expect(await watchRow()).toMatchObject({ settled: true, reportQueueItemId: report!.id });
+      const reports = (await c.engineStore.listUnsettledSubmissions(c.parent.id))
+        .filter(item => item.dispatchId === `${c.child.id}:settled:${c.child.id}:${c.watch.queueItemId}`);
+      expect(reports).toHaveLength(1);
     });
 
     it("does not report an injected signal as a separate completed turn", async () => {
@@ -5546,5 +5567,196 @@ describe("registry capacity child admission", () => {
     expect(await deps.db.select().from(childWatches)).toHaveLength(0);
     expect(await deps.db.select().from(sessionRepos)).toHaveLength(0);
     expect(readdirSync(deps.workspaceRoot!)).toHaveLength(0);
+  });
+});
+
+describe("child batches and child_stop", () => {
+  async function batchParent(name: string) {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = testChildWatcher(deps);
+    const parent = await api.providers.engineHost.sessionFor(`parent-${name}`, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+    return { deps, watcher, parent, parentThread };
+  }
+
+  /** A child whose delegated submission has an unclaimed queued item; `settle` finishes it. */
+  async function batchChild(p: Awaited<ReturnType<typeof batchParent>>, id: string, batchKey: string | null, title: string, origin?: ChannelOrigin) {
+    const { engineHost, engineStore, db } = api!.providers;
+    const child = await engineHost.childSessionFor(id, {
+      parentSessionId: p.parent.id, parentThreadId: p.parentThread.id, actorUserId: "local-user", orgId: "local-org",
+      owner: { type: "user", id: "local-user" }, workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    await child.pause();
+    const itemId = `qi-${id}`;
+    await engineStore.admitSubmission(id, childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
+      ...(origin ? { metadata: parentDelegationMetadata(p.parent.id, p.parentThread.id, origin) } : {}) });
+    await db.insert(agentSessions).values({
+      id, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active", title,
+      ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const watch = {
+      childSessionId: id, queueItemId: itemId, parentSessionId: p.parent.id,
+      parentThreadId: p.parentThread.id, actorUserId: "local-user", orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), batchKey,
+      ...(origin ? { originJson: JSON.stringify(origin), replyRoute: "origin" } : {}) });
+    return {
+      child, childThread, itemId, watch,
+      settle: async () => {
+        await appendTerminalResult(engineStore, id, childThread.id, itemId);
+        await engineStore.settleUnclaimed(id, childThread.id, itemId, { outcome: "completed" });
+        p.watcher.arm(watch);
+        await waitFor(async () => (await db.select().from(childWatches).where(eq(childWatches.childSessionId, id)))[0]?.settled === true);
+        await new Promise((r) => setTimeout(r, 100));
+      },
+    };
+  }
+
+  async function parentSignals(parentId: string) {
+    return (await api!.providers.engineStore.listUnsettledSubmissions(parentId)).filter(
+      (i) => typeof i.content === "object" && i.content !== null && "kind" in i.content && i.content.kind === "signal"
+        && (i.content as SignalContent).signalType === "child.settled");
+  }
+
+  it("holds a batch member's report until the last member settles, then admits one signal with both", async () => {
+    const p = await batchParent("batch");
+    const a = await batchChild(p, "child-batch-a", "review", "Review A");
+    const b = await batchChild(p, "child-batch-b", "review", "Review B");
+
+    await a.settle();
+    expect(await parentSignals(p.parent.id)).toHaveLength(0);
+    const [heldA] = await api!.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-batch-a"));
+    expect(heldA?.batchHeldJson).toContain("child-batch-a");
+
+    await b.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    const content = signals[0]!.content as SignalContent;
+    expect(content.attributes?.batch).toBe("review");
+    expect(content.attributes?.batch_children).toBe("child-batch-a,child-batch-b");
+    expect(content.body).toContain('All 2 children in batch "review" have settled.');
+    expect(content.body).toContain("## Review A (child-batch-a): completed");
+    expect(content.body).toContain("## Review B (child-batch-b): completed");
+    const rows = await api!.providers.db.select().from(childWatches).where(eq(childWatches.parentSessionId, p.parent.id));
+    expect(rows.map((r) => [r.childSessionId, r.settled, r.batchHeldJson, r.reportQueueItemId])).toEqual(expect.arrayContaining([
+      ["child-batch-a", true, null, signals[0]!.id],
+      ["child-batch-b", true, null, signals[0]!.id],
+    ]));
+  });
+
+  it("holds a batch while its spawning turn runs, then releases it when that turn ends", async () => {
+    const p = await batchParent("spawning");
+    const { engineStore, db } = api!.providers;
+    // The parent's turn that spawned the batch, still running: it may spawn more members.
+    await engineStore.admitSubmission(p.parent.id, p.parentThread.id, queuedItem("qi-spawning-turn", p.parentThread.id, "start the reviews"));
+    const a = await batchChild(p, "child-spawning-a", "review", "Review A");
+    const b = await batchChild(p, "child-spawning-b", "review", "Review B");
+    await db.update(childWatches).set({ parentQueueItemId: "qi-spawning-turn" }).where(eq(childWatches.parentSessionId, p.parent.id));
+
+    await a.settle();
+    await b.settle();
+    expect(await parentSignals(p.parent.id)).toHaveLength(0);
+
+    await engineStore.settleUnclaimed(p.parent.id, p.parentThread.id, "qi-spawning-turn", { outcome: "completed" });
+    await p.watcher.releaseBatchesAfterTurn(p.parent.id, "qi-spawning-turn");
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).attributes?.batch_children).toBe("child-spawning-a,child-spawning-b");
+    const rows = await db.select().from(childWatches).where(eq(childWatches.parentSessionId, p.parent.id));
+    expect(rows.every((r) => r.batchHeldJson === null && r.reportQueueItemId === signals[0]!.id)).toBe(true);
+
+    // A second turn-end event finds nothing left to release.
+    await p.watcher.releaseBatchesAfterTurn(p.parent.id, "qi-spawning-turn");
+    expect(await parentSignals(p.parent.id)).toHaveLength(1);
+  });
+
+  it("delivers a re-opened member's first held report with its follow-up", async () => {
+    const p = await batchParent("reopen");
+    const { db, engineStore } = api!.providers;
+    const a = await batchChild(p, "child-reopen-a", "review", "Review A");
+    const b = await batchChild(p, "child-reopen-b", "review", "Review B");
+    await a.settle();
+    // child_send re-opens A while its first report is held and B still runs.
+    const followUp = "qi-child-reopen-a-2";
+    await engineStore.admitSubmission("child-reopen-a", a.childThread.id, queuedItem(followUp, a.childThread.id, "follow up"));
+    await engineStore.appendEntries("child-reopen-a", a.childThread.id, [{
+      id: `terminal-${followUp}`, sessionId: "child-reopen-a", threadId: a.childThread.id, queueItemId: followUp, parentId: null,
+      type: "message", role: "assistant", content: "follow-up done", stopReason: "end_turn", createdAt: Date.now(),
+    }]);
+    await engineStore.settleUnclaimed("child-reopen-a", a.childThread.id, followUp, { outcome: "completed" });
+    await db.update(childWatches).set({ queueItemId: followUp, settled: false }).where(eq(childWatches.childSessionId, "child-reopen-a"));
+    p.watcher.arm({ ...a.watch, queueItemId: followUp });
+    await waitFor(async () => (await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-reopen-a")))[0]?.settled === true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await parentSignals(p.parent.id)).toHaveLength(0);
+
+    await b.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    const content = signals[0]!.content as SignalContent;
+    expect(content.body).toContain('All 2 children in batch "review" have settled.');
+    expect(content.body.match(/## Review A \(child-reopen-a\): completed/g)).toHaveLength(2);
+    expect(content.body).toContain("follow-up done");
+    expect(content.attributes?.batch_children).toBe("child-reopen-a,child-reopen-b");
+  });
+
+  it("replies manually for a batch when a held report's route is manual", async () => {
+    const p = await batchParent("route");
+    const { db, engineStore } = api!.providers;
+    const slack: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+    const a = await batchChild(p, "child-route-a", "review", "Private A", slack);
+    const b = await batchChild(p, "child-route-b", "review", "Public B", slack);
+    // A's route went manual (private input); B, which releases the batch, still replies automatically.
+    await db.update(childWatches).set({ replyRoute: "manual" }).where(eq(childWatches.childSessionId, "child-route-a"));
+
+    await a.settle();
+    await b.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).origin).toMatchObject({ threadKey: "slack:C1:1.2", reply: "manual" });
+    expect(await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.childSessionId, "child-route-b"))).toHaveLength(0);
+    expect(await engineStore.getQueueItem(p.parent.id, signals[0]!.id)).toBeTruthy();
+  });
+
+  it("keeps a batch reply automatic only when every report replies automatically to the same thread", () => {
+    const auto = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
+    expect(batchOrigin(auto, [{ origin: auto }])).toEqual(auto);
+    expect(batchOrigin(auto, [{ origin: undefined }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin(auto, [{ origin: { ...auto, threadKey: "slack:C2:9.9" } }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin({ ...auto, reply: "manual" }, [{ origin: auto }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin(undefined, [{ origin: auto }])).toBeUndefined();
+    expect(batchOrigin(auto, [])).toEqual(auto);
+  });
+
+  it("reports a child without a batch at once while a batch is still running", async () => {
+    const p = await batchParent("mixed");
+    const a = await batchChild(p, "child-mixed-a", "review", "Review A");
+    await batchChild(p, "child-mixed-b", "review", "Review B");
+    const solo = await batchChild(p, "child-mixed-solo", null, "Solo");
+
+    await a.settle();
+    await solo.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).attributes?.child_session_id).toBe("child-mixed-solo");
+    expect((signals[0]!.content as SignalContent).attributes?.batch).toBeUndefined();
+  });
+
+  it("child_stop aborts a child's queued work, refuses another parent's child, and reports an idle child", async () => {
+    const p = await batchParent("stop");
+    const c = await batchChild(p, "child-stop-a", null, "Stop me");
+    const stopper = buildChildStopper(p.deps);
+
+    expect(await stopper({ childSessionId: "child-stop-a" }, { parentSessionId: "someone-else", parentThreadId: p.parentThread.id })).toBeNull();
+    expect(await stopper({ childSessionId: "child-stop-a" }, { parentSessionId: p.parent.id, parentThreadId: p.parentThread.id }))
+      .toEqual({ stopped: 1 });
+    const item = await api!.providers.engineStore.getQueueItem("child-stop-a", c.itemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("aborted");
+    expect(await stopper({ childSessionId: "child-stop-a" }, { parentSessionId: p.parent.id, parentThreadId: p.parentThread.id }))
+      .toEqual({ stopped: 0 });
   });
 });

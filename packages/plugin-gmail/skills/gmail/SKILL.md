@@ -23,6 +23,8 @@ Send an email. Use `body` for Markdown. Gmail sends the source as `text/plain` a
 }
 ```
 
+To attach files, add `attachments`. See [Attachments](#attachments).
+
 Risk: **high** (sends immediately).
 
 ---
@@ -102,7 +104,8 @@ Create a draft without sending. Use `body` for Markdown. Gmail sends the source 
   "subject": "Proposal",
   "body": "Dear Alice, ...",
   "bodyHtml": "<p>Optional explicit HTML</p>",
-  "replyToMessageId": "<optional>"
+  "replyToMessageId": "<optional>",
+  "attachments": [{ "threadFileId": "<id from drive.export_file>" }, { "path": "/workspace/out/sow.pdf" }]
 }
 ```
 
@@ -133,7 +136,7 @@ Risk: **low**.
 ---
 
 ### `gmail.update_draft`
-Fully replace a draft's contents (subject, body, recipients). Use `body` for Markdown. Gmail sends the source as `text/plain` and safe rendered Markdown as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML in `body` is escaped. To send trusted explicit HTML, set non-blank `bodyHtml`. Gmail then uses `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. Do not use `bodyHtml` for blank content. This is a full overwrite, not a patch.
+Fully replace a draft's contents (subject, body, recipients, attachments). The new `attachments` list replaces the old files, so list every file the draft must keep. To add files without retyping the draft, use `add_draft_attachments`. Use `body` for Markdown. Gmail sends the source as `text/plain` and safe rendered Markdown as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML in `body` is escaped. To send trusted explicit HTML, set non-blank `bodyHtml`. Gmail then uses `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. Do not use `bodyHtml` for blank content. This is a full overwrite, not a patch.
 
 ```json
 {
@@ -142,6 +145,20 @@ Fully replace a draft's contents (subject, body, recipients). Use `body` for Mar
   "subject": "Updated Proposal",
   "body": "Dear Alice, revised text...",
   "bodyHtml": "<p>Optional explicit HTML</p>"
+}
+```
+
+Risk: **medium**.
+
+---
+
+### `gmail.add_draft_attachments`
+Add files to an existing draft. The draft keeps its recipients, subject, body, threading, and current files.
+
+```json
+{
+  "draftId": "r8765432109",
+  "attachments": [{ "threadFileId": "<id>", "filename": "Agreement.pdf" }]
 }
 ```
 
@@ -168,6 +185,20 @@ Permanently delete a draft. Irreversible — not moved to Trash.
 ```
 
 Risk: **high**.
+
+---
+
+## Attachments
+
+`send_email`, `create_draft`, `update_draft`, and `add_draft_attachments` take an `attachments` list. Each item names one file:
+
+- `threadFileId`: a file saved in this thread. Use `threadFileId` from `drive.export_file`, or `id` from `file_attach`. A thread file download URL also works.
+- `path`: an absolute path in the working directory, such as a file you generated or a file the person uploaded to `/workspace/uploads/`.
+- `filename` (optional): the name the recipient sees.
+
+To attach a Google Doc, Sheet, or Slides deck, save it first with `drive.export_file` (PDF by default). Then pass its `threadFileId`. Gmail does not read Drive files directly.
+
+Gmail limits the attachments of one email to 25 MB in total. If the files are larger, share a Google Drive link in the body instead.
 
 ---
 
@@ -215,6 +246,11 @@ Risk: **medium**.
 1. `gmail.list_messages` with `q: "from:alice@example.com"` to find the message
 2. `gmail.get_message` to read the full content
 3. `gmail.send_email` with `replyToMessageId` set to thread correctly
+
+**Email a generated file and a Google Doc:**
+1. `drive.export_file` with the Doc's `fileId` to save it as a PDF in the thread
+2. `gmail.create_draft` with `attachments`: the export's `threadFileId` and the generated file's `path`
+3. User reviews the draft, then `gmail.send_draft`
 
 **Manage labels:**
 1. `gmail.list_labels` to discover label IDs

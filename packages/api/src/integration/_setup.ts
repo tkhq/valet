@@ -21,6 +21,7 @@ import {
   VirtualSandboxProvider,
   type ChildReader,
   type ChildSender,
+  type ChildStopper,
   type ChildSpawner,
   type ChildStatusReader,
   type SandboxProvider,
@@ -35,6 +36,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -314,6 +316,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -373,6 +376,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
   });
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here unless a test injects one); routes
@@ -415,6 +422,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });

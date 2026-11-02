@@ -273,6 +273,19 @@ reader of the target cannot read the sending thread, the person approves the
 exact text first (`sendWidens`). A private fork that reports to its team
 thread asks; a team thread that sends to a member's private fork does not.
 
+### 16. Duplicate copies the whole thread in place
+
+Call: the sidebar row menu and the thread header menu offer "Duplicate
+thread". A duplicate is a fork of the whole thread into the same workspace,
+titled "<title> (copy)", or "Untitled thread (copy)" when the source has no
+title. A long title loses its end, never the suffix. The source stays as it is: no archive, no note, no
+`movedTo`. The copy records `forkOf` and opens. The fork rules apply: only
+the thread owner or a team member can duplicate, the copy keeps the source's
+audience (so a team thread private to one person, such as an Ask Valet or
+workflow editor thread, does not duplicate; its owner branches it privately), and a thread with a running turn or an open approval does not
+duplicate until it settles. Background work does not block it, because the
+source keeps running.
+
 ### Later
 
 - Compare two versions: a files diff between two leaves' checkpoints, and
@@ -448,6 +461,9 @@ left, so the compaction drops it, returns `noop`, and sets
 - `POST /api/threads/:threadId/fork` with `{ entryId }`. Members only.
   Returns the new thread summary and, for a user message, the text for the
   composer.
+- `POST /api/threads/:threadId/duplicate` with no body copies the whole
+  thread into its workspace (decision 16). Members only. Returns the fork
+  response for the copy, or 409 while a turn runs or waits on an approval.
 - The REST message list projects a note as a system message with a
   `branch` field: `kind` (`edit`, `return`, or `fork`), the tool list, a
   files-changed flag, `canReturn`, the approval choices that still apply,

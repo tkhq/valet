@@ -416,6 +416,7 @@ describe("workflow case files", () => {
       "workflow-release-report",
       "workflow-sales-tracker",
       "workflow-scheduled-refresh",
+      "workflow-webhook-or-schedule",
     ]);
     for (const c of cases) {
       expect(c.drive).toBe("product");
