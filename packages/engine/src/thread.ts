@@ -19,7 +19,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
+import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -195,7 +195,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
@@ -4674,7 +4674,7 @@ export class Thread {
    */
   private async appendUserEntry(
     item: QueueItem,
-  ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
+  ): Promise<{ text: string; attachments: MessageEntry["attachments"]; time: MessageTime }> {
     // Every path that appends the user entry moves an edit's leaf first, the
     // claim loop's credential-cap path included. It runs once per item.
     await this.applyEdit(item);
@@ -4780,6 +4780,7 @@ export class Thread {
       return {
         text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
+        time: entryMessageTime(existingUserEntry),
       };
     }
 
@@ -4815,9 +4816,14 @@ export class Thread {
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
     const baseMetadata = stripSignalStamp(item.metadata);
-    const metadata = spilledInputPath
-      ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
-      : baseMetadata;
+    // The timezone read now, written once with `createdAt`: together they
+    // render this entry's `[sent: …]` line on every later call.
+    const userTimezone = await this.session.currentUserTimezone();
+    const metadata = {
+      ...(baseMetadata ?? {}),
+      ...(spilledInputPath ? { [SPILLED_INPUT_PATH_KEY]: spilledInputPath } : {}),
+      [ENTRY_USER_TIMEZONE_KEY]: userTimezone ?? null,
+    };
 
     text = renderReplyContext(text, metadata);
 
@@ -4846,7 +4852,7 @@ export class Thread {
       this.appendEntry(userEntry, this.fence),
     );
     this.turnUserEntryId ??= userEntry.id;
-    return { text, attachments };
+    return { text, attachments, time: entryMessageTime(userEntry) };
   }
 
   /**
@@ -5083,7 +5089,7 @@ export class Thread {
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
     // `agent.state.messages` across subsequent turns: the LLM sees the image
     // on every downstream call, not just the turn it was uploaded on.
-    const { text, attachments } = await this.appendUserEntry(item);
+    const { text, attachments, time } = await this.appendUserEntry(item);
     const queuedSkillFact = item.metadata?.skillInvocation;
     if (isSkillInvocationFact(queuedSkillFact)) {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
@@ -5131,7 +5137,7 @@ export class Thread {
       if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
 
       try {
-        await this.runAgent(text, attachments, sender);
+        await this.runAgent(text, attachments, sender, time);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -5349,11 +5355,12 @@ export class Thread {
    */
   private async runAgent(
     text: string,
-    attachments?: MessageEntry["attachments"],
-    sender?: PromptAuthor,
+    attachments: MessageEntry["attachments"] | undefined,
+    sender: PromptAuthor | undefined,
+    time: MessageTime,
   ): Promise<void> {
     if (!(await this.canRunCurrentSubmission())) return;
-    const content = userContentBlocks(text, attachments, sender);
+    const content = userContentBlocks(text, attachments, sender, time);
     // Delivery steers only inside finishTurn, just before the loop reads the
     // steered messages, so this queue is empty here. Clearing it keeps an
     // interrupted boundary from replaying a delivered message into a later
@@ -5654,13 +5661,13 @@ export class Thread {
       role: "user",
       content: prompt,
       channel: item.channel,
-      metadata: { compaction_continue: true, synthetic: true },
+      metadata: { compaction_continue: true, synthetic: true, [ENTRY_USER_TIMEZONE_KEY]: this.session.lastKnownUserTimezone ?? null },
       queueItemId: item.id,
       createdAt: Date.now(),
     };
     await this.fencedWrite(() => this.appendEntry(entry, this.fence));
     if (this.staleFenceDetected) return;
-    await this.runAgent(prompt);
+    await this.runAgent(prompt, undefined, undefined, entryMessageTime(entry));
   }
 
   /**
@@ -6707,7 +6714,7 @@ export class Thread {
     // first and the item is not delivered, or it finds the item settled.
     // An item is in `taken` once it settles `merged`, so a failure on a
     // later item still delivers the earlier ones; nothing else would run them.
-    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }> = [];
+    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }> = [];
     const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running, taken));
     this.overheardCoalesceChain = run.then(() => null, () => null);
     try {
@@ -6715,8 +6722,8 @@ export class Thread {
     } catch (err) {
       this.emitError("mid_turn_delivery_failed", err instanceof Error ? err.message : String(err));
     }
-    for (const { text, attachments, sender } of taken) {
-      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender), timestamp: Date.now() });
+    for (const { text, attachments, sender, time } of taken) {
+      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() });
     }
   }
 
@@ -6747,7 +6754,7 @@ export class Thread {
    */
   private async takeMidTurnItems(
     running: QueueItem,
-    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>,
+    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }>,
   ): Promise<void> {
     const store = this.session.providers.store;
     const run = this.midTurnRun(await store.listUnsettledSubmissions(this.session.id), running);
@@ -6762,7 +6769,7 @@ export class Thread {
         // in the transcript this turn was rebuilt from, so it is settled but
         // not steered again. An entry this process wrote is steered.
         const recovered = !this.midTurnAppended.has(item.id) && await this.hasUserEntry(item.id);
-        const { text, attachments } = await this.appendUserEntry(item);
+        const { text, attachments, time } = await this.appendUserEntry(item);
         if (stopped()) break;
         this.midTurnAppended.add(item.id);
         // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
@@ -6778,6 +6785,7 @@ export class Thread {
           taken.push({
             text,
             attachments,
+            time,
             ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
           });
         }
@@ -7040,6 +7048,7 @@ export class Thread {
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
+      currentUserTimezone: () => session.currentUserTimezone(),
       cwd: session.options.workspace,
       // The turn's author picks whose account a team read uses first. A
       // channel sender with no Valet account acts for nobody.
@@ -8235,11 +8244,17 @@ function findMostRecentCompaction(
  * model can tell which person sent the message. Callers pass it only on
  * shared (team/org-owned) sessions — on a personal session every prompt has
  * the same author and the line would be noise.
+ *
+ * `time` renders as the first line, `[sent: …]` (`messageTimeLine`). Every
+ * engine caller passes the persisted entry's `entryMessageTime`, so the
+ * newest message tells the model the current time and older messages keep
+ * their bytes.
  */
 export function userContentBlocks(
   text: string,
   attachments: MessageEntry["attachments"] | undefined,
   sender?: PromptAuthor,
+  time?: MessageTime,
 ): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   const files = (attachments ?? []).filter(
     (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
@@ -8247,7 +8262,8 @@ export function userContentBlocks(
   );
   const note = formatFileAttachmentsNote(files);
   const senderLine = formatSenderLine(sender);
-  const prefixed = [senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
+  const timeLine = time ? messageTimeLine(time) : undefined;
+  const prefixed = [timeLine, senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
   return [
     { type: "text" as const, text: prefixed },
     ...attachmentsToImageBlocks(attachments),
@@ -8514,7 +8530,7 @@ export function entriesToAgentMessages(
           ? renderSignalEnvelope(e.signal, e.content)
           : renderReplyContext(e.content, e.metadata);
       const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
-      const contentBlocks = userContentBlocks(text, e.attachments, sender);
+      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
       out.push({
         role: "user",
         content: contentBlocks,

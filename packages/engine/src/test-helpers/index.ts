@@ -19,3 +19,5 @@ export {
 } from "@earendil-works/pi-ai/compat";
 
 export { fauxToolCall } from "./tool-intent.js";
+
+export { withoutSentLine } from "./sent-line.js";
