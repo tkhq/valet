@@ -195,6 +195,16 @@ describe("duplicate", () => {
     expect(((await (await read(copy.thread.id)).json()) as ListMessagesResponse).messages.map((m) => m.content).slice(0, 2)).toEqual(["my idea", "my answer"]);
   });
 
+  it("keeps the copy suffix when the source title is at the length limit", async () => {
+    await boot();
+    const { thread, sessionId } = await personalThread();
+    const long = "x".repeat(200);
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: long });
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    expect(copy.thread.title).toBe(`${"x".repeat(193)} (copy)`);
+    expect(copy.thread.title).not.toBe(long);
+  });
+
   it("refuses a thread with a turn waiting to run, and a person outside the team", async () => {
     await boot();
     const { thread } = await teamThread();
