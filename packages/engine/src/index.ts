@@ -146,6 +146,18 @@ export {
   type WorkspaceGrowOutcome,
   type EventDeriveResult,
 } from "./metrics.js";
+export {
+  ERROR_AREAS,
+  ERROR_TALLY_WINDOW_MS,
+  MAX_ERROR_SERIES,
+  recentErrorReports,
+  reportError,
+  resetErrorReports,
+  type ErrorArea,
+  type ErrorReport,
+  type ErrorTallyRow,
+} from "./error-report.js";
+export { errorLogFields, log, type LogFields, type LogLevel } from "./log.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
 export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, type ThreadEntryQuery } from "./thread.js";
