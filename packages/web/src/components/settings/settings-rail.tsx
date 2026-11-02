@@ -167,8 +167,8 @@ const MODELS_ITEM: RailItem = { to: "/settings/models", label: "Models", icon: C
 
 /** Single-user-mode stand-in for Organization · MCP servers, shown only
  * while the org gate is OFF and only to an org admin. The API answers with
- * the gate off but returns 403 to a non-admin. The first user of a
- * deployment is its org admin. */
+ * the gate off but returns 403 to a non-admin. A deployment's first admin
+ * joins through an admin invite. */
 const MCP_SERVERS_ITEM: RailItem = {
   to: "/settings/mcp-servers",
   label: "MCP servers",

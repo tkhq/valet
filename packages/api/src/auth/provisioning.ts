@@ -9,7 +9,7 @@ import type { Account, BetterAuthOptions, User } from "better-auth";
 import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
+import { orgMembers, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg, findOrg } from "../services/org.js";
 import { readTeamClaim } from "../services/team-sync.js";
 import { refreshTeamJoinEligibility } from "../services/team-join-eligibility.js";
@@ -23,11 +23,6 @@ export type Admission =
   | { allowed: true; role: "admin" | "member"; inviteId?: string }
   | { allowed: false };
 
-async function countUsers(db: AppQueryable): Promise<number> {
-  const rows = await db.select({ id: users.id }).from(users);
-  return rows.length;
-}
-
 function domainOf(email: string): string | undefined {
   return email.trim().toLowerCase().split("@").pop();
 }
@@ -35,13 +30,17 @@ function domainOf(email: string): string | undefined {
 /**
  * The single admission rule, used by both the signup invite gate and the
  * OAuth/SSO creation gate. Order (first match wins):
- *   1. zero users in the db → admin (bootstraps the first operator)
- *   2. a valid invite matching by code, else by email → the invite's role
- *   3. unrestricted signup enabled AND no domain allow-list → member. A
+ *   1. a valid invite matching by code, else by email → the invite's role
+ *   2. unrestricted signup enabled AND no domain allow-list → member. A
  *      configured allow-list is a fence that signup does not lift.
- *   4. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
+ *   3. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
  *      no subdomain match) → member
- *   5. otherwise → denied
+ *   4. otherwise → denied
+ *
+ * No rule makes the first user an admin: on a reachable host that would be
+ * whoever signs up first. The first admin comes from an invite, either a
+ * config-declared admin or the one-time link `ensureBootstrapAdminInvite`
+ * prints to the server log.
  *
  * The invite rule precedes the domain rule so a config-declared admin whose
  * email domain is also allowlisted is admitted as admin (the invite's role),
@@ -54,10 +53,6 @@ export async function evaluateAdmission(
   email: string,
   inviteCode?: string,
 ): Promise<Admission> {
-  if ((await countUsers(db)) === 0) {
-    return { allowed: true, role: "admin" };
-  }
-
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
@@ -156,8 +151,7 @@ function isSsoPath(path: string | undefined): boolean {
 }
 
 /** SSO paths never reject: an admission the rule would otherwise deny still
- * resolves to "member" (spec: "SSO paths skip the rule entirely (→ member,
- * or admin if first user)"). */
+ * resolves to "member". Admin comes only from an invite, as on every path. */
 function roleFromAdmission(admission: Admission): "admin" | "member" {
   return admission.allowed ? admission.role : "member";
 }

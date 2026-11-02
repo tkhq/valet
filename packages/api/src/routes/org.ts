@@ -410,7 +410,7 @@ orgRouter.patch("/plugins/:name", async (c) => {
 // `mcpServers` list. Read-only: the operator changes servers in the config
 // file. Not tied to the `organizations` gate, for the same reason as
 // `/plugins`: a single-org deployment still runs these servers, and its
-// first user is an org admin.
+// first admin joins through an admin invite.
 //
 // Admin only, with the `isOrgAdmin` check that `requireOrgAdmin` uses: the
 // entries are deployment configuration, and the settings UI shows the page

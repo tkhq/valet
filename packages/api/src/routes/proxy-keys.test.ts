@@ -14,6 +14,7 @@ import { createLlmProvider } from "../services/llm-providers.js";
 import { setProxySettings } from "../services/org.js";
 import { clearDeviceStartLimits } from "./cli-device.js";
 import type { CliDeviceCodeResponse, CliDeviceInfo, CliProxyKeyResponse, CreateInviteResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -80,7 +81,7 @@ describe("proxy key device flow", () => {
   it("gives the CLI's own account a proxy-only key that carries Claude Code traffic and revokes with the CLI token", async () => {
     api = await bootTestApi({ auth: true });
     const { baseUrl, providers } = api;
-    const ownerCookie = await signUp(baseUrl, "owner@example.test");
+    const ownerCookie = await signUp(baseUrl, "owner@example.test", await bootstrapAdminInviteCode(api.providers.db));
     const otherCookie = await signUp(baseUrl, "other@example.test", await invite(baseUrl, ownerCookie));
     const ownerId = await userId(api, "owner@example.test");
     const cli = await mintCliToken(providers.db, ownerId, "test-box");
@@ -181,7 +182,7 @@ describe("proxy key device flow", () => {
   it("refuses to revoke a key that is not proxy-scoped, and keeps login requests as they were", async () => {
     api = await bootTestApi({ auth: true });
     const { baseUrl, providers } = api;
-    const cookie = await signUp(baseUrl, "owner@example.test");
+    const cookie = await signUp(baseUrl, "owner@example.test", await bootstrapAdminInviteCode(api.providers.db));
     const ownerId = await userId(api, "owner@example.test");
     const cli = await mintCliToken(providers.db, ownerId, "test-box");
     const created = await fetch(`${baseUrl}/api/auth/api-key/create`, {

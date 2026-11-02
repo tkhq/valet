@@ -34,6 +34,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { ensureBootstrapAdminInvite } from "./auth/bootstrap-admin.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
@@ -306,7 +307,7 @@ try {
     sandboxJwtMaster: authConfig?.sandboxJwtMaster,
     sandboxApiUrl,
     // Real auth configured → skip seeding the local-dev identity so the
-    // "zero users → first signup becomes admin" provisioning rule can fire
+    // first admin comes from an invite (`auth/bootstrap-admin.ts`)
     // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
     // here — the boot check above refuses that pair.
     seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
@@ -541,6 +542,12 @@ async function runBootChain(): Promise<void> {
   const seededTeams = await seedMissingTeamDefaults(providers.db);
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
+  }
+  // With real auth and no users yet, the first admin needs the one-time
+  // link printed here. After the reconcile, so a config-declared admin
+  // invite makes the link unnecessary.
+  if (authConfig) {
+    await ensureBootstrapAdminInvite(providers.db, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
   }
 
   if (closed) return;

@@ -72,10 +72,12 @@ describe("evaluateAdmission", () => {
     ({ appDb: db } = await freshTestPgDb());
   });
 
-  it("admits the first user in the db as admin, regardless of domain/invite", async () => {
-    const cfg = baseConfig();
-    const result = await evaluateAdmission(db, cfg, "anyone@nowhere.test");
-    expect(result).toEqual({ allowed: true, role: "admin" });
+  it("never admits the first user as admin for being first", async () => {
+    // Zero users: no invite means no admission, and open signup or an allowed domain gives member only.
+    expect(await evaluateAdmission(db, baseConfig(), "anyone@nowhere.test")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "anyone@nowhere.test")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, baseConfig({ allowedEmailDomains: ["nowhere.test"] }), "anyone@nowhere.test"))
+      .toEqual({ allowed: true, role: "member" });
   });
 
   it("admits unrestricted signups as members only when explicitly enabled", async () => {
@@ -128,11 +130,11 @@ describe("evaluateAdmission", () => {
     expect(await evaluateAdmission(db, cfg, "nobody@nowhere.test")).toEqual({ allowed: false });
   });
 
-  it("precedence: first-user beats domain and invite", async () => {
+  it("admits the first user as admin only through an admin invite", async () => {
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    await createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
-    // db has zero users still — first-user wins over domain match and invite.
-    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "admin" });
+    const { invite } = await createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
+    // Zero users: a member invite stays a member invite.
+    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "member", inviteId: invite.id });
   });
 
   it("precedence: an admin invite beats an allowlisted domain (invite role wins, inviteId set)", async () => {
@@ -315,7 +317,7 @@ describe("buildAuthHooks", () => {
       expect(result).toMatchObject({ data: { role: "member" } });
     });
 
-    it("SSO path: first user (empty db) is stamped admin", async () => {
+    it("SSO path: the first user (empty db) is a member without an admin invite", async () => {
       const fresh = await freshTestPgDb();
       db = fresh.appDb;
       credentialStore = new PgCredentialStore(fresh.pgdb, deriveSecretKey("test-key"));
@@ -325,7 +327,7 @@ describe("buildAuthHooks", () => {
         makeUser({ email: "first@nowhere.test" }),
         dbHookCtx({ path: "/sso/callback/keycloak" }),
       );
-      expect(result).toMatchObject({ data: { role: "admin" } });
+      expect(result).toMatchObject({ data: { role: "member" } });
     });
 
     it("password signup path: role stamped from the admission rule (domain match)", async () => {
