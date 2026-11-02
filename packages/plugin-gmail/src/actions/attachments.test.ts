@@ -208,6 +208,7 @@ describe('gmail attachments', () => {
     expect(upload.headers.Authorization).toBe('Bearer test-token');
     const sent = Buffer.from(upload.body).toString('latin1');
     expect(Number(start.headers['X-Upload-Content-Length'])).toBe(upload.body.byteLength);
+    expect(upload.headers['Content-Range']).toBe(`bytes 0-${upload.body.byteLength - 1}/${upload.body.byteLength}`);
     expect(sent).toContain('Subject: Contract');
     expect(sent).toContain(base64Of(large).slice(0, 76));
   });

@@ -71,7 +71,12 @@ export async function submitRawMessage(opts: {
   }
   return fetch(session, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'message/rfc822' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'message/rfc822',
+      // The whole message in one request.
+      'Content-Range': `bytes 0-${message.byteLength - 1}/${message.byteLength}`,
+    },
     // A copy typed over a plain ArrayBuffer, which BodyInit requires.
     body: new Uint8Array(message),
     signal,
