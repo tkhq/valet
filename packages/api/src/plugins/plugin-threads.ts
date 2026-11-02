@@ -22,6 +22,7 @@ import {
   type SubmissionResult,
   type ValetPlugin,
 } from "@valet/engine";
+import type { TSchema } from "typebox";
 import { eq, like, or } from "drizzle-orm";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -113,11 +114,11 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
 
     async post(ref, body, opts) {
       owned(ref);
-      const { thread } = await openThread(ref.key);
+      const { session, thread } = await openThread(ref.key);
       const content: SignalContent = {
         kind: "signal",
         signalType: `plugin.${plugin.name}`,
-        body,
+        body: opts.resultSchema ? `${body}\n\n${answerFormat(opts.resultSchema)}` : body,
         ...(opts.attributes !== undefined ? { attributes: opts.attributes } : {}),
       };
       // Nobody waits on a plugin post, so the turn refuses decision cards
@@ -126,7 +127,11 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
         dispatchId: `plugin:${plugin.name}:${createHash("sha256").update(ref.key).digest("hex").slice(0, 12)}:${opts.dispatchId}`,
         metadata: { [UNATTENDED_DELIVERY_KEY]: true },
       });
-      return { queueItemId: receipt.queueItemId };
+      return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
+    },
+
+    async awaitReply(reply, opts) {
+      return awaitSubmission(deps, { sessionId: reply.sessionId, queueItemId: reply.queueItemId }, opts);
     },
 
     async spawnChild(ref, req, opts) {
@@ -156,6 +161,9 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           ...(req.model !== undefined ? { model: req.model } : {}),
           ...(req.repo !== undefined ? { repo: req.repo } : {}),
           ...(req.ref !== undefined ? { branch: req.ref } : {}),
+          ...(req.profile !== undefined ? { profile: req.profile } : {}),
+          ...(req.docker !== undefined ? { docker: req.docker } : {}),
+          ...(req.resources !== undefined ? { resources: req.resources } : {}),
         },
         {
           parentSessionId: parent.sessionId,
@@ -170,38 +178,39 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
     },
 
     async awaitChild(child, opts) {
-      return awaitPluginChild(deps, child, opts);
+      return awaitSubmission(deps, { sessionId: child.childSessionId, queueItemId: child.queueItemId }, opts);
     },
   };
 }
 
 /**
- * Wait for a child submission to settle, then read its result from the
- * store. Polls the queue item: the child may run in another process after a
- * restart, so there is no in-process event to wait on.
+ * Wait for a submission (a child's task, or the assistant's answer to a
+ * post) to settle, then read its result from the store. Polls the queue
+ * item: the work may run in another process after a restart, so there is no
+ * in-process event to wait on.
  */
-export async function awaitPluginChild(
+export async function awaitSubmission(
   deps: Pick<PluginThreadsDeps, "engineStore" | "pollMs">,
-  child: PluginChild,
+  target: { sessionId: string; queueItemId: string },
   opts: Parameters<PluginThreads["awaitChild"]>[1] = {},
 ): Promise<SubmissionResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  let itemId = child.queueItemId;
+  let itemId = target.queueItemId;
   for (let hop = 0; hop <= MAX_MERGE_HOPS; hop++) {
     for (;;) {
-      const item = await deps.engineStore.getQueueItem(child.childSessionId, itemId);
-      if (!item) throw new Error(`Child submission ${itemId} is missing from session ${child.childSessionId}.`);
+      const item = await deps.engineStore.getQueueItem(target.sessionId, itemId);
+      if (!item) throw new Error(`Submission ${itemId} is missing from session ${target.sessionId}.`);
       if (item.status === "settled") {
         const outcome = item.outcome ?? { outcome: "failed" as const, error: "settled without a recorded outcome" };
         if (outcome.outcome === "merged" && item.mergedIntoItemId) {
           itemId = item.mergedIntoItemId;
           break;
         }
-        return settledSubmissionResult(deps.engineStore, child.childSessionId, item, outcome, opts);
+        return settledSubmissionResult(deps.engineStore, target.sessionId, item, outcome, opts);
       }
       if (Date.now() >= deadline) {
-        // The child keeps running; a later awaitChild with the same handle picks it up.
+        // The work keeps running; a later wait with the same handle picks it up.
         throw new TimeoutError(itemId, timeoutMs);
       }
       await new Promise((resolve) => setTimeout(resolve, deps.pollMs ?? DEFAULT_POLL_MS));
@@ -244,4 +253,14 @@ async function freeChildId(deps: PluginThreadsDeps, baseId: string): Promise<str
     console.warn("plugin_child_orphan", { childSessionId: id });
   }
   throw new Error(`Child ${baseId} failed to start ${MAX_ORPHAN_RETRIES + 1} times. Check the orphaned child sessions in the logs.`);
+}
+
+/** The instruction a typed `post` appends, so the assistant ends with JSON the schema accepts. */
+export function answerFormat(schema: TSchema): string {
+  return [
+    "End your answer with one ```json code block that matches this JSON Schema.",
+    "```json",
+    JSON.stringify(schema, null, 2),
+    "```",
+  ].join("\n");
 }
