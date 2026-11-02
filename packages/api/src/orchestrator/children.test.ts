@@ -5673,6 +5673,33 @@ describe("child batches and child_stop", () => {
     expect(await parentSignals(p.parent.id)).toHaveLength(1);
   });
 
+  it("keeps two turns that reuse a batch name apart", async () => {
+    const p = await batchParent("overlap");
+    const { db, engineStore } = api!.providers;
+    for (const turn of ["qi-turn-1", "qi-turn-2"]) {
+      await engineStore.admitSubmission(p.parent.id, p.parentThread.id, queuedItem(turn, p.parentThread.id, turn));
+      await engineStore.settleUnclaimed(p.parent.id, p.parentThread.id, turn, { outcome: "completed" });
+    }
+    const a = await batchChild(p, "child-overlap-a", "review", "Turn 1 A");
+    const b = await batchChild(p, "child-overlap-b", "review", "Turn 1 B");
+    const c = await batchChild(p, "child-overlap-c", "review", "Turn 2 C");
+    for (const [child, turn] of [["child-overlap-a", "qi-turn-1"], ["child-overlap-b", "qi-turn-1"], ["child-overlap-c", "qi-turn-2"]]) {
+      await db.update(childWatches).set({ parentQueueItemId: turn }).where(eq(childWatches.childSessionId, child!));
+    }
+
+    await a.settle(); // held: B, from the same turn, still runs
+    await c.settle(); // a later turn's batch: reports without waiting on B
+    let signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).attributes?.child_session_id).toBe("child-overlap-c");
+    expect((signals[0]!.content as SignalContent).body).not.toContain("child-overlap-a");
+
+    await b.settle();
+    signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(2);
+    expect(signals.map((s) => (s.content as SignalContent).attributes?.batch_children)).toContain("child-overlap-a,child-overlap-b");
+  });
+
   it("delivers a re-opened member's first held report with its follow-up", async () => {
     const p = await batchParent("reopen");
     const { db, engineStore } = api!.providers;

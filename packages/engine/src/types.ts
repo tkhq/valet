@@ -3297,9 +3297,10 @@ export interface SpawnChildRequest {
    * — the session must register the role in its `roles` option). */
   role?: string;
   /**
-   * Batch name. Children spawned on one parent thread with the same batch
-   * report together: the host holds each result until the last child in the
-   * batch settles, then admits one `child.settled` signal with all of them.
+   * Batch name. Children one parent turn spawns with the same batch report
+   * together: the host holds each result until the last child in the batch
+   * settles, then admits one `child.settled` signal with all of them. A later
+   * turn that reuses the name starts a new batch.
    */
   batch?: string;
 }
