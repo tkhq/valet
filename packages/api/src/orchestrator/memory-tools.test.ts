@@ -19,12 +19,13 @@ import type {
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
-import { agentSessions, artifacts, teamMembers } from "../schema/index.js";
+import { agentSessions, artifacts, memoryFiles, teamMembers } from "../schema/index.js";
 import { writeFile } from "../services/memory.js";
 import { addArtifactComment, resolveArtifactComment } from "../services/artifacts.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
+  savePrincipleTool,
   memWriteTool,
   memPatchTool,
   memReadTool,
@@ -90,6 +91,7 @@ describe("buildMemoryTools", () => {
     const names = buildMemoryTools().map((t) => t.name);
     expect(names).toEqual([
       "mem_write",
+      "save_principle",
       "mem_patch",
       "mem_read",
       "mem_search",
@@ -203,6 +205,29 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const readResult = await memReadTool.execute({ path: "notes/hello.md" }, ctx);
     expect(readResult.text).toContain("World.");
+  });
+
+  it("save_principle writes a principle the Principles index lists", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const saved = await savePrincipleTool.execute({
+      name: "prove-it-works",
+      rule: "Prove a fix works before saying it is done",
+      when: "Any bug fix or change a person will rely on",
+      details: "Run the failing case again after the fix. A passing build is not proof.",
+    }, ctx);
+    expect(saved.text).toBe("wrote principles/prove-it-works.md (v1)");
+
+    const read = await memReadTool.execute({ path: "principles/prove-it-works.md" }, ctx);
+    expect(read.text).toContain("# Prove a fix works before saying it is done");
+    expect(read.text).toContain("A passing build is not proof.");
+    const files = await api.providers.db.select().from(memoryFiles).where(eq(memoryFiles.path, "principles/prove-it-works.md"));
+    expect(files[0]).toMatchObject({ type: "principle", description: "Any bug fix or change a person will rely on" });
   });
 
   it("mem_write relays ⚠ warnings from the service", async () => {

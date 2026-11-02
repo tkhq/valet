@@ -903,6 +903,34 @@ export const memRmTool = defineTool({
 /** The tools a child session or a workflow step gets: it reads its
  * owner's memory, such as a principle its snapshot lists, and writes none.
  * Its assistant curates memory. */
+// ─── save_principle ────────────────────────────────────────────────────
+
+/** Save a principle: a rule for how the work is done, kept at
+ * `principles/<name>.md` and listed in every snapshot's Principles index
+ * (brain spec). A thin wrapper over mem_write, so a model that would not
+ * compose the file shape itself still writes a well-formed principle. */
+export const savePrincipleTool = defineTool({
+  name: "save_principle",
+  ownerOnly: true,
+  description:
+    "Save a rule a person gave you for how to do the work, so you follow it in every later conversation. Use it when a person corrects you or states a standing rule. Search principles/ with mem_search first, and pass the same name to update a principle that covers the same rule. Pass teamId only when the person asks you to add the rule to that team; only a team admin can save a team principle.",
+  parameters: Type.Object({
+    name: Type.String({ pattern: "^[a-z0-9][a-z0-9-]{1,62}$", description: "Short file name in kebab case, e.g. 'prove-it-works'. The principle is saved at principles/<name>.md." }),
+    rule: Type.String({ minLength: 3, maxLength: 120, description: "The rule in a few words, e.g. 'Prove a fix works before saying it is done'." }),
+    when: Type.String({ minLength: 3, maxLength: 200, description: "When the rule applies, in one line." }),
+    details: Type.String({ minLength: 3, maxLength: 4000, description: "The rule, the reason for it, and one example." }),
+    teamId: Type.Optional(Type.String({ description: "Save it to this team's shared principles instead of your own. Only when the person asked for a team rule." })),
+  }),
+  execute: async (args, ctx) => memWriteTool.execute({
+    path: `principles/${args.name}.md`,
+    content: `# ${args.rule}\n\n${args.details}\n`,
+    type: "principle",
+    description: args.when,
+    origin: "user-stated",
+    ...(args.teamId !== undefined ? { teamId: args.teamId } : {}),
+  }, ctx),
+});
+
 export function buildReadOnlyMemoryTools(): ToolDef[] {
   return [memReadTool, memSearchTool];
 }
@@ -913,6 +941,7 @@ export function buildReadOnlyMemoryTools(): ToolDef[] {
 export function buildMemoryTools(): ToolDef[] {
   return [
     memWriteTool,
+    savePrincipleTool,
     memPatchTool,
     memReadTool,
     memSearchTool,

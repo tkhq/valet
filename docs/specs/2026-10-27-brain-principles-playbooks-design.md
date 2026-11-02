@@ -41,6 +41,14 @@ The section holds the index, not the bodies. The model reads a body with `mem_re
 
 The snapshot budget never drops the section, so the index has a cap: 40 lines or 4,000 characters, whichever it reaches first. Past the cap, one line gives the number of principles not listed and tells the model to read the directory with `mem_read principles/` or `mem_read team:<id>/principles/`.
 
+### Saving a principle
+
+The `save_principle` tool saves a principle (amended 2026-11-02). It takes a file name, the rule in a few words, when the rule applies, and the details: the rule, the reason, and one example. It writes `principles/<name>.md` through the same route as `mem_write`, with type `principle`, so every check below applies. The base principle names this tool, because a model follows a named tool more reliably than a file layout it must compose.
+
+### The Principles view
+
+The memory page has a Principles view beside Files, Graph and Usage. It lists the built-in principle first, then each saved principle with its rule, a Team badge for a team principle, how often agents used it, and when it was last edited. A row opens the file.
+
 ### Who can write a principle
 
 A team principle reaches the assistant of every team member at its next wake. So a team principle takes more than a team note:

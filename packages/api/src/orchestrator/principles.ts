@@ -25,7 +25,7 @@ export const BASE_PRINCIPLE = `### ${BASE_PRINCIPLE_NAME} (built in)
 Applies when a person tells you how they want the work done.
 
 - If a person corrects you or states a rule for your work, write a personal principle in your own memory.
-- Write a principle with mem_write at \`principles/<name>.md\`. Set the title to the rule in a few words. Set the description to when the rule applies, in one line. In the body, write the rule, the reason, and one example.
+- Save a principle with save_principle. Give the rule in a few words, when it applies in one line, and the details: the rule, the reason, and one example.
 - Before you write, search \`principles/\` with mem_search. If a principle covers the same rule, update it. Do not make a duplicate.
 - Write a team principle only when a person in this conversation asks you to add the rule to a team. Then pass that team's \`teamId\`. Only a team admin or an organization admin can write a team principle. If the write is refused, tell the person and offer to save the rule as a personal principle.
 - Before you make a choice in open-ended work, check the index below. Read a principle with mem_read before you follow it. Say which principle you followed.

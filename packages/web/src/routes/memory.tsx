@@ -32,8 +32,9 @@ function MemoryLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isGraph = pathname === "/memory/graph";
   const isUsage = pathname === "/memory/usage";
-  // The graph and usage views own the right pane, like an open file.
-  const isView = isGraph || isUsage;
+  const isPrinciples = pathname === "/memory/principles";
+  // The graph, usage and principles views own the right pane, like an open file.
+  const isView = isGraph || isUsage || isPrinciples;
   const activePath =
     !isView && pathname.startsWith(MEMORY_PREFIX)
       ? decodeURIComponent(pathname.slice(MEMORY_PREFIX.length))
@@ -53,6 +54,7 @@ function MemoryLayout() {
         <div className="flex min-w-0 items-center gap-1 px-2 pt-2">
           <ViewTab to="/memory" label="Files" active={!isView} back={Boolean(activePath) || isView} />
           <ViewTab to="/memory/graph" label="Graph" active={isGraph} />
+          <ViewTab to="/memory/principles" label="Principles" active={isPrinciples} />
           <ViewTab to="/memory/usage" label="Usage" active={isUsage} />
         </div>
         <div className={cn("flex-1 min-h-0 overflow-y-auto", (activePath || isView) && "hidden md:block")}>
