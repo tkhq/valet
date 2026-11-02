@@ -875,20 +875,26 @@ export class EventDispatcher {
       // Take the claim this poll made. A miss means another process
       // re-claimed the row between the claim and here.
       if (!(await takeLease({ attempts }))) return;
+      // The outcome is decided after the run, abort reason first: a handler
+      // that ignores `ctx.signal` and returns normally after its line was
+      // turned off must not read as delivered.
+      let failure: { err: unknown } | undefined;
       try {
         await this.runPluginDelivery(event, sub, target, abort.signal);
-        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(owned());
       } catch (err) {
-        if (abort.signal.aborted && abort.signal.reason === PLUGIN_LEASE_LOST) {
-          // Another run owns the row now; its outcome is the one that counts.
-        } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
-          await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
-        } else if (abort.signal.aborted && this.stopped) {
-          // Shutdown is not the handler's fault. The lease lapses and a
-          // later process runs it again.
-        } else {
-          await this.recordDeliveryFailure(delivery, event, err, attempts, owned());
-        }
+        failure = { err };
+      }
+      if (abort.signal.aborted && abort.signal.reason === PLUGIN_LEASE_LOST) {
+        // Another run owns the row now; its outcome is the one that counts.
+      } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
+        await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
+      } else if (abort.signal.aborted && this.stopped) {
+        // Shutdown is not the handler's fault. The lease lapses and a
+        // later process runs it again.
+      } else if (failure) {
+        await this.recordDeliveryFailure(delivery, event, failure.err, attempts, owned());
+      } else {
+        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(owned());
       }
     })()
       .catch((err) => console.error(`plugin delivery ${delivery.id}: outcome not recorded:`, err))

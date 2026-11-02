@@ -249,6 +249,24 @@ describe("EventDispatcher plugin target", () => {
     await d.stop();
   });
 
+  it("skips, not delivers, when a handler that ignores the signal returns after its line was turned off", async () => {
+    const { deliveryId } = await seed();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    let aborted = false;
+    const d = dispatcher(pluginWith(async (_event, ctx) => {
+      ctx.signal.addEventListener("abort", () => { aborted = true; });
+      await gate;
+    }));
+    await d.pollOnce();
+    await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
+    for (let i = 0; i < 100 && !aborted; i++) await new Promise((r) => setTimeout(r, 10));
+    release();
+    const row = await settled(deliveryId);
+    expect(row.status).toBe("skipped");
+    await d.stop();
+  });
+
   it("marks a delivery dead when its handler never finished across every attempt", async () => {
     const { deliveryId } = await seed({ attempts: 5 });
     const handle = vi.fn(async () => {});
