@@ -7,10 +7,12 @@ import { safeNextPath } from "~/lib/next-path";
 import { Button, Input, Label, Spinner } from "~/components/primitives";
 
 /**
- * `/login` — public (auth-v2 design). Email/password, plus social/SSO
- * buttons filtered to what `GET /api/auth-config` reports connected
- * (`stub: true` deployments report empty `social`/`sso` and this page is
- * unreachable anyway — the guard in `api/client.ts` never fires).
+ * `/login` — public (auth-v2 design). It shows only the sign-in methods
+ * `GET /api/auth-config` reports on (`AUTH_METHODS`): the email/password form
+ * when `password` is on, and one button per social or SSO provider. The
+ * primary method comes first. With no method on, the page says so instead
+ * of showing a form that cannot work. (`stub: true` deployments never reach
+ * this page: the guard in `api/client.ts` never fires.)
  *
  * `?next=` (artifacts design): where to land after sign-in — set by the
  * central 401 redirect and by the shared-artifact page, so a teammate who
@@ -69,9 +71,84 @@ export function LoginPage({ next }: { next?: string } = {}) {
     finishAuthChange(safeNextPath(next) ?? "/");
   }
 
-  const social = authConfigQ.data?.social ?? [];
-  const sso = authConfigQ.data?.sso ?? null;
-  const hasAlternatives = social.length > 0 || sso !== null;
+  const config = authConfigQ.data;
+  const social = config?.social ?? [];
+  const sso = config?.sso ?? null;
+  const passwordOn = config?.password ?? false;
+  const primary = config?.primary ?? null;
+  const callbackURL = () => `${window.location.origin}${next ?? "/"}`;
+
+  // One button per provider. The primary provider takes the primary style.
+  const providerButtons = [
+    ...(sso ? [{ id: "oidc" as const, label: `Continue with ${sso.name}`,
+      // Origin-absolute: a relative callbackURL resolves against
+      // BETTER_AUTH_URL (the api origin), which in dev is :8788,
+      // not the vite server the user is on.
+      onClick: () => authClient.signIn.sso({ providerId: "oidc", callbackURL: callbackURL() }) }] : []),
+    ...social.map((provider) => ({ id: provider, label: SOCIAL_LABEL[provider],
+      onClick: () => authClient.signIn.social({ provider, callbackURL: callbackURL() }) })),
+  ].sort((a, b) => Number(b.id === primary) - Number(a.id === primary));
+
+  const buttons = providerButtons.length > 0 && (
+    <div className="space-y-2">
+      {providerButtons.map((button) => (
+        <Button key={button.id} type="button" variant={button.id === primary ? "primary" : "secondary"} className="w-full" onClick={button.onClick}>
+          {button.label}
+        </Button>
+      ))}
+    </div>
+  );
+
+  const form = passwordOn && (
+    <form className="space-y-4" onSubmit={onSubmit}>
+      <div className="space-y-1.5">
+        <Label htmlFor="login-email">Email</Label>
+        <Input
+          id="login-email"
+          type="email"
+          autoComplete="email"
+          // An address is not prose. Spell-check marks a correct address
+          // as a mistake and gives the wrong hint after a failed sign-in.
+          spellCheck={false}
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="login-password">Password</Label>
+        <Input
+          id="login-password"
+          type="password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+      {error && (
+        <p ref={errorRef} tabIndex={-1} role="alert" className="text-xs text-danger-500">
+          {error}
+        </p>
+      )}
+      {/* The label stays while the request is in flight. A lone spinner
+          names the button "Loading", which tells nobody what is loading. */}
+      <Button type="submit" className="w-full" variant={primary === "password" || providerButtons.length === 0 ? "primary" : "secondary"} disabled={submitting}>
+        {submitting ? (
+          <>
+            <Spinner size={14} /> Signing in…
+          </>
+        ) : (
+          "Sign in"
+        )}
+      </Button>
+    </form>
+  );
+
+  // The primary method leads; the other kind follows under a rule.
+  const passwordFirst = primary === "password" || providerButtons.length === 0;
+  const [first, second] = passwordFirst ? [form, buttons] : [buttons, form];
+  const nothingOn = config !== undefined && !passwordOn && providerButtons.length === 0;
 
   return (
     <div className="grid min-h-screen place-items-center bg-[--bg] px-6 py-12">
@@ -83,95 +160,28 @@ export function LoginPage({ next }: { next?: string } = {}) {
           <h1 className="font-display text-2xl text-ink">Sign in</h1>
         </div>
 
-        <form className="space-y-4" onSubmit={onSubmit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="login-email">Email</Label>
-            <Input
-              id="login-email"
-              type="email"
-              autoComplete="email"
-              // An address is not prose. Spell-check marks a correct address
-              // as a mistake and gives the wrong hint after a failed sign-in.
-              spellCheck={false}
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="login-password">Password</Label>
-            <Input
-              id="login-password"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-          {error && (
-            <p ref={errorRef} tabIndex={-1} role="alert" className="text-xs text-danger-500">
-              {error}
-            </p>
-          )}
-          {/* The label stays while the request is in flight. A lone spinner
-              names the button "Loading", which tells nobody what is loading. */}
-          <Button type="submit" className="w-full" disabled={submitting}>
-            {submitting ? (
-              <>
-                <Spinner size={14} /> Signing in…
-              </>
-            ) : (
-              "Sign in"
-            )}
-          </Button>
-        </form>
-
-        {hasAlternatives && (
-          <div className="space-y-2 border-t border-line pt-6">
-            {social.map((provider) => (
-              <Button
-                key={provider}
-                type="button"
-                variant="secondary"
-                className="w-full"
-                onClick={() =>
-                  authClient.signIn.social({
-                    provider,
-                    callbackURL: `${window.location.origin}${next ?? "/"}`,
-                  })
-                }
-              >
-                {SOCIAL_LABEL[provider]}
-              </Button>
-            ))}
-            {sso && (
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full"
-                onClick={() =>
-                  // Origin-absolute: a relative callbackURL resolves against
-                  // BETTER_AUTH_URL (the api origin), which in dev is :8788,
-                  // not the vite server the user is on.
-                  authClient.signIn.sso({
-                    providerId: "oidc",
-                    callbackURL: `${window.location.origin}${next ?? "/"}`,
-                  })
-                }
-              >
-                Continue with {sso.name}
-              </Button>
-            )}
-          </div>
+        {authConfigQ.isLoading && (
+          <div className="flex justify-center"><Spinner /></div>
         )}
 
-        <p className="text-center text-sm text-muted">
-          New here?{" "}
-          <Link to="/signup" search={{ next }} className="text-moss hover:underline">
-            Create an account
-          </Link>
-        </p>
+        {nothingOn && (
+          <p role="status" className="text-center text-sm text-muted">
+            Sign-in is not set up for this Valet. Ask your administrator to turn on a sign-in method.
+          </p>
+        )}
+
+        {first}
+        {first && second && <div className="border-t border-line pt-6">{second}</div>}
+        {!first && second}
+
+        {passwordOn && (
+          <p className="text-center text-sm text-muted">
+            New here?{" "}
+            <Link to="/signup" search={{ next }} className="text-moss hover:underline">
+              Create an account
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   );

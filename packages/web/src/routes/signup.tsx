@@ -3,6 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { signUpEmailWithInvite } from "~/lib/auth-client";
 import { safeNextPath } from "~/lib/next-path";
+import { useAuthConfig } from "~/api/auth-config";
 import { Button, Input, Label, Spinner } from "~/components/primitives";
 
 interface SignupSearch {
@@ -33,6 +34,7 @@ function SignupRoute() {
 }
 
 export function SignupPage({ invite, next }: { invite?: string; next?: string }) {
+  const authConfigQ = useAuthConfig();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -55,6 +57,20 @@ export function SignupPage({ invite, next }: { invite?: string; next?: string })
       return;
     }
     finishAuthChange(safeNextPath(next) ?? "/");
+  }
+
+  // With password sign-in off, an account comes from the SSO or social
+  // provider on the login page, so this form has nothing to submit to.
+  if (authConfigQ.data && !authConfigQ.data.stub && !authConfigQ.data.password) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-[--bg] px-6 py-12">
+        <div className="w-full max-w-sm space-y-4 text-center">
+          <h1 className="font-display text-2xl text-ink">Create your account</h1>
+          <p className="text-sm text-muted">This Valet does not use passwords. Sign in with your organization account, and Valet creates your account.</p>
+          <Link to="/login" search={{ next }} className="text-sm text-moss hover:underline">Go to sign in</Link>
+        </div>
+      </div>
+    );
   }
 
   return (
