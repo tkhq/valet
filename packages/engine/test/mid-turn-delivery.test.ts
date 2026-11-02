@@ -481,6 +481,22 @@ function toolResultTexts(context: { messages: Array<{ role: string; content: unk
       : (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === "text").map((b) => b.text).join(""));
 }
 
+/**
+ * An event stream that holds the question's announcement: the gate is saved
+ * and shown, but its waiter is not registered until the test releases it.
+ */
+function holdQuestionAnnouncement(): { stream: InMemoryEventStream; announced: Promise<void>; release: () => void } {
+  const announced = latch();
+  const held = latch();
+  class HoldingStream extends InMemoryEventStream {
+    override async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
+      if (event.event.type === "decision_gate") { announced.open(); await held.promise; }
+      return super.append(event, eventKey, fence);
+    }
+  }
+  return { stream: new HoldingStream(), announced: announced.promise, release: held.open };
+}
+
 describe("a message while a question is open", () => {
   const askRepo = fauxAssistantMessage(
     [fauxToolCall("ask_question", { question: "Which repo?", options: ["web", "api"] }, { id: "tc-q" })],
@@ -518,25 +534,15 @@ describe("a message while a question is open", () => {
   });
 
   it("withdraws the question for a message admitted before the question's waiter exists", async () => {
-    // Hold the question's announcement: the gate is saved and shown, but the
-    // waiter is not registered yet. A message sent now must still close it.
-    let reached!: () => void;
-    const announced = new Promise<void>((resolve) => { reached = resolve; });
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    class HoldingStream extends InMemoryEventStream {
-      override async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
-        if (event.event.type === "decision_gate") { reached(); await held; }
-        return super.append(event, eventKey, fence);
-      }
-    }
-    const h = await setup("question-window", [askRepo, fauxAssistantMessage("web is the frontend")], [], new HoldingStream());
+    // A message sent before the waiter exists must still close the question.
+    const hold = holdQuestionAnnouncement();
+    const h = await setup("question-window", [askRepo, fauxAssistantMessage("web is the frontend")], [], hold.stream);
 
     const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
-    await announced;
+    await hold.announced;
     expect(h.thread.pendingDecisionGates()).toHaveLength(0);
     const second = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
-    release();
+    hold.release();
     await waitFor(() => h.settled(first.queueItemId));
 
     expect(await h.outcome(first.queueItemId)).toBe("completed");
@@ -575,6 +581,54 @@ describe("a message while a question is open", () => {
     h.thread.resolveDecision(gateId, { actionId: "option-0", resolvedBy: "u1", resolvedAt: Date.now() });
     await waitFor(() => h.settled(later.queueItemId));
     expect(await h.outcome(first.queueItemId)).toBe("completed");
+    h.faux.unregister();
+  });
+
+  // Delivery takes the leading run of queued items that may join the turn
+  // and stops at the first that cannot. A message behind a followup does
+  // not join the turn, so it must not close the question either.
+  const behindFollowup = [askRepo, fauxAssistantMessage("picked web"), fauxAssistantMessage("opened"), fauxAssistantMessage("web is the frontend")];
+
+  it("keeps the question open for a message queued behind a followup", async () => {
+    const h = await setup("question-behind-followup", behindFollowup);
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await waitFor(() => h.thread.pendingDecisionGates().length === 1);
+    const gateId = h.thread.pendingDecisionGates()[0]!.id;
+    const later = await h.thread.submitPrompt("after that, open a PR", { author: PERSON, queueMode: "followup" });
+    const message = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(h.thread.isPendingGate(gateId)).toBe(true);
+    expect((await h.store.getQueueItem(h.session.id, message.queueItemId))?.status).toBe("queued");
+    h.thread.resolveDecision(gateId, { actionId: "option-0", resolvedBy: "u1", resolvedAt: Date.now() });
+    await waitFor(() => h.settled(message.queueItemId));
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(later.queueItemId)).toBe("completed");
+    expect(await h.outcome(message.queueItemId)).toBe("completed");
+    h.faux.unregister();
+  });
+
+  it("keeps the question open for a message admitted behind a followup before the question's waiter exists", async () => {
+    const hold = holdQuestionAnnouncement();
+    const h = await setup("question-window-behind-followup", behindFollowup, [], hold.stream);
+
+    const first = await h.thread.submitPrompt("pick a repo for me", { author: PERSON });
+    await hold.announced;
+    const later = await h.thread.submitPrompt("after that, open a PR", { author: PERSON, queueMode: "followup" });
+    const message = await h.thread.submitPrompt("what is in web?", { author: PERSON, queueMode: "inject" });
+    hold.release();
+    await waitFor(() => h.events.some((e) => e.event.type === "decision_gate"));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(h.events.map((e) => e.event).find((e) => e.type === "decision_gate_withdrawn")).toBeUndefined();
+    const [gate] = h.thread.pendingDecisionGates();
+    expect(gate).toBeDefined();
+    h.thread.resolveDecision(gate!.id, { actionId: "option-0", resolvedBy: "u1", resolvedAt: Date.now() });
+    await waitFor(() => h.settled(message.queueItemId));
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(later.queueItemId)).toBe("completed");
+    expect(await h.outcome(message.queueItemId)).toBe("completed");
     h.faux.unregister();
   });
 });
