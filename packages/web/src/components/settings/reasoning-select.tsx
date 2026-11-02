@@ -53,7 +53,7 @@ export function ReasoningSelect({
         const next = e.target.value;
         if (next === "" || levels.some(level => level === next)) onChange(next === "" ? null : next);
       }}
-      className={cn("w-full", surface === "plain" && "border-transparent bg-transparent text-right")}
+      className={cn("w-full", surface === "plain" && "border-transparent bg-transparent pl-0 text-right")}
       disabled={disabled || (levels.length === 0 && unavailableValue === null)}
     >
       <option value="">{emptyLabel}</option>
