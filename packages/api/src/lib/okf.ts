@@ -296,8 +296,10 @@ function tagsField(map: YAMLMap): string[] {
  * `text`. Returns `null` when there is no well-formed leading block (e.g.
  * a body that merely starts with a markdown horizontal rule `---`) — the
  * caller then treats the entire input as body with no frontmatter. Never
- * throws; a YAML parse error is treated the same as "no frontmatter". */
-function splitFrontmatter(text: string): { yamlText: string; body: string } | null {
+ * throws; a YAML parse error is treated the same as "no frontmatter".
+ * `yamlText` always starts on line 2 of `text`, so a validator can turn a
+ * YAML error line into a file line. */
+export function splitFrontmatter(text: string): { yamlText: string; body: string } | null {
   if (!text.startsWith("---\n") && text !== "---" && !text.startsWith("---\r\n")) return null;
 
   const firstNewline = text.indexOf("\n");
