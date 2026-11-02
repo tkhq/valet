@@ -250,15 +250,45 @@ export const memWriteTool = defineTool({
 
 // ─── mem_patch ─────────────────────────────────────────────────────────
 
+const patchSchema = Type.Object({
+  path: Type.String(),
+  oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
+  newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
+});
+
+interface PatchSetBody {
+  files: { path: string; version?: number }[];
+  warnings?: unknown;
+}
+
+/** Names each file in the scope the server wrote, as `relayWriteResult` does. */
+function asPatchSetBody(body: unknown): PatchSetBody | null {
+  if (!isRecord(body) || !Array.isArray(body.files)) return null;
+  const files = body.files.flatMap((f) => {
+    if (!isRecord(f) || typeof f.path !== "string") return [];
+    const scoped = f.ownerType === "team" && typeof f.ownerId === "string" && f.ownerId ? `team:${f.ownerId}/${f.path}` : f.path;
+    return [{ path: scoped, version: typeof f.version === "number" ? f.version : undefined }];
+  });
+  return { files, warnings: body.warnings };
+}
+
 export const memPatchTool = defineTool({
   name: "mem_patch",
   ownerOnly: true,
   description:
-    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal).",
+    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal). To change several files together, send `patches` instead of `path`/`oldString`/`newString`: up to 20 patches, applied in order, all or none.",
   parameters: Type.Object({
-    path: Type.String(),
-    oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
-    newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
+    path: Type.Optional(Type.String()),
+    oldString: Type.Optional(Type.String({ description: "Exact text to find, or '' to create a new file at `path`." })),
+    newString: Type.Optional(Type.String({ description: "Replacement text (or full body, when creating)." })),
+    patches: Type.Optional(
+      Type.Array(patchSchema, {
+        minItems: 1,
+        maxItems: 20,
+        description:
+          "A batched patch set, in place of path/oldString/newString. Patches apply in order, so a later patch to the same file sees the earlier edit. If any patch fails, none is applied and the error names the failed patch.",
+      }),
+    ),
     teamId: Type.Optional(
       Type.String({
         description:
@@ -274,6 +304,22 @@ export const memPatchTool = defineTool({
     // Same rule as mem_write: the header keeps this session's scope and the
     // model-named team rides as a parameter the route authorizes.
     if (args.teamId !== undefined) url.searchParams.set("teamId", args.teamId);
+    const single = args.path !== undefined || args.oldString !== undefined || args.newString !== undefined;
+    if (args.patches !== undefined) {
+      if (single) return { text: "[memory_error] Send either path, oldString and newString, or patches, not both." };
+      return memoryRequest(
+        url,
+        { method: "POST", headers: memoryHeaders(cfg, owner, ctx, true), body: JSON.stringify({ patches: args.patches }) },
+        async (res) => {
+          const body = asPatchSetBody(await parseJsonBody(res));
+          const files = (body?.files ?? []).map((f) => `${f.path}${f.version !== undefined ? ` (v${f.version})` : ""}`);
+          return { text: `patched ${files.length} ${files.length === 1 ? "file" : "files"}: ${files.join(", ")}${formatWarnings(body?.warnings)}` };
+        },
+      );
+    }
+    if (args.path === undefined || args.oldString === undefined || args.newString === undefined) {
+      return { text: "[memory_error] Send path, oldString and newString, or a patches list." };
+    }
     return memoryRequest(
       url,
       {

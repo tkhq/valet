@@ -241,6 +241,34 @@ describe("mem_* tools: real HTTP round trip", () => {
     expect(readResult.text).not.toContain("Alpha.");
   });
 
+  it("mem_patch applies a batch of patches in one call, or none of them", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+    await memWriteTool.execute({ path: "principles/a.md", content: "# A\n\nOld rule.\n" }, ctx);
+    await memWriteTool.execute({ path: "notes/b.md", content: "# B\n\nOld note.\n" }, ctx);
+
+    const ok = await memPatchTool.execute({ patches: [
+      { path: "principles/a.md", oldString: "Old rule", newString: "New rule" },
+      { path: "notes/b.md", oldString: "Old note", newString: "New note" },
+    ] }, ctx);
+    expect(ok.text).toBe("patched 2 files: principles/a.md (v2), notes/b.md (v2)");
+
+    const refused = await memPatchTool.execute({ patches: [
+      { path: "notes/b.md", oldString: "New note", newString: "Newer note" },
+      { path: "principles/a.md", oldString: "absent", newString: "x" },
+    ] }, ctx);
+    expect(refused.text).toMatch(/^\[memory_error\] Patch 2 of 2 \(principles\/a\.md\)/);
+    expect((await memReadTool.execute({ path: "notes/b.md" }, ctx)).text).toContain("New note.");
+
+    const mixed = await memPatchTool.execute({ path: "notes/b.md", oldString: "a", newString: "b",
+      patches: [{ path: "notes/b.md", oldString: "a", newString: "b" }] }, ctx);
+    expect(mixed.text).toMatch(/^\[memory_error\] Send either/);
+  });
+
   it("mem_patch with oldString '' creates a new file (journal-append idiom)", async () => {
     api = await bootTestApi();
     const ctx = makeCtx({

@@ -1,6 +1,6 @@
 # Brain: principles and playbooks
 
-Design. 2026-10-27. Status: pilot.
+Design. 2026-10-27. Status: pilot. Updated 2026-11-02: memory usage, principle citations, principles in child sessions and workflow steps, and batched patch sets.
 
 ## Summary
 
@@ -73,11 +73,60 @@ The exact text is `BASE_PRINCIPLE` in `packages/api/src/orchestrator/principles.
 
 ### Limits
 
-- Only assistant sessions get the section, because only they get the memory snapshot. Child sessions and workflow steps do not get it. This is a known gap. See Deferred.
 - The agent does not infer a principle from repeated choices. It writes one only when a person corrects it or states a rule.
 - The index cap hides principles past the 40th line or the 4,000th character. The model sees them only when it reads the directory.
-- The snapshot is built when the assistant session wakes. A principle written during a session appears in the index after the next wake. The model that wrote it already has it in context.
+- The snapshot is built when a session is built: an assistant at wake, a child or a workflow step when it starts. A principle written during a session appears in the index after the next build. The model that wrote it already has it in context.
 - There is no org-wide memory scope. An org principle lives in the memory of a team that everyone belongs to.
+
+### Principles in child sessions and workflow steps
+
+A child session and a workflow step get the memory snapshot an assistant gets, Principles section included (TKAI-578). They also get the two read-only memory tools, `mem_read` and `mem_search`, so they can open a principle that the index lists. They get no write tool. Their assistant curates memory. So they get a read-only base principle (`READ_ONLY_BASE_PRINCIPLE`). It tells the agent to read and follow principles. When a person states a rule, the agent puts it in its result, so an assistant can save it.
+
+The scope is the one the memory routes resolve for the session id (`delegatedMemoryScope` in `services/memory-scope.ts`):
+
+- A child or a step of a personal owner reads that person's memory and the principles of their teams.
+- A child or a step of a team reads the team's memory in the namespace the routes give that session. It also reads the team's shared memory under `team:{id}/`. It does not read the acting member's personal memory.
+- A workflow step's read names its session, so the route resolves the run's memory audience. A step whose team audience cannot be resolved gets no snapshot and no memory tools. It never widens to the whole team.
+- A security persona child gets neither.
+
+Children and steps run often and in parallel, so their snapshot budget is 16,000 characters instead of 48,000. The budget drops journals first, then the oldest pinned files. It never drops the Principles section or the root index.
+
+## Usage
+
+Valet records how agents use each memory file, so a person can see which files are used and trim the rest. Three kinds of use stay apart:
+
+| Kind | Recorded when | Counts as a use |
+|---|---|---|
+| Read | An agent opens a file: `mem_read`, an MCP or CLI read, a sandbox read | Yes |
+| Cite | A turn's answer or plan names a principle | Yes |
+| Inject | The memory snapshot loads a pinned file or a journal, or lists a principle in the index | No |
+
+A search hit counts only when the agent then opens the file. A directory read opens no file, so it records nothing. A person who opens a file on the memory page records nothing. A file the snapshot loads is shown as "loaded at wake", not as used, because the agent did not choose it.
+
+### Storage
+
+The `memory_file_usage` table holds one row per file, keyed like `memory_files`, with a count and a last time for each kind. It is a separate table: an update to `memory_files` recomputes the file's search vector. A row moves with `mem_move` and goes away with `mem_rm`. A file that a repository sync removes keeps its row. A file that comes back at that path inherits it.
+
+### Writes stay off the hot path
+
+A read never waits on a usage write. `MemoryUsageRecorder` (`services/memory-usage.ts`) buffers hits in process and writes one batched upsert every 10 seconds. The upsert joins `memory_files`, so it adds no row for a file that was deleted or moved meanwhile. The buffer holds at most 1,000 files. When it is full and a flush is still running, the recorder drops the hit and counts it in `dropped`. A failed write drops its batch and is not retried, so a database outage cannot grow the buffer. Shutdown flushes the buffer. A crash loses at most one interval of hits. Usage is a signal for trimming, not an audit log.
+
+### Citations
+
+When a submission settles, a subscriber (`orchestrator/principle-citations.ts`) reads that turn's assistant entries, up to 50 entries and 64 KB of text. It also reads the items of any plan the turn wrote with `update_plan`. It finds the principles they name:
+
+- **Explicit** (`match: "path"`): the principle's path as the index names it, with or without `.md` or a leading `/`, or the built-in principle's name. An own path never matches inside a `team:{id}/` path.
+- **Heuristic** (`match: "title"`): the principle's title, as a whole phrase. Only titles of two words or more and 8 characters or more match. A title match can be wrong.
+
+The subscriber appends one `principle_cited` thread event per submission, with the citations, and records a cite on each principle file. The event key is `principle_cited:{queueItemId}`, so a repeated settle appends nothing and counts nothing. A turn records at most 10 citations. The event stays in the durable thread log. No client shows it yet.
+
+### The memory page
+
+The memory page has a Usage view beside Files and Graph. It lists every file of the workspace with its last use, its use count, its last load at wake, and its last edit. It filters to never-used or stale files and sorts by least recent use, most uses, or path. A file is stale when no agent used it and nobody edited it for 30 days. So a new file that no agent used yet is not stale. A person selects files and deletes them after one confirm. A file under `lib/` mirrors a repository, so the view offers no delete for it.
+
+## Batched patch sets
+
+`mem_patch` takes `patches`, a list of up to 20 exact-replace patches, in place of `path`, `oldString`, and `newString`. The memory service applies them in one transaction (`patchFiles`): every patch applies, or none does. Patches apply in order, so a later patch to the same file sees the earlier edit. Each patch takes the path rules, the team-principle authority check, and the provenance of a single patch. If a patch fails, the error names it, for example "Patch 2 of 3 (principles/x.md) failed", and says that no patch was applied. `POST /api/memory/patch` takes the same `patches` body. This is the batched patch set that `brain.put` needs.
 
 ## Playbooks
 
@@ -123,11 +172,14 @@ The `skill` tool description marks each playbook with `(playbook)`, so the model
 These come from the concept note. This pilot does not build them:
 
 - The brain repository, its manifest (`.valet/brain.yaml`), and write-back to git.
-- `brain.get`, `brain.search`, `brain.put`, and `brain.rm`. `brain.put` needs a batched patch set, which is not designed yet.
+- `brain.get`, `brain.search`, `brain.put`, and `brain.rm`. `brain.put` can build on the batched patch set in `mem_patch`.
 - Automatic playbook matching from a `when` field. The model chooses a playbook from the skill list.
-- Skip tracking with a reason, and principle citation as a thread event.
+- Skip tracking with a reason.
 - `extends` for project playbooks.
-- Principles for child sessions and workflow steps.
+- A client view of `principle_cited` events in the thread.
+- Batched patch sets in the MCP `patch_memory` tool.
+- Usage by member: the table counts uses per file, not per person or per session.
+- Agent-led trimming: the agent proposes stale files to remove. Today a person trims from the memory page.
 
 ## Open questions
 

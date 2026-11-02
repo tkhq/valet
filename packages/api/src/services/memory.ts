@@ -27,6 +27,7 @@ import {
   assertWritablePath,
   normalizePath,
   parseConcept,
+  ReservedPathError,
   remapImportPath,
   renderConcept,
   type RenderableConcept,
@@ -376,6 +377,45 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
   return writeFile(db, scope, { path, content: newContent, source: params.source });
+}
+
+// ─── patchFiles ────────────────────────────────────────────────────────
+
+/** Most patches one `patchFiles` call applies. */
+export const MAX_PATCH_BATCH = 20;
+
+export interface PatchFilesParams {
+  patches: Array<Omit<PatchFileParams, "source">>;
+  /** Passed through to every patch. */
+  source?: WriteSource;
+}
+
+/**
+ * A batched patch set: several exact-replace patches in one transaction.
+ * Every patch applies, or none does. Patches run in order, so a later patch
+ * to the same file sees the earlier one's edit. Each patch takes the same
+ * path and authority rules as `patchFile`.
+ */
+export async function patchFiles(db: AppDb, scope: MemoryScope, params: PatchFilesParams): Promise<WriteFileResult[]> {
+  const { patches } = params;
+  if (patches.length === 0) throw new ValidationError("Send at least one patch.");
+  if (patches.length > MAX_PATCH_BATCH) {
+    throw new ValidationError(`Send at most ${MAX_PATCH_BATCH} patches in one call. Put the rest in another call.`);
+  }
+  return db.transaction(async (tx) => {
+    const results: WriteFileResult[] = [];
+    for (const [i, patch] of patches.entries()) {
+      try {
+        results.push(await patchFile(tx, scope, { ...patch, source: params.source }));
+      } catch (err) {
+        if (err instanceof ValidationError || err instanceof NotFoundError || err instanceof ReservedPathError) {
+          throw new ValidationError(`Patch ${i + 1} of ${patches.length} (${patch.path}) failed: ${err.message.replace(/\.$/, "")}. No patch was applied.`);
+        }
+        throw err;
+      }
+    }
+    return results;
+  });
 }
 
 // ─── removeFile ────────────────────────────────────────────────────────

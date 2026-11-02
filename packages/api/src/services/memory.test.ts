@@ -10,7 +10,9 @@ import {
   linksForFile,
   listFiles,
   moveFile,
+  MAX_PATCH_BATCH,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
@@ -160,6 +162,58 @@ describe("memory service", () => {
       await expect(
         patchFile(db, scope, { path: "notes/p.md", oldString: "nope", newString: "x" }),
       ).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("patchFiles", () => {
+    async function body(scope: MemoryScope, path: string): Promise<string> {
+      const result = await readFile(db, scope, path);
+      if (result.kind !== "file") throw new Error("expected file");
+      return result.file.content;
+    }
+
+    it("applies several patches across files in one call", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      const results = await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "one", newString: "two" },
+        { path: "journal/2026-10-31.md", oldString: "", newString: "new\n" },
+      ] });
+      expect(results.map((r) => r.file.path)).toEqual(["notes/a.md", "notes/b.md", "journal/2026-10-31.md"]);
+      expect(await body(scope, "notes/a.md")).toBe("alpha two\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta two\n");
+      expect(await body(scope, "journal/2026-10-31.md")).toBe("new\n");
+    });
+
+    it("applies patches to one file in order", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "one\n" });
+      await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/a.md", oldString: "two", newString: "three" },
+      ] });
+      expect(await body(scope, "notes/a.md")).toBe("three\n");
+    });
+
+    it("applies no patch when one fails, and names the one that failed", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      await expect(patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "missing", newString: "two" },
+      ] })).rejects.toThrow(/Patch 2 of 2 \(notes\/b\.md\).*No patch was applied/);
+      expect(await body(scope, "notes/a.md")).toBe("alpha one\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta one\n");
+    });
+
+    it("refuses an empty batch and one past the limit", async () => {
+      const scope = scopeFor("u1");
+      await expect(patchFiles(db, scope, { patches: [] })).rejects.toThrow(/at least one patch/);
+      const many = Array.from({ length: MAX_PATCH_BATCH + 1 }, (_, i) => ({ path: `notes/${i}.md`, oldString: "", newString: "x" }));
+      await expect(patchFiles(db, scope, { patches: many })).rejects.toThrow(/at most 20 patches/);
     });
   });
 

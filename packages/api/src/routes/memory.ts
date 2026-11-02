@@ -54,6 +54,7 @@ import {
   linksForFile,
   moveFile,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
@@ -586,6 +587,18 @@ memoryRouter.put("/", async (c) => {
   }
 });
 
+function parsePatches(value: unknown): { path: string; oldString: string; newString: string }[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: { path: string; oldString: string; newString: string }[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || !("path" in item) || !("oldString" in item) || !("newString" in item)) return null;
+    const { path, oldString, newString } = item;
+    if (typeof path !== "string" || !path || typeof oldString !== "string" || typeof newString !== "string") return null;
+    out.push({ path, oldString, newString });
+  }
+  return out;
+}
+
 memoryRouter.post("/patch", async (c) => {
   let scope: MemoryScope;
   try {
@@ -596,12 +609,29 @@ memoryRouter.post("/patch", async (c) => {
     throw err;
   }
 
-  let body: { path?: string; oldString?: string; newString?: string };
+  let body: { path?: string; oldString?: string; newString?: string; patches?: unknown };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+
+  // A batched patch set: every patch applies, or none does.
+  if (body.patches !== undefined) {
+    const patches = parsePatches(body.patches);
+    if (!patches || body.path !== undefined) {
+      return c.json({ error: "Send patches as an array of { path, oldString, newString }, without a top-level path." }, 400);
+    }
+    try {
+      const results = await patchFiles(c.var.providers.db, scope, { patches, source: writeSource(c) });
+      return c.json({ files: results.map((r) => r.file), warnings: results.flatMap((r) => r.warnings) });
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
+    }
+  }
+
   if (!body.path || body.oldString === undefined || body.newString === undefined) {
     return c.json({ error: "path, oldString, and newString are required" }, 400);
   }
