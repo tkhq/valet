@@ -70,6 +70,7 @@ const skillsQuery = vi.fn();
 const sourcesQuery = vi.fn();
 const addSource = vi.fn();
 
+vi.mock("~/components/memory/memory-principles", () => ({ MemoryPrinciplesPanel: () => <div>principles panel</div> }));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
@@ -273,19 +274,20 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     expect(lastSkillsOwner()).toEqual({ ownerType: undefined, ownerId: undefined });
   });
 
-  it("writes the Prompts chip to the URL as the kind it means", () => {
+  it("writes the Principles chip to the URL", () => {
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Principles" }));
 
-    expect(lastNavigationSearch()).toMatchObject({ filter: "prompts" });
+    expect(lastNavigationSearch()).toMatchObject({ filter: "principles" });
   });
 
-  it("sends the chip on to the server as a kind", () => {
-    searchParams = { filter: "prompts" };
+  it("shows the principles in place of the skill list", () => {
+    searchParams = { filter: "principles" };
     render(<SkillsIndexPage />);
 
-    expect(lastSkillsQuery()).toEqual({ kind: "prompt" });
-    expect(screen.getByRole("button", { name: "Prompts" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("principles panel")).toBeTruthy();
+    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    expect(screen.getByRole("button", { name: "Principles" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("sends the search box on as a catalog-wide query, once typing settles", async () => {
@@ -323,7 +325,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   it("returns to the first page when a filter changes", () => {
     searchParams = { page: "cursor_1" };
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Principles" }));
 
     // A different question has a different first page, so the old cursor
     // names a row that the new question may not even list.

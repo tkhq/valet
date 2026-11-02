@@ -179,7 +179,6 @@ function OrgSkillsSection({
             filters={filters}
             onFiltersChange={(next) =>
               onSearchChange({
-                filter: next.filter === "all" ? undefined : next.filter,
                 q: next.query.trim().length === 0 ? undefined : next.query,
                 page: undefined,
               })
