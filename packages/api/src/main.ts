@@ -45,7 +45,8 @@ import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
 import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
-import { initSandboxMetrics } from "@valet/engine";
+import { initSandboxMetrics, reportError } from "@valet/engine";
+import { startProcessHealthSampler } from "./observability/process-health.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
@@ -95,7 +96,7 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
   try {
     ids = await providers.engineStore.listSessionIdsWithUnsettledSubmissions();
   } catch (err) {
-    console.error("boot restore: failed to list unsettled sessions:", err);
+    reportError({ area: "boot", reason: "restore_list" }, "boot restore: failed to list unsettled sessions", err);
     return;
   }
   const deps: RestoreSessionDeps = {
@@ -288,6 +289,9 @@ const telemetry = initTelemetry();
 // Counters are zero-initialized at boot so increase() sees the first event after a restart.
 initImageFallbackMetrics();
 initSandboxMetrics();
+// Memory, heap, and event-loop samples for the process gauges and the
+// diagnostics.process_health tool. Stopped in close().
+const stopProcessHealthSampler = startProcessHealthSampler();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
 // `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
@@ -461,7 +465,7 @@ async function runBootChain(): Promise<void> {
   // `runBoundedRestore`) so one wedged sandbox exec can't hold readiness
   // forever.
   await restoreUnsettledSessions(providers, () => closed).catch((err) => {
-    console.error("boot restore: unexpected failure (continuing to serve):", err);
+    reportError({ area: "boot", reason: "restore_pass" }, "boot restore: unexpected failure (continuing to serve)", err);
   });
 
   if (closed) return;
@@ -558,7 +562,7 @@ async function runBootChain(): Promise<void> {
   // starts webhook registration or the long-poll loop per transport. A
   // failure here must never block boot — channels are best-effort.
   await providers.channelHost.start().catch((err) => {
-    console.error("boot restore: channelHost.start failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "channel_host_start" }, "boot restore: channelHost.start failed (continuing to serve)", err);
   });
   console.log("channel host started");
 
@@ -604,7 +608,7 @@ async function runBootChain(): Promise<void> {
   const modelRegistry = new ModelRegistry(providers.db);
   setModelRegistry(modelRegistry);
   await modelRegistry.start().catch((err) => {
-    console.error("modelRegistry.start failed:", err);
+    reportError({ area: "boot", reason: "model_registry_start" }, "modelRegistry.start failed", err);
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
@@ -613,7 +617,7 @@ async function runBootChain(): Promise<void> {
   // backend (`imageBuilder: null`) still starts harmlessly — every pass
   // short-circuits.
   await providers.prebuildService.start().catch((err) => {
-    console.error("prebuildService.start failed:", err);
+    reportError({ area: "boot", reason: "prebuild_service_start" }, "prebuildService.start failed", err);
   });
 
   // LLM proxy env-key bootstrap (llm-recording-gateway plan, Task 8): for each
@@ -621,7 +625,7 @@ async function runBootChain(): Promise<void> {
   // provider, seed one named `env:{kind}` so the recording proxy works with
   // zero setup. Idempotent; a failure must never block boot.
   await ensureEnvProviders(providers.db, providers.engineCredentials, await resolveOrgId(providers.db)).catch((err) => {
-    console.error("ensureEnvProviders failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "env_providers" }, "ensureEnvProviders failed (continuing to serve)", err);
   });
 
   if (closed) return;
@@ -687,6 +691,7 @@ async function close(): Promise<void> {
   // after this point stay unstarted, so the stops below can meet a service
   // that never ran — each one tolerates that.
   closed = true;
+  stopProcessHealthSampler();
   // The WakeWatcher's stop flag goes up first: the awaited stops below can
   // take most of the hard-exit budget, and a pass must not start new rows
   // meanwhile (fix wave 4, concurrency M6). It is awaited below, before
@@ -804,10 +809,10 @@ async function close(): Promise<void> {
 // handler that's swallowing the error; these are belt-and-braces so the dev
 // experience doesn't get whiplashed when one slips through.
 process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
+  reportError({ area: "api", reason: "unhandled_rejection" }, "unhandledRejection", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("uncaughtException:", err);
+  reportError({ area: "api", reason: "uncaught_exception" }, "uncaughtException", err);
 });
 
   return { close, port, backend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) };
