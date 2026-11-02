@@ -19,6 +19,7 @@ import {
   type PluginActionContext,
   type PluginActionResult,
 } from "@valet/engine";
+import { CHART_LIMITS, chartAsMarkdown, chartProblem, readChart, type Chart } from "@valet/shared";
 import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
@@ -1341,27 +1342,56 @@ async function resolveSlackOrigin(
 const replyToOrigin = action(Type.Object({
     ...senderParameters,
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
+    charts: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), {
+      maxItems: CHART_LIMITS.perMessage,
+      description:
+        'Up to 2 native Slack charts, drawn below the text. Each is { title, chart } with chart one of ' +
+        '{ type: "pie", segments: [{ label, value }] } or { type: "bar" | "line" | "area", series: [{ name, data: [{ label, value }] }], ' +
+        'axis_config: { categories: [...], x_label?, y_label? } }. Labels, names, and categories are at most 20 characters; ' +
+        'at most 12 series or segments and 20 categories; every series has one point per category.',
+    })),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
   description:
-    'Reply in the Slack thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
+    'Reply in the Slack thread this turn came from. Use it for later updates and final results, and to post a chart: pass charts and Slack draws them natively. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    const charts: Chart[] = [];
+    for (const [index, value] of (args.charts ?? []).entries()) {
+      const chart = readChart(value);
+      if (!chart) return { success: false, error: `Chart ${index + 1}: ${chartProblem(value)}` };
+      charts.push(chart);
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const body = {
+    const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const body: Record<string, unknown> = {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
+      text: formattedText,
       mrkdwn: true,
     };
-    const mentionError = await unknownMentionError(o.token, [body.text]);
+    // A workspace where Slack has not rolled out the chart block rejects it
+    // as invalid_blocks; the fallback posts each chart as a table instead.
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    if (charts.length > 0) {
+      const textBudget = SLACK_MAX_BLOCKS - charts.length;
+      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+      body.blocks = [
+        ...buildContentBlocks(args.text, formattedText, textBudget, { preserveSlackNativeSpans: true }),
+        ...charts.map((chart) => ({ type: 'data_visualization', title: chart.title, chart: chart.chart })),
+      ];
+      const withTables = [args.text, ...charts.map(chartAsMarkdown)].join('\n\n');
+      fallbackBlocks = buildContentBlocks(withTables, markdownToSlackMrkdwn(withTables, { preserveSlackNativeSpans: true }),
+        SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true, nativeTables: false });
+    }
+    const mentionError = await unknownMentionError(o.token, [formattedText, body.blocks, fallbackBlocks]);
     if (mentionError) return mentionError;
-    const { res, data } = await postActionMessage(o.token, body, ctx, args);
+    const { res, data } = await postActionMessage(o.token, body, ctx, args, fallbackBlocks);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
-    return { success: true, data: { channel: o.channelId, ts: data.ts } };
+    return { success: true, data: { channel: o.channelId, ts: data.ts, ...(charts.length > 0 ? { charts: charts.length } : {}) } };
   },
 });
 

@@ -24,7 +24,7 @@ describe("widget catalog", () => {
   });
 
   it("names a component it does not have, and a missing prop", () => {
-    const problems = widgetSpecProblems({ root: "a", elements: { a: { type: "Chart", props: {}, children: [] } } });
+    const problems = widgetSpecProblems({ root: "a", elements: { a: { type: "Gauge", props: {}, children: [] } } });
     expect(problems).toContain("call show_widget again");
     expect(problems).toMatch(/elements\.a/);
     expect(widgetSpecProblems({ root: "a", elements: { a: { type: "Stat", props: { label: "x" }, children: [] } } })).toMatch(/value/);
@@ -62,6 +62,24 @@ describe("widget catalog", () => {
   });
 });
 
+const chartCard = {
+  root: "c",
+  elements: { c: { type: "Chart", props: { title: "Merged PRs", chart: {
+    type: "bar",
+    series: [{ name: "Web", data: [{ label: "Oct 6", value: 7 }, { label: "Oct 13", value: 11 }] }],
+    axis_config: { categories: ["Oct 6", "Oct 13"] },
+  } }, children: [] } },
+};
+
+describe("Chart card", () => {
+  it("accepts a chart in Slack's shape and refuses what Slack would refuse", () => {
+    expect(widgetSpecProblems(chartCard)).toBeUndefined();
+    const scatter = { ...chartCard, elements: { c: { ...chartCard.elements.c, props: { title: "x", chart: { type: "scatter" } } } } };
+    expect(widgetSpecProblems(scatter)).toMatch(/elements\.c\.props: Set chart.type to pie, bar, area, or line/);
+    expect(WIDGET_TOOL_DESCRIPTION).toContain("slack.reply_to_origin");
+  });
+});
+
 describe("show_widget", () => {
   const [tool] = buildWidgetTools();
 
@@ -72,8 +90,14 @@ describe("show_widget", () => {
     expect(result.text).toContain("Don't repeat");
   });
 
+  it("tells a Slack turn to post charts with reply_to_origin", async () => {
+    const result = await tool!.execute({ spec: chartCard } as never, { origin: { channelType: "slack", threadKey: "slack:C1:1.2" } } as never);
+    expect(result.text).toContain("slack.reply_to_origin");
+    expect(result.ok).toBeUndefined();
+  });
+
   it("returns what to fix, as an action failure the model reads", async () => {
-    const result = await tool!.execute({ spec: { root: "a", elements: { a: { type: "Chart", props: {}, children: [] } } } } as never, {} as never);
+    const result = await tool!.execute({ spec: { root: "a", elements: { a: { type: "Gauge", props: {}, children: [] } } } } as never, {} as never);
     expect(result.ok).toBe(false);
     expect(result.text).toContain("call show_widget again");
   });

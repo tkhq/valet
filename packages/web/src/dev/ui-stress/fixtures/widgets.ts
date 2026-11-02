@@ -1,6 +1,6 @@
 /** Widgets as the assistant writes them with `show_widget`: the cards from
  * the generative-UI demo (transactions, meeting memory, a new event), a
- * status list, and an activity grid, plus one at the catalog's limits. */
+ * status list, an activity grid, and charts, plus one at the catalog's limits. */
 import type { WidgetSpec } from "@valet/api/widgets";
 import { STRING_2000, TITLE_400 } from "./common";
 
@@ -74,6 +74,28 @@ export const activityWidget: WidgetSpec = {
   },
 };
 
+const weeks = ["Sep 15", "Sep 22", "Sep 29", "Oct 6", "Oct 13", "Oct 20"];
+const weekly = (name: string, values: number[]) => ({ name, data: weeks.map((label, i) => ({ label, value: values[i]! })) });
+
+/** Charts in Slack's data_visualization shape: grouped bars, lines, and a pie. */
+export const chartsWidget: WidgetSpec = {
+  root: "card",
+  elements: {
+    card: { type: "Card", props: { title: "Engineering this month" }, children: ["bars", "lines", "pie"] },
+    bars: { type: "Chart", props: { title: "Merged pull requests per week", chart: {
+      type: "bar", series: [weekly("Platform", [12, 15, 18, 9, 14, 16]), weekly("Web", [7, 9, 11, 14, 8, 12])],
+      axis_config: { categories: weeks, y_label: "Pull requests" },
+    } }, children: [] },
+    lines: { type: "Chart", props: { title: "Daily model spend (USD)", chart: {
+      type: "area", series: [weekly("Opus", [410, 520, 470, 610, 580, 640]), weekly("Sonnet", [120, 140, 135, 150, 160, 170])],
+      axis_config: { categories: weeks },
+    } }, children: [] },
+    pie: { type: "Chart", props: { title: "Open issues by priority", chart: {
+      type: "pie", segments: [{ label: "Urgent", value: 4 }, { label: "High", value: 11 }, { label: "Medium", value: 23 }, { label: "Low", value: 9 }],
+    } }, children: [] },
+  },
+};
+
 /** Long text everywhere a string goes: the cards must wrap, not overflow. */
 export const stressWidget: WidgetSpec = {
   root: "card",
@@ -91,5 +113,6 @@ export const galleryWidgets = [
   { label: "New event with buttons", spec: eventWidget },
   { label: "Status list and progress", spec: statusWidget },
   { label: "Activity grid", spec: activityWidget },
+  { label: "Charts", spec: chartsWidget },
   { label: "Long text", spec: stressWidget },
 ];

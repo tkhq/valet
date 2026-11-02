@@ -14,6 +14,7 @@
 import { defineCatalog, formatSpecIssues, validateSpec, type Spec } from "@json-render/core";
 import { schema } from "@json-render/react/schema";
 import { z } from "zod";
+import { chartProblem } from "@valet/shared";
 
 export const WIDGET_TOOL_NAME = "show_widget";
 
@@ -79,6 +80,10 @@ const components = {
     props: z.object({ values: z.array(z.number().min(0)).max(371), label: z.string().optional() }),
     description: "An activity grid, one cell per day, oldest first, like a contribution graph.",
   },
+  Chart: {
+    props: z.object({ title: z.string(), chart: z.record(z.string(), z.unknown()) }),
+    description: "A pie, bar, line, or area chart. chart is { type: \"pie\", segments: [{ label, value }] } or { type: \"bar\" | \"line\" | \"area\", series: [{ name, data: [{ label, value }] }], axis_config: { categories, x_label?, y_label? } }. Title at most 50 characters; labels at most 20; at most 12 series or segments and 20 categories; every series has one point per category. In Slack, send the same { title, chart } in slack.reply_to_origin charts.",
+  },
   Button: {
     props: z.object({ label: z.string(), reply: z.string(), primary: z.boolean().optional() }),
     description: "Sends `reply` as the person's next message. Offer a next step; never act directly.",
@@ -99,7 +104,7 @@ function componentLine(name: string, props: z.ZodObject, description: string): s
 }
 
 export const WIDGET_TOOL_DESCRIPTION = [
-  "Show the person a small card in the thread when a structured view answers faster than prose: a number with context, a short table, quotes from a meeting, an event, items with status, or an activity grid.",
+  "Show the person a small card in the thread when a structured view answers faster than prose: a number with context, a short table, a chart, quotes from a meeting, an event, items with status, or an activity grid.",
   "The card is the answer: keep any text beside it to a sentence and do not repeat what it shows. A Button sends its reply text as the person's next message, so use it to offer a next step.",
   "spec is a flat map: { \"root\": \"<key>\", \"elements\": { \"<key>\": { \"type\": \"<Component>\", \"props\": { ... }, \"children\": [\"<key>\", ...] } } }. Every element needs children, [] when it has none.",
   "Components:",
@@ -126,6 +131,9 @@ export function widgetSpecProblems(spec: unknown): string | undefined {
     const result = def.props.safeParse(element.props);
     if (!result.success) {
       for (const issue of result.error.issues.slice(0, 3)) propIssues.push(`elements.${key}.props.${issue.path.join(".") || element.type}: ${issue.message}`);
+    } else if (element.type === "Chart") {
+      const problem = chartProblem(element.props);
+      if (problem) propIssues.push(`elements.${key}.props: ${problem}`);
     }
   }
   if (propIssues.length) {
