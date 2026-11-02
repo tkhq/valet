@@ -39,7 +39,7 @@ import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { journalHasEntries } from "../orchestrator/bootstrap.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { getTeamInOrg, isTeamMember } from "../services/teams.js";
-import { assistantMemoryNamespace, workflowMemoryNamespace } from "../services/memory-scope.js";
+import { assistantMemoryNamespace, workflowMemoryNamespace, memorySessionId } from "../services/memory-scope.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { agentSessions, memoryFiles, securityCells } from "../schema/index.js";
@@ -184,8 +184,10 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
   const internal = isValidInternalToken(c.req.header("x-valet-internal"));
   // Explicit team writes retain their authorized shared destination.
   if (internal && c.req.query("teamId")) return scope;
-  const sessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
-  if (!sessionId) return scope;
+  const requestedSessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
+  if (!requestedSessionId) return scope;
+  // A child session reads its parent's memory: it has no app session row.
+  const sessionId = await memorySessionId(c.var.providers.db, requestedSessionId);
   const orgId = c.var.sandbox?.orgId ?? (internal ? c.req.header("x-valet-org-id") : c.var.user.orgId);
   const { db } = c.var.providers;
   const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);

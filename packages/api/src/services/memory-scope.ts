@@ -60,6 +60,24 @@ export async function memoryScopeForSession(db: AppDb, sessionId: string): Promi
 
 /** Shared web conversations retain the team's established corpus. Private and
  * external conversations keep their execution storage, regardless of who wakes them. */
+/**
+ * The session whose memory a session reads. A child session (`task`) has no
+ * app session row or execution row of its own, so it reads with the session
+ * that spawned it, up the parent chain to a top-level session.
+ */
+export async function memorySessionId(db: AppDb, sessionId: string): Promise<string> {
+  let current = sessionId;
+  for (let depth = 0; depth < 8; depth++) {
+    // db.execute returns untyped rows; the column is text or null.
+    const result = await db.execute(
+      sql`SELECT parent_session_id FROM engine_sessions WHERE id = ${current} LIMIT 1`) as { rows: Array<{ parent_session_id: string | null }> };
+    const parent = result.rows[0]?.parent_session_id;
+    if (!parent || parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
 export async function assistantMemoryNamespace(db: AppDb, sessionId: string, teamId: string, orgId: string, depth = 0): Promise<string> {
   if (depth > 8) throw new NotFoundError("memory origin ancestry");
   const [legacyOwner] = await db.select({ id: assistants.id }).from(assistants)

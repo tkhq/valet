@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Session } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { createTeam } from "../services/teams.js";
 import { writeFile, type MemoryScope } from "../services/memory.js";
 
@@ -73,6 +74,31 @@ describe("delegated sessions get the memory snapshot", () => {
     expect(snapshot).toContain(`team:${team.id}/principles/ship-small.md`);
     // The team child acts for the team, so the member's own principles stay out.
     expect(snapshot).not.toContain("personal-only");
+  });
+
+  it("lets a team child read the team principle its snapshot lists", async () => {
+    // A child has no app session row, so the memory route resolves it
+    // through the session that spawned it.
+    api = await bootTestApi({ plugins: [] });
+    const { db } = api.providers;
+    const team = await createTeam(db, { orgId: ORG, name: "Release team", creatorUserId: USER });
+    await writeFile(db, { owner: { type: "team", id: team.id }, actorUserId: USER }, { path: "principles/ship-small.md", content: "# Ship small\n\nShip in small PRs.\n" });
+    // The real team assistant, with its app session row, spawns the child.
+    const assistant = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: USER, orgId: ORG });
+    const session = await api.providers.engineHost.childSessionFor("child:team-read", {
+      parentSessionId: assistant.sessionId, parentThreadId: "thread:parent",
+      actorUserId: USER, orgId: ORG, owner: { type: "team", id: team.id }, workspace: "/tmp",
+    });
+    const read = (session.options.tools ?? []).find((tool) => tool.name === "mem_read");
+    if (!read) throw new Error("mem_read missing");
+    const ctx: Parameters<typeof read.execute>[1] = {
+      sessionId: session.id, threadId: "thread:child", userId: USER, orgId: ORG, owner: { type: "team", id: team.id },
+      config: session.options.toolConfig,
+    } satisfies Partial<Parameters<typeof read.execute>[1]> as Parameters<typeof read.execute>[1];
+    // The snapshot lists the principle under its team prefix, so the model reads that path.
+    expect(snapshotOf(session)).toContain(`team:${team.id}/principles/ship-small.md`);
+    const result = await read.execute({ path: `team:${team.id}/principles/ship-small.md` }, ctx);
+    expect(result.text).toContain("Ship in small PRs.");
   });
 
   it("gives a workflow step the snapshot and read-only memory tools", async () => {

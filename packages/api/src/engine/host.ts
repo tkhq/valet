@@ -3,7 +3,7 @@ import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js"
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
-import { assistantMemoryNamespace, delegatedMemoryScope } from "../services/memory-scope.js";
+import { assistantMemoryNamespace, delegatedMemoryScope, memorySessionId } from "../services/memory-scope.js";
 import { NotFoundError } from "@valet/shared";
 import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
@@ -4462,7 +4462,9 @@ export class EngineHost {
     // A security persona child reads no memory (its tool scope grants none,
     // and the memory routes refuse its writes). Every other child reads its
     // owner's memory like the assistant that spawned it.
-    const childMemory = personaCell ? undefined : await this.delegatedMemory(childSessionId, opts.owner, opts.actorUserId, opts.orgId);
+    // A child reads its parent's memory namespace: it has no execution row of
+    // its own, so resolving its own id would select an empty namespace.
+    const childMemory = personaCell ? undefined : await this.delegatedMemory(childSessionId, opts.owner, opts.actorUserId, opts.orgId, (this.opts.db ? await memorySessionId(this.opts.db, opts.parentSessionId) : opts.parentSessionId));
     const childToolsWithMemory = [...(childMemory?.tools ?? []), ...childTools];
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
@@ -4695,13 +4697,14 @@ export class EngineHost {
     owner: Principal,
     actorUserId: string,
     orgId: string,
+    namespaceSessionId: string = sessionId,
   ): Promise<{ systemContext: Array<{ name: string; content: string; order: number }>; tools: ToolDef[]; toolConfig: { apiBaseUrl: string; internalToken: string } } | undefined> {
     const db = this.opts.db;
     const apiBaseUrl = this.opts.apiBaseUrl;
     if (!db || !apiBaseUrl) return undefined;
     let scope: MemoryScope;
     try {
-      scope = await delegatedMemoryScope(db, { sessionId, owner, actorUserId, orgId });
+      scope = await delegatedMemoryScope(db, { sessionId: namespaceSessionId, owner, actorUserId, orgId });
     } catch (err) {
       if (err instanceof NotFoundError) return undefined;
       throw err;
