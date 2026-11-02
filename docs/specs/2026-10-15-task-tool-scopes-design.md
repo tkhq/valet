@@ -41,7 +41,7 @@ The workflow skill loads the troubleshooting procedure for failures. It records 
 The workflow editor starts in diagnose focus. An edit request selects repair. An authorized test selects validate.
 The patch action rejects unknown parameters. An unsupported patch format must not appear to save a successful edit.
 Focused discovery returns eight compact summaries by default. Request an exact schema before calling an unfamiliar action.
-`outside_focus` discovers summaries within the inherited ceiling. It does not enable calls or return schemas.
+`outside_focus` discovers summaries within the inherited ceiling. It does not enable calls or return schemas. When a focused search finds no integration action, list_tools also searches the ceiling and returns the matches as `outside_focus` with the `focus_tools` call that adds them (amended 2026-11-02). A workflow editor thread starts focused, so without this an integration such as Granola looked missing. The `repair` phase accepts `actions`, like `validate`, so an editor can read the schemas of the actions its steps use.
 Exact action scopes still permit the internal account-discovery approval needed to resolve dynamic services.
 
 Scopes constrain tools and brokered integration actions. They do not restrict network access from an explicitly allowed shell.

@@ -46,7 +46,12 @@ describe.each(["user", "team"] as const)("EngineHost %s tool scope", (ownerType)
       focus.execute({ phase: "repair" }, context(session, b)),
     ]);
     expect((await list.execute({ service: "demo" }, context(session, a))).text).toContain("demo.inspect");
-    expect((await list.execute({ service: "demo" }, context(session, b))).text).not.toContain("demo.inspect");
+    // Thread b's focus excludes demo.inspect: it is not in b's tool list,
+    // only reported as outside the focus, and b cannot call it.
+    const listedForB = (await list.execute({ service: "demo" }, context(session, b))).text;
+    expect(listedForB).toMatch(/^tools\[0\]/);
+    expect(listedForB).toContain("outside_focus");
+    expect((await call.execute({ tool_id: "demo.inspect", params: {}, summary: "Inspect" }, context(session, b))).text).toContain("outside this task");
     const result = await call.execute({ tool_id: "demo.inspect", params: {}, summary: "Inspect" }, context(session, a));
     expect(result.text).toContain(owner.id);
     expect((await call.execute({ tool_id: "demo.change", params: {}, summary: "Change" }, context(session, a))).text).toContain("outside this task");
