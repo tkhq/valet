@@ -11,7 +11,7 @@ import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { externalCalls, orgMembers } from "../schema/index.js";
+import { externalCalls, orgMembers, users } from "../schema/index.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
 import { recentErrorReports } from "@valet/engine";
 import { requestTimingSummary, serverErrorSummary } from "../observability/request-timings.js";
@@ -104,12 +104,20 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
   };
 
   /** The caller's organization when the caller is one of its admins, or the refusal to return. */
-  const adminOrg = async (ctx: PluginActionContext, what: string): Promise<{ orgId: string } | { refusal: PluginActionResult }> => {
+  const adminOrg = async (ctx: PluginActionContext, what: string): Promise<{ orgId: string; userId: string } | { refusal: PluginActionResult }> => {
     if (ctx.externalSender) return { refusal: EXTERNAL_SENDER };
     const caller = await member(ctx);
     if (!caller || !ctx.orgId) return { refusal: { success: false, error: "You are not a member of this organization. Ask an organization admin to add you." } };
     if (caller.role !== "admin") return { refusal: { success: false, error: `${what} are for organization admins. Ask an admin to run this check.` } };
-    return { orgId: ctx.orgId };
+    return { orgId: ctx.orgId, userId: caller.userId };
+  };
+
+  /** Whether the user is a deployment operator (`users.role`, not
+   * `org_members.role`). Only an operator reads numbers that count every
+   * organization on the deployment: the error-path tally and sandbox pods. */
+  const isOperator = async (userId: string): Promise<boolean> => {
+    const [row] = await db.select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
+    return row?.role === "admin";
   };
 
   const listToolFailures = action(Type.Object({
@@ -208,7 +216,8 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
     name: "List server errors",
     description:
       "Find which Valet API routes answered 5xx and which internal error paths fired. Returns each route pattern with its request count and 5xx counts by status (500, 502, 503, 504), " +
-      "and each error path by area, reason and provider with its count, such as channels/outbound_delivery/slack or workflows/schedule_fire. " +
+      "Routes count this organization's requests and requests with no organization. Error paths, such as channels/outbound_delivery/slack or workflows/schedule_fire, " +
+      "count every organization on the deployment, so only a deployment operator gets them. " +
       "Reads this API process only, up to the last 60 minutes; a restart clears it. A 503 the load balancer returns while no API pod is ready never reaches this process: " +
       "use diagnostics.list_pod_restarts for that. Organization admins only.",
     riskLevel: "low",
@@ -217,7 +226,11 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
       if ("refusal" in gate) return gate.refusal;
       const sinceMs = Date.now() - (minutes ?? 15) * 60_000;
       const routes = serverErrorSummary({ orgId: gate.orgId, sinceMs, limit: limit ?? 10 });
-      return { success: true, data: { ...routes, errorPaths: recentErrorReports({ sinceMs, limit: limit ?? 10 }) } };
+      // The tally has no organization: most error paths run in sweeps that serve every organization.
+      const errorPaths = await isOperator(gate.userId)
+        ? { errorPaths: recentErrorReports({ sinceMs, limit: limit ?? 10 }) }
+        : { errorPathsOmitted: "Error paths count every organization on this deployment, so only a deployment operator can read them. Ask an operator to run this check." };
+      return { success: true, data: { ...routes, ...errorPaths } };
     },
   });
 
@@ -245,7 +258,7 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
     description:
       "Find restarts and OOM kills of Valet's pods on the kubernetes backend. Returns the API namespace's pods, such as the API and its database, " +
       "with each container's restart count, state and last termination reason (OOMKilled, Error), and the last hour's Warning events, such as failed liveness probes. " +
-      "Returns sandbox pods as counts by node and termination reason, without pod or session names. " +
+      "Returns sandbox pods as counts by node and termination reason, without pod or session names, to deployment operators only. " +
       "If the API's service account may not read a namespace, the result names the RBAC rule an operator must add. Read-only. Organization admins only.",
     riskLevel: "low",
     execute: async (_args, ctx) => {
@@ -260,7 +273,7 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
       } catch (err) {
         return { success: false, error: `The kubernetes client could not start: ${err instanceof Error ? err.message : String(err)} Check the API's kubeconfig or in-cluster service account.` };
       }
-      return { success: true, data: await readPodHealth(target) };
+      return { success: true, data: await readPodHealth(target, { includeSandboxes: await isOperator(gate.userId) }) };
     },
   });
 

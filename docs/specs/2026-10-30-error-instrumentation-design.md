@@ -75,7 +75,10 @@ failures and slow routes, but not a 5xx, a restart, or an OOM kill.
 
    `cgroup_usage` is the number the container OOM killer compares to
    `cgroup_limit`. `changes(valet_process_start_time_seconds[1h])` counts
-   container restarts.
+   container restarts. Bun 1.2, which compiles the single-file `valet`
+   binary, does not implement `monitorEventLoopDelay`. There the sampler
+   records memory only and the event-loop series stay empty. The deployed
+   API runs on Node and has all of them.
 
 5. **Self-diagnosis tools.** The diagnostics plugin
    (`packages/api/src/diagnostics/actions.ts`) adds three tools next to
@@ -85,7 +88,7 @@ failures and slow routes, but not a 5xx, a restart, or an OOM kill.
    - `diagnostics.list_server_errors`: 5xx responses by route pattern and
      status from the request-timing window, plus the `reportError` tally
      by area, reason, and provider. It reads one API process, up to 60
-     minutes back.
+     minutes back. Routes count the caller's organization only.
    - `diagnostics.process_health`: RSS, heap used, total, and limit,
      cgroup memory and limit, event-loop delay, uptime, and start time,
      with peaks over the sample window.
@@ -93,8 +96,14 @@ failures and slow routes, but not a 5xx, a restart, or an OOM kill.
      namespace's pods (the API and its database) with restart counts,
      state, last termination reason, and the last hour's Warning events.
      Sandbox pods are counts by node and termination reason, without pod
-     or session names, because sandboxes belong to every organization on
-     the deployment.
+     or session names.
+
+   Two results count every organization on the deployment: the error-path
+   tally, which has no organization because most failing paths run in
+   sweeps that serve all of them, and the sandbox pod counts. Only a
+   deployment operator (`users.role = 'admin'`, not `org_members.role`)
+   gets them. An organization admin gets an `errorPathsOmitted` note or a
+   `sandboxes.omitted` note instead.
 
 6. **RBAC is reported, not worked around.** The chart's Role
    (`deploy/chart/valet/templates/rbac.yaml`) lets the API service account

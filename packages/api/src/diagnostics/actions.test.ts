@@ -10,6 +10,7 @@ import { diagnosticsActionPlugin, type DiagnosticsInfra } from "./actions.js";
 import type { PodHealthApi } from "./pod-health.js";
 
 const ORG = "diagnostics-org";
+const OTHER_ORG = "other-org";
 
 function context(userId: string, overrides: Partial<PluginActionContext> = {}): PluginActionContext {
   return { userId, orgId: ORG, actionId: "diagnostics.list_tool_failures", service: "diagnostics", owner: { type: "user", id: userId }, ...overrides } as PluginActionContext;
@@ -28,12 +29,18 @@ describe("diagnosticsActionPlugin", () => {
   beforeEach(async () => {
     const fresh = await freshTestPgDb();
     db = fresh.appDb;
-    await db.insert(orgs).values({ id: ORG, name: "Diagnostics", createdAt: Date.now() });
+    await db.insert(orgs).values([{ id: ORG, name: "Diagnostics", createdAt: Date.now() }, { id: OTHER_ORG, name: "Other", createdAt: Date.now() }]);
+    // "admin" is a deployment operator (users.role) and an org admin; "org-admin" is an org admin only.
     await db.insert(users).values([
       { id: "admin", email: "admin@example.test", name: "Admin", role: "admin" },
+      { id: "org-admin", email: "org-admin@example.test", name: "Org Admin", role: "member" },
       { id: "member", email: "member@example.test", name: "Member", role: "member" },
+      { id: "other-admin", email: "other-admin@example.test", name: "Other Admin", role: "member" },
     ]);
-    await db.insert(orgMembers).values([{ orgId: ORG, userId: "admin", role: "admin" }, { orgId: ORG, userId: "member", role: "member" }]);
+    await db.insert(orgMembers).values([
+      { orgId: ORG, userId: "admin", role: "admin" }, { orgId: ORG, userId: "org-admin", role: "admin" },
+      { orgId: ORG, userId: "member", role: "member" }, { orgId: OTHER_ORG, userId: "other-admin", role: "admin" },
+    ]);
     const now = Date.now();
     await fresh.pgdb.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, created_at)
       VALUES ('entry-1', 's-admin', 't-admin', 'message', 'assistant', $1, $2)`, [JSON.stringify([{ type: "tool_call", callId: "call-1", toolName: "call_tool",
@@ -111,6 +118,23 @@ describe("diagnosticsActionPlugin", () => {
     expect(body.errorPaths).toEqual([expect.objectContaining({ area: "channels", reason: "outbound_delivery", provider: "slack", count: 1 })]);
   });
 
+  it("does not show an Org A admin Org B's routes or the deployment's error paths", async () => {
+    recordRequestTiming("POST /api/sessions/:id/messages", { at: Date.now(), ms: 20, status: 503, orgId: ORG });
+    recordRequestTiming("GET /api/workflows", { at: Date.now(), ms: 20, status: 500, orgId: OTHER_ORG });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError({ area: "workflows", reason: "schedule_fire" }, `workflow scheduler: fire failed for ${OTHER_ORG}-schedule`, new Error("x"));
+    errors.mockRestore();
+    const run = plugin()("diagnostics.list_server_errors");
+    const orgA = data(await run({}, context("org-admin")));
+    expect(orgA.routes).toEqual([expect.objectContaining({ route: "POST /api/sessions/:id/messages", serverErrors: 1 })]);
+    expect(orgA.errorPaths).toBeUndefined();
+    expect(orgA.errorPathsOmitted).toContain("deployment operator");
+    const orgB = data(await run({}, context("other-admin", { orgId: OTHER_ORG })));
+    expect(orgB.routes).toEqual([expect.objectContaining({ route: "GET /api/workflows", serverErrors: 1 })]);
+    expect(orgB.errorPaths).toBeUndefined();
+    expect(data(await run({}, context("admin"))).errorPaths).toEqual([expect.objectContaining({ area: "workflows", reason: "schedule_fire" })]);
+  });
+
   it("reads this process's memory and event loop for admins only", async () => {
     const run = plugin({ sandboxBackend: "docker" })("diagnostics.process_health");
     expect((await run({}, context("member"))).error).toContain("organization admins");
@@ -139,6 +163,9 @@ describe("diagnosticsActionPlugin", () => {
     const body = data(await run({}, context("admin")));
     expect(body.api).toEqual({ namespace: "valet", error: "forbidden", requiredRbac: expect.stringContaining('resources ["pods"], verbs ["get", "list"]') });
     expect(body.sandboxes).toEqual(expect.objectContaining({ namespace: "valet-sandboxes", pods: 1, restarts: 2, oomKilledPods: 1 }));
+    const orgAdmin = data(await run({}, context("org-admin")));
+    expect(orgAdmin.api).toEqual(expect.objectContaining({ error: "forbidden" }));
+    expect(orgAdmin.sandboxes).toEqual({ namespace: "valet-sandboxes", omitted: expect.stringContaining("deployment operator") });
   });
 
   it("turns a kubernetes client that cannot start into a corrective error", async () => {

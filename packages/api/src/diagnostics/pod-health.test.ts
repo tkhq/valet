@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type * as k8s from "@kubernetes/client-node";
-import { apiNamespaceRbac, podHealthApiAdapter, podRead, readPodHealth, summarizeApiNamespace, summarizeSandboxNamespace, type PodRead } from "./pod-health.js";
+import {
+  SANDBOX_COUNTS_OPERATOR_ONLY, apiNamespaceRbac, podHealthApiAdapter, podRead, readPodHealth, summarizeApiNamespace, summarizeSandboxNamespace, type PodRead,
+} from "./pod-health.js";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
 
@@ -89,13 +91,24 @@ describe("readPodHealth", () => {
       },
       apiNamespace: "valet",
       sandboxNamespace: "valet-sandboxes",
-    }, NOW);
+    }, { includeSandboxes: true, now: NOW });
     expect(result.api).toEqual({ namespace: "valet", error: "forbidden", requiredRbac: apiNamespaceRbac("valet") });
     expect(result.sandboxes).toEqual({ namespace: "valet-sandboxes", error: "unavailable", detail: "connect ECONNREFUSED 10.0.0.1:443" });
   });
 
   it("says there is no API pod out of cluster", async () => {
-    const result = await readPodHealth({ api: { listPods: async () => [], listPodWarnings: async () => [] }, sandboxNamespace: "valet-sandboxes" }, NOW);
+    const result = await readPodHealth({ api: { listPods: async () => [], listPodWarnings: async () => [] }, sandboxNamespace: "valet-sandboxes" }, { includeSandboxes: true, now: NOW });
     expect(result.api).toMatchObject({ error: "out_of_cluster" });
+  });
+
+  it("does not read sandbox pods for a caller who may not see every organization's numbers", async () => {
+    const read: string[] = [];
+    const result = await readPodHealth({
+      api: { listPods: async (namespace) => { read.push(namespace); return []; }, listPodWarnings: async () => [] },
+      apiNamespace: "valet",
+      sandboxNamespace: "valet-sandboxes",
+    }, { includeSandboxes: false, now: NOW });
+    expect(read).toEqual(["valet"]);
+    expect(result.sandboxes).toEqual({ namespace: "valet-sandboxes", omitted: SANDBOX_COUNTS_OPERATOR_ONLY });
   });
 });
