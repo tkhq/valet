@@ -13,7 +13,7 @@
  * `ChildWatcher.sweepRetention`.
  */
 import { and, eq, isNull, lte, sql } from "drizzle-orm";
-import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
+import { recordSandboxDestroyed, type AttachmentState, reportError } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
@@ -116,7 +116,7 @@ export class HibernationReaper {
           .set({ sandboxReclaimedAt: now, updatedAt: now })
           .where(and(eq(agentSessions.id, row.id), eq(agentSessions.status, "hibernated")));
       } catch (err) {
-        console.error(`HibernationReaper: reclaim failed for session ${row.id}:`, err);
+        reportError({ area: "sandbox", reason: "hibernation_reclaim" }, `HibernationReaper: reclaim failed for session ${row.id}`, err);
       }
     }
   }

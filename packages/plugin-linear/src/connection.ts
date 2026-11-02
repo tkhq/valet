@@ -29,6 +29,7 @@ import {
   LinearTokenError,
   LINEAR_WEBHOOK_RESOURCE_TYPES,
 } from "./service.js";
+import { reportError } from "@valet/engine";
 
 /** Event ingress readiness for the caller's organization. */
 export interface LinearConnectionStatus {
@@ -173,17 +174,17 @@ export function createLinearConnectionHandlers(
         token = await service.clientCredentialsToken();
       } catch (err) {
         if (err instanceof LinearTokenError && err.status >= 400 && err.status < 500) {
-          console.warn("linear connect: Linear refused the client credentials grant:", err.message);
+          reportError({ area: "plugins", reason: "linear_client_credentials", provider: "linear", level: "warn" }, "linear connect: Linear refused the client credentials grant", err.message);
           return Response.json({ error: tokenRefusalMessage(err) }, { status: 400 });
         }
-        console.error("linear connect: client credentials request failed:", err);
+        reportError({ area: "plugins", reason: "linear_client_credentials", provider: "linear" }, "linear connect: client credentials request failed", err);
         return Response.json({ error: "Could not reach Linear to check the app. Try again." }, { status: 502 });
       }
       let workspace: { workspaceId: string; workspaceName: string };
       try {
         workspace = await service.fetchWorkspace(token.accessToken);
       } catch (err) {
-        console.error("linear connect: workspace lookup failed:", err);
+        reportError({ area: "plugins", reason: "linear_workspace_lookup", provider: "linear" }, "linear connect: workspace lookup failed", err);
         return Response.json({ error: "Linear issued a token but the workspace lookup failed. Try again." }, { status: 502 });
       }
 
@@ -212,7 +213,7 @@ export function createLinearConnectionHandlers(
           try {
             await deleteLinearWebhook(legacy.accessToken, webhookId, { LINEAR_API_URL: endpoints.linearApiUrl });
           } catch (err) {
-            console.error(`linear disconnect: remove webhook ${webhookId} in Linear's settings; delete failed:`, err);
+            reportError({ area: "plugins", reason: "linear_webhook_delete", provider: "linear" }, `linear disconnect: remove webhook ${webhookId} in Linear's settings; delete failed`, err);
           }
         }
       }

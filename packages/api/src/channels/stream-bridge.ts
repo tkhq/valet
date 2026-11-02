@@ -33,6 +33,7 @@ import {
   type EventStream,
   type StreamRef,
   type Unsubscribe,
+  reportError,
 } from "@valet/engine";
 import type { ActiveStreamRecord, ActiveStreamStore } from "./active-streams.js";
 
@@ -468,7 +469,7 @@ export class ChannelStreamBridge {
     try {
       await run();
     } catch (err) {
-      console.error(`[channels] stream ${what} failed`, err);
+      reportError({ area: "channels", reason: "stream_operation" }, `[channels] stream ${what} failed`, err);
     }
   }
 
@@ -676,7 +677,7 @@ export class ChannelStreamBridge {
       await this.discard(stream);
       await this.deps
         .abortTurn(stream.turn.sessionId, stream.turn.threadId)
-        .catch((abortErr: unknown) => console.error("[channels] abort after reader stop failed", abortErr));
+        .catch((abortErr: unknown) => reportError({ area: "channels", reason: "stream_abort" }, "[channels] abort after reader stop failed", abortErr));
       return "stop";
     }
 
@@ -707,7 +708,7 @@ export class ChannelStreamBridge {
     // the rest as plain messages: that is a different method, so a different
     // rate-limit bucket.
     if (kind !== "rate_limited") {
-      console.error(`[channels] ${stream.turn.channelType}: appendStream failed`, err);
+      reportError({ area: "channels", reason: "stream_append", provider: stream.turn.channelType }, `[channels] ${stream.turn.channelType}: appendStream failed`, err);
     }
     stream.degraded = true;
     await this.closeRef(stream);
@@ -751,7 +752,7 @@ export class ChannelStreamBridge {
     try {
       await this.flush(stream, true);
     } catch (err) {
-      console.error("[channels] final flush failed", err);
+      reportError({ area: "channels", reason: "stream_final_flush" }, "[channels] final flush failed", err);
     }
     // Marked closed only after the last flush, so `scheduleFlush` cannot
     // arm a timer for a stream that is on its way out.
@@ -778,7 +779,7 @@ export class ChannelStreamBridge {
     }
     // The callback can restore processing status after Slack closes the reply.
     await this.deps.onMessageClosed?.(stream.turn, ref.messageId, stream.engineMessageId)
-      .catch((err: unknown) => console.error("[channels] stream record failed", err));
+      .catch((err: unknown) => reportError({ area: "channels", reason: "stream_record" }, "[channels] stream record failed", err));
     if (keepRecord) return;
     await this.deleteRecordFor(stream.turn.channelType, stream.turn.conversationKey, ref.messageId);
   }
@@ -802,7 +803,7 @@ export class ChannelStreamBridge {
       return "done";
     } catch (err) {
       const kind = err instanceof ChannelStreamError ? err.kind : "unknown";
-      console.error(`[channels] ${channelType}: stopStream failed`, err);
+      reportError({ area: "channels", reason: "stream_stop", provider: channelType }, `[channels] ${channelType}: stopStream failed`, err);
       // `stream_gone` and `stopped_by_user` both mean the provider has already
       // closed this message. Retrying would fail the same way for ever.
       return kind === "stream_gone" || kind === "stopped_by_user" ? "done" : "retry";
@@ -832,7 +833,7 @@ export class ChannelStreamBridge {
     try {
       await this.deps.streams.delete({ channelType, conversationKey, messageId });
     } catch (err) {
-      console.error("[channels] active-stream row delete failed", err);
+      reportError({ area: "channels", reason: "stream_row_delete" }, "[channels] active-stream row delete failed", err);
     }
   }
 
@@ -891,7 +892,7 @@ export class ChannelStreamBridge {
           "This answer stopped before it finished. Send the message again, or open the session in Valet.",
         );
       } catch (err) {
-        console.error(`[channels] ${channelType}: orphan sweep failed`, err);
+        reportError({ area: "channels", reason: "stream_orphan_sweep", provider: channelType }, `[channels] ${channelType}: orphan sweep failed`, err);
       }
     }
     return closed;
@@ -920,7 +921,8 @@ export class ChannelStreamBridge {
         // the message is still shimmering on someone's screen.
         continue;
       } else {
-        console.error(
+        reportError(
+          { area: "channels", reason: "stream_abandoned", provider: row.channelType },
           `[channels] ${row.channelType}: giving up on stream ${row.messageId} after ` +
             `${Math.round(STREAM_ABANDON_AFTER_MS / 60_000)} minutes of failed closes`,
         );

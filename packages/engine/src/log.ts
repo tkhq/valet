@@ -32,11 +32,20 @@ function safeStringify(value: unknown): string {
   }
 }
 
-/** The log fields for a caught value: message, class and stack for an Error. */
+/** The log fields for a caught value: message, class and stack for an
+ * Error or an error-shaped object (such as `formatSandboxErrorLog` output).
+ * An Error's `cause` is left out: it can hold a request with credentials. */
 export function errorLogFields(err: unknown): LogFields {
   if (err === undefined) return {};
   if (err instanceof Error) {
     return { error: err.message, error_class: err.name, ...(err.stack ? { stack: err.stack } : {}) };
+  }
+  if (typeof err === "object" && err !== null && "message" in err && typeof err.message === "string") {
+    return {
+      error: err.message,
+      ...("name" in err && typeof err.name === "string" ? { error_class: err.name } : {}),
+      ...("stack" in err && typeof err.stack === "string" ? { stack: err.stack } : {}),
+    };
   }
   const text = typeof err === "string" ? err : safeStringify(err);
   return { error: text.length > MAX_VALUE_CHARS ? `${text.slice(0, MAX_VALUE_CHARS)}…` : text };

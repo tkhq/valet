@@ -18,6 +18,7 @@ import { OAuthTokenError, refreshTokenPkce, type TokenResponse } from "@valet/sd
 import type { AppQueryable } from "../lib/drizzle.js";
 import { mcpOauthClients } from "../schema/index.js";
 import { findOAuthDeclaration, refreshAuthorizationCodeToken } from "../services/integration-oauth.js";
+import { reportError } from "@valet/engine";
 
 const REFRESH_BUFFER_MS = 60_000;
 /** The longest refusal text kept on a credential. */
@@ -143,8 +144,8 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       const reason = err instanceof OAuthTokenError
         ? refreshErrorText(err, [stored.refreshToken, stored.accessToken, clientSecret])
         : undefined;
-      if (reason !== undefined) console.error(`credential refresh failed for ${service}: ${reason}`);
-      else console.error(`credential refresh failed for ${service}:`, err);
+      if (reason !== undefined) reportError({ area: "plugins", reason: "credential_refresh", provider: service }, `credential refresh failed for ${service}: ${reason}`);
+      else reportError({ area: "plugins", reason: "credential_refresh", provider: service }, `credential refresh failed for ${service}`, err);
       // Only the provider refusing the grant (400 or 401) makes the row dead
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
       // failure and leaves the next read to retry.

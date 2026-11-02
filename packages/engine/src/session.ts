@@ -69,6 +69,7 @@ import type {
   WriteFence,
 } from "./types.js";
 import { credentialSecret, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { reportError } from "./error-report.js";
 
 
 function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
@@ -423,7 +424,7 @@ export class Session {
     if (!this.reclaimRecovery) return;
     const recover = this.reclaimRecovery;
     this.reclaimRecoveryTail = this.reclaimRecoveryTail.then(recover).catch(error => {
-      console.error(`Session ${this.id}: reclaim recovery failed; resolve the session to retry:`, error);
+      reportError({ area: "engine", reason: "reclaim_recovery" }, `Session ${this.id}: reclaim recovery failed; resolve the session to retry`, error);
     });
   }
 
@@ -526,10 +527,7 @@ export class Session {
         // trace forever.
         detachedFromTrace(() =>
           this.heartbeatOnce().catch((err) => {
-            console.error(
-              `[engine] heartbeat failed (session=${this.id}):`,
-              err instanceof Error ? err.message : String(err),
-            );
+            reportError({ area: "engine", reason: "heartbeat" }, `[engine] heartbeat failed (session=${this.id})`, err);
           }),
         );
       }, 10_000);
@@ -543,10 +541,7 @@ export class Session {
         // stale-context reasoning as the heartbeat above.
         detachedFromTrace(() =>
           this.sweepOnce().catch((err) => {
-            console.error(
-              `[engine] sweep failed (session=${this.id}):`,
-              err instanceof Error ? err.message : String(err),
-            );
+            reportError({ area: "engine", reason: "session_sweep" }, `[engine] sweep failed (session=${this.id})`, err);
           }),
         );
       }, 5_000);
@@ -1949,10 +1944,7 @@ export class Session {
       await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"), opts?.fence);
     } catch (err) {
       if (err instanceof StaleAttemptError || opts?.throwOnAppendError) throw err;
-      console.error(
-        `[engine] event append failed (session=${this.id}, type=${event.type}):`,
-        err instanceof Error ? err.message : String(err),
-      );
+      reportError({ area: "engine", reason: "event_append" }, `[engine] event append failed (session=${this.id}, type=${event.type})`, err);
     }
   }
 

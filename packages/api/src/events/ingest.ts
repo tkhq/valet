@@ -28,6 +28,7 @@ import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { isAssistantKind } from "./target-names.js";
 import { placeOfSubject } from "../services/presence-places.js";
+import { reportError } from "@valet/engine";
 
 /** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
 function receiptTargetKind(target: unknown): string {
@@ -213,7 +214,7 @@ async function logFilterExcludedDrop(
       detail: message,
     });
   } catch (err) {
-    console.error("[ingest] filter-excluded drop-log failed", err);
+    reportError({ area: "events", reason: "ingest_drop_log" }, "[ingest] filter-excluded drop-log failed", err);
   }
 }
 
@@ -516,7 +517,7 @@ export async function ingestEvent(
     return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
     await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Search the server logs for this event's ID; the error itself is not kept here.` });
-    console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
+    reportError({ area: "events", reason: "ingest_receipt" }, `[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }
 }

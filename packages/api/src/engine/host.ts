@@ -48,6 +48,7 @@ import {
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
   type ProviderBundle,
+  reportError,
 } from "@valet/engine";
 import type { CompactionConfig, CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
@@ -275,7 +276,8 @@ export function securityRolesForCell(
       return [{ ...role, name: persona }];
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      console.warn(
+      reportError(
+        { area: "engine", reason: "security_persona_load", level: "warn" },
         `security: repo persona "${persona}" role markdown failed to load (${detail}); ` +
           "attaching the code-review role. Fix the persona markdown in the repo.",
       );
@@ -959,7 +961,7 @@ export class EngineHost {
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
       this.sweepInterval = setInterval(() => {
-        this.runIdleSweep().catch((err) => console.error("EngineHost: idle sweep failed:", err));
+        this.runIdleSweep().catch((err) => reportError({ area: "engine", reason: "idle_sweep" }, "EngineHost: idle sweep failed", err));
       }, 60_000);
       this.sweepInterval.unref?.();
     }
@@ -1077,7 +1079,7 @@ export class EngineHost {
 
     if (this.opts.onHibernate) {
       Promise.resolve(this.opts.onHibernate(sessionId, session.attachment.sandboxId)).catch((err) =>
-        console.error(`EngineHost: onHibernate failed for session ${sessionId}:`, err),
+        reportError({ area: "engine", reason: "on_hibernate" }, `EngineHost: onHibernate failed for session ${sessionId}`, err),
       );
     }
   }
@@ -1103,7 +1105,7 @@ export class EngineHost {
           wasSuspended = false;
           if (this.opts.onWake) {
             Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
-              console.error(`EngineHost: onWake failed for session ${sessionId}:`, err),
+              reportError({ area: "engine", reason: "on_wake" }, `EngineHost: onWake failed for session ${sessionId}`, err),
             );
           }
         }
@@ -1112,7 +1114,7 @@ export class EngineHost {
         // separately from `onWake` above.
         if (this.opts.onSessionReady) {
           Promise.resolve(this.opts.onSessionReady(sessionId)).catch((err) =>
-            console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
+            reportError({ area: "engine", reason: "on_session_ready" }, `EngineHost: onSessionReady failed for session ${sessionId}`, err),
           );
         }
         // Prep-completion seam for slash commands (Task 10): repo templates
@@ -1122,7 +1124,7 @@ export class EngineHost {
         // no-op when the session has no `workspaceSkillsProvider`. Best-effort — a
         // refresh failure never breaks the ready transition.
         Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
-          console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
+          reportError({ area: "engine", reason: "command_registry_refresh" }, `EngineHost: refreshCommandRegistry failed for session ${sessionId}`, err),
         );
         // Repo AGENTS.md instructions (agents-md spec, decision 1): re-read on
         // every ready transition — cold boot, wake, and warm rebuild — so
@@ -1130,7 +1132,7 @@ export class EngineHost {
         // session has no `repoInstructionsProvider`. Best-effort, same as the
         // registry refresh above; a failure leaves the previous value serving.
         Promise.resolve(session.refreshRepoInstructions()).catch((err) =>
-          console.error(`EngineHost: refreshRepoInstructions failed for session ${sessionId}:`, err),
+          reportError({ area: "engine", reason: "repo_instructions_refresh" }, `EngineHost: refreshRepoInstructions failed for session ${sessionId}`, err),
         );
       }
     });
@@ -1310,10 +1312,7 @@ export class EngineHost {
       }
       if (target.options.startRef) return;
       await target.setStartRef(ref).catch((err: unknown) => {
-        console.error(
-          `EngineHost: recording start-ref for session ${sessionId} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        reportError({ area: "engine", reason: "start_ref_record" }, `EngineHost: recording start-ref for session ${sessionId} failed`, err);
       });
     };
     const specProvider = await this.buildSpecProvider(
@@ -1639,10 +1638,7 @@ export class EngineHost {
       try {
         if (await orgAllowsPluginForUser(db, orgId, owner.id, plugin.name)) kept.push(plugin);
       } catch (err) {
-        console.error(
-          `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        reportError({ area: "engine", reason: "plugin_entitlement" }, `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin`, err);
         kept.push(plugin);
       }
     }
@@ -1994,7 +1990,7 @@ export class EngineHost {
         .returning({ id: agentSessions.id });
       return rows.length > 0;
     } catch (err) {
-      console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
+      reportError({ area: "engine", reason: "image_fallback_record" }, `EngineHost: recording image_fallback for session ${sessionId} failed`, err);
       return false;
     }
   }
@@ -2463,7 +2459,7 @@ export class EngineHost {
         ref,
       );
     } catch (err) {
-      console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
+      reportError({ area: "engine", reason: "credentials_yaml_read" }, "EngineHost: reading .valet/credentials.yaml failed", err);
       return [];
     }
   }
@@ -2864,7 +2860,7 @@ export class EngineHost {
         createdAt: Date.now(),
       });
     } catch (err) {
-      console.error(`EngineHost: session ${session.id}: showing a startup warning failed:`, err);
+      reportError({ area: "engine", reason: "startup_warning" }, `EngineHost: session ${session.id}: showing a startup warning failed`, err);
     }
   }
 
@@ -3063,7 +3059,7 @@ export class EngineHost {
         const ids = settled.map((i) => i.id);
         if (ids.length > 0) await this.opts.eventStream.prune(sessionId, ids);
       } catch (err) {
-        console.error(`event retention prune failed for session ${sessionId}:`, err);
+        reportError({ area: "engine", reason: "event_retention_prune" }, `event retention prune failed for session ${sessionId}`, err);
       }
     })();
   }
@@ -3494,7 +3490,7 @@ export class EngineHost {
         try {
           await revokeSessionGrants(this.opts.db, sessionId);
         } catch (err) {
-          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+          reportError({ area: "engine", reason: "grant_revoke" }, `EngineHost: revoking session grants for ${sessionId} failed`, err);
         }
       }
       return;
@@ -3518,7 +3514,7 @@ export class EngineHost {
         try {
           await revokeSessionGrants(this.opts.db, sessionId);
         } catch (err) {
-          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+          reportError({ area: "engine", reason: "grant_revoke" }, `EngineHost: revoking session grants for ${sessionId} failed`, err);
         }
       }
     }
@@ -3699,7 +3695,7 @@ export class EngineHost {
     try {
       await this.opts.onWake(sessionId);
     } catch (err) {
-      console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
+      reportError({ area: "engine", reason: "mark_session_used" }, `EngineHost: markSessionUsed failed for session ${sessionId}`, err);
     }
   }
 

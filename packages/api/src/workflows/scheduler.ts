@@ -44,6 +44,7 @@ import {
 export { BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON };
 import type { WorkflowOwner } from "./service.js";
 import { readScheduleTargetKind } from "../events/target-names.js";
+import { reportError } from "@valet/engine";
 
 
 const POLL_MS = 30_000;
@@ -129,11 +130,11 @@ export class WorkflowScheduler {
         try {
           await this.fire(schedule, now);
         } catch (err) {
-          console.error(`workflow scheduler: fire failed for ${schedule.id} (will retry next tick):`, err);
+          reportError({ area: "workflows", reason: "schedule_fire" }, `workflow scheduler: fire failed for ${schedule.id} (will retry next tick)`, err);
         }
       }
     } catch (err) {
-      console.error("workflow scheduler: tick failed:", err);
+      reportError({ area: "workflows", reason: "scheduler_tick" }, "workflow scheduler: tick failed", err);
     } finally {
       this.ticking = false;
     }
@@ -251,7 +252,7 @@ export class WorkflowScheduler {
     const { db } = this.deps;
     const next = nextFireAt(schedule.cron, schedule.timezone, now);
     if (!next.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id} — ${next.error}`);
       await db.update(workflowSchedules)
         .set({ enabled: false, updatedAt: now, disabledReason: BAD_CRON_REASON })
         .where(eq(workflowSchedules.id, schedule.id));
@@ -259,7 +260,7 @@ export class WorkflowScheduler {
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (!result.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id}: ${result.error}`);
       // Every disable records its reason, so the routine page can name the fix.
       const disabled = await db.update(workflowSchedules)
         .set({ enabled: false, updatedAt: now, disabledReason: result.error })

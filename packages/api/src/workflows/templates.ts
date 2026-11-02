@@ -80,6 +80,7 @@ import type {
   WorkflowTemplateRequirement,
   WorkflowTemplateSummary,
 } from "../wire/types.js";
+import { reportError } from "@valet/engine";
 
 /** Foreach's own default cap (`nodes/foreach.ts`), repeated here only to
  * word the caveat when a template leaves `maxItems` off. */
@@ -761,9 +762,10 @@ export async function listWorkflowTemplateSummaries(
   try {
     orgEnv = await buildOrgValidateEnvironment(deps, caller.orgId);
   } catch (err) {
-    console.error(
+    reportError(
+      { area: "workflows", reason: "template_model_policy" },
       `workflow templates: could not read the model policy of org ${caller.orgId}; ` +
-        "listing every template as installable:",
+        "listing every template as installable",
       err,
     );
   }
@@ -772,7 +774,8 @@ export async function listWorkflowTemplateSummaries(
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable, own);
     if (!result.ok) {
-      console.error(
+      reportError(
+        { area: "workflows", reason: "template_invalid" },
         `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +
           `its definition is invalid: ${result.errors.join("; ")}`,
       );

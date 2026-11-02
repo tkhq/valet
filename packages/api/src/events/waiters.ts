@@ -20,6 +20,7 @@ import {
   type SessionStore,
   type ValetPlugin,
   type Wakeup,
+  reportError,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
@@ -178,7 +179,7 @@ export async function evaluateWaiterCandidates(
     } catch (error) {
       onError?.();
       metrics.failed();
-      console.error(`[event-waiters] matching failed for waiter ${waiter.id}`, error);
+      reportError({ area: "events", reason: "waiter_match" }, `[event-waiters] matching failed for waiter ${waiter.id}`, error);
     }
   }
   return candidates;
@@ -219,7 +220,7 @@ export async function appendWaiterDigests(
     } catch (error) {
       result.errors++;
       metrics.failed();
-      console.error(`[event-waiters] matching failed for waiter ${candidate.waiter.id}`, error);
+      reportError({ area: "events", reason: "waiter_match" }, `[event-waiters] matching failed for waiter ${candidate.waiter.id}`, error);
     }
   }
   if (appended.length > 0) deps.nudge?.(appended);

@@ -3,6 +3,7 @@ import type { SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { recordChildReplyFailure, recordChildReplyOverAgeWait } from "../observability/child-reply-metrics.js";
 import { childReplyDeliveries, childWatches, eventDropLog } from "../schema/index.js";
+import { reportError } from "@valet/engine";
 
 type ChildReplyRow = typeof childReplyDeliveries.$inferSelect;
 
@@ -80,7 +81,7 @@ export class ChildReplyDispatcher {
   poll(): Promise<void> {
     if (this.running) return this.running;
     const running = this.run().catch((error: unknown) => {
-      console.error("[channels] child reply retry failed", error);
+      reportError({ area: "channels", reason: "child_reply_retry" }, "[channels] child reply retry failed", error);
     }).finally(() => { this.running = undefined; });
     this.running = running;
     return running;

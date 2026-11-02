@@ -57,6 +57,7 @@ import {
   type OnGateResolved,
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
+import { reportError } from "@valet/engine";
 
 /**
  * What the host learns when a run reaches a terminal outcome (batch-fanout
@@ -476,7 +477,7 @@ async function abortInFlight(deps: InterpreterDeps, runId: string, waits: RunWai
       if (wait.kind === 'submission') await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
       if (wait.kind === 'run') await cancelChildRun(store, wait.runId, clock);
     } catch (err) {
-      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed:`, err);
+      reportError({ area: "workflows", reason: "node_stop", level: "warn" }, `workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed`, err);
       firstError ??= err;
     }
   }
@@ -499,7 +500,7 @@ export async function abortPoisonedRun(deps: Pick<InterpreterDeps, 'store' | 'en
       if (wait.kind === 'submission') await deps.engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
       if (wait.kind === 'run') await cancelChildRun(deps.store, wait.runId, deps.clock);
     } catch (err) {
-      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" before the failed settle failed:`, err);
+      reportError({ area: "workflows", reason: "node_stop", level: "warn" }, `workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" before the failed settle failed`, err);
     }
   }
 }

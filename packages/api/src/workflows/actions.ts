@@ -11,6 +11,7 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  reportError,
 } from "@valet/engine";
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
@@ -1040,7 +1041,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       } catch (err) {
         // The approval is already recorded. A failed read only loses the
         // still-waiting list; it must not turn a success into a failure.
-        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+        reportError({ area: "workflows", reason: "approval_run_read", level: "warn" }, `resolve_approval: could not read run ${run_id} after the approval`, err);
       }
       const next = stillWaiting === undefined
         ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."

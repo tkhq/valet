@@ -421,8 +421,10 @@ describe("SandboxAttachment.reconcile", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await att.reconcile();
-      expect(log).toHaveBeenCalledWith("SandboxAttachment.reconcile failed", {
-        name: "TypeError", message: "exec connection failed", stack: failure.stack,
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+        message: "SandboxAttachment.reconcile failed", area: "sandbox", reason: "reconcile",
+        error: "exec connection failed", error_class: "TypeError", stack: failure.stack,
       });
       expect(JSON.stringify(log.mock.calls)).not.toContain("SECRET_COMMAND");
     } finally {

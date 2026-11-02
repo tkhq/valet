@@ -116,6 +116,13 @@ cost on the `turn_end` event and patch-capture records on
    - `cost_total` NULL means unpriced, never free. The engine omits cost for
      a model it has no price for. Read `priced` before you present a total.
 
+8. **Error paths and process health (2026-10-30).** Error paths that do
+   not throw report through `reportError`, which counts
+   `valet.errors{area, reason, provider}`, marks the active span, and
+   writes a trace-aware log line. The API also exports heap, cgroup
+   memory, event-loop delay, and start-time gauges. See
+   `2026-10-30-error-instrumentation-design.md`.
+
 ## Out of scope
 
 - Logs export (the LGTM stack accepts OTLP logs; stdout/kubectl remains the

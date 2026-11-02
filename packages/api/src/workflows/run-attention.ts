@@ -33,6 +33,7 @@ import { assistantExecutions, sessionThreads, workflowDefinitions } from "../sch
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { workflowRunIdFromThreadKey } from "./run-conversations.js";
 import { endChildSubscriptions, selectWork } from "../engine/wakeups-admin.js";
+import { reportError } from "@valet/engine";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
@@ -73,7 +74,7 @@ export function buildRunApprovalAttention(deps: {
       });
     } catch (err) {
       // A failed notification must not prevent the run from parking.
-      console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
+      reportError({ area: "workflows", reason: "approval_notify" }, `workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
     }
   };
 }
@@ -130,7 +131,7 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
         },
       );
     } catch (err) {
-      console.error(`workflow failed-run notification failed for ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "failed_run_notify" }, `workflow failed-run notification failed for ${info.runId}`, err);
     }
   };
 }
@@ -208,7 +209,7 @@ export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
         attributes: { runId: info.runId, outcome: info.outcome },
       }));
     } catch (err) {
-      console.error(`workflow run report to its thread failed for ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "run_report" }, `workflow run report to its thread failed for ${info.runId}`, err);
     }
   };
 }
@@ -278,7 +279,7 @@ export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalP
         attributes: { runId: info.runId },
       }));
     } catch (err) {
-      console.error(`workflow approval report to its thread failed for ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "approval_report" }, `workflow approval report to its thread failed for ${info.runId}`, err);
     }
   };
 }
@@ -435,7 +436,7 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
         }
       }
     } catch (err) {
-      console.error(`workflow run thread archive failed for ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "run_thread_archive" }, `workflow run thread archive failed for ${info.runId}`, err);
     }
   };
 }

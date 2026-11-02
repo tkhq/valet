@@ -21,6 +21,7 @@ import type {
 } from "./types.js";
 import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
+import { reportError } from "./error-report.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -784,7 +785,7 @@ export async function invokeAction(
     // Log and keep the cause: without it, every team action fails with no
     // trace of why the policy check threw.
     const cause = innermostMessage(err);
-    console.error(`[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}:`, err);
+    reportError({ area: "plugins", reason: "policy_resolution" }, `[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
       return { kind: "error", message: `Could not check this team's action policies (${cause.slice(0, 300)}). Retry the action when policy checks are available.` };

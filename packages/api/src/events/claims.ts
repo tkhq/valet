@@ -16,6 +16,7 @@ import { subscriptionMatchesEvent } from "./match.js";
 import { isTeamAssistantMention, mentionSenderActor } from "./team-slack-gate.js";
 import type { WaiterCandidate, WaiterDecision } from "./waiters.js";
 import { isAssistantKind } from "./target-names.js";
+import { reportError } from "@valet/engine";
 
 /** The subscription fields claim resolution reads. */
 export interface ClaimSubscription {
@@ -252,7 +253,7 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
     // never loss (INV-D6). It counts as a failed resolution, so ingest
     // records the receipt stage and the failure counter.
     decision.failedOwners += 1;
-    console.error(`[event-claims] the follow route check failed in org ${args.orgId}`, error);
+    reportError({ area: "events", reason: "claim_follow_route" }, `[event-claims] the follow route check failed in org ${args.orgId}`, error);
   }
   if (routedOwner) {
     const entry = owners.get(ownerKey(routedOwner)) ?? { owner: routedOwner, subscriptions: [], followRouted: false };
@@ -279,7 +280,7 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
       result = await resolveOwner(deps, args, owner, delivering.length > 0, followRouted);
     } catch (error) {
       decision.failedOwners += 1;
-      console.error(`[event-claims] claim resolution failed for a ${owner.type} owner in org ${args.orgId}`, error);
+      reportError({ area: "events", reason: "claim_resolution" }, `[event-claims] claim resolution failed for a ${owner.type} owner in org ${args.orgId}`, error);
       continue;
     }
     if (!result) continue;
