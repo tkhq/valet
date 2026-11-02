@@ -19,6 +19,7 @@ import {
   type PluginActionContext,
   type PluginActionResult,
 } from '@valet/engine';
+import { DEFAULT_MAX_UPLOAD_BYTES } from '@valet/shared';
 import { insertMarkdown } from './docs-markdown.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -1038,7 +1039,7 @@ const downloadFile = action(
         if (!exportMime || !isTextDocumentMime(exportMime)) {
           return {
             success: false,
-            error: `Cannot read Google Workspace type: ${meta.mimeType ?? 'unknown'}. Export the file as PDF and download the exported file.`,
+            error: `Cannot read Google Workspace type: ${meta.mimeType ?? 'unknown'}. Save it as a PDF with drive.export_file instead.`,
           };
         }
         const maxBytes = maxSizeBytes ?? 1_048_576;
@@ -1214,6 +1215,153 @@ const createFromTemplate = action(
   },
 });
 
+/** Formats `drive.export_file` converts Google editor files to, by source type. */
+const EXPORT_FORMATS: Record<string, Partial<Record<ExportFormat, string>>> = {
+  'application/vnd.google-apps.document': { pdf: 'application/pdf', docx: DOCX_DOCUMENT_MIME },
+  'application/vnd.google-apps.spreadsheet': {
+    pdf: 'application/pdf',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    csv: 'text/csv',
+  },
+  'application/vnd.google-apps.presentation': {
+    pdf: 'application/pdf',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  },
+  'application/vnd.google-apps.drawing': { pdf: 'application/pdf' },
+};
+
+const EXPORT_FORMAT_NAMES = ['pdf', 'docx', 'xlsx', 'pptx', 'csv'] as const;
+type ExportFormat = (typeof EXPORT_FORMAT_NAMES)[number];
+
+/**
+ * The saved file's name: the caller's name or the Drive name, with the
+ * format's extension when a conversion happened and the name lacks it.
+ * Slashes and control characters cannot reach the thread file store.
+ */
+export function exportFileName(name: string, format: ExportFormat | null): string {
+  let base = name.replace(/[\x00-\x1f\x7f]/g, '').replace(/[/\\]/g, '-').trim() || 'export';
+  const ext = format ? `.${format}` : '';
+  if (ext && base.toLowerCase().endsWith(ext)) base = base.slice(0, -ext.length);
+  return `${Array.from(base).slice(0, 255 - ext.length).join('')}${ext}`;
+}
+
+const exportFile = action(
+  Type.Object({
+    fileId: Type.String({ description: 'Drive file ID of the file to save.' }),
+    format: Type.Optional(Type.Union(EXPORT_FORMAT_NAMES.map((name) => Type.Literal(name)), {
+      description:
+        'Output format for a Google Docs, Sheets, or Slides file. Docs: pdf or docx. Sheets: pdf, xlsx, or csv (first sheet only). ' +
+        'Slides: pdf or pptx. Default: pdf. Omit it for other Drive files, which are saved unchanged.',
+    })),
+    fileName: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'Optional name for the saved file. Default: the Drive file name, plus the format extension.',
+    })),
+  }, { additionalProperties: false }),
+)({
+  id: 'drive.export_file',
+  name: 'Export File',
+  description:
+    'Saves a Google Drive file to this thread as a file the person can download. Converts Google Docs, Sheets, and Slides ' +
+    'to PDF (default) or docx, xlsx, pptx, or csv. Saves other Drive files, such as PDFs and Office files, unchanged. ' +
+    'Returns threadFileId and a download URL. To email the file, pass threadFileId in a Gmail attachment.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const token = await getAccessToken(ctx);
+    if (!token) return { success: false, error: 'Missing access token' };
+    if (!ctx.threadFiles) {
+      return {
+        success: false,
+        error: 'This session cannot save files to the thread. Share the Drive link instead, or read the text with drive.download_file.',
+      };
+    }
+    try {
+      const metaQs = new URLSearchParams({ fields: 'id,name,mimeType,size,webViewLink', supportsAllDrives: 'true' });
+      const metaRes = await driveFetch(`/files/${encodeURIComponent(args.fileId)}?${metaQs}`, token, { signal: ctx.signal });
+      if (!metaRes.ok) return driveError(metaRes);
+      const meta = (await metaRes.json()) as DriveFile;
+      const sourceMime = normalizeDocumentMime(meta.mimeType);
+      const limit = DEFAULT_MAX_UPLOAD_BYTES;
+      const tooLarge = (size: number) => ({
+        success: false as const,
+        error: `${meta.name} is ${size} bytes, over the ${limit / (1024 * 1024)} MB limit for thread files. Share the Drive link instead: ${meta.webViewLink ?? 'open the file in Drive'}.`,
+      });
+
+      let response: Response;
+      let format: ExportFormat | null = null;
+      let mimeType: string;
+      if (isGoogleWorkspaceMimeType(sourceMime)) {
+        const formats = EXPORT_FORMATS[sourceMime];
+        if (!formats) {
+          return {
+            success: false,
+            error: `Cannot export ${meta.name} (${sourceMime}). Only Google Docs, Sheets, Slides, and Drawings can be exported. Share the Drive link instead.`,
+          };
+        }
+        format = args.format ?? 'pdf';
+        const exportMime = formats[format];
+        if (!exportMime) {
+          return {
+            success: false,
+            error: `Cannot export ${meta.name} as ${format}. Use one of: ${Object.keys(formats).join(', ')}.`,
+          };
+        }
+        mimeType = exportMime;
+        const exportQs = new URLSearchParams({ mimeType: exportMime });
+        response = await driveFetch(`/files/${encodeURIComponent(args.fileId)}/export?${exportQs}`, token, { signal: ctx.signal });
+        if (!response.ok) {
+          const failure = await driveError(response);
+          // Drive refuses exports over 10 MB with a 403 "too large to be exported".
+          if (/too large to be exported/i.test(failure.error)) {
+            return {
+              success: false,
+              error: `Google Drive cannot export ${meta.name} because the export is over its 10 MB limit. Share the Drive link instead, or split the file.`,
+            };
+          }
+          return failure;
+        }
+      } else {
+        if (args.format && !sourceMime.endsWith(args.format) && !meta.name.toLowerCase().endsWith(`.${args.format}`)) {
+          return {
+            success: false,
+            error: `Drive converts only Google Docs, Sheets, and Slides. ${meta.name} is ${sourceMime || 'a binary file'}. Omit format to save it unchanged.`,
+          };
+        }
+        const declared = Number(meta.size);
+        if (Number.isFinite(declared) && declared > limit) return tooLarge(declared);
+        mimeType = sourceMime || 'application/octet-stream';
+        const dlQs = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
+        response = await driveFetch(`/files/${encodeURIComponent(args.fileId)}?${dlQs}`, token, { signal: ctx.signal });
+        if (!response.ok) return driveError(response);
+      }
+
+      const downloaded = await readResponseBytes(response, limit, ctx.signal);
+      if (!downloaded.ok) return tooLarge(downloaded.size);
+      const saved = await ctx.threadFiles.save({
+        name: exportFileName(args.fileName ?? meta.name, format),
+        mimeType,
+        data: downloaded.data,
+      });
+      return {
+        success: true,
+        data: {
+          threadFileId: saved.id,
+          name: saved.name,
+          mimeType: saved.mimeType,
+          bytes: saved.bytes,
+          url: saved.url,
+          webUrl: saved.webUrl,
+          exportedAs: format,
+          source: { fileId: meta.id, name: meta.name, mimeType: meta.mimeType },
+          message: `Saved ${saved.name} to this thread. Give the person the download URL as a Markdown link. To email it, add { "threadFileId": "${saved.id}" } to the Gmail attachments.`,
+        },
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+});
+
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 export const driveActions: PluginAction[] = [
@@ -1231,5 +1379,6 @@ export const driveActions: PluginAction[] = [
   renameFile,
   deleteFileAction,
   downloadFile,
+  exportFile,
   createFromTemplate,
 ];

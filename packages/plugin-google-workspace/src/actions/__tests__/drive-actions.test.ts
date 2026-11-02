@@ -7,9 +7,11 @@ import type {
   MessageQuery,
   Sandbox,
   SessionEntry,
+  ThreadFile,
+  ThreadFileStore,
   ToolContext,
 } from '@valet/engine';
-import { driveActions } from '../drive-actions.js';
+import { driveActions, exportFileName } from '../drive-actions.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
@@ -895,5 +897,135 @@ describe('DOCX downloads', () => {
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
     expect(result.success).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('drive.export_file', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => { fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+
+  function fileStore() {
+    const saved: Array<{ name: string; mimeType: string; data: Uint8Array }> = [];
+    const store: ThreadFileStore = {
+      save: async (file) => {
+        saved.push(file);
+        const id = '6f1c2d3e-4a5b-4c6d-8e7f-001122334455';
+        const webUrl = `/api/sessions/s1/threads/t1/files/${id}`;
+        const result: ThreadFile = { id, name: file.name, mimeType: file.mimeType, bytes: file.data.byteLength, url: webUrl, webUrl };
+        return result;
+      },
+      read: async () => null,
+    };
+    return { store, saved };
+  }
+
+  function metadata(body: Record<string, unknown>): Response {
+    return jsonResponse(200, { id: 'doc1', webViewLink: 'https://docs.google.com/document/d/doc1', ...body });
+  }
+
+  it('exports a Google Doc to PDF with files.export and saves it as a thread file', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Master Services Agreement', mimeType: 'application/vnd.google-apps.document' }));
+    fetchMock.mockResolvedValueOnce(new Response(pdfBytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        threadFileId: '6f1c2d3e-4a5b-4c6d-8e7f-001122334455',
+        name: 'Master Services Agreement.pdf',
+        mimeType: 'application/pdf',
+        bytes: pdfBytes.byteLength,
+        exportedAs: 'pdf',
+        webUrl: '/api/sessions/s1/threads/t1/files/6f1c2d3e-4a5b-4c6d-8e7f-001122334455',
+      },
+    });
+    const exportUrl = new URL(String(fetchMock.mock.calls[1][0]));
+    expect(exportUrl.pathname).toBe('/drive/v3/files/doc1/export');
+    expect(exportUrl.searchParams.get('mimeType')).toBe('application/pdf');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer test-token');
+    expect(saved).toHaveLength(1);
+    expect(saved[0].data).toEqual(pdfBytes);
+  });
+
+  it.each([
+    ['application/vnd.google-apps.document', 'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    ['application/vnd.google-apps.spreadsheet', 'xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['application/vnd.google-apps.spreadsheet', 'csv', 'text/csv'],
+    ['application/vnd.google-apps.presentation', 'pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ] as const)('exports %s as %s', async (sourceMime, format, exportMime) => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Plan', mimeType: sourceMime }));
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(true);
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.get('mimeType')).toBe(exportMime);
+    expect(saved[0]).toMatchObject({ name: `Plan.${format}`, mimeType: exportMime });
+  });
+
+  it('rejects a format the source type cannot export to before downloading', async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Plan', mimeType: 'application/vnd.google-apps.presentation' }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format: 'xlsx' }, pluginCtx({ threadFiles: store }));
+    expect(result).toEqual({ success: false, error: 'Cannot export Plan as xlsx. Use one of: pdf, pptx.' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves a non-Google file unchanged with alt=media', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Signed SOW.pdf', mimeType: 'application/pdf', size: String(pdfBytes.byteLength) }));
+    fetchMock.mockResolvedValueOnce(new Response(pdfBytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result).toMatchObject({ success: true, data: { name: 'Signed SOW.pdf', exportedAs: null } });
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.get('alt')).toBe('media');
+    expect(saved[0]).toMatchObject({ name: 'Signed SOW.pdf', mimeType: 'application/pdf' });
+  });
+
+  it('refuses to convert a non-Google file', async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'photo.png', mimeType: 'image/png' }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format: 'pdf' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Omit format to save it unchanged');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a file over the thread file limit before downloading it', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'video.mp4', mimeType: 'video/mp4', size: String(60 * 1024 * 1024) }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Share the Drive link instead');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(saved).toEqual([]);
+  });
+
+  it("names the fix when Drive's 10 MB export limit refuses the file", async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Handbook', mimeType: 'application/vnd.google-apps.document' }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { error: { code: 403, message: 'This file is too large to be exported.' } }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('over its 10 MB limit. Share the Drive link instead');
+  });
+
+  it('names the limit when the host has no thread file store', async () => {
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx());
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('cannot save files to the thread');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('builds safe file names', () => {
+    expect(exportFileName('Q3 / Q4 plan', 'pdf')).toBe('Q3 - Q4 plan.pdf');
+    expect(exportFileName('Agreement.PDF', 'pdf')).toBe('Agreement.pdf');
+    expect(exportFileName('Signed.pdf', null)).toBe('Signed.pdf');
+    expect(exportFileName('Résumé — 履歴書', 'docx')).toBe('Résumé — 履歴書.docx');
+    expect(exportFileName('\x00\n', 'pdf')).toBe('export.pdf');
+    expect(Array.from(exportFileName('é'.repeat(300), 'pdf'))).toHaveLength(255);
   });
 });
