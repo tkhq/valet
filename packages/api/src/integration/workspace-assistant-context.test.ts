@@ -6,6 +6,7 @@ import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { mintCliToken } from "../auth/cli-tokens.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import { writeSessionGrant } from "../policies/service.js";
 import { orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 
@@ -102,7 +103,9 @@ it("preserves the persisted human author when a pending settings approval replay
 it("refuses a CLI-authored settings write even when that user has a lasting session grant", async () => {
   const { local, model } = await bootSettings(true);
   const signup = await fetch(`${local.baseUrl}/api/auth/sign-up/email`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Person", email: "settings-agent@example.test", password: "correct-horse-battery" }),
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Person", email: "settings-agent@example.test", password: "correct-horse-battery",
+      inviteCode: await bootstrapAdminInviteCode(local.providers.db) }),
   });
   expect(signup.status).toBe(200);
   const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];

@@ -44,6 +44,7 @@ import type {
   ChildSender,
   ChildSpawner,
   ChildStatusReader,
+  ChildStopper,
   DecisionResolution,
   ExecJobHandle,
   ExecOpts,
@@ -552,6 +553,9 @@ const EXTERNAL_SENDER_CHILDREN = {
   text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
 };
 
+/** Longest `task` batch name. It is a label the model picks, not content. */
+export const TASK_BATCH_MAX_CHARS = 64;
+
 /**
  * Byte ceiling on one `child_read` result. Matches the api's
  * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
@@ -725,6 +729,50 @@ export const childStatusTool = defineTool({
       text:
         `child ${args.child_session_id}: ${state}; last queue activity ` +
         `${new Date(status.lastActivityAt).toISOString()} (${age}).`,
+    };
+  },
+});
+
+/**
+ * Not in `builtinTools`: the host registers it only on sessions that can
+ * spawn children, so child and workflow sessions do not carry a tool they
+ * cannot use.
+ */
+export const childStopTool = defineTool({
+  name: "child_stop",
+  description:
+    "Stop a child you spawned: abort its running and queued work. Its partial result " +
+    "still arrives as a child.settled signal. child_send starts it again.",
+  parameters: Type.Object({
+    child_session_id: Type.String({ description: "The child to stop." }),
+  }),
+  execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
+    // Same `toolConfig` passthrough convention as `child_send`'s childSender.
+    const rawStopper = ctx.config?.childStopper;
+    if (typeof rawStopper !== "function") {
+      return { text: "[child_stop_unavailable] this session cannot stop child sessions" };
+    }
+    const stopper = rawStopper as ChildStopper; // narrowed by typeof check above
+
+    const result = await stopper(
+      { childSessionId: args.child_session_id },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    if (result.stopped === 0) {
+      return { text: `child ${args.child_session_id} had no running or queued work to stop.` };
+    }
+    return {
+      text:
+        `stopped child ${args.child_session_id} (${result.stopped} submission${result.stopped === 1 ? "" : "s"} aborted). ` +
+        `Its partial result will arrive as a child.settled signal; you do not need to wait for anything else from it.`,
     };
   },
 });
@@ -990,6 +1038,13 @@ export const taskTool = defineTool({
         description: "Provision the child's sandbox with a rootless docker daemon (docker-in-sandbox).",
       }),
     ),
+    batch: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: TASK_BATCH_MAX_CHARS,
+        description: "Children with the same batch report together, in one child.settled signal after the last settles.",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
     if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
@@ -1058,6 +1113,7 @@ export const taskTool = defineTool({
       resources,
       profile: args.profile,
       docker: args.docker,
+      ...(args.batch?.trim() ? { batch: args.batch.trim() } : {}),
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
     let result;
@@ -1081,7 +1137,10 @@ export const taskTool = defineTool({
     }
     return {
       text: [
-        `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+        req.batch
+          ? `spawned child session ${result.childSessionId} (submission ${result.queueItemId}) in batch "${req.batch}". ` +
+            `Its result will arrive with the rest of the batch, in one child.settled signal, after the last child in the batch settles.`
+          : `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
         ...(result.warnings ?? []).map((warning) => `Warning: ${warning}`),
       ].join("\n"),
     };

@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Search, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -81,7 +81,8 @@ import { matchesNeedle } from "~/lib/text-match";
  */
 export interface ModelPickerProps {
   currentId?: string;
-  /** A phone settings dialog embeds the controls without a second popup. */
+  /** "menu": the composer control, which opens upward beside Send. "panel": a
+   * phone settings dialog embeds the controls without a second popup. */
   presentation?: "menu" | "panel" | "trigger";
   /** A composer pill opens the existing model settings dialog. */
   onOpenPanel?: () => void;
@@ -347,12 +348,11 @@ export function ModelPicker({
       variant="ghost"
       size="sm"
       disabled={disabled}
-      className={cn("min-w-0 max-w-full font-normal gap-1.5", presentation === "trigger" && "rounded-full bg-ink-wash")}
+      className={cn("min-w-0 max-w-full font-normal gap-1", presentation === "trigger" ? "rounded-full bg-ink-wash" : "text-muted hover:text-ink data-[state=open]:text-ink")}
       onClick={presentation === "trigger" ? onOpenPanel : undefined}
       aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
       aria-describedby={ariaDescription ? descriptionId : undefined}
     >
-      {presentation !== "trigger" && <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
       <span className={presentation === "trigger" ? "truncate text-sm" : "truncate text-xs"}>
         {triggerLabel}
         {triggerReasoning}
@@ -642,6 +642,7 @@ export function ModelPicker({
         </span>
       )}
       <DropdownMenuContent
+        side="top"
         align="end"
         className="w-[340px] max-h-[min(70dvh,560px,var(--radix-dropdown-menu-content-available-height))] flex flex-col overflow-hidden p-0"
         // Keyboard nav is handled locally so Radix's own arrow-key

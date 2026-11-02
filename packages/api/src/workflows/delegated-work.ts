@@ -9,7 +9,7 @@
  * (`engine-deps.ts`) and the run's thread archive (`run-attention.ts`) that
  * the step still owes that work.
  */
-import { and, asc, eq, gte } from "drizzle-orm";
+import { and, asc, eq, gte, isNotNull, or } from "drizzle-orm";
 import type { QueueItem, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { childWatches } from "../schema/index.js";
@@ -24,11 +24,13 @@ function reportedChild(item: QueueItem): string | undefined {
 /**
  * True when a child spawned on this thread has not reported back yet.
  * The watcher marks the watch settled only after it admits the report to
- * the parent thread, or after it drops the report.
+ * the parent thread, or after it drops the report. A batch member's held
+ * report has not reached the thread yet either.
  */
 export async function hasUnreportedChild(db: AppDb, sessionId: string, threadId: string): Promise<boolean> {
   const [row] = await db.select({ id: childWatches.childSessionId }).from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.parentThreadId, threadId), eq(childWatches.settled, false)))
+    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.parentThreadId, threadId),
+      or(eq(childWatches.settled, false), isNotNull(childWatches.batchHeldJson))))
     .limit(1);
   return row !== undefined;
 }

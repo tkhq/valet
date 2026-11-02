@@ -535,7 +535,8 @@ Rules:
   deployment configuration, so a plain member gets 403 with an error that
   says to ask an organization admin. The route uses the `isOrgAdmin` check
   of the other admin-only org routes. It does not read the `organizations`
-  feature gate: the first user of a deployment is its org admin. A user
+  feature gate: a deployment's first admin joins through an admin invite
+  (`auth/bootstrap-admin.ts`), so even a single-org deployment has one. A user
   with no live `org_members` row gets its own 403, because a session
   resolves `orgId` without a membership row. Organization settings shows
   the list as "MCP servers" to an admin. While organizations are off, the

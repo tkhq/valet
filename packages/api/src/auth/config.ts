@@ -23,6 +23,14 @@ export interface AuthConfig {
   baseUrl: string;
   trustedOrigins: string[];
   allowedEmailDomains: string[];
+  /**
+   * `AUTH_ADMIN_EMAILS`, lowercased: the deployment's administrators. Each
+   * becomes an org admin on SSO sign-in, or on Google/GitHub sign-in with a
+   * provider-verified email. Password sign-up cannot claim one without the
+   * one-time admin code (`auth/bootstrap-admin.ts`). Nobody is demoted when
+   * an email leaves the list.
+   */
+  adminEmails?: string[];
   /** Explicit deployment opt-in: admit new users without invitations. */
   allowSignup?: boolean;
   oidc?: {
@@ -66,6 +74,20 @@ export interface AuthConfig {
     };
   };
   sandboxJwtMaster: string;
+}
+
+/** Parses `AUTH_ADMIN_EMAILS`: comma-separated, trimmed, lowercased, deduplicated. */
+export function parseAdminEmails(raw: string | undefined): string[] {
+  const emails = (raw ?? "").split(",").map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0);
+  for (const email of emails) {
+    if (!/^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(email)) {
+      throw new Error(
+        `AUTH_ADMIN_EMAILS has "${email}", which is not an email address. ` +
+        `Set AUTH_ADMIN_EMAILS to a comma-separated list of administrator emails, then restart the api.`,
+      );
+    }
+  }
+  return [...new Set(emails)];
 }
 
 /** Reads an optional variable, treating whitespace-only as unset. */
@@ -123,6 +145,10 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
       .filter((domain) => domain.length > 0);
     allowedEmailDomains.push(...domains);
   }
+
+  // adminEmails: lowercased; a malformed entry stops boot instead of
+  // silently leaving the deployment without its intended admin.
+  const adminEmails = parseAdminEmails(env.AUTH_ADMIN_EMAILS);
 
   // OIDC configuration: requires all three (issuer, clientId, clientSecret) or none
   let oidc: AuthConfig["oidc"] | undefined;
@@ -249,6 +275,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     baseUrl,
     trustedOrigins,
     allowedEmailDomains,
+    ...(adminEmails.length ? { adminEmails } : {}),
     ...(env.AUTH_ALLOW_SIGNUP === "1" ? { allowSignup: true } : {}),
     // A provider with credentials but no place in AUTH_METHODS stays off.
     ...(methods.includes("oidc") ? { oidc } : {}),

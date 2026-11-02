@@ -16,6 +16,7 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users, invites } from "../schema/index.js";
 import { createInvite } from "./invites.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import type { AuthConfigResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -42,10 +43,20 @@ describe("real better-auth instance + mounting", () => {
   it("signup, session replay, and role stamping work through the real endpoints", async () => {
     api = await bootTestApi({ auth: true });
 
+    // A fresh deployment admits no one without an invite: a stranger cannot become the first admin.
+    const strangerRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Stranger", email: "stranger@nowhere.test", password: "correct-horse-battery" }),
+    });
+    expect(strangerRes.status).toBe(403);
+
+    // The operator's one-time link from the boot log creates the first admin.
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "First User", email: "first@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "First User", email: "first@nowhere.test", password: "correct-horse-battery",
+        inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const cookie = extractSessionCookie(signUpRes.headers.get("set-cookie"));
@@ -56,7 +67,7 @@ describe("real better-auth instance + mounting", () => {
     expect(sessionRes.status).toBe(200);
     const sessionBody = (await sessionRes.json()) as { user: { email: string; role: string } };
     expect(sessionBody.user.email).toBe("first@nowhere.test");
-    // First-ever signup is promoted to admin (auth-v2 design, decision 5).
+    // The bootstrap invite's role (auth-v2 design, decision 5).
     expect(sessionBody.user.role).toBe("admin");
 
     const configRes = await fetch(`${api.baseUrl}/api/auth-config`);
@@ -112,12 +123,13 @@ describe("real better-auth instance + mounting", () => {
       api = await bootTestApi({ auth: true });
       const { db } = api.providers;
 
-      // First user: consumes the "first signup is admin" rule so the
-      // second signup below actually exercises the invite path.
+      // First user: the operator's bootstrap admin, so the second signup
+      // below exercises a code-only invite from an existing admin.
       const firstRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery" }),
+        body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery",
+          inviteCode: await bootstrapAdminInviteCode(db) }),
       });
       expect(firstRes.status).toBe(200);
       const firstUserRows = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).limit(1);

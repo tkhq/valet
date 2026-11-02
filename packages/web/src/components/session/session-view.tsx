@@ -408,9 +408,10 @@ export function SessionView({
       summaryControl={summaryControl}
       onOpenView={hideBrowser && !mobileConversation ? undefined : changeTab}
       compact={mobileConversation}
-      modelControlTarget={mobileConversation ? composerModelTarget : null}
+      modelControlTarget={mobileConversation || !panel ? composerModelTarget : null}
       viewers={viewers}
       scopeNotice={scopeNotice}
+      onOpenThread={onOpenThread}
     />
   );
   const sandboxTabs = (!hideBrowser || mobileConversation) && (
@@ -519,7 +520,7 @@ export function SessionView({
               would orphan in-flight uploads). */}
           <div className={responseFormActive ? "hidden" : "contents"} aria-hidden={responseFormActive || undefined}>
           {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
-            modelControlRef={mobileConversation && canCancelWork ? setComposerModelTarget : undefined}
+            modelControlRef={(mobileConversation || !panel) && canCancelWork ? setComposerModelTarget : undefined}
             active={chatActive && !responseFormActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}

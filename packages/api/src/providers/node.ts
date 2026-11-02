@@ -10,7 +10,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ChildStopper, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -29,6 +29,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -207,8 +208,8 @@ export interface NodeProviderOpts {
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
    * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * the one-time admin invite (`auth/bootstrap-admin.ts`) is minted only
+   * while there are no users, so with a local user pre-seeded a
    * fresh real deployment could never mint its first admin and every real
    * signup would land in the seeded "Local Dev" org. The stub identity is an
    * admin, so seeding it next to real auth also leaves an admin row nobody
@@ -511,6 +512,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   let homeDepsRef: HomeDeps | undefined;
   const engineHost = new EngineHost({
     engineStore,
@@ -560,6 +562,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
     homeTools: () => buildHomeTools(() => {
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
       return homeDepsRef;
@@ -608,6 +614,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // Destroys sandboxes hibernated past the retention window; `start()`/
   // `stop()` are called from `main.ts`, next to the child retention sweep.

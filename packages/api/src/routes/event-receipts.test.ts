@@ -4,6 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventReceipts } from "../schema/index.js";
 import { appendReceiptStage, createEventReceipt, RECEIPT_CLEANUP_INTERVAL_MS, sanitizeReceiptSubscriptions } from "../events/receipts.js";
 import type { ListEventReceiptsResponse, CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 describe("event receipts", () => {
@@ -102,7 +103,7 @@ describe("event receipts", () => {
   });
   it("rejects team API keys even when their issuing user is an admin", async () => {
     api = await bootTestApi({ auth: true });
-    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "receipt@nowhere.test", name: "Admin", password: "correct-horse-battery" }) });
+    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "receipt@nowhere.test", name: "Admin", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }) });
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
     if (!cookie) throw new Error("Missing session cookie");
     const team = await (await fetch(`${api.baseUrl}/api/teams`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ name: "Receipt team" }) })).json() as CreateTeamResponse;

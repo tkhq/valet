@@ -152,6 +152,21 @@ describe("task tool: spawner present", () => {
     expect(result.text).toContain("spawned child session child-1");
   });
 
+  it("forwards a trimmed batch name and says the result arrives with the batch", async () => {
+    let seenReq: SpawnChildRequest | undefined;
+    const spawner = vi.fn(async (req: SpawnChildRequest) => {
+      seenReq = req;
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    const result = await executeTask({ prompt: "review part one", batch: " review " }, makeCtx({ config: { childSpawner: spawner } }));
+    expect(seenReq?.batch).toBe("review");
+    expect(result.text).toContain('in batch "review"');
+    expect(result.text).toContain("after the last child in the batch settles");
+
+    await executeTask({ prompt: "solo work", batch: "   " }, makeCtx({ config: { childSpawner: spawner } }));
+    expect(seenReq?.batch).toBeUndefined();
+  });
+
   it("forwards valid child sandbox resource overrides", async () => {
     let seenReq: SpawnChildRequest | undefined;
     const spawner = vi.fn(async (req: SpawnChildRequest) => {

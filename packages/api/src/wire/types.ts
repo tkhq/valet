@@ -1719,7 +1719,7 @@ export interface ForkThreadResponse {
 
 /** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
 export interface MoveThreadRequest {
-  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  /** "private": a team thread to the caller's private threads. A team: a thread into that team, which the caller is on. */
   to: "private" | { teamId: string };
   /** Required to move into a team, which then reads the thread. */
   confirm?: true;
