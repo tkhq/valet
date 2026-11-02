@@ -3507,6 +3507,19 @@ export interface GetWorkflowTriggerCatalogResponse {
   catalog: { service: string; entries: WorkflowTriggerCatalogEntry[]; readiness?: EventIngressReadiness }[];
 }
 
+/** One principle file the scope reads, for the Principles view. */
+export interface MemoryPrincipleEntry {
+  /** The read path: own, `team:{id}/…`, or `org:{id}/…`. */
+  path: string;
+  title: string;
+  /** When the rule applies. */
+  description: string;
+}
+
+export interface GetMemoryPrinciplesResponse {
+  principles: MemoryPrincipleEntry[];
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
   /** When Valet started to track memory use, in ms epoch. Before it, a

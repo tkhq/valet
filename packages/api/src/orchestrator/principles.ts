@@ -48,7 +48,7 @@ Applies when a person tells you how they want the work done.
  * A principle synced from a repository's `.valet/memory/principles/` mounts at
  * `lib/principles/`, so that directory holds principles too. */
 export function isPrincipleFile(path: string): boolean {
-  const own = path.replace(/^team:[^/]+\//, "");
+  const own = path.replace(/^(?:team|org):[^/]+\//, "");
   return [PRINCIPLES_DIR, SYNCED_PRINCIPLES_DIR].some((dir) => own.startsWith(dir) && own.length > dir.length);
 }
 
@@ -69,12 +69,11 @@ function indexLine(file: PrincipleIndexEntry): string {
   return `- ${file.path}${title}${when}`;
 }
 
-/** Own principles first, then team principles. Each group is in path
- * order, so team entries group by team id. */
+/** Own principles first, then team principles, then org principles. Each
+ * group is in path order, so team and org entries group by id. */
 function comparePrinciples(a: PrincipleIndexEntry, b: PrincipleIndexEntry): number {
-  const aTeam = a.path.startsWith("team:") ? 1 : 0;
-  const bTeam = b.path.startsWith("team:") ? 1 : 0;
-  return aTeam - bTeam || a.path.localeCompare(b.path);
+  const group = (path: string) => (path.startsWith("org:") ? 2 : path.startsWith("team:") ? 1 : 0);
+  return group(a.path) - group(b.path) || a.path.localeCompare(b.path);
 }
 
 /** The principle files the index lists, in index order, within the caps.

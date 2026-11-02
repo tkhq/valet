@@ -515,6 +515,23 @@ describe("memory service", () => {
       await expect(writeFile(db, scopeFor("u1"), { path: "lib/principles/canonical-source-wins.md", content: "# Changed\n" }))
         .rejects.toThrow(/lib\/ is reserved/);
     });
+
+    it("lets org members read what an org source mirrors, and nobody else", async () => {
+      const now = Date.now();
+      await db.insert(orgs).values({ id: "org2", name: "Other", createdAt: now });
+      await seedUser(db, "u3", "org2");
+      await db.insert(memoryFiles).values({
+        ownerType: "org", ownerId: orgId, path: "lib/principles/merge-bar.md", title: "Verify before merge",
+        content: "# Verify before merge\n", type: "principle", description: "Before a merge.", sourceId: "src-org", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => entry.path)).toEqual([`org:${orgId}/lib/principles/merge-bar.md`]);
+      const read = await readFile(db, scopeFor("u1"), `org:${orgId}/lib/principles/merge-bar.md`);
+      expect(read.kind === "file" && read.rendered).toContain("# Verify before merge");
+      expect(await listPrincipleFiles(db, scopeFor("u3"))).toEqual([]);
+      await expect(readFile(db, scopeFor("u3"), `org:${orgId}/lib/principles/merge-bar.md`)).rejects.toThrow();
+      await expect(writeFile(db, scopeFor("u1"), { path: `org:${orgId}/lib/principles/merge-bar.md`, content: "# Changed\n" })).rejects.toThrow();
+    });
   });
 
   describe("team principles", () => {

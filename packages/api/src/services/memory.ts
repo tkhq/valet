@@ -193,7 +193,28 @@ async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<Rea
       owners.push({ ownerType: "team", ownerId: team.id, namespace: "", prefix: `team:${team.id}/` });
     }
   }
+  for (const orgId of await readableOrgIds(db, scope)) {
+    owners.push({ ownerType: "org", ownerId: orgId, namespace: "", prefix: `org:${orgId}/` });
+  }
   return owners;
+}
+
+/**
+ * The orgs whose memory a scope reads: a user's orgs, or a team's org. Org
+ * memory holds what an org content source mirrors, such as a company brain's
+ * principles. No write path accepts an `org:{id}/` path, so it stays read-only
+ * to agents and members.
+ */
+async function readableOrgIds(db: AppDb, scope: MemoryScope): Promise<string[]> {
+  if (scope.owner.type === "user") {
+    const rows = await db.select({ orgId: orgMembers.orgId }).from(orgMembers).where(eq(orgMembers.userId, scope.owner.id));
+    return rows.map((row) => row.orgId);
+  }
+  if (scope.owner.type === "team") {
+    const rows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, scope.owner.id)).limit(1);
+    return rows.map((row) => row.orgId);
+  }
+  return [];
 }
 
 async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<boolean> {
@@ -206,6 +227,7 @@ async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<
 }
 
 const TEAM_PREFIX_RE = /^team:([^/]+)\/(.*)$/;
+const ORG_PREFIX_RE = /^org:([^/]+)\/(.*)$/;
 
 /** Resolves a caller-supplied path (which may carry a `team:{id}/` virtual
  * prefix) to the real `(ownerType, ownerId, realPath)` it maps to, for
@@ -218,6 +240,12 @@ async function resolveReadTarget(
   scope: MemoryScope,
   path: string,
 ): Promise<{ ownerType: string; ownerId: string; namespace: string; realPath: string } | null> {
+  const org = ORG_PREFIX_RE.exec(path);
+  if (org) {
+    const [, orgId, rest] = org;
+    if (!(await readableOrgIds(db, scope)).includes(orgId)) return null;
+    return { ownerType: "org", ownerId: orgId, namespace: "", realPath: rest };
+  }
   const m = TEAM_PREFIX_RE.exec(path);
   if (!m) {
     return { ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", realPath: path };

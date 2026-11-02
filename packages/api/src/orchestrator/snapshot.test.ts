@@ -106,7 +106,8 @@ describe("assembleMemorySnapshot", () => {
     const empty = await assembleMemorySnapshot(db, scope);
     expect(empty).toContain("## Principles");
     expect(empty).toContain("learn-from-the-org (built in)");
-    expect(empty).toContain("No principles yet.");
+    // An empty brain starts with the built-in principles.
+    expect(empty).toContain("- principles/prove-it-works.md — Show evidence before you say work is done (built in)");
 
     await writeFile(db, scope, {
       path: "principles/prove-it-works.md",
@@ -117,7 +118,8 @@ describe("assembleMemorySnapshot", () => {
 
     const snapshot = await assembleMemorySnapshot(db, scope);
     expect(snapshot).toMatch(/- principles\/prove-it-works\.md — .*: Before you report a change as done/);
-    expect(snapshot).not.toContain("No principles yet.");
+    // The own file replaces the built-in principle at the same path.
+    expect(snapshot).not.toContain("Show evidence before you say work is done (built in)");
     // The index carries no bodies; the model reads one with mem_read.
     expect(snapshot).not.toContain("Run the real app before you say done.");
   });

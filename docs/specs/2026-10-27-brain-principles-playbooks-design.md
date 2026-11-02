@@ -68,6 +68,10 @@ The base principle tells the agent to update a principle when it turns out wrong
 
 Content sync mounts a repository's `.valet/memory/**` at `lib/**`, so `.valet/memory/principles/<name>.md` lands at `lib/principles/<name>.md` in the source owner's memory. The index and the Principles view treat `lib/principles/` as a principle directory. A synced principle shows with a Synced badge. It is read-only, because `lib/` refuses product writes. The base principle tells the agent to send changes to the repository, or to save a personal principle that refines it. The source must collect the `memories` kind.
 
+An org source mirrors into org memory. Every org member's read-union, and every team's in that org, reads org memory under the `org:{orgId}/` prefix, so a company brain's principles reach everyone. No write path accepts an `org:` path, so org memory stays read-only. Before this change, an org source could collect memories that no scope read.
+
+The Principles view lists `GET /api/memory/principles`: every principle file the read-union holds (own, team, and org). The memory tree is own-scope only, so usage counts and edit times show only for own files.
+
 ### Who can write a principle
 
 A team principle reaches the assistant of every team member at its next wake. So a team principle takes more than a team note:
@@ -210,7 +214,7 @@ These come from the concept note. This pilot does not build them:
 
 ## Open questions
 
-1. Should an org principle have its own org memory scope, or is a team that holds everyone enough?
+1. Should an org principle have its own org memory scope, or is a team that holds everyone enough? Answered in part: org content sources mirror into a read-only org memory that every member reads. Agents still cannot write org principles.
 2. Should a playbook replace an open plan when a person invokes it with a slash command? This pilot keeps the open plan on both paths.
 3. Should a team principle go through review, as the concept note requires for brain changes? This pilot requires a request in the conversation and team-admin authority, but no review step.
 4. Is a playbook anything more than a skill whose steps seed the plan? This pilot says no.

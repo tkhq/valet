@@ -5,7 +5,7 @@
  * Task 6 explorer adds `search` on top of the same factory.
  */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import type { GetMemoryTreeResponse } from "@valet/api/wire";
+import type { GetMemoryPrinciplesResponse, GetMemoryTreeResponse } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
 import { retryUnlessNotFound } from "~/lib/not-found";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
@@ -19,6 +19,7 @@ function ownerKey(owner?: OwnerFilter): readonly string[] {
 
 export const qkMemory = {
   tree: (owner?: OwnerFilter) => ["memory", "tree", ...ownerKey(owner)] as const,
+  principles: (owner?: OwnerFilter) => ["memory", "principles", ...ownerKey(owner)] as const,
   doc: (path: string, owner?: OwnerFilter) =>
     ["memory", "doc", path, ...ownerKey(owner)] as const,
   search: (q: string, owner?: OwnerFilter) =>
@@ -34,6 +35,14 @@ export function useMemoryTree(
     queryKey: qkMemory.tree(owner),
     queryFn: () => api.getMemoryTree(owner),
     ...opts,
+  });
+}
+
+/** Every principle the scope reads: own, team, and org-synced. */
+export function useMemoryPrinciples(owner?: OwnerFilter) {
+  return useQuery<GetMemoryPrinciplesResponse>({
+    queryKey: qkMemory.principles(owner),
+    queryFn: () => api.getMemoryPrinciples(owner),
   });
 }
 

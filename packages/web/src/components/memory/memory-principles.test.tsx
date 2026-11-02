@@ -14,21 +14,22 @@ describe("principles view", () => {
     expect(files.filter(isPrincipleEntry).map((e) => e.path)).toEqual(["principles/prove-it.md", "team:t1/principles/ship-small.md"]);
   });
 
-  it("lists own principles before team ones, most used first", () => {
+  it("lists own principles before team ones, each in path order", () => {
     const sorted = sortPrinciples([
-      entry("team:t1/principles/a.md", { useCount: 9 }),
-      entry("principles/rare.md", { useCount: 1 }),
-      entry("principles/often.md", { useCount: 5 }),
+      entry("team:t1/principles/a.md"),
+      entry("principles/z.md"),
+      entry("principles/b.md"),
     ]);
-    expect(sorted.map((e) => e.path)).toEqual(["principles/often.md", "principles/rare.md", "team:t1/principles/a.md"]);
+    expect(sorted.map((e) => e.path)).toEqual(["principles/b.md", "principles/z.md", "team:t1/principles/a.md"]);
   });
 
   it("keeps principles synced from a repository and lists them after team ones", () => {
-    const files = [entry("lib/principles/canonical.md"), entry("team:t1/lib/principles/names.md"), entry("lib/notes/x.md")];
-    expect(files.filter(isPrincipleEntry).map((e) => e.path)).toEqual(["lib/principles/canonical.md", "team:t1/lib/principles/names.md"]);
+    const files = [entry("lib/principles/canonical.md"), entry("team:t1/lib/principles/names.md"), entry("org:o1/lib/principles/merge.md"), entry("lib/notes/x.md")];
+    expect(files.filter(isPrincipleEntry).map((e) => e.path)).toEqual(["lib/principles/canonical.md", "team:t1/lib/principles/names.md", "org:o1/lib/principles/merge.md"]);
+    expect(isSyncedPrinciple("org:o1/lib/principles/merge.md")).toBe(true);
     expect(isSyncedPrinciple("team:t1/lib/principles/names.md")).toBe(true);
     expect(isSyncedPrinciple("principles/mine.md")).toBe(false);
-    const sorted = sortPrinciples([entry("lib/principles/canonical.md", { useCount: 9 }), entry("team:t1/principles/a.md"), entry("principles/b.md")]);
+    const sorted = sortPrinciples([entry("lib/principles/canonical.md"), entry("team:t1/principles/a.md"), entry("principles/b.md")]);
     expect(sorted.map((e) => e.path)).toEqual(["principles/b.md", "team:t1/principles/a.md", "lib/principles/canonical.md"]);
   });
 

@@ -44,7 +44,7 @@ import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { agentSessions, memoryFiles, securityCells } from "../schema/index.js";
 import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
+import type { GetMemoryPrinciplesResponse, GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
   copyFileFromTeam,
@@ -59,6 +59,7 @@ import {
   removeFile,
   searchFiles,
   writeFile,
+  listPrincipleFiles,
   type MemoryScope,
   type WriteSource,
 } from "../services/memory.js";
@@ -496,6 +497,26 @@ memoryRouter.get("/journal-summary", async (c) => {
  * A caller who names a team owner therefore gets that team's files and
  * nothing else — one owner per response, still no union.
  */
+/**
+ * GET /api/memory/principles — every principle file the scope reads: its
+ * own, its teams', and what its org's content sources mirror. The tree is
+ * own-scope only, so the Principles view reads this list instead.
+ */
+memoryRouter.get("/principles", async (c) => {
+  try {
+    const scope = await resolveScope(c, "read");
+    const files = await listPrincipleFiles(c.var.providers.db, scope);
+    const body: GetMemoryPrinciplesResponse = {
+      principles: files.map((file) => ({ path: file.path, title: file.title, description: file.description })),
+    };
+    return c.json(body);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
+
 memoryRouter.get("/tree", async (c) => {
   let scope: MemoryScope;
   try {
