@@ -137,9 +137,15 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
           {fileCount(entries.length)}, {neverUsed} never used. A file is used when an agent reads it or a
           turn cites it. Stale means no use and no edit for 30 days.
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <FilterChips label="Show" options={FILTERS} value={filter} onChange={(v) => { setFilter(v); setSelected(new Set()); }} />
-          <FilterChips label="Sort" options={SORTS} value={sort} onChange={setSort} />
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted" aria-hidden>Show</span>
+            <FilterChips label="Show" options={FILTERS} value={filter} onChange={(v) => { setFilter(v); setSelected(new Set()); }} />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted" aria-hidden>Sort</span>
+            <FilterChips label="Sort" options={SORTS} value={sort} onChange={setSort} />
+          </div>
           <Button
             type="button"
             variant="danger"
@@ -148,7 +154,7 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
             disabled={chosen.length === 0}
             onClick={() => { setFailed([]); setConfirming(true); }}
           >
-            {`Delete ${fileCount(chosen.length)}`}
+            {chosen.length === 0 ? "Delete" : `Delete ${fileCount(chosen.length)}`}
           </Button>
         </div>
       </div>
