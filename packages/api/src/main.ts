@@ -34,7 +34,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
-import { ensureBootstrapAdminInvite } from "./auth/bootstrap-admin.js";
+import { AdminBootstrapError, ensureAdminAccess } from "./auth/bootstrap-admin.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
@@ -543,11 +543,19 @@ async function runBootChain(): Promise<void> {
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
   }
-  // With real auth and no users yet, the first admin needs the one-time
-  // link printed here. After the reconcile, so a config-declared admin
-  // invite makes the link unnecessary.
+  // With real auth, make sure an admin exists or can sign in: promote
+  // AUTH_ADMIN_EMAILS users, print the one-time admin link, or stop boot
+  // (SSO with no admin declared). After the reconcile, so config-declared
+  // admin invites count, and before the ready flip, so a bad setup never
+  // takes traffic.
   if (authConfig) {
-    await ensureBootstrapAdminInvite(providers.db, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
+    try {
+      await ensureAdminAccess(providers.db, authConfig, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
+    } catch (e) {
+      if (!(e instanceof AdminBootstrapError)) throw e;
+      console.error(e.message);
+      process.exit(1);
+    }
   }
 
   if (closed) return;

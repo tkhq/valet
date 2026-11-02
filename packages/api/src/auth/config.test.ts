@@ -4,7 +4,7 @@
  * with correct defaults, validations, and error cases.
  */
 import { describe, it, expect } from "vitest";
-import { authModeConflict, loadAuthConfig } from "./config.js";
+import { authModeConflict, loadAuthConfig, parseAdminEmails } from "./config.js";
 
 /**
  * The boot refusal (`main.ts`): stub auth beside real auth resolves every
@@ -438,4 +438,18 @@ it("only explicitly enabled unrestricted signup changes admission configuration"
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "1" })?.allowSignup).toBe(true);
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test" })?.allowSignup).toBeUndefined();
   expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "0" })?.allowSignup).toBeUndefined();
+});
+
+describe("AUTH_ADMIN_EMAILS", () => {
+  it("parses a comma-separated list, lowercased and deduplicated", () => {
+    expect(parseAdminEmails(" Boss@Corp.test, ops@corp.test,,boss@corp.test ")).toEqual(["boss@corp.test", "ops@corp.test"]);
+    expect(parseAdminEmails(undefined)).toEqual([]);
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_ADMIN_EMAILS: "boss@corp.test" })?.adminEmails).toEqual(["boss@corp.test"]);
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s" })?.adminEmails).toBeUndefined();
+  });
+
+  it("stops boot on an entry that is not an email address, naming the fix", () => {
+    expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_ADMIN_EMAILS: "boss@corp.test, not-an-email" }))
+      .toThrow(/AUTH_ADMIN_EMAILS has "not-an-email".*comma-separated list of administrator emails/);
+  });
 });

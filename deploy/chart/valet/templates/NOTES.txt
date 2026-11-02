@@ -12,12 +12,15 @@ Ingress is disabled; port-forward the api Service to reach it:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "valet.fullname" . }}-api 8787:{{ .Values.service.port }}
 {{- end }}
 
-Create the first admin with the one-time link in the api log. A sign-up
-without it is refused, so a stranger cannot claim the deployment:
-  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "valet.fullname" . }}-api | grep "No users yet"
-The link works once and changes on every api restart until someone uses it.
-To name admins in advance instead, set org.members with role: admin in the
-instance config.
+{{- if .Values.api.auth.adminEmails }}
+Administrators ({{ .Values.api.auth.adminEmails }}) become org admins when
+they sign in with SSO, or with Google/GitHub and a verified email.
+{{- else }}
+No api.auth.adminEmails set. Without SSO, create the first admin with the
+one-time link in the api log (a sign-up without it gets no admin role):
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "valet.fullname" . }}-api | grep "No admin yet"
+With SSO on, the api refuses to boot until api.auth.adminEmails names an admin.
+{{- end }}
 
 Reminder: this chart does NOT install the agent-sandbox CRDs/controller.
 See deploy/chart/valet/README.md for install ordering.

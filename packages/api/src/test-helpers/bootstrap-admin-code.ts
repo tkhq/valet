@@ -8,7 +8,7 @@ import { ensureBootstrapAdminInvite } from "../auth/bootstrap-admin.js";
  */
 export async function bootstrapAdminInviteCode(db: AppDb): Promise<string> {
   const link = await ensureBootstrapAdminInvite(db, { log: () => {} });
-  const code = link ? new URL(link, "http://valet.test").searchParams.get("invite") : null;
+  const code = new URL(link, "http://valet.test").searchParams.get("invite");
   if (!code) throw new Error("expected a bootstrap admin invite on a deployment with no users");
   return code;
 }

@@ -26,7 +26,7 @@ import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { CLIENT_TEAM_KEY_METADATA_MESSAGE, PERSONAL_TEAM_KEY_MUTATION_MESSAGE } from "./api-key-hooks.js";
-import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
+import { ADMIN_EMAIL_RESERVED_MESSAGE, buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
 
 // better-auth's real `GenericEndpointContext` is a large request-plumbing object
 // (session config, adapters, cookie helpers, rate-limit state, …) that's
@@ -235,6 +235,23 @@ describe("buildAuthHooks", () => {
       expect((caught as APIError).message).toBe("an invite is required to join this deployment");
     });
 
+    it("refuses a password sign-up that names an admin email without an admin code", async () => {
+      const cfg = baseConfig({ adminEmails: ["boss@corp.test"], allowSignup: true });
+      await createInvite(db, { email: "declared@corp.test", role: "admin", createdBy: "config" });
+      const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
+      for (const email of ["Boss@Corp.test", "declared@corp.test"]) {
+        await expect(beforeHook(middlewareCtx({ path: "/sign-up/email", body: { email } })))
+          .rejects.toMatchObject({ message: ADMIN_EMAIL_RESERVED_MESSAGE });
+      }
+      // A member code does not unlock it either; an admin code does.
+      const member = await createInvite(db, { role: "member", createdBy: "admin1" });
+      await expect(beforeHook(middlewareCtx({ path: "/sign-up/email", body: { email: "boss@corp.test", inviteCode: member.code } })))
+        .rejects.toMatchObject({ message: ADMIN_EMAIL_RESERVED_MESSAGE });
+      const admin = await createInvite(db, { role: "admin", createdBy: "bootstrap" });
+      await expect(beforeHook(middlewareCtx({ path: "/sign-up/email", body: { email: "boss@corp.test", inviteCode: admin.code } })))
+        .resolves.not.toThrow();
+    });
+
     it("does not throw when the domain admits the signup", async () => {
       const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
       const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
@@ -315,6 +332,21 @@ describe("buildAuthHooks", () => {
       );
       expect(result).not.toBe(false);
       expect(result).toMatchObject({ data: { role: "member" } });
+    });
+
+    it("AUTH_ADMIN_EMAILS: SSO and verified Google/GitHub sign-ins become admin; an unverified social email does not", async () => {
+      const cfg = baseConfig({ adminEmails: ["boss@corp.test"] });
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
+      const create = databaseHooks!.user!.create!.before!;
+      expect(await create(makeUser({ email: "Boss@corp.test" }), dbHookCtx({ path: "/sso/callback/keycloak" })))
+        .toMatchObject({ data: { role: "admin" } });
+      expect(await create(makeUser({ email: "boss@corp.test", emailVerified: true }), dbHookCtx({ path: "/callback/google" })))
+        .toMatchObject({ data: { role: "admin" } });
+      // Unverified: the social gate applies as for anyone, and there is no invite or domain.
+      expect(await create(makeUser({ email: "boss@corp.test", emailVerified: false }), dbHookCtx({ path: "/callback/github" }))).toBe(false);
+      // Not listed: SSO admits as member.
+      expect(await create(makeUser({ email: "staff@corp.test" }), dbHookCtx({ path: "/sso/callback/keycloak" })))
+        .toMatchObject({ data: { role: "member" } });
     });
 
     it("SSO path: the first user (empty db) is a member without an admin invite", async () => {

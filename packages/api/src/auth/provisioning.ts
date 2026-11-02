@@ -73,6 +73,30 @@ export async function evaluateAdmission(
 /** Exact rejection copy for the invite gate — asserted byte-exact by tests/spec. */
 export const INVITE_REQUIRED_MESSAGE = "an invite is required to join this deployment";
 
+/** Rejection copy when a password sign-up names an administrator's email without the admin code. */
+export const ADMIN_EMAIL_RESERVED_MESSAGE =
+  "this email belongs to an administrator: sign in with SSO, Google, or GitHub, or use the one-time admin link from the server log";
+
+/** Admin admission for a verified AUTH_ADMIN_EMAILS sign-in; keeps a matched invite so `.after` still accepts it. */
+function adminAdmission(admission: Admission): Admission {
+  return { allowed: true, role: "admin", ...(admission.allowed && admission.inviteId ? { inviteId: admission.inviteId } : {}) };
+}
+
+function isAdminEmail(cfg: AuthConfig, email: string): boolean {
+  return cfg.adminEmails?.includes(email.trim().toLowerCase()) ?? false;
+}
+
+/**
+ * True for an email only a verified sign-in may claim: an `AUTH_ADMIN_EMAILS`
+ * entry, or the target of a pending admin invite (a config-declared admin).
+ * Password sign-up does not prove that the person owns the email, so for
+ * these it needs an admin invite matched by code.
+ */
+async function isReservedAdminEmail(db: AppQueryable, cfg: AuthConfig, email: string): Promise<boolean> {
+  if (isAdminEmail(cfg, email)) return true;
+  return (await findValidInviteByEmail(db, email))?.role === "admin";
+}
+
 /**
  * The subset of better-auth's `GenericEndpointContext` our hooks read.
  * Deliberately narrow: the real type is a large request-plumbing object
@@ -193,7 +217,11 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     if (ctx.path === "/sign-up/email") {
       const body = (ctx.body ?? undefined) as Record<string, unknown> | undefined;
       const email = typeof body?.email === "string" ? body.email : "";
-      const admission = await evaluateAdmission(db, cfg, email, readInviteCode(body));
+      const code = readInviteCode(body);
+      if (await isReservedAdminEmail(db, cfg, email) && (!code || (await findValidInviteByCode(db, code))?.role !== "admin")) {
+        throw new APIError("FORBIDDEN", { message: ADMIN_EMAIL_RESERVED_MESSAGE });
+      }
+      const admission = await evaluateAdmission(db, cfg, email, code);
       if (!admission.allowed) {
         throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
       }
@@ -210,11 +238,19 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     const path = context?.path;
     let admission: Admission;
 
+    // An AUTH_ADMIN_EMAILS entry is an admin when the identity provider
+    // vouches for the email: the deployment's own SSO, or Google/GitHub with
+    // a verified email. Password sign-up never gets here for one without the
+    // admin code (`beforeHook`).
+    const verifiedAdmin = isAdminEmail(cfg, user.email) &&
+      (isSsoPath(path) || (isSocialPath(path) && user.emailVerified === true));
     if (isSsoPath(path)) {
       // SSO always passes regardless of admission's verdict (see roleFromAdmission).
       admission = await evaluateAdmission(db, cfg, user.email);
+      if (verifiedAdmin) admission = adminAdmission(admission);
     } else if (isSocialPath(path)) {
       admission = await evaluateAdmission(db, cfg, user.email);
+      if (verifiedAdmin) admission = adminAdmission(admission);
       if (!admission.allowed) return false;
     } else {
       // "/sign-up/email" (already gated by beforeHook, above) or a null/internal
