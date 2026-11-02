@@ -1014,6 +1014,8 @@ export const api = {
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
   moveThread: (threadId: string, body: MoveThreadRequest) =>
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/move`, body),
+  duplicateThread: (threadId: string) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/duplicate`),
   returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
     request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>

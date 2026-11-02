@@ -1953,6 +1953,32 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   return c.json(result, 201);
 }
 
+/**
+ * Copies a whole thread into a new thread in the same workspace, with its
+ * files, as a branch from the latest message does. The source stays as it
+ * is. The copy keeps the source's audience, and a thread with a running
+ * turn or an open approval does not duplicate until it settles.
+ */
+export async function duplicateThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") return c.json({ error: "Only the thread owner or a team member can duplicate this thread." }, 403);
+  const { db, engineStore } = c.var.providers;
+  if ((await engineStore.listUnsettledSubmissions(sessionId)).some((item) => item.threadId === threadId)) {
+    return c.json({ error: "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it." }, 409);
+  }
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  // A copy of a copy keeps one suffix: "Plan (copy)", not "Plan (copy) (copy)".
+  // A long title gives up its end, never the suffix, and an untitled source
+  // gets a name, so the copy's title always differs from the source's.
+  const suffix = " (copy)";
+  const base = (titled?.title?.replace(/(?: \(copy\))+$/, "") || "Untitled thread").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination: "here", title: `${base}${suffix}` });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
 /** Where a fork lands: the source's workspace, the person's private threads, or a team (a move only). */
 type ForkDestination = "here" | "private" | { teamId: string };
 
@@ -2010,7 +2036,7 @@ async function forkThreadAt(
   const sourceTeam = loaded.session.ownerType === "team";
   const audience = sourceTeam || typeof destination === "object" ? await threadAudience(db, sessionId, threadId) : undefined;
   if (destination === "here" && sourceTeam && audience?.privateTo !== undefined) {
-    return c.json({ error: "This thread is private to you, and a branch would show its history to your team. Branch it privately instead." }, 400);
+    return c.json({ error: "This thread is private to you, and a copy here would show its history to your team. Branch it privately instead." }, 400);
   }
   if (destination === "private" && !sourceTeam) {
     return c.json({ error: "This thread is already private to you. Use Branch to copy it here." }, 400);

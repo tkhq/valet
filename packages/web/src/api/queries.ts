@@ -895,6 +895,17 @@ export function useMoveThread() {
   });
 }
 
+/** Copies a whole thread into a new thread in the same workspace. The source
+ * stays as it is; the caller opens the copy. */
+export function useDuplicateThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.duplicateThread(threadId),
+    // A team copy runs in its own execution session, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
 /** Which workspace holds a thread, for a link to a thread outside the open one. */
 export function useThreadWorkspace(threadId: string | undefined) {
   return useQuery({
