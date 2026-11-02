@@ -80,15 +80,16 @@ export interface PluginEventContext {
   orgId: string;
   /** The subscription owner: the workspace the handler acts for. */
   owner: Principal;
-  /** The person the subscription runs as, for credentials and attribution. */
+  /** The identity the handler acts as: the owner's user id, or `team:<id>` for a team. */
   actorUserId: string;
   threads: PluginThreads;
   /** This plugin's store, scoped to `owner`. Keep pointers here, not content. */
   store: ScopedPluginStore;
   /**
    * The org's app credential for one of this plugin's services, or null when
-   * it is not connected. `owner` picks the installation for a provider with
-   * one per account (GitHub: the repository owner's login).
+   * it is not connected. The service must be the plugin's own name or one it
+   * declares a credential for. `owner` picks the installation for a provider
+   * with one per account (GitHub: the repository owner's login).
    */
   appToken(service: string, scope?: { owner?: string }): Promise<string | null>;
   signal: AbortSignal;

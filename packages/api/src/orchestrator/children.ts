@@ -810,7 +810,8 @@ export class ChildWatcher {
   /** Publishes a gate event. Delivery keeps gate replies manual. */
   async reportGateOpened(childSessionId: string, gate: Pick<DecisionGate, "id" | "title" | "type" | "queueItemId" | "threadId">): Promise<void> {
     const [row] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1);
-    if (!row) return;
+    // A plugin's child reports to the plugin, not to the parent thread.
+    if (!row || !row.reportToParent) return;
     const watch = gate.queueItemId === row.queueItemId ? watchRowToArgs(row) : await this.turnWatch(row, gate.queueItemId);
     await this.ensureSubscription(watch);
     await this.publish(watch, {

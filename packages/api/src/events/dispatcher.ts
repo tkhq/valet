@@ -69,6 +69,8 @@ import {
 import { readStoredTarget } from "./target-names.js";
 import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
 import { pluginStore } from "../services/plugin-store.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
+import { actorUserIdFor } from "../workflows/engine-deps.js";
 import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
 import { reportError } from "@valet/engine";
 
@@ -84,6 +86,13 @@ const CLAIM_LEASE_MS = 60_000;
 const DEFAULT_PLUGIN_CONCURRENCY = 8;
 /** When all plugin slots are busy, retry the delivery after this long. */
 const PLUGIN_BUSY_RETRY_MS = 10_000;
+/** Abort reason when a plugin line is turned off or deleted mid-run. */
+const PLUGIN_LINE_OFF = "plugin-line-off";
+
+/** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
+function pluginServices(plugin: ValetPlugin): Set<string> {
+  return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name)]);
+}
 
 /** What the dispatcher needs to run plugin event handlers. */
 export interface PluginHandlerHost {
@@ -92,6 +101,8 @@ export interface PluginHandlerHost {
   /** The org's app credential for `service`, or null when it is not connected. */
   appToken(orgId: string, service: string, scope?: { owner?: string }): Promise<string | null>;
   maxConcurrent?: number;
+  /** How often a running handler renews its lease and checks its line. Tests shorten it. */
+  leaseRenewMs?: number;
 }
 const MAX_ERROR_CHARS = 2_000;
 const MAX_BODY_EXCERPT_CHARS = 4_000;
@@ -769,8 +780,8 @@ export class EventDispatcher {
     delivery: typeof eventDeliveries.$inferSelect,
     event: typeof events.$inferSelect,
     err: unknown,
+    attempts = delivery.attempts + 1,
   ): Promise<void> {
-    const attempts = delivery.attempts + 1;
     const backoff = BACKOFF_MS[attempts - 1];
     // The last attempt failed, so the waiters this delivery suppressed get
     // the event back before the row goes dead.
@@ -813,21 +824,50 @@ export class EventDispatcher {
     }
     const abort = new AbortController();
     this.pluginRuns.set(delivery.id, abort);
+    // Only rows still owed an outcome take one: a late write never
+    // overwrites a delivery another poll already settled.
+    const open = and(eq(eventDeliveries.id, delivery.id), inArray(eventDeliveries.status, ["pending", "failed"]));
+    const finish = () => {
+      clearInterval(renew);
+      this.pluginRuns.delete(delivery.id);
+    };
     const renew = setInterval(() => {
-      void db.update(eventDeliveries).set({ nextAttemptAt: Date.now() + CLAIM_LEASE_MS })
-        .where(and(eq(eventDeliveries.id, delivery.id), inArray(eventDeliveries.status, ["pending", "failed"])))
-        .catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err));
-    }, CLAIM_LEASE_MS / 3);
-    void this.runPluginDelivery(event, sub, target, abort.signal)
-      .then(() => db.update(eventDeliveries)
-        .set({ status: "delivered", deliveredAt: Date.now(), attempts: delivery.attempts + 1 })
-        .where(eq(eventDeliveries.id, delivery.id)))
-      .catch((err) => this.recordDeliveryFailure(delivery, event, err))
+      void (async () => {
+        const [line] = await db.select({ enabled: eventSubscriptions.enabled }).from(eventSubscriptions)
+          .where(eq(eventSubscriptions.id, sub.id)).limit(1);
+        if (!line?.enabled) {
+          abort.abort(PLUGIN_LINE_OFF);
+          return;
+        }
+        await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() + CLAIM_LEASE_MS }).where(open);
+      })().catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err));
+    }, this.deps.pluginHandlers?.leaseRenewMs ?? CLAIM_LEASE_MS / 3);
+
+    void (async () => {
+      // Count the attempt when it starts, so a handler that crashes the
+      // process still uses up its retries instead of looping forever.
+      const attempts = delivery.attempts + 1;
+      if (attempts > BACKOFF_MS.length + 1) {
+        await db.update(eventDeliveries).set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(open);
+        return;
+      }
+      await db.update(eventDeliveries).set({ attempts }).where(open);
+      try {
+        await this.runPluginDelivery(event, sub, target, abort.signal);
+        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(open);
+      } catch (err) {
+        if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
+          await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(open);
+        } else if (abort.signal.aborted && this.stopped) {
+          // Shutdown is not the handler's fault. The lease lapses and a
+          // later process runs it again.
+        } else {
+          await this.recordDeliveryFailure(delivery, event, err, attempts);
+        }
+      }
+    })()
       .catch((err) => console.error(`plugin delivery ${delivery.id}: outcome not recorded:`, err))
-      .finally(() => {
-        clearInterval(renew);
-        this.pluginRuns.delete(delivery.id);
-      });
+      .finally(finish);
   }
 
   private async runPluginDelivery(
@@ -846,7 +886,14 @@ export class EventDispatcher {
     if (sub.ownerType !== "user" && sub.ownerType !== "team") {
       throw new Error("A plugin handler acts for a person or a team. Arm it from a personal or team workspace.");
     }
-    const owner: Principal = { type: sub.ownerType, id: sub.ownerId };
+    const owner = { type: sub.ownerType, id: sub.ownerId } satisfies Principal;
+    if (!(await orgAllowsPluginForOwner(this.deps.db, sub.orgId, owner, plugin.name))) {
+      throw new Error(`Plugin ${plugin.name} is off for this workspace. An org admin can turn it on in Settings, or delete this line.`);
+    }
+    // The handler acts as the workspace that owns the line, as a workflow
+    // run does, not as the member who armed it.
+    const actorUserId = actorUserIdFor(owner);
+    const services = pluginServices(plugin);
     const store = pluginStore(this.deps.db, plugin.name);
     await handler.handle(
       {
@@ -864,10 +911,15 @@ export class EventDispatcher {
       {
         orgId: sub.orgId,
         owner,
-        actorUserId: sub.createdBy,
-        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId: sub.createdBy }),
+        actorUserId,
+        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId }),
         store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
-        appToken: (service, scope) => host.appToken(sub.orgId, service, scope),
+        appToken: async (service, scope) => {
+          if (!services.has(service)) {
+            throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);
+          }
+          return host.appToken(sub.orgId, service, scope);
+        },
         signal,
       },
     );

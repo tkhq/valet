@@ -31,6 +31,7 @@ function pluginWith(handle: PluginEventHandler["handle"]): ValetPlugin {
   return {
     name: "reviewer",
     version: "0.0.1",
+    credentials: [{ service: "github", type: "oauth2", configKeys: ["accessToken"] }],
     eventHandlers: [{ id: "review", description: "Review a pull request.", events: ["github.pull_request.*"], handle }],
   };
 }
@@ -44,7 +45,7 @@ const noThreads: PluginThreads = {
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {
-  return { threads: () => noThreads, appToken };
+  return { threads: () => noThreads, appToken, leaseRenewMs: 20 };
 }
 
 describe("EventDispatcher plugin target", () => {
@@ -54,7 +55,7 @@ describe("EventDispatcher plugin target", () => {
     tdb = await freshTestPgDb();
   });
 
-  async function seed(opts: { ownerType?: "user" | "team"; ownerId?: string } = {}) {
+  async function seed(opts: { ownerType?: "user" | "team"; ownerId?: string; attempts?: number } = {}) {
     const db = tdb.appDb;
     const now = Date.now();
     const eventId = randomUUID();
@@ -93,7 +94,7 @@ describe("EventDispatcher plugin target", () => {
       eventId,
       subscriptionId,
       status: "pending",
-      attempts: 0,
+      attempts: opts.attempts ?? 0,
       nextAttemptAt: now - 1,
       createdAt: now,
     });
@@ -140,7 +141,8 @@ describe("EventDispatcher plugin target", () => {
     expect(seen?.id).toBe(eventId);
     expect(seen?.key).toBe("github.pull_request.synchronize");
     expect(seen?.ctx.owner).toEqual({ type: "team", id: "team-1" });
-    expect(seen?.ctx.actorUserId).toBe("user-1");
+    // The handler acts as the team, not as the member who armed the line.
+    expect(seen?.ctx.actorUserId).toBe("team:team-1");
     expect(appToken).toHaveBeenCalledWith(ORG, "github", { owner: "acme" });
     // The pointer landed in the plugin's team-scoped store.
     const stored = await seen?.ctx.store.get<{ lastReviewedHead: string }>("pr-state", "acme/site#7");
@@ -177,14 +179,58 @@ describe("EventDispatcher plugin target", () => {
     await d.stop();
   });
 
-  it("aborts running handlers on stop", async () => {
-    await seed();
+  it("aborts running handlers on stop without recording a failure", async () => {
+    const { deliveryId } = await seed();
     let aborted = false;
     const d = dispatcher(pluginWith(async (_event, ctx) => {
       await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => { aborted = true; resolve(); }));
+      throw new Error("aborted");
     }));
     await d.pollOnce();
+    await new Promise((r) => setTimeout(r, 50));
     await d.stop();
+    await new Promise((r) => setTimeout(r, 50));
     expect(aborted).toBe(true);
+    // The row stays open for a later process; the attempt that started counts.
+    const row = await delivery(deliveryId);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(1);
+  });
+
+  it("refuses an app token for a service the plugin does not declare", async () => {
+    const { deliveryId } = await seed();
+    const d = dispatcher(pluginWith(async (_event, ctx) => {
+      await ctx.appToken("slack");
+    }));
+    await d.pollOnce();
+    const row = await settled(deliveryId);
+    expect(row.status).toBe("failed");
+    expect(row.lastError).toContain("did not declare service slack");
+    await d.stop();
+  });
+
+  it("skips the delivery when its line is turned off while the handler runs", async () => {
+    const { deliveryId } = await seed();
+    const d = dispatcher(pluginWith(async (_event, ctx) => {
+      await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
+      throw new Error("stopped");
+    }));
+    await d.pollOnce();
+    await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
+    const row = await settled(deliveryId);
+    expect(row.status).toBe("skipped");
+    expect(row.lastError).toContain("turned off");
+    await d.stop();
+  });
+
+  it("marks a delivery dead when its handler never finished across every attempt", async () => {
+    const { deliveryId } = await seed({ attempts: 5 });
+    const handle = vi.fn(async () => {});
+    const d = dispatcher(pluginWith(handle));
+    await d.pollOnce();
+    const row = await settled(deliveryId);
+    expect(row.status).toBe("dead");
+    expect(handle).not.toHaveBeenCalled();
+    await d.stop();
   });
 });
