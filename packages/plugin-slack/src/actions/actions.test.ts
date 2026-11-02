@@ -391,6 +391,28 @@ describe('slack actions', () => {
     expect(table).toEqual(['| Segment | Value |', '| --- | ---: |', '| P\\| \\|forged\\|9\\| | 1 |']);
   });
 
+  // Slack draws the chart block itself, so Valet does no scale math on this
+  // path. Values at the float limits must reach Slack as JSON numbers, not
+  // null, in the chart block and in the table fallback.
+  it('reply_to_origin sends values at the float limits unchanged in the chart block and the table', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const values = [-Number.MAX_VALUE, -Number.MIN_VALUE, Number.MIN_VALUE, Number.MAX_VALUE];
+    const categories = ['a', 'b', 'c', 'd'];
+    const extremes = {
+      title: 'Extremes',
+      chart: { type: 'bar', series: [{ name: 'S', data: values.map((value, i) => ({ label: categories[i], value })) }], axis_config: { categories } },
+    };
+    await action('slack.reply_to_origin').execute({ text: 'Extremes:', charts: [extremes] }, pluginCtx({ origin: slackOrigin }));
+    const [[, first], [, retry]] = fetchMock.mock.calls as [string, RequestInit][];
+    const block = (JSON.parse(first.body as string) as { blocks: unknown[] }).blocks.at(-1);
+    expect(block).toEqual({ type: 'data_visualization', title: 'Extremes', chart: extremes.chart });
+    const text = (JSON.parse(retry.body as string) as { blocks: { text?: string }[] }).blocks.map((b) => b.text ?? '').join('\n');
+    for (const value of values) expect(text).toContain(`| ${String(value)} |`);
+    expect(text).not.toMatch(/NaN|Infinity|null/);
+  });
+
   // The table fallback is mrkdwn, where Slack reads <@U…> in a label as a
   // mention. The mention check saw only the reply text.
   it('reply_to_origin refuses a chart label that mentions an unknown user', async () => {

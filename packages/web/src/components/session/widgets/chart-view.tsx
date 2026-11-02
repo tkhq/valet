@@ -41,8 +41,9 @@ export function niceTicks(min: number, max: number): number[] {
   const raw = (high - low) / 4;
   const power = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * power).find((s) => s >= raw) ?? raw;
-  // Near Number.MAX_VALUE the loop bound overflows to Infinity and never ends; use the bare range.
-  if (!Number.isFinite(high - low + step)) return [low, high];
+  // Near Number.MAX_VALUE the loop bound overflows to Infinity and never ends. Near
+  // Number.MIN_VALUE the step underflows to 0 and the loop draws nothing. Use the bare range.
+  if (!(step > 0) || !Number.isFinite(high - low + step)) return [low, high];
   const ticks: number[] = [];
   for (let t = Math.floor(low / step) * step; t <= high + step * 1e-9; t += step) ticks.push(Number(t.toPrecision(12)));
   if (ticks[ticks.length - 1]! < high) ticks.push(ticks[ticks.length - 1]! + step);
@@ -68,7 +69,9 @@ function AxisChart({ type, series, categories }: { type: "bar" | "line" | "area"
   const ticks = niceTicks(Math.min(...values), Math.max(...values));
   const lo = ticks[0]!;
   const hi = ticks[ticks.length - 1]!;
-  const y = (v: number) => PAD.top + PLOT_H * (1 - (v - lo) / (hi - lo));
+  // Divide by the largest magnitude before subtracting: (v - lo) / (hi - lo) is Infinity / Infinity for [-MAX, MAX].
+  const scale = Math.max(Math.abs(lo), Math.abs(hi));
+  const y = (v: number) => PAD.top + PLOT_H * (1 - (v / scale - lo / scale) / (hi / scale - lo / scale));
   const band = PLOT_W / categories.length;
   const x = (i: number) => PAD.left + band * (i + 0.5);
   const barW = Math.max(2, (band * 0.7) / series.length - 2);
@@ -101,14 +104,17 @@ function AxisChart({ type, series, categories }: { type: "bar" | "line" | "area"
 }
 
 function Pie({ segments }: { segments: { label: string; value: number }[] }) {
-  const total = segments.reduce((sum, s) => sum + s.value, 0);
+  // Shares come from values over the largest one, so the total cannot overflow to Infinity.
+  const largest = Math.max(...segments.map((s) => s.value));
+  const total = segments.reduce((sum, s) => sum + s.value / largest, 0);
+  const share = (value: number) => value / largest / total;
   const r = 80;
   const inner = 48;
   let angle = -Math.PI / 2;
   const point = (a: number, radius: number) => `${100 + radius * Math.cos(a)},${100 + radius * Math.sin(a)}`;
   return <svg viewBox="0 0 200 200" className="h-40 w-40 shrink-0" aria-hidden>
     {segments.map((s, i) => {
-      const sweep = (s.value / total) * Math.PI * 2;
+      const sweep = share(s.value) * Math.PI * 2;
       const start = angle;
       angle += sweep;
       const large = sweep > Math.PI ? 1 : 0;
@@ -116,7 +122,7 @@ function Pie({ segments }: { segments: { label: string; value: number }[] }) {
         ? `M ${point(0, r)} A ${r} ${r} 0 1 1 ${point(Math.PI, r)} A ${r} ${r} 0 1 1 ${point(0, r)} M ${point(0, inner)} A ${inner} ${inner} 0 1 0 ${point(Math.PI, inner)} A ${inner} ${inner} 0 1 0 ${point(0, inner)} Z`
         : `M ${point(start, r)} A ${r} ${r} 0 ${large} 1 ${point(angle, r)} L ${point(angle, inner)} A ${inner} ${inner} 0 ${large} 0 ${point(start, inner)} Z`;
       return <path key={s.label} d={d} fillRule="evenodd" stroke="var(--paper)" strokeWidth={2} style={{ fill: color(i) }}>
-        <title>{`${s.label}: ${format(s.value)} (${Math.round((s.value / total) * 100)}%)`}</title>
+        <title>{`${s.label}: ${format(s.value)} (${Math.round(share(s.value) * 100)}%)`}</title>
       </path>;
     })}
   </svg>;
