@@ -46,6 +46,7 @@ import {
   buildChildSpawner,
   buildChildStatusReader,
   buildChildStopper,
+  batchOrigin,
   ChildWatcher,
   CHILD_TERMINAL_SIGNAL_GRACE_MS,
   ChildLimitError,
@@ -5581,7 +5582,7 @@ describe("child batches and child_stop", () => {
   }
 
   /** A child whose delegated submission has an unclaimed queued item; `settle` finishes it. */
-  async function batchChild(p: Awaited<ReturnType<typeof batchParent>>, id: string, batchKey: string | null, title: string) {
+  async function batchChild(p: Awaited<ReturnType<typeof batchParent>>, id: string, batchKey: string | null, title: string, origin?: ChannelOrigin) {
     const { engineHost, engineStore, db } = api!.providers;
     const child = await engineHost.childSessionFor(id, {
       parentSessionId: p.parent.id, parentThreadId: p.parentThread.id, actorUserId: "local-user", orgId: "local-org",
@@ -5590,7 +5591,8 @@ describe("child batches and child_stop", () => {
     const childThread = child.thread("web:default");
     await child.pause();
     const itemId = `qi-${id}`;
-    await engineStore.admitSubmission(id, childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.admitSubmission(id, childThread.id, { ...queuedItem(itemId, childThread.id, "work"),
+      ...(origin ? { metadata: parentDelegationMetadata(p.parent.id, p.parentThread.id, origin) } : {}) });
     await db.insert(agentSessions).values({
       id, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active", title,
       ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
@@ -5599,7 +5601,8 @@ describe("child batches and child_stop", () => {
       childSessionId: id, queueItemId: itemId, parentSessionId: p.parent.id,
       parentThreadId: p.parentThread.id, actorUserId: "local-user", orgId: "local-org",
     };
-    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), batchKey });
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), batchKey,
+      ...(origin ? { originJson: JSON.stringify(origin), replyRoute: "origin" } : {}) });
     return {
       child, childThread, itemId, watch,
       settle: async () => {
@@ -5668,6 +5671,34 @@ describe("child batches and child_stop", () => {
     // A second turn-end event finds nothing left to release.
     await p.watcher.releaseBatchesAfterTurn(p.parent.id, "qi-spawning-turn");
     expect(await parentSignals(p.parent.id)).toHaveLength(1);
+  });
+
+  it("replies manually for a batch when a held report's route is manual", async () => {
+    const p = await batchParent("route");
+    const { db, engineStore } = api!.providers;
+    const slack: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+    const a = await batchChild(p, "child-route-a", "review", "Private A", slack);
+    const b = await batchChild(p, "child-route-b", "review", "Public B", slack);
+    // A's route went manual (private input); B, which releases the batch, still replies automatically.
+    await db.update(childWatches).set({ replyRoute: "manual" }).where(eq(childWatches.childSessionId, "child-route-a"));
+
+    await a.settle();
+    await b.settle();
+    const signals = await parentSignals(p.parent.id);
+    expect(signals).toHaveLength(1);
+    expect((signals[0]!.content as SignalContent).origin).toMatchObject({ threadKey: "slack:C1:1.2", reply: "manual" });
+    expect(await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.childSessionId, "child-route-b"))).toHaveLength(0);
+    expect(await engineStore.getQueueItem(p.parent.id, signals[0]!.id)).toBeTruthy();
+  });
+
+  it("keeps a batch reply automatic only when every report replies automatically to the same thread", () => {
+    const auto = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
+    expect(batchOrigin(auto, [{ origin: auto }])).toEqual(auto);
+    expect(batchOrigin(auto, [{ origin: undefined }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin(auto, [{ origin: { ...auto, threadKey: "slack:C2:9.9" } }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin({ ...auto, reply: "manual" }, [{ origin: auto }])).toMatchObject({ reply: "manual" });
+    expect(batchOrigin(undefined, [{ origin: auto }])).toBeUndefined();
+    expect(batchOrigin(auto, [])).toEqual(auto);
   });
 
   it("reports a child without a batch at once while a batch is still running", async () => {

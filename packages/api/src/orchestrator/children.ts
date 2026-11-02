@@ -1166,7 +1166,6 @@ export class ChildWatcher {
     watch: ArmArgs, childOwner: Principal, report: BatchReport, batchKey: string | null, fresh: boolean,
   ): Promise<void> {
     const itemId = report.itemId;
-    const origin = report.origin;
     let held: BatchReport[] = [];
     if (batchKey !== null) {
       const members = await this.deps.db.select({
@@ -1193,6 +1192,7 @@ export class ChildWatcher {
     }
 
     const reports = [...held, report];
+    const origin = batchOrigin(report.origin, held);
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${itemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
@@ -2533,6 +2533,19 @@ interface BatchReport {
 /** One in-process lock per batch of one parent thread. */
 function batchLockKey(watch: Pick<ArmArgs, "parentSessionId" | "parentThreadId">, batchKey: string): string {
   return `batch:${watch.parentSessionId}:${watch.parentThreadId}:${batchKey}`;
+}
+
+/**
+ * The route of a batch signal. It replies automatically only when every
+ * report could reply automatically to the same channel thread on its own.
+ * Otherwise a held report kept manual (private input, a takeover, or no
+ * channel origin) would reach the channel in the combined reply.
+ */
+export function batchOrigin(own: ChannelOrigin | undefined, held: Pick<BatchReport, "origin">[]): ChannelOrigin | undefined {
+  if (own === undefined || held.length === 0) return own;
+  const automatic = own.reply !== "manual" && held.every(({ origin }) => origin !== undefined && origin.reply !== "manual"
+    && origin.channelType === own.channelType && origin.threadKey === own.threadKey);
+  return automatic ? own : { ...own, reply: "manual" };
 }
 
 /** The body of the one signal that reports a whole batch. */
