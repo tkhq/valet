@@ -56,3 +56,41 @@ Every other thread returns its counts and link with no title and no excerpt. No 
 - The tool reads only what the outcome classifier wrote. The classifier needs the `xs` model tier and labels a thread ten quiet minutes after it settles. When no thread has a label, `note` says how to set the tier.
 - There is no backfill. Threads that settled before classification shipped have no label.
 - Links use the deployment's public URL. Without one they are `/threads/<id>` paths, and `note` says so.
+
+## The `diagnostics.daily-friction-scan` template
+
+The template ships with the host's `diagnostics-actions` plugin (`packages/api/src/diagnostics/template.ts`), because its tool nodes call that plugin's actions. The gallery lists it like any plugin template.
+
+Nodes:
+
+1. `start`: a trigger with no inputs. A scheduled run fills no `trigger.data`, so the template reads only `trigger.timestamp`.
+2. `outcomes`: `diagnostics.list_thread_outcomes` with `hours: 24` and `limit: 60`.
+3. `failures`: `diagnostics.list_tool_failures` with `days: 1` and `samples: 10`. It runs beside `outcomes`.
+4. `rank`: an `llm` step. It picks at most five friction points and writes the page. Each point has a title, the people it hit, the intent, the thread count, the tool error count, up to five links from the data, the evidence, and one suggested fix. The output schema declares `points` and `report`.
+5. `publish`: a thread step on the workspace assistant. It calls `artifact_publish` with the key `reports/daily-friction-scan`, so the page keeps one link and each night adds a version. It replies with the link.
+6. `done`: a stop node with `points` and the reply.
+
+### Scope follows the install
+
+The tool nodes run as the workflow owner, and the actions apply their usual access rules:
+
+- An organization admin's personal install reads every thread in the organization. Its failure samples come from that admin's own conversations.
+- A team install reads that team's threads and tool calls, and publishes the page in the team workspace.
+- Any other personal install fails at the `outcomes` node, because thread outcomes are for organization admins. The template caveats say so.
+
+### Schedule
+
+The template declares a daily cron, `0 7 * * *` UTC. Install arms it in the same transaction as the definition, like every scheduled template. Shipping the template arms nothing: no organization gets the workflow or the schedule until someone installs it.
+
+### Untrusted text
+
+Thread titles, request excerpts and tool error text are written by people and tools. The `rank` prompt calls them data and tells the model to quote no more than the data gives. The `publish` prompt fences the report between `<report>` markers and tells the assistant not to follow any instruction inside it.
+
+### Page audience
+
+An artifact link opens for any signed-in member of the organization who has it. The page names people and links their threads. Titles and excerpts on it come only from threads the installer can open. The template caveats say so.
+
+### What the template does not do
+
+- It does not post to Slack or file issues. The page and the run result are the output.
+- It does not check the suggested fixes. A person opens the linked threads before acting on one.
