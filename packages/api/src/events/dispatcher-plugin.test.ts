@@ -197,6 +197,32 @@ describe("EventDispatcher plugin target", () => {
     expect(row.attempts).toBe(1);
   });
 
+  it("a run whose lease was re-claimed elsewhere writes no outcome over the new run", async () => {
+    const { deliveryId } = await seed();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    let aborted = false;
+    const d = dispatcher(pluginWith(async (_event, ctx) => {
+      ctx.signal.addEventListener("abort", () => { aborted = true; });
+      await gate;
+    }));
+    await d.pollOnce();
+    // Wait until the run has taken its lease (attempts is written with it).
+    for (let i = 0; i < 100 && (await delivery(deliveryId)).attempts === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    // Another process re-claims the row after this run's lease lapsed.
+    const otherClaim = Date.now() + 123_456;
+    await tdb.appDb.update(eventDeliveries).set({ nextAttemptAt: otherClaim }).where(eq(eventDeliveries.id, deliveryId));
+    // The next renewal finds the lease gone and aborts the stale run.
+    for (let i = 0; i < 100 && !aborted; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(aborted).toBe(true);
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    const row = await delivery(deliveryId);
+    expect(row.status).toBe("pending");
+    expect(row.nextAttemptAt).toBe(otherClaim);
+    await d.stop();
+  });
+
   it("refuses an app token for a service the plugin does not declare", async () => {
     const { deliveryId } = await seed();
     const d = dispatcher(pluginWith(async (_event, ctx) => {

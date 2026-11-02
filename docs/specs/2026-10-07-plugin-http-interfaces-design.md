@@ -273,6 +273,7 @@ Event handlers:
 - `ValetPlugin.eventHandlers` declares handlers with an id, a description and the event keys each accepts.
 - A subscription target `{ kind: "plugin", plugin, handler, teamId? }` routes matching events to a handler. The validator refuses an unknown handler, event keys the handler does not accept, and assistant-only fields. A team target needs the caller's team membership.
 - The dispatcher runs a handler beside its loop and renews the delivery's claim lease while it runs. Each process runs at most 8 handlers; a busy process leaves the row for a later poll.
+- The lease value is a fence. A run renews the lease and records its outcome only while `next_attempt_at` still holds the value it wrote. If its lease lapsed and another process re-claimed the row, the stale run aborts and writes nothing.
 - The attempt counts when the handler starts, so a handler that crashes the process still uses up its retries. After the last retry the delivery is dead.
 - A throw records a failed delivery with the usual backoff. A graceful shutdown records nothing: the lease lapses and a later poll runs the handler again. If the line is turned off or deleted mid-run, the handler is aborted and the delivery is skipped. Handlers must be idempotent per event; dispatch ids give that for threads and children.
 - The handler acts as the line's owner: the owner's user id, or `team:<id>` for a team, as a workflow run does. The org must admit the plugin for that owner when the line is armed and again at each delivery.

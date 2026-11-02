@@ -30,7 +30,7 @@ import type { EventHead } from "../services/event-columns.js";
 import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -88,6 +88,8 @@ const DEFAULT_PLUGIN_CONCURRENCY = 8;
 const PLUGIN_BUSY_RETRY_MS = 10_000;
 /** Abort reason when a plugin line is turned off or deleted mid-run. */
 const PLUGIN_LINE_OFF = "plugin-line-off";
+/** Abort reason when another run re-claimed the delivery after this run's lease lapsed. */
+const PLUGIN_LEASE_LOST = "plugin-lease-lost";
 
 /** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
 function pluginServices(plugin: ValetPlugin): Set<string> {
@@ -781,6 +783,8 @@ export class EventDispatcher {
     event: typeof events.$inferSelect,
     err: unknown,
     attempts = delivery.attempts + 1,
+    /** Narrows the write, e.g. to a plugin run's fenced lease. Default: the row. */
+    where: SQL | undefined = eq(eventDeliveries.id, delivery.id),
   ): Promise<void> {
     const backoff = BACKOFF_MS[attempts - 1];
     // The last attempt failed, so the waiters this delivery suppressed get
@@ -794,7 +798,7 @@ export class EventDispatcher {
         nextAttemptAt: backoff === undefined ? delivery.nextAttemptAt : Date.now() + backoff,
         lastError: String(err).slice(0, MAX_ERROR_CHARS),
       })
-      .where(eq(eventDeliveries.id, delivery.id));
+      .where(where);
   }
 
   /** Plugin deliveries running in this process, by delivery id. */
@@ -824,9 +828,26 @@ export class EventDispatcher {
     }
     const abort = new AbortController();
     this.pluginRuns.set(delivery.id, abort);
-    // Only rows still owed an outcome take one: a late write never
-    // overwrites a delivery another poll already settled.
-    const open = and(eq(eventDeliveries.id, delivery.id), inArray(eventDeliveries.status, ["pending", "failed"]));
+    // The lease value is the fence. This run owns the row only while
+    // `next_attempt_at` still holds the value it last wrote, so a run that
+    // outlived its lease (and was re-claimed elsewhere) can neither renew
+    // nor record an outcome over the new run.
+    let lease = delivery.nextAttemptAt;
+    const owned = () => and(
+      eq(eventDeliveries.id, delivery.id),
+      inArray(eventDeliveries.status, ["pending", "failed"]),
+      eq(eventDeliveries.nextAttemptAt, lease),
+    );
+    /** Move the lease to a new value, fenced on the current one. False when another run took the row. */
+    const takeLease = async (set: Partial<typeof eventDeliveries.$inferInsert> = {}): Promise<boolean> => {
+      // Jitter keeps two writes in the same millisecond from minting one value.
+      const next = Date.now() + CLAIM_LEASE_MS + Math.floor(Math.random() * 1000);
+      const moved = await db.update(eventDeliveries).set({ ...set, nextAttemptAt: next }).where(owned())
+        .returning({ id: eventDeliveries.id });
+      if (moved.length === 0) return false;
+      lease = next;
+      return true;
+    };
     const finish = () => {
       clearInterval(renew);
       this.pluginRuns.delete(delivery.id);
@@ -839,7 +860,7 @@ export class EventDispatcher {
           abort.abort(PLUGIN_LINE_OFF);
           return;
         }
-        await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() + CLAIM_LEASE_MS }).where(open);
+        if (!(await takeLease())) abort.abort(PLUGIN_LEASE_LOST);
       })().catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err));
     }, this.deps.pluginHandlers?.leaseRenewMs ?? CLAIM_LEASE_MS / 3);
 
@@ -848,21 +869,25 @@ export class EventDispatcher {
       // process still uses up its retries instead of looping forever.
       const attempts = delivery.attempts + 1;
       if (attempts > BACKOFF_MS.length + 1) {
-        await db.update(eventDeliveries).set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(open);
+        await db.update(eventDeliveries).set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(owned());
         return;
       }
-      await db.update(eventDeliveries).set({ attempts }).where(open);
+      // Take the claim this poll made. A miss means another process
+      // re-claimed the row between the claim and here.
+      if (!(await takeLease({ attempts }))) return;
       try {
         await this.runPluginDelivery(event, sub, target, abort.signal);
-        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(open);
+        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(owned());
       } catch (err) {
-        if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
-          await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(open);
+        if (abort.signal.aborted && abort.signal.reason === PLUGIN_LEASE_LOST) {
+          // Another run owns the row now; its outcome is the one that counts.
+        } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
+          await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
         } else if (abort.signal.aborted && this.stopped) {
           // Shutdown is not the handler's fault. The lease lapses and a
           // later process runs it again.
         } else {
-          await this.recordDeliveryFailure(delivery, event, err, attempts);
+          await this.recordDeliveryFailure(delivery, event, err, attempts, owned());
         }
       }
     })()
