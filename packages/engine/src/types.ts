@@ -803,6 +803,26 @@ export type ToolArtifact =
   | { type: "link"; url: string; title: string }
   | { type: "diff"; path?: string; content: string };
 
+/** One durable download saved in a thread (the `file_attach` store). */
+export interface ThreadFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  bytes: number;
+  /** Absolute when the host has a public origin, else the same as `webUrl`. */
+  url: string;
+  /** Download path relative to the Valet web app. */
+  webUrl: string;
+}
+
+/** `ToolContext.threadFiles`, bound to the calling thread. */
+export interface ThreadFileStore {
+  /** Save bytes as a download in this thread. Throws an Error whose message names the fix. */
+  save(file: { name: string; mimeType: string; data: Uint8Array }): Promise<ThreadFile>;
+  /** Read a file saved in this thread. Null when no ready file of this thread has the id. */
+  read(id: string): Promise<(ThreadFile & { data: Uint8Array }) | null>;
+}
+
 export interface ToolContext {
   /** Effective session, submission, and thread restrictions. This may change after a focus call. */
   readonly toolScope?: ToolScope;
@@ -919,6 +939,14 @@ export interface ToolContext {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Host seam for this thread's durable downloads, the store `file_attach`
+   * writes. A plugin action saves bytes a person can download from the
+   * thread, and reads back a file saved earlier in the same thread. Absent
+   * on hosts that wire no blob store and in workflow tool nodes; callers
+   * must name that limit, not fail silently.
+   */
+  threadFiles?: ThreadFileStore;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /** Host seam for wakeups and leases (spec 2026-10-08). Absent === the host
    * wires no wakeups, and tools that need it must degrade or refuse. */
@@ -2949,6 +2977,11 @@ export interface CreateSessionOptions {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Binds `ToolContext.threadFiles` to each thread in `buildToolContext`.
+   * Absent === tools and plugin actions get no thread file store.
+   */
+  threadFiles?: (scope: { orgId: string; sessionId: string; threadId: string }) => ThreadFileStore;
   /** Threaded onto `ToolContext.wakeups` via `buildToolContext`. Absent ===
    * plugin actions and tools get no wakeups seam. */
   wakeups?: WakeupsSeam;

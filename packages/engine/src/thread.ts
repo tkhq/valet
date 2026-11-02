@@ -7072,6 +7072,7 @@ export class Thread {
       pluginStoreFactory: session.options.pluginStoreFactory,
       browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
+      threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.

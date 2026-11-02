@@ -43,6 +43,7 @@ export const READ_GET_ACTIONS: string[] = [
   'drive.get_document_info',
   'drive.get_folder_info',
   'drive.download_file',
+  'drive.export_file',
   'docs.read_document',
   'docs.find_text_index',
   'docs.list_tabs',

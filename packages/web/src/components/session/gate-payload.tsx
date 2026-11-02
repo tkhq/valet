@@ -84,12 +84,24 @@ function slackDm(args: Args): PayloadView | null {
   return user ? slackText(`Slack DM · ${user}`, args) : null;
 }
 
+/** The name each attached file is sent under: its `filename`, else its path's base name, else its thread file id. */
+function attachmentNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: unknown) => {
+    if (typeof item !== "object" || item === null) return [];
+    const ref: Args = { ...item };
+    const name = str(ref, "filename") ?? str(ref, "path")?.split("/").filter(Boolean).at(-1) ?? str(ref, "threadFileId");
+    return name ? [name] : [];
+  });
+}
+
 function email(label: string, args: Args): PayloadView | null {
   const to = addresses(args.to);
   const { subject, body } = args;
   if (to.length === 0 || typeof subject !== "string" || typeof body !== "string") return null;
   const cc = addresses(args.cc);
   const bcc = addresses(args.bcc);
+  const files = attachmentNames(args.attachments);
   return {
     icon: Mail,
     heading: label,
@@ -98,6 +110,7 @@ function email(label: string, args: Args): PayloadView | null {
       ...(cc.length > 0 ? [{ label: "Cc", value: cc.join(", ") }] : []),
       ...(bcc.length > 0 ? [{ label: "Bcc", value: bcc.join(", ") }] : []),
       { label: "Subject", value: subject.trim() || "(no subject)" },
+      ...(files.length > 0 ? [{ label: "Attachments", value: files.join(", ") }] : []),
     ],
     ...optionalText(args, "body"),
   };
