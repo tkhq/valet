@@ -453,7 +453,12 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
+  /**
+   * `text` stays empty for new parts: it is what a rebuilt transcript sends
+   * back to the model. `summary` is the provider's reasoning summary, for
+   * display only; nothing that builds model input reads it.
+   */
+  | { type: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;

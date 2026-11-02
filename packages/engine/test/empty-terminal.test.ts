@@ -103,7 +103,10 @@ describe("terminal result integrity", () => {
         streamedTextLength: test.delta?.length ?? 0, effectiveMaxOutputTokens: 8192, outputLimitField: "max_output_tokens", requestId: "request-1",
         providerTerminalStatus: null, incompleteReason: null,
       });
-      expect(JSON.stringify(entries)).not.toMatch(/PRIVATE REASONING|REQUEST_SECRET|RESPONSE_SECRET/);
+      expect(JSON.stringify(entries)).not.toMatch(/REQUEST_SECRET|RESPONSE_SECRET/);
+      // Reasoning is stored only as a display summary, never as model-facing text.
+      for (const part of last?.parts ?? []) if (part.type === "thinking") expect(part.text).toBe("");
+      expect(last?.content ?? "").not.toContain("PRIVATE REASONING");
       expect(last?.content).not.toContain("streamed answer");
       await thread.awaitResult(receipt.queueItemId);
       await session.reconcile();
