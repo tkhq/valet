@@ -59,6 +59,7 @@ function baseConfig(overrides: Partial<AuthConfig> = {}): AuthConfig {
     allowedEmailDomains: [],
     social: {},
     sandboxJwtMaster: "test-secret",
+    mcpAppSchemes: [],
     ...overrides,
   };
 }

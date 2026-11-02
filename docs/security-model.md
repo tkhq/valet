@@ -66,7 +66,13 @@ Signup can be restricted by email domain (`AUTH_ALLOWED_EMAIL_DOMAINS`).
 
 **MCP** (`/mcp`) uses proper OAuth instead of API keys: RFC 8414 discovery,
 dynamic client registration, and Bearer access tokens validated against the
-better-auth OAuth tables. Tools are scoped to the token's user.
+better-auth OAuth tables. Tools are scoped to the token's user. Registration
+needs no session, as the MCP spec expects. Every redirect URI must be
+`https://` with a full host name, `http://` loopback, or a listed app scheme
+such as `claude://`, without wildcards, user names, or fragments.
+Registrations are limited per address and by a daily cap on unapproved
+clients. The consent page labels the app name as unverified and shows the
+redirect host.
 
 ## Authorization
 

@@ -12,6 +12,25 @@ export type LoginMethod = "password" | "oidc" | "google" | "github";
 
 export const LOGIN_METHODS: readonly LoginMethod[] = ["password", "oidc", "google", "github"];
 
+/** The Claude desktop app and Cursor call back on their own schemes. */
+export const DEFAULT_MCP_APP_SCHEMES: readonly string[] = ["claude", "cursor"];
+
+// Schemes that run content, read files, or leave the computer are never app schemes.
+const UNSAFE_APP_SCHEMES = new Set(["http", "https", "javascript", "data", "vbscript", "file", "blob", "about", "ftp", "ws", "wss", "mailto", "tel"]);
+
+/** Reads `AUTH_MCP_APP_SCHEMES`, a comma list. Unset means `claude,cursor`; empty allows none. */
+export function parseMcpAppSchemes(raw: string | undefined): string[] {
+  if (raw === undefined) return [...DEFAULT_MCP_APP_SCHEMES];
+  const schemes = [...new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))];
+  for (const scheme of schemes) {
+    if (!/^[a-z][a-z0-9+.-]*$/.test(scheme) || UNSAFE_APP_SCHEMES.has(scheme)) {
+      throw new Error(`AUTH_MCP_APP_SCHEMES has "${scheme}", which cannot be an app scheme. List native app schemes without "://", such as claude,cursor.`);
+    }
+  }
+  return schemes;
+}
+
+
 export interface AuthConfig {
   /** The sign-in methods this deployment offers, from `AUTH_METHODS`. Empty
    * means nobody can sign in: login is off until a deployment lists a method. */
@@ -33,6 +52,8 @@ export interface AuthConfig {
   adminEmails?: string[];
   /** Explicit deployment opt-in: admit new users without invitations. */
   allowSignup?: boolean;
+  /** `AUTH_MCP_APP_SCHEMES`: native app schemes an MCP redirect URI may use. */
+  mcpAppSchemes: string[];
   oidc?: {
     issuer: string;
     clientId: string;
@@ -277,6 +298,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     allowedEmailDomains,
     ...(adminEmails.length ? { adminEmails } : {}),
     ...(env.AUTH_ALLOW_SIGNUP === "1" ? { allowSignup: true } : {}),
+    mcpAppSchemes: parseMcpAppSchemes(env.AUTH_MCP_APP_SCHEMES),
     // A provider with credentials but no place in AUTH_METHODS stays off.
     ...(methods.includes("oidc") ? { oidc } : {}),
     social: {

@@ -87,7 +87,11 @@ export function ConsentPage({ code }: { code: string | undefined }) {
         ) : (
           <div className="space-y-5">
             <p className="text-sm text-ink">
-              <strong>{info.data.client_name}</strong> wants to act as <strong>{info.data.account}</strong> in Valet.
+              An app that calls itself <strong>{info.data.client_name}</strong> wants to act as{" "}
+              <strong>{info.data.account}</strong> in Valet.
+            </p>
+            <p className="text-xs text-muted">
+              Valet does not verify app names. Check where the code goes: <strong className="text-ink">{info.data.redirect_origin}</strong>
             </p>
 
             {!info.data.redirect_is_local && (

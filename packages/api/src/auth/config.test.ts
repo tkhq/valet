@@ -445,6 +445,7 @@ describe("loadAuthConfig", () => {
         },
       },
       sandboxJwtMaster: "sandbox-key",
+      mcpAppSchemes: ["claude", "cursor"],
     });
   });
 });
@@ -530,5 +531,16 @@ describe("AUTH_ADMIN_EMAILS", () => {
   it("stops boot on an entry that is not an email address, naming the fix", () => {
     expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_ADMIN_EMAILS: "boss@corp.test, not-an-email" }))
       .toThrow(/AUTH_ADMIN_EMAILS has "not-an-email".*comma-separated list of administrator emails/);
+  });
+});
+
+describe("AUTH_MCP_APP_SCHEMES", () => {
+  it("reads AUTH_MCP_APP_SCHEMES and refuses a scheme that runs content or leaves the computer", () => {
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s" })?.mcpAppSchemes).toEqual(["claude", "cursor"]);
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: " Claude ,claude" })?.mcpAppSchemes).toEqual(["claude"]);
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: "" })?.mcpAppSchemes).toEqual([]);
+    for (const bad of ["javascript", "https", "data", "claude://"]) {
+      expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_MCP_APP_SCHEMES: bad })).toThrow(/AUTH_MCP_APP_SCHEMES has/);
+    }
   });
 });

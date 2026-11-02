@@ -68,6 +68,7 @@ packages/api/src/auth/
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | Optional social provider. |
 | `AUTH_TRUSTED_ORIGINS` | Comma-separated extra origins (dev default adds `http://localhost:5173` for the Vite proxy). When OIDC is enabled, MUST include the issuer's origin — the sso plugin rejects discovery URLs outside `trustedOrigins` (`discovery_untrusted_origin`, sign-in 400s). |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Optional comma-separated domains admitted without an invite (decision 5). |
+| `AUTH_MCP_APP_SCHEMES` | Comma list of native app schemes an MCP redirect URI may use (see "MCP client registration"). Unset means `claude,cursor`. Empty allows none. `http`, `https`, `javascript`, `data`, `file`, and similar schemes stop the boot. |
 | `VALET_SANDBOX_JWT_MASTER` | Optional master secret for per-session service-JWT derivation; falls back to `BETTER_AUTH_SECRET`. |
 
 Keycloak is configured via the sso plugin's **`defaultSSO` option** (config-only, idempotent, takes precedence over DB rows — no `sso_provider` seeding, no `registerSSOProvider` call, which requires a session and is non-idempotent). Set `trustEmailVerified: true` on the plugin: we trust the enterprise IdP's `email_verified` claim.
@@ -85,7 +86,7 @@ New tables, transcribed verbatim from the CLI-generated Drizzle schema (research
 - `session`, `account`, `verification` — core. `account` holds password hashes AND linked social/SSO identities per user, including IdP tokens (`access_token`, `refresh_token`, `id_token`, expiries, `scope`) — this is what makes "same email via Google and via password" one user with two accounts, and what feeds the credential-capture hook.
 - `sso_provider` — sso plugin (table required even though we configure via `defaultSSO`).
 - `apikey` — api-key plugin. Note: owner column is `reference_id` (not `user_id`), plus `config_id` (default `"default"`), `start` (displayable first chars), `prefix`, `last_request`, `expires_at`, `enabled`, rate-limit columns.
-- `oauth_application`, `oauth_access_token`, `oauth_consent` — MCP plugin (dynamic client registration + issued tokens + consent records).
+- `oauth_application`, `oauth_access_token`, `oauth_consent` — MCP plugin (dynamic client registration + issued tokens + consent records). `mcpRegisterGate` checks and limits new `oauth_application` rows (see "MCP client registration").
 - `invites` — **Valet-owned**: `id`, `code_hash` (SHA-256 of the invite code), `email` (nullable — when set, the invite auto-matches that address; required path for social signups), `role` (`admin` | `member`), `created_by`, `created_at`, `expires_at`, `accepted_by` (nullable), `accepted_at` (nullable).
 - `sandbox_tokens` — **Valet-owned**: `id`, `token_hash` (SHA-256), `session_id`, `user_id`, `org_id`, `created_at`, `expires_at`, `revoked_at` (nullable).
 
@@ -193,6 +194,26 @@ Two credentials, one file, both independent of better-auth:
 - Acting user = `session.userId` from the validated OAuth token; tool handlers reuse existing services (no bespoke queries).
 - Success criterion: Claude (or MCP inspector) completes dynamic client registration + OAuth against Valet and calls both tools.
 
+### MCP client registration
+
+Registration at `POST /api/auth/mcp/register` stays open and needs no session. The MCP authorization spec expects it: Claude Code, Codex, claude.ai, and the Claude app register before anyone signs in. The person's protection is the consent page, so the gate (`auth/mcp-registration.ts`, `mcpRegisterGate`, before better-auth) checks what a registration may hold and how many arrive. better-auth's plugin alone stores any redirect URI.
+
+**Redirect URIs.** Each URI must be `https://` with a full host name (at least one dot), `http://` on `localhost`, `127.0.0.1`, or `[::1]` with any port, or `<app scheme>://<host>` for a scheme in `AUTH_MCP_APP_SCHEMES` (RFC 8252 private-use scheme; the Claude app registers `claude://claude.ai/mcp-auth-callback/sdk`). The gate refuses wildcards (`*`), user names (`user@host`), fragments, commas (the plugin stores the list comma-joined), spaces, and any other scheme, including `javascript:` and `data:`. A registration holds one to five URIs. The gate reads the body as JSON only, so the plugin cannot read a body the gate did not check. The authorize handler (`mcpAuthorizeGate`) applies the same URI check to the `redirect_uri` it receives, so a client registered before this check cannot receive a code.
+
+**Limits.** Each address may register 10 clients an hour (in memory, for each api process, with the address rules of the CLI device sign-in). A client is unapproved until it has an `oauth_consent` row or an `oauth_access_token` row. When 200 clients from the last 24 hours are unapproved, the gate refuses new registrations until some age out or someone approves one. Over a limit, the gate returns 429. Nothing deletes unapproved clients (CLAUDE.md, "Invariants: alert, don't auto-repair"). The `valet.mcp.client_registration` counter reports each registration by `outcome`, and the api logs a warning when the daily cap refuses one.
+
+**Consent page.** The app chooses its own name, so the page labels the name as unverified and shows where the code goes: the redirect URI's scheme and full host with port (`redirect_origin`, for example `https://app.example.com:8443` or `claude://claude.ai`). It warns when the code leaves the computer, which is any `https://` redirect.
+
+To find unapproved clients, run this query. Review the rows before you delete them:
+
+```sql
+SELECT a.client_id, a.name, a.redirect_urls, a.user_id, a.created_at
+FROM oauth_application a
+WHERE NOT EXISTS (SELECT 1 FROM oauth_consent c WHERE c.client_id = a.client_id)
+  AND NOT EXISTS (SELECT 1 FROM oauth_access_token t WHERE t.client_id = a.client_id)
+ORDER BY a.created_at;
+```
+
 ## Frontend (`packages/web`)
 
 - New public routes `/login` and `/signup` (and `/signup?invite=…`), designed under the frontend-design skill in the app's established idiom. Login shows only the methods `AUTH_METHODS` turns on: the email/password form when `password` is on, social buttons (Google/GitHub), and "Continue with {AUTH_OIDC_NAME}". The primary method comes first and takes the primary button style. With no method on, the page says sign-in is not set up. A tiny unauthenticated `GET /api/auth-config` returns `{ stub, password, primary, social: ("google"|"github")[], sso: { name } | null }` and drives which controls render. better-auth also refuses `/sign-up/email` and `/sign-in/email` when `password` is off, so hiding the form is not the only guard.
@@ -210,6 +231,7 @@ Two credentials, one file, both independent of better-auth:
 - **Signup gates**: the boot-time bootstrap invite code (password) → admin + org + membership; a first signup without it is not an admin; a password signup naming an administrator's email without an admin code is refused; second password signup without invite rejected; with code-invite joins with invite role; email-matched invite auto-consumes; expired/revoked/accepted invites rejected; single-use enforced. Social-path creation hook: rejected without email-matched invite, admitted with one (unit-tested by invoking the hook with a synthesized social context). SSO-path: admitted without invite as member.
 - **Provisioning**: role stamping via `create.before` data; org_members rows; invite acceptance bookkeeping; account-token capture writes to the credential store (fake account row with tokens).
 - **API keys**: create/list/revoke round-trip via plugin endpoints; revoked/expired key fails rung 3; `verifyApiKey` path sets the right user; secret never re-readable.
+- **MCP registration** (`auth/mcp-registration.test.ts`): open registration for https, loopback, and app scheme redirects; each refused redirect shape (wildcard, `https://victim@evil.example/cb`, `javascript:`, fragment, comma, dotless host, unlisted app scheme); the list cap; the JSON-only body; the per-address and daily limits; the authorize refusal for a client with a stored wildcard or user-name redirect; and the consent page's `redirect_origin` for an app scheme and a port.
 - **MCP**: discovery endpoints serve metadata; `withMcpAuth` rejects missing/invalid Bearer; with a token minted through the OAuth flow (or directly seeded `oauth_access_token` row), `whoami` and `list_sessions` return the acting user's data.
 - **E2E**: boot with `BETTER_AUTH_SECRET`, `VALET_LOCAL_AUTH` off → signup → login → cookie-authed `GET /api/me` → API key create → key-authed request.
 - Existing fleet: entire current suite stays green with no env changes (stub path untouched).

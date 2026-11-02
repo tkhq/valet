@@ -25,7 +25,8 @@ import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-lis
 import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
-import type { AuthConfig } from "./auth/config.js";
+import { mcpRegisterGate } from "./auth/mcp-registration.js";
+import { DEFAULT_MCP_APP_SCHEMES, type AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { generatedFileOrigin } from "./services/generated-files.js";
@@ -275,8 +276,11 @@ export function createApp(
   if (auth) {
     // Every MCP authorization goes through Valet's consent page: a client
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
-    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
+    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth, authConfig?.mcpAppSchemes ?? DEFAULT_MCP_APP_SCHEMES));
     app.post("/api/auth/mcp/token", mcpTokenGate(providers.db));
+    // Registration stays open (MCP clients register before sign-in), but
+    // redirect URIs are checked and registrations are limited.
+    app.post("/api/auth/mcp/register", mcpRegisterGate(providers.db, authConfig?.mcpAppSchemes ?? DEFAULT_MCP_APP_SCHEMES));
     // `valet login` starts, polls, refreshes, and signs out here before it
     // has a credential (routes/cli-device.ts).
     app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));

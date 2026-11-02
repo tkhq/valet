@@ -6737,9 +6737,12 @@ export type ActionInvokeResponse =
 export interface OAuthConsentInfo {
   /** The name the app registered with. The app chooses it, so it is not proof of identity. */
   client_name: string;
-  /** Where the browser sends the authorization code after approval. */
+  /** Where the browser sends the authorization code after approval: the
+   * redirect URI's scheme and full host with port, such as
+   * `https://app.example.com:8443` or `claude://claude.ai`. */
   redirect_origin: string;
-  /** True when the code goes to this computer (localhost), as with Claude Code. */
+  /** True when the code goes to this computer (loopback or a native app
+   * scheme), as with Claude Code and the Claude app. */
   redirect_is_local: boolean;
   /** The signed-in Valet account the app would act as. */
   account: string;
