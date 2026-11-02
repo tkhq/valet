@@ -1989,7 +1989,8 @@ export class ChildWatcher {
           if (admitted) {
             await this.deps.db.update(childReplyDeliveries).set({ queueItemId: admitted.id })
               .where(and(eq(childReplyDeliveries.id, replyId), isNull(childReplyDeliveries.queueItemId)));
-            await this.markSettled(row.childSessionId, row.queueItemId);
+            // The admitted signal is this watch's report turn. A workflow step reads it from the row.
+            await this.markSettled(row.childSessionId, row.queueItemId, admitted.id);
             await this.parkChildSandbox(row.childSessionId);
           } else this.arm(watchRowToArgs(row));
         } catch (error) {
