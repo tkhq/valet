@@ -12,6 +12,7 @@ import {
   ArchiveRestore,
   ArrowDownUp,
   ArrowRightLeft,
+  Copy,
   Lock,
   Users,
   Bot,
@@ -59,6 +60,7 @@ import {
   prefetchTranscript,
   useArchivedThreads,
   useCreateThread,
+  useDuplicateThread,
   useRenameThread,
   useReplaceSandbox,
   useMarkThreadsRead,
@@ -688,6 +690,17 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
     }
   }
 
+  // Duplicate: the whole thread is copied into this workspace and opens.
+  // The source stays as it is.
+  const duplicateThread = useDuplicateThread();
+  function duplicate(threadId: string) {
+    if (duplicateThread.isPending) return;
+    setActionError(undefined);
+    duplicateThread.mutateAsync({ threadId })
+      .then((result) => navigate({ search: (prev) => ({ ...prev, thread: result.thread.id, workspace: result.workspace, child: undefined }) }))
+      .catch((err: unknown) => setActionError(errorText(err, "Could not duplicate the thread. Try again.")));
+  }
+
   const archiveActive = useCallback(() => {
     if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
     archiveThread(activeThreadId);
@@ -768,6 +781,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               onArchive={archiveThread}
               moveTargets={t.key?.startsWith("web:") ? moveTargets : []}
               onMoveWorkspace={(target) => { setMoveError(undefined); setPendingMove({ threadId: t.id, target }); }}
+              onDuplicate={isAppAssistantThread(t) ? undefined : () => duplicate(t.id)}
               onReplaceSandbox={replaceSessionSandbox}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
               onRename={(threadId, title) =>
@@ -1059,6 +1073,7 @@ function ThreadNode({
   onArchive,
   moveTargets,
   onMoveWorkspace,
+  onDuplicate,
   onReplaceSandbox,
   onDismissChild,
   onRename,
@@ -1097,6 +1112,8 @@ function ThreadNode({
   /** Workspaces this thread can move to; empty when it cannot move. */
   moveTargets: MoveTarget[];
   onMoveWorkspace: (target: MoveTarget) => void;
+  /** Copies the whole thread into this workspace; absent when it cannot duplicate. */
+  onDuplicate?: () => void;
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
   /** Send `null` to clear the stored title. */
@@ -1316,6 +1333,12 @@ function ThreadNode({
                 {projects.map((project) => <DropdownMenuItem key={project.id} onSelect={() => onMove(project.id)}><Check className={cn("h-4 w-4", projectId !== project.id && "invisible")} />{project.name}</DropdownMenuItem>)}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
+            {onDuplicate && (
+              <DropdownMenuItem onSelect={onDuplicate}>
+                <Copy className="h-4 w-4" aria-hidden />
+                Duplicate thread
+              </DropdownMenuItem>
+            )}
             {moveTargets.length > 0 && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger><ArrowRightLeft className="h-4 w-4" />Move to workspace</DropdownMenuSubTrigger>

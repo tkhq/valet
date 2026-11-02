@@ -1953,6 +1953,31 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   return c.json(result, 201);
 }
 
+/**
+ * Copies a whole thread into a new thread in the same workspace, with its
+ * files, as a branch from the latest message does. The source stays as it
+ * is. The copy keeps the source's audience, and a thread with a running
+ * turn or an open approval does not duplicate until it settles.
+ */
+export async function duplicateThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") return c.json({ error: "Only the thread owner or a team member can duplicate this thread." }, 403);
+  const { db, engineStore } = c.var.providers;
+  if ((await engineStore.listUnsettledSubmissions(sessionId)).some((item) => item.threadId === threadId)) {
+    return c.json({ error: "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it." }, 409);
+  }
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  // A copy of a copy keeps one suffix: "Plan (copy)", not "Plan (copy) (copy)".
+  const base = titled?.title?.replace(/(?: \(copy\))+$/, "");
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, {
+    destination: "here", ...(base ? { title: `${base} (copy)`.slice(0, MAX_THREAD_TITLE_CHARS) } : {}),
+  });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
 /** Where a fork lands: the source's workspace, the person's private threads, or a team (a move only). */
 type ForkDestination = "here" | "private" | { teamId: string };
 

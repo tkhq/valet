@@ -8,7 +8,7 @@ import type { MessageEntry, Thread, ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { buildThreadLinkTools } from "../home/thread-link-tools.js";
-import { sessionThreads, teamMembers, teams } from "../schema/index.js";
+import { orgMembers, sessionThreads, teamMembers, teams, users } from "../schema/index.js";
 import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY } from "../services/thread-links.js";
 import type { ForkThreadResponse, ListMessagesResponse, ThreadAddress } from "../wire/types.js";
 
@@ -153,6 +153,59 @@ describe("move", () => {
     const res = await post(`/threads/${rule.thread.id}/move`, { to: "private" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("Only a thread started in Valet can move");
+  });
+});
+
+describe("duplicate", () => {
+  it("copies a team thread into the same team and leaves the source as it was", async () => {
+    await boot();
+    const { thread, sessionId } = await teamThread();
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: "Plan" });
+    const res = await post(`/threads/${thread.id}/duplicate`, {}, MEMBER);
+    expect(res.status).toBe(201);
+    const copy = (await res.json()) as ForkThreadResponse;
+    expect(copy.workspace).toBe("fork-team");
+    expect(copy.thread.title).toBe("Plan (copy)");
+    expect(copy.thread.id).not.toBe(thread.id);
+    // Everyone on the team reads the copy, as they read the source.
+    for (const reader of ["local-user", MEMBER]) {
+      const messages = ((await (await read(copy.thread.id, reader)).json()) as ListMessagesResponse).messages;
+      expect(messages.map((m) => m.content).slice(0, 2)).toEqual(["first", "first answer"]);
+    }
+    const stored = await api!.providers.engineStore.getThread(copy.thread.sessionId, copy.thread.id);
+    expect(stored?.metadata?.[FORK_OF_METADATA_KEY]).toEqual({ sessionId, threadId: thread.id });
+
+    const [row] = await api!.providers.db.select().from(sessionThreads).where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, thread.id)));
+    expect(row?.archivedAt ?? null).toBeNull();
+    const source = await api!.providers.engineStore.getThread(sessionId, thread.id);
+    expect(source?.metadata?.[MOVED_TO_METADATA_KEY]).toBeUndefined();
+    const sourceMessages = ((await (await read(thread.id)).json()) as ListMessagesResponse).messages;
+    expect(sourceMessages.map((m) => m.content)).toEqual(["first", "first answer"]);
+  });
+
+  it("copies a private thread into the private threads and keeps one copy suffix", async () => {
+    await boot();
+    const { thread, sessionId } = await personalThread();
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: "Idea (copy)" });
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(201);
+    const copy = (await res.json()) as ForkThreadResponse;
+    expect(copy.workspace).toBe("user");
+    expect(copy.thread.title).toBe("Idea (copy)");
+    expect(((await (await read(copy.thread.id)).json()) as ListMessagesResponse).messages.map((m) => m.content).slice(0, 2)).toEqual(["my idea", "my answer"]);
+  });
+
+  it("refuses a thread with a turn waiting to run, and a person outside the team", async () => {
+    await boot();
+    const { thread } = await teamThread();
+    await api!.providers.db.insert(users).values({ id: "test-outsider", email: "outsider@dev", name: "Outsider", role: "member" });
+    await api!.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "test-outsider", role: "member", createdAt: 1 });
+    expect((await post(`/threads/${thread.id}/duplicate`, {}, "test-outsider")).status).toBe(404);
+    // The thread is paused, so this message waits in its queue.
+    expect((await post(`/threads/${thread.id}/messages`, { text: "keep going" })).status).toBeLessThan(300);
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("Let it finish, then duplicate it");
   });
 });
 
