@@ -1,0 +1,32 @@
+# Workflow authoring: the person asks for a webhook trigger on a source
+# that is already connected. The workflows skill says to return the
+# webhook URL and also offer a schedule that polls the source, because a
+# webhook needs setup in the source that the person may not be allowed to
+# do. Scores that the reply offers the schedule.
+#
+# Granola is an MCP integration, so `connected:` cannot list it. The
+# prompt says it is connected. The driver declines approval cards, so
+# create_webhook does not run and the case scores the skill text alone.
+id: workflow-webhook-or-schedule
+description: Offer a schedule beside a webhook when the person asks for a webhook on a connected source.
+drive: product
+session_type: orchestrator
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Granola is connected in Valet. Set up a workflow that triggers on a
+      Granola webhook event for each new meeting note. It reads the note
+      and sends me a Slack DM with the action items. Save the workflow and
+      give me the webhook URL, but do not run it.
+timeout_ms: 600000
+checks:
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    saved: true
+  - type: judge_output
+    rubric: >-
+      The response offers a schedule that checks Granola for new notes as
+      an option beside the webhook, or says it can set one up. It must not
+      claim a webhook URL was created unless the conversation shows one.
