@@ -68,6 +68,14 @@ export async function memoryScopeForSession(db: AppDb, sessionId: string): Promi
 export async function memorySessionId(db: AppDb, sessionId: string): Promise<string> {
   let current = sessionId;
   for (let depth = 0; depth < 8; depth++) {
+    // A session with its own memory audience keeps it. A team execution and
+    // a workflow step have a parent, but their memory is their own.
+    if (current.startsWith("wf:")) return current;
+    const [own] = await db.select({ id: agentSessions.id }).from(agentSessions).where(eq(agentSessions.id, current)).limit(1);
+    if (own) return current;
+    const [execution] = await db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, current)).limit(1);
+    if (execution) return current;
     // db.execute returns untyped rows; the column is text or null.
     const result = await db.execute(
       sql`SELECT parent_session_id FROM engine_sessions WHERE id = ${current} LIMIT 1`) as { rows: Array<{ parent_session_id: string | null }> };
