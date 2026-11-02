@@ -12,7 +12,8 @@
  *    container exposes them;
  *  - `valet.process.heap_limit` bytes: V8's heap ceiling;
  *  - `valet.process.event_loop.delay{quantile}` ms: p50, p99, max over the
- *    last interval;
+ *    last interval, when the runtime has `monitorEventLoopDelay` (Bun
+ *    1.2, which builds the single-file `valet` binary, does not);
  *  - `valet.process.start_time` unix seconds: `changes()` over it counts
  *    restarts of this container.
  */
@@ -34,9 +35,10 @@ export interface ProcessSample {
   heapTotalBytes: number;
   externalBytes: number;
   arrayBuffersBytes: number;
-  loopP50Ms: number;
-  loopP99Ms: number;
-  loopMaxMs: number;
+  /** Absent when the runtime cannot measure event-loop delay. */
+  loopP50Ms?: number;
+  loopP99Ms?: number;
+  loopMaxMs?: number;
 }
 
 export interface CgroupMemory {
@@ -83,7 +85,19 @@ export function readCgroupMemory(read: (path: string) => string | undefined = re
   return v1;
 }
 
-function takeSample(loop: IntervalHistogram, now: number): ProcessSample {
+/** The event-loop delay histogram, or undefined when the runtime throws
+ * "Not implemented" for it (Bun 1.2). Memory samples still run. */
+function startLoopMonitor(): IntervalHistogram | undefined {
+  try {
+    const loop = monitorEventLoopDelay({ resolution: 20 });
+    loop.enable();
+    return loop;
+  } catch {
+    return undefined;
+  }
+}
+
+function takeSample(loop: IntervalHistogram | undefined, now: number): ProcessSample {
   const memory = process.memoryUsage();
   const sample: ProcessSample = {
     at: now,
@@ -92,11 +106,13 @@ function takeSample(loop: IntervalHistogram, now: number): ProcessSample {
     heapTotalBytes: memory.heapTotal,
     externalBytes: memory.external,
     arrayBuffersBytes: memory.arrayBuffers,
-    loopP50Ms: loop.percentile(50) / NS_PER_MS,
-    loopP99Ms: loop.percentile(99) / NS_PER_MS,
-    loopMaxMs: loop.max / NS_PER_MS,
+    ...(loop ? {
+      loopP50Ms: loop.percentile(50) / NS_PER_MS,
+      loopP99Ms: loop.percentile(99) / NS_PER_MS,
+      loopMaxMs: loop.max / NS_PER_MS,
+    } : {}),
   };
-  loop.reset();
+  loop?.reset();
   return sample;
 }
 
@@ -128,10 +144,9 @@ function registerGauges(): void {
     unit: "ms", description: "API event-loop delay over the last sample interval, by quantile (p50, p99, max)",
   }).addCallback((result) => {
     const latest = samples[samples.length - 1];
-    if (!latest) return;
-    result.observe(latest.loopP50Ms, { quantile: "p50" });
-    result.observe(latest.loopP99Ms, { quantile: "p99" });
-    result.observe(latest.loopMaxMs, { quantile: "max" });
+    if (latest?.loopP50Ms !== undefined) result.observe(latest.loopP50Ms, { quantile: "p50" });
+    if (latest?.loopP99Ms !== undefined) result.observe(latest.loopP99Ms, { quantile: "p99" });
+    if (latest?.loopMaxMs !== undefined) result.observe(latest.loopMaxMs, { quantile: "max" });
   });
   meter.createObservableGauge("valet.process.start_time", {
     unit: "s", description: "Unix time the API process started. changes() over it counts container restarts.",
@@ -142,13 +157,12 @@ function registerGauges(): void {
  * for shutdown. The timer is unref'd and runs outside any trace. */
 export function startProcessHealthSampler(intervalMs = PROCESS_SAMPLE_INTERVAL_MS): () => void {
   registerGauges();
-  const loop = monitorEventLoopDelay({ resolution: 20 });
-  loop.enable();
+  const loop = startLoopMonitor();
   const timer = detachedFromTrace(() => setInterval(() => pushSample(takeSample(loop, Date.now())), intervalMs));
   timer.unref();
   return () => {
     clearInterval(timer);
-    loop.disable();
+    loop?.disable();
   };
 }
 
@@ -185,13 +199,15 @@ export interface ProcessHealthSummary {
 export function summarizeSamples(all: readonly ProcessSample[], since: number): ProcessHealthWindow {
   const kept = all.filter((sample) => sample.at >= since);
   if (kept.length === 0) return { since, samples: 0 };
+  const p99s = kept.flatMap((sample) => sample.loopP99Ms === undefined ? [] : [sample.loopP99Ms]);
+  const maxes = kept.flatMap((sample) => sample.loopMaxMs === undefined ? [] : [sample.loopMaxMs]);
   return {
     since,
     samples: kept.length,
     peakRssBytes: Math.max(...kept.map((sample) => sample.rssBytes)),
     peakHeapUsedBytes: Math.max(...kept.map((sample) => sample.heapUsedBytes)),
-    eventLoopP99MaxMs: Math.max(...kept.map((sample) => sample.loopP99Ms)),
-    eventLoopMaxMs: Math.max(...kept.map((sample) => sample.loopMaxMs)),
+    ...(p99s.length > 0 ? { eventLoopP99MaxMs: Math.max(...p99s) } : {}),
+    ...(maxes.length > 0 ? { eventLoopMaxMs: Math.max(...maxes) } : {}),
   };
 }
 

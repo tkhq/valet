@@ -32,6 +32,11 @@ describe("summarizeSamples", () => {
     expect(window).toEqual({ since: 2_000, samples: 2, peakRssBytes: 500, peakHeapUsedBytes: 250, eventLoopP99MaxMs: 30, eventLoopMaxMs: 45 });
     expect(summarizeSamples([], 0)).toEqual({ since: 0, samples: 0 });
   });
+
+  it("leaves event-loop peaks out when the runtime could not measure them", () => {
+    const memoryOnly: ProcessSample = { at: 1_000, rssBytes: 700, heapUsedBytes: 350, heapTotalBytes: 700, externalBytes: 0, arrayBuffersBytes: 0 };
+    expect(summarizeSamples([memoryOnly], 0)).toEqual({ since: 0, samples: 1, peakRssBytes: 700, peakHeapUsedBytes: 350 });
+  });
 });
 
 describe("process gauges", () => {
