@@ -17,7 +17,7 @@ import { sql } from "drizzle-orm";
 import type { EventStream, MessagePart, PrincipleCitation } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { listPrincipleFiles, type MemoryFileKey } from "../services/memory.js";
-import { memoryScopeForSession } from "../services/memory-scope.js";
+import { memoryScopeForSession, memorySessionId } from "../services/memory-scope.js";
 import { memoryUsageRecorder } from "../services/memory-usage.js";
 import { BASE_PRINCIPLE_NAME } from "./principles.js";
 
@@ -132,7 +132,8 @@ export interface SettledTurn {
 export async function recordPrincipleCitations(db: AppDb, eventStream: EventStream, turn: SettledTurn): Promise<void> {
   const texts = await turnTexts(db, turn.sessionId, turn.queueItemId);
   if (texts.length === 0) return;
-  const scope = await memoryScopeForSession(db, turn.sessionId);
+  // A child session reads its parent's memory, so its citations count there.
+  const scope = await memoryScopeForSession(db, await memorySessionId(db, turn.sessionId));
   if (!scope) return;
   const files = await listPrincipleFiles(db, scope);
   const citations = findPrincipleCitations(texts, files);

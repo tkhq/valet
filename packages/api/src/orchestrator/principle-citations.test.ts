@@ -106,6 +106,28 @@ describe("recordPrincipleCitations", () => {
     expect((await readMemoryUsage(db, team)).get("principles/ship-small.md")).toMatchObject({ citeCount: 1 });
   });
 
+  it("counts a child session's citation in its parent's memory", async () => {
+    // A child has no app session row; it reads its parent's memory, so its
+    // citations must land there too.
+    api = await bootTestApi();
+    const { db, eventStream } = api.providers;
+    const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+    await db.insert(agentSessions).values({ id: "cite-parent", userId: "local-user", orgId: "local-org",
+      ownerType: "user", ownerId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, created_at, updated_at)
+      VALUES ('child:cite', 'user', 'local-user', 'local-user', 'local-org', 'w', 'child', 'active', 'cite-parent', 1, 1)`);
+    await writeFile(db, own, { path: "principles/prove-it-works.md", content: "# Prove it works\n" });
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, content, queue_item_id, created_at)
+      VALUES ('c1', 'child:cite', 'th1', 'message', 'assistant', 'I followed principles/prove-it-works.md.', 'q1', 1)`);
+
+    await recordPrincipleCitations(db, eventStream, { sessionId: "child:cite", threadId: "th1", queueItemId: "q1" });
+    await memoryUsageRecorder(db).flush();
+
+    const { events } = await eventStream.read("child:cite");
+    expect(events.filter((e) => e.event.type === "principle_cited")).toHaveLength(1);
+    expect((await readMemoryUsage(db, own)).get("principles/prove-it-works.md")).toMatchObject({ citeCount: 1 });
+  });
+
   it("appends nothing when the turn names no principle", async () => {
     api = await bootTestApi();
     const { db, eventStream } = api.providers;
