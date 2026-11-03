@@ -16,7 +16,8 @@
  *
  * Requests the process makes to itself are never gated: in-process dispatch
  * (`app.fetch` with no server env, the MCP tool path) and loopback callers
- * (engine tools over `apiBaseUrl`). Both are part of work already in flight.
+ * with no proxy headers (engine tools over `apiBaseUrl`). Both are part of
+ * work already in flight.
  *
  * Health endpoints are never gated. The chart serves the pod with
  * `publishNotReadyAddresses`, so these 503s reach callers instead of the
@@ -142,7 +143,7 @@ export class Lifecycle {
 
 /**
  * True for a request the process sent to itself: no server env (in-process
- * `app.fetch`) or a loopback peer. Node exposes the peer through
+ * `app.fetch`), or a loopback peer with no proxy headers. Node exposes the peer through
  * `c.env.incoming.socket`; Bun through `server.requestIP(req)`.
  */
 export function isSelfRequest(c: Context<AppEnv>): boolean {
@@ -153,8 +154,17 @@ export function isSelfRequest(c: Context<AppEnv>): boolean {
   if (addr === undefined && typeof requestIP === "function") {
     addr = field(requestIP.call(env, c.req.raw), "address");
   }
-  return typeof addr === "string" && isLoopback(addr);
+  return typeof addr === "string" && isLoopback(addr) && !hasProxyHeaders(c);
 }
+
+/** A same-host reverse proxy (Caddy on one box, a sidecar) connects from
+ * loopback for every external caller. Such a request carries a proxy header;
+ * the api's own loopback calls do not. */
+function hasProxyHeaders(c: Context<AppEnv>): boolean {
+  return PROXY_HEADERS.some((name) => c.req.header(name) !== undefined);
+}
+
+const PROXY_HEADERS = ["x-forwarded-for", "forwarded", "x-real-ip"];
 
 /** Reads one property of an unknown value, or `undefined`. */
 function field(value: unknown, key: string): unknown {

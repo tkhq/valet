@@ -170,6 +170,34 @@ describe("lifecycleGate", () => {
     expect((await app.request("/api/things")).status).toBe(200);
   });
 
+  it("gates a loopback peer that carries proxy headers (same-host reverse proxy)", async () => {
+    const lc = new Lifecycle();
+    const app = gatedApp(lc);
+    for (const header of ["x-forwarded-for", "forwarded", "x-real-ip"]) {
+      const init = { headers: { [header]: header === "forwarded" ? "for=203.0.113.7" : "203.0.113.7" } };
+      // Booting.
+      expect((await app.request("/api/things", init, loopback)).status).toBe(503);
+    }
+    lc.markReady();
+    lc.beginDrain();
+    const res = await app.request("/api/things", { headers: { "x-forwarded-for": "203.0.113.7" } }, loopback);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe(String(RETRY_AFTER_SECONDS));
+    expect(((await res.json()) as UnavailableBody).reason).toBe("draining");
+  });
+
+  it("counts a proxied loopback request as in flight during the drain", async () => {
+    const lc = new Lifecycle(1_000);
+    lc.markReady();
+    let finish!: () => void;
+    const app = gatedApp(lc, () => new Promise<void>((resolve) => (finish = resolve)));
+    const pending = Promise.resolve(app.request("/api/things", { headers: { "x-forwarded-for": "203.0.113.7" } }, loopback));
+    await vi.waitFor(() => expect(lc.requestsInFlight).toBe(1));
+    finish();
+    expect((await pending).status).toBe(200);
+    expect(lc.requestsInFlight).toBe(0);
+  });
+
   it("reads the peer from Bun's requestIP when there is no Node socket", async () => {
     const lc = new Lifecycle();
     const app = gatedApp(lc);
