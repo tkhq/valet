@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { DockerImageBuilder, type SpawnedProcess, type SpawnFn } from "../prebuilds/docker-builder.js";
 import { KubernetesImageBuilder } from "../prebuilds/k8s-builder.js";
-import { parseImageBuilderBackend, resolveImageBuilder } from "./image-builder.js";
+import { parseBuildNodeSelector, parseBuildTolerations, parseImageBuilderBackend, resolveImageBuilder } from "./image-builder.js";
 
 /** Fake-but-structurally-valid `KubeConfig` (mirrors
  * `sandbox-backend.test.ts`'s `fakeKubeConfig`) — `resolveImageBuilder`
@@ -38,6 +38,61 @@ describe("parseImageBuilderBackend", () => {
   });
 });
 
+describe("parseBuildNodeSelector", () => {
+  it("returns undefined when unset or empty", () => {
+    expect(parseBuildNodeSelector(undefined)).toBeUndefined();
+    expect(parseBuildNodeSelector("  ")).toBeUndefined();
+  });
+
+  it("accepts a JSON object and key=value pairs", () => {
+    expect(parseBuildNodeSelector('{"pool":"builds","valet.dev/tier":"untrusted"}')).toEqual({ pool: "builds", "valet.dev/tier": "untrusted" });
+    expect(parseBuildNodeSelector("pool=builds, zone=a")).toEqual({ pool: "builds", zone: "a" });
+  });
+
+  it.each([
+    ["{not json", /not valid JSON/],
+    ["[\"pool\"]", /not an object/],
+    ['{"pool":1}', /value for "pool" is not a string/],
+    ["{}", /no labels/],
+    ["pool", /has no "="/],
+    ["=builds", /not a valid label key/],
+    ["pool=two words", /contains a space/],
+  ])("throws a boot error that names the fix for %j", (value, detail) => {
+    expect(() => parseBuildNodeSelector(value)).toThrow(detail);
+    expect(() => parseBuildNodeSelector(value)).toThrow(/Set it to a JSON object such as/);
+  });
+});
+
+describe("parseBuildTolerations", () => {
+  it("returns undefined when unset or empty", () => {
+    expect(parseBuildTolerations(undefined)).toBeUndefined();
+    expect(parseBuildTolerations("")).toBeUndefined();
+  });
+
+  it("accepts a JSON array of tolerations", () => {
+    const value = '[{"key":"valet.dev/build","operator":"Exists","effect":"NoSchedule"},{"key":"k","operator":"Equal","value":"v","effect":"NoExecute","tolerationSeconds":60}]';
+    expect(parseBuildTolerations(value)).toEqual([
+      { key: "valet.dev/build", operator: "Exists", effect: "NoSchedule" },
+      { key: "k", operator: "Equal", value: "v", effect: "NoExecute", tolerationSeconds: 60 },
+    ]);
+  });
+
+  it.each([
+    ["nope", /not valid JSON/],
+    ['{"key":"k"}', /not an array/],
+    ['["k"]', /entry 0 is not an object/],
+    ['[{"key":"k","efect":"NoSchedule"}]', /unknown field "efect"/],
+    ['[{"key":"k","operator":"In"}]', /operator must be/],
+    ['[{"key":"k","effect":"Never"}]', /effect must be/],
+    ['[{"key":1}]', /field "key" is not a string/],
+    ['[{"key":"k","tolerationSeconds":"60"}]', /tolerationSeconds is not an integer/],
+    ['[{"key":"k","operator":"Exists","value":"v"}]', /sets a value with operator "Exists"/],
+  ])("throws a boot error that names the fix for %j", (value, detail) => {
+    expect(() => parseBuildTolerations(value)).toThrow(detail);
+    expect(() => parseBuildTolerations(value)).toThrow(/Set it to a JSON array such as/);
+  });
+});
+
 describe("resolveImageBuilder", () => {
   it("defaults to docker when VALET_SANDBOX_BACKEND is docker (or unset)", () => {
     expect(resolveImageBuilder({})).toBeInstanceOf(DockerImageBuilder);
@@ -48,6 +103,21 @@ describe("resolveImageBuilder", () => {
     const result = resolveImageBuilder({ VALET_SANDBOX_BACKEND: "kubernetes" }, { kubeConfig: fakeKubeConfig() });
     expect(result).toBeInstanceOf(KubernetesImageBuilder);
     expect(result?.backend).toBe("kubernetes");
+  });
+
+  it("fails at boot on an invalid build placement value", () => {
+    expect(() =>
+      resolveImageBuilder(
+        { VALET_SANDBOX_BACKEND: "kubernetes", VALET_PREBUILD_BUILD_TOLERATIONS: "{" },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/Invalid VALET_PREBUILD_BUILD_TOLERATIONS/);
+    expect(() =>
+      resolveImageBuilder(
+        { VALET_SANDBOX_BACKEND: "kubernetes", VALET_PREBUILD_BUILD_NODE_SELECTOR: "pool" },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/Invalid VALET_PREBUILD_BUILD_NODE_SELECTOR/);
   });
 
   it("throws the same VALET_KUBE_CONTEXT guidance as the sandbox backend when no kubeConfig is injected and running out-of-cluster", () => {

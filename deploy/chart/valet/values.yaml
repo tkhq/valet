@@ -497,6 +497,18 @@ build:
   # Soft in-process cap (KubernetesImageBuilder) on simultaneously
   # outstanding BuildKit Jobs; extra builds queue FIFO.
   concurrency: 1
+  # Bakes run setup commands that an org admin or a repo controls, so treat
+  # every build pod as untrusted. Build pods carry the label
+  # valet.dev/workload: untrusted-build for a NetworkPolicy to select.
+  # nodeSelector and tolerations place them on an isolated, tainted node pool.
+  # Empty keeps the scheduler's choice. See the cluster-side requirements in
+  # docs/specs/2026-08-02-sandbox-reconcile-design.md.
+  # Example:
+  #   nodeSelector: { valet.dev/pool: builds }
+  #   tolerations:
+  #     - { key: valet.dev/build, operator: Exists, effect: NoSchedule }
+  nodeSelector: {}
+  tolerations: []
 
 observability:
   # Bundled local observability stack (grafana/otel-lgtm: OTel collector +

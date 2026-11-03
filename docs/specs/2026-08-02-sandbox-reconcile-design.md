@@ -290,3 +290,22 @@ The 403 message is "`<name>` is a built-in image source. Change it in code or th
 At boot, `seedDefaultBasesIfMissing` compares each built-in row with the code values. On `default-full` it checks `setupCommands`, `parentId`, `enabled`, and `schedule`. On `stock-full` it checks `pullSecretName`, `enabled`, and `schedule`. If a field drifted, the service writes the code value back. It logs the old and new values at error level and adds 1 to the counter `valet.image_source.builtin_repaired` for each field. A repaired `default-full` also starts a bake, so sandboxes stop using the image built from the drifted commands. Drift means tampering or an edit made before the API refused it, so alert on any non-zero counter value. This repair is an exception to "alert, don't auto-repair": code owns this content, and keeping the drift runs unreviewed commands in every sandbox.
 
 A `stock-full` ref change still logs at info level, because a deploy pin change is normal operation. Bakes built from drifted commands stay in the registry until retention removes them.
+
+### Build pod isolation and cluster-side requirements (2026-11-03)
+
+A bake runs setup commands that an org admin or a repository controls. Treat every builder pod as untrusted code.
+
+The kubernetes builder labels every BuildKit Job and pod with `valet.dev/workload: untrusted-build`. A NetworkPolicy or admission policy can select build pods by this label. Two settings place build pods on an isolated node pool:
+
+- `VALET_PREBUILD_BUILD_NODE_SELECTOR`: a JSON object, or `key=value` pairs separated by commas. The chart sets it from `build.nodeSelector`.
+- `VALET_PREBUILD_BUILD_TOLERATIONS`: a JSON array of Kubernetes tolerations. The chart sets it from `build.tolerations`.
+
+If a setting is unset, the scheduler picks the node, as before. If a value does not parse, the api fails at boot and names the expected format.
+
+The api cannot isolate a build by itself. The cluster operator must also provide these items:
+
+1. A separate node pool for builds, with a taint that only build pods tolerate.
+2. Instance metadata (IMDS) blocked for that pool, or an IMDSv2 hop limit of 1.
+3. A NetworkPolicy that denies build pod egress to 169.254.169.254, the Kubernetes API, and the pod and service CIDRs.
+4. An egress allowlist for build pods: the image registry, the Git host, and the package mirrors the recipes use.
+5. A rootless builder (the default `moby/buildkit:rootless`) or a gVisor runtime class. Do not run builds privileged.

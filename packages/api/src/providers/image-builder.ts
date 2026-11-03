@@ -15,6 +15,7 @@
  * unavailable", not an error (port doc, `builder.ts`).
  */
 import * as k8s from "@kubernetes/client-node";
+import type { V1Toleration } from "@kubernetes/client-node";
 import { batchJobsApiAdapter } from "@valet/sandbox-kubernetes";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
@@ -38,6 +39,113 @@ export function parseImageBuilderBackend(value: string | undefined): ImageBuilde
   throw new Error(
     `Invalid VALET_IMAGE_BUILDER "${value}": expected one of ${IMAGE_BUILDER_BACKENDS.join(", ")}.`,
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parses `VALET_PREBUILD_BUILD_NODE_SELECTOR`: a JSON object of string
+ * values, or `key=value` pairs separated by commas. Unset or empty returns
+ * undefined (no selector). Throws at boot on any other shape.
+ */
+export function parseBuildNodeSelector(value: string | undefined): Record<string, string> | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const fail = (detail: string): never => {
+    throw new Error(
+      `Invalid VALET_PREBUILD_BUILD_NODE_SELECTOR: ${detail}. Set it to a JSON object such as {"pool":"builds"} or to key=value pairs such as pool=builds,zone=a.`,
+    );
+  };
+  const out: Record<string, string> = {};
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return fail("the value is not valid JSON");
+    }
+    if (!isRecord(parsed)) return fail("the JSON value is not an object");
+    for (const [key, entry] of Object.entries(parsed)) {
+      if (typeof entry !== "string") return fail(`the value for "${key}" is not a string`);
+      out[key] = entry;
+    }
+  } else {
+    for (const pair of raw.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq < 0) return fail(`"${pair.trim()}" has no "="`);
+      out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+    }
+  }
+  for (const [key, label] of Object.entries(out)) {
+    if (key === "" || /\s/.test(key)) return fail(`"${key}" is not a valid label key`);
+    if (/\s/.test(label)) return fail(`the value for "${key}" contains a space`);
+  }
+  if (Object.keys(out).length === 0) return fail("the object has no labels");
+  return out;
+}
+
+const TOLERATION_FIELDS = new Set(["key", "operator", "value", "effect", "tolerationSeconds"]);
+const TOLERATION_OPERATORS = new Set(["Exists", "Equal"]);
+const TOLERATION_EFFECTS = new Set(["NoSchedule", "PreferNoSchedule", "NoExecute"]);
+
+/**
+ * Parses `VALET_PREBUILD_BUILD_TOLERATIONS`: a JSON array of Kubernetes
+ * tolerations. Unset or empty returns undefined (no tolerations). Throws at
+ * boot on an unknown field, operator, or effect, so a typo does not
+ * silently leave builds off the tainted build pool.
+ */
+export function parseBuildTolerations(value: string | undefined): V1Toleration[] | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const fail = (detail: string): never => {
+    throw new Error(
+      `Invalid VALET_PREBUILD_BUILD_TOLERATIONS: ${detail}. Set it to a JSON array such as [{"key":"valet.dev/build","operator":"Exists","effect":"NoSchedule"}].`,
+    );
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fail("the value is not valid JSON");
+  }
+  if (!Array.isArray(parsed)) return fail("the JSON value is not an array");
+  return parsed.map((entry, index) => {
+    if (!isRecord(entry)) return fail(`entry ${index} is not an object`);
+    for (const field of Object.keys(entry)) {
+      if (!TOLERATION_FIELDS.has(field)) return fail(`entry ${index} has the unknown field "${field}"`);
+    }
+    const toleration: V1Toleration = {};
+    for (const field of ["key", "value"] as const) {
+      const fieldValue = entry[field];
+      if (fieldValue === undefined) continue;
+      if (typeof fieldValue !== "string") return fail(`entry ${index} field "${field}" is not a string`);
+      toleration[field] = fieldValue;
+    }
+    if (entry.operator !== undefined) {
+      if (typeof entry.operator !== "string" || !TOLERATION_OPERATORS.has(entry.operator)) {
+        return fail(`entry ${index} operator must be "Exists" or "Equal"`);
+      }
+      toleration.operator = entry.operator;
+    }
+    if (entry.effect !== undefined) {
+      if (typeof entry.effect !== "string" || !TOLERATION_EFFECTS.has(entry.effect)) {
+        return fail(`entry ${index} effect must be "NoSchedule", "PreferNoSchedule", or "NoExecute"`);
+      }
+      toleration.effect = entry.effect;
+    }
+    if (entry.tolerationSeconds !== undefined) {
+      if (typeof entry.tolerationSeconds !== "number" || !Number.isInteger(entry.tolerationSeconds)) {
+        return fail(`entry ${index} tolerationSeconds is not an integer`);
+      }
+      toleration.tolerationSeconds = entry.tolerationSeconds;
+    }
+    if (toleration.operator === "Exists" && toleration.value !== undefined) {
+      return fail(`entry ${index} sets a value with operator "Exists"`);
+    }
+    return toleration;
+  });
 }
 
 /** Default image-builder backend paired with a resolved sandbox backend. */
@@ -128,6 +236,10 @@ export function resolveImageBuilder(
               },
             }
           : undefined;
+      // Bakes run untrusted setup commands. These place build pods on an
+      // isolated, tainted node pool; unset keeps the scheduler's choice.
+      const nodeSelector = parseBuildNodeSelector(env.VALET_PREBUILD_BUILD_NODE_SELECTOR);
+      const tolerations = parseBuildTolerations(env.VALET_PREBUILD_BUILD_TOLERATIONS);
       return new KubernetesImageBuilder({
         jobsApi,
         namespace,
@@ -136,6 +248,8 @@ export function resolveImageBuilder(
         ...(registryPullHost ? { registryPullHost } : {}),
         ...(activeDeadlineSeconds !== undefined && !Number.isNaN(activeDeadlineSeconds) ? { activeDeadlineSeconds } : {}),
         ...(resources ? { resources } : {}),
+        ...(nodeSelector ? { nodeSelector } : {}),
+        ...(tolerations ? { tolerations } : {}),
       });
     }
     case "none":

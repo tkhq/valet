@@ -124,6 +124,13 @@ data:
   VALET_PREBUILD_BUILD_CPU_LIMIT: {{ .Values.build.resources.limits.cpu | quote }}
   VALET_PREBUILD_BUILD_MEMORY_REQUEST: {{ .Values.build.resources.requests.memory | quote }}
   VALET_PREBUILD_BUILD_MEMORY_LIMIT: {{ .Values.build.resources.limits.memory | quote }}
+  {{- with .Values.build.nodeSelector }}
+  # Places BuildKit Jobs on an isolated build pool (bakes run untrusted code).
+  VALET_PREBUILD_BUILD_NODE_SELECTOR: {{ toJson . | quote }}
+  {{- end }}
+  {{- with .Values.build.tolerations }}
+  VALET_PREBUILD_BUILD_TOLERATIONS: {{ toJson . | quote }}
+  {{- end }}
   {{- if .Values.api.auth.methods }}
   AUTH_METHODS: {{ .Values.api.auth.methods | quote }}
   {{- end }}
