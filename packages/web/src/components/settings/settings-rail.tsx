@@ -94,6 +94,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
       { to: "/settings/organization/policies", label: "Policies" },
       { to: "/settings/organization/sandbox-images", label: "Sandbox settings" },
       { to: "/settings/organization/action-log", label: "Action log" },
+      { to: "/settings/organization/audit-log", label: "Audit log" },
     ],
   },
 ];
