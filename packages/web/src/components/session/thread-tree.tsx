@@ -2,6 +2,8 @@ import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
 import { SpacesNav } from "./spaces-nav";
+import { CHROME_BUTTON, HOVER_CHROME, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
+import { useSidebarControls } from "~/components/layout/app-shell";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useHomeConversation } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
@@ -25,6 +27,7 @@ import {
   Folder,
   FolderOpen,
   PanelLeft,
+  PanelLeftClose,
   Bell,
   Check,
   CheckCheck,
@@ -138,8 +141,10 @@ const THREAD_DRAG_TYPE = "application/x-valet-thread";
 
 /** A list action a phone leaves out: the drawer is for opening threads. */
 const PHONE_HIDDEN = "max-md:hidden";
-/** A thread row's wait line: a full-width item of the row's flex wrap, under the title. The row's 2px left border sits before it, so it pads 2px less. */
-const WAIT_LINE_CLASS = "basis-full -mt-1.5 pb-1.5 pl-[calc(2.25rem-2px)]";
+/** A thread row's wait line: a full-width item of the row's flex wrap, under the title (32px indent + 14px icon + 8px gap). */
+const WAIT_LINE_CLASS = "basis-full -mt-0.5 pb-1 pl-[3.375rem]";
+/** Recents rows a wider screen shows before "Show more". */
+const RECENTS_LIMIT = 5;
 /** A sub-conversation row action: left out on a phone, shown on hover or focus on a wider screen (`group/child`). */
 const CHILD_HOVER_ACTION = "max-md:hidden opacity-0 group-hover/child:opacity-100 group-focus-within/child:opacity-100 focus-visible:opacity-100";
 const THREAD_SORT_STORAGE_KEY = "valet:thread-sort";
@@ -394,6 +399,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const homeId = !mobile ? home.data?.threadId : undefined;
   const homeInList = homeId !== undefined && home.data?.sessionId === sessionId;
   const onHome = useRouterState({ select: (state) => state.location.pathname === "/" });
+  const onThreadsPage = useRouterState({ select: (state) => state.location.pathname === "/" || state.location.pathname === "/chat" });
+  const sidebarControls = useSidebarControls();
   // Who is in which thread now: faces on the rows.
   const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
@@ -441,6 +448,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
   const scrollRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLButtonElement>(null);
+  const [recentsExpanded, setRecentsExpanded] = useState(false);
   useEffect(() => {
     const target = moreRef.current;
     if (!target || !threadsQ.hasNextPage || threadsQ.isFetching || threadsQ.isError || typeof IntersectionObserver === "undefined") return;
@@ -453,7 +461,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
     }, { root: scrollRef.current });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [threadsQ.hasNextPage, threadsQ.isFetching, threadsQ.isError, threadsQ.fetchNextPage]);
+    // "Show more" mounts the sentinel, so expanding Recents observes it again.
+  }, [threadsQ.hasNextPage, threadsQ.isFetching, threadsQ.isError, threadsQ.fetchNextPage, recentsExpanded]);
   const markRead = useMarkThreadsRead(sessionId);
   const childrenQ = useChildWork(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
@@ -572,6 +581,11 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const { needsYou: needsYouThreads, rest: listed } = mobile
     ? splitNeedsYou(visible, (thread) => threadNeedsYou({ pendingGate: gatedThreadIds.has(thread.id), question: pendingAgentQuestion(thread) }))
     : { needsYou: [], rest: visible };
+  const recents = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id])));
+  // A wider screen shows the first few Recents, plus the open thread wherever
+  // it falls. The phone drawer lists them all: it is for opening threads.
+  const shownRecents = mobile || recentsExpanded ? recents : recents.filter((thread, index) => index < RECENTS_LIMIT || thread.id === openThreadId);
+  const recentsCollapsible = !mobile && recents.length > RECENTS_LIMIT;
   function selectOriginFilter(next: ThreadOriginBucket) {
     setOriginFilter(next);
     try {
@@ -840,6 +854,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           </DropdownMenuContent>
         </DropdownMenu>}
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
+        {!mobile && sidebarControls?.present && <button type="button" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={sidebarControls.toggleCollapsed}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><PanelLeftClose className="h-4 w-4" /></button>}
       </div>
       {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
       {actionError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{actionError}</p>}
@@ -898,16 +914,18 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           content in a `display: table` div that sizes to intrinsic content
           width, which defeats row truncation within the fixed-width sidebar. */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
-        <nav className="pb-3">
+        <nav aria-label="Sidebar" className="pb-3">
           {homeId && home.data && <HomeRow sessionId={home.data.sessionId} threadId={homeId} thread={homeInList ? threadsQ.data?.threads.find((t) => t.id === homeId) : undefined}
             active={onHome} hasPendingGate={homeInList && gatedThreadIds.has(homeId)} />}
-          <SpacesNav bare={mobile}>
-          <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
-            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+          <SpacesNav />
+          {/* A space's Projects and threads show while its Threads or Home is open; a phone's drawer always shows them. */}
+          {(mobile || onThreadsPage) && <>
+          <div className="group flex items-center gap-1 pb-1 pl-4 pr-3 pt-4">
+            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-[11px] font-medium text-muted hover:text-ink focus-visible:outline-none">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown aria-hidden className={cn("h-3 w-3", HOVER_CHROME, projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               {/* The one list-wide menu (sort, filter, mark all read) stays on a
                   phone: it is the only place those live. Per-row actions do not. */}
-              <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink max-md:min-h-11 max-md:min-w-11 max-md:inline-flex max-md:items-center max-md:justify-center"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
+              <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className={cn(CHROME_BUTTON, HOVER_CHROME)}><MoreHorizontal className="h-3.5 w-3.5" /></button></DropdownMenuTrigger>
               <DropdownMenuContent align="start">
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger><PanelLeft className="h-4 w-4" />Organize sidebar</DropdownMenuSubTrigger>
@@ -926,7 +944,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
                 </DropdownMenuSub>
               </DropdownMenuContent>
             </DropdownMenu>
-            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={openNewProject} className={cn("rounded p-1 text-muted hover:bg-ink-wash hover:text-ink", PHONE_HIDDEN)}><Plus className="h-4 w-4" /></button>
+            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={openNewProject} className={cn(CHROME_BUTTON, HOVER_CHROME, PHONE_HIDDEN)}><Plus className="h-3.5 w-3.5" /></button>
           </div>
           {projects.isLoading && <p role="status" className="px-4 py-2 text-xs text-muted">Syncing project folders…</p>}
           {projects.isSaving && <p role="status" className="px-4 py-2 text-xs text-muted">Saving sidebar changes…</p>}
@@ -973,42 +991,44 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           {threadsQ.error && (
             <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load threads. <button type="button" onClick={() => void (threadsQ.isFetchNextPageError ? threadsQ.fetchNextPage() : threadsQ.refetch())} className="underline">Retry</button></div>
           )}
-          {needsYouThreads.length > 0 && <section aria-label="Needs you"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Needs you</h2>{needsYouThreads.map(renderThread)}</section>}
-          {listed.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Pinned</h2>{listed.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
+          {needsYouThreads.length > 0 && <section aria-label="Needs you" className="space-y-0.5"><h2 className={SIDEBAR_LABEL}>Needs you</h2>{needsYouThreads.map(renderThread)}</section>}
+          {listed.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned" className="space-y-0.5"><h2 className={SIDEBAR_LABEL}>Pinned</h2>{listed.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
           {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
             const members = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
-            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
-              <div className="group flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
-              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
-                {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
+            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-0.5 rounded-md transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
+              <div className={cn("group gap-0.5 pr-1 hover:bg-ink-wash", TOP_ROW)} onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
+              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 text-left focus-visible:bg-ink-wash focus-visible:outline-none">
+                {project.collapsed ? <Folder aria-hidden className="h-4 w-4 shrink-0 text-muted" /> : <FolderOpen aria-hidden className="h-4 w-4 shrink-0 text-muted" />}
                 <span className="truncate">{project.name}</span>{!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
                 <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending || !projects.isReady || projects.isSaving}
                   onClick={() => void createAndNavigate(project.id)}
-                  className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 max-md:min-h-11 max-md:min-w-11")}>
-                  <Plus className="h-4 w-4" aria-hidden />
+                  className={cn(CHROME_BUTTON, HOVER_CHROME)}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden />
                 </button>
                 <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>
-                  <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss", PHONE_HIDDEN)}><MoreHorizontal className="h-4 w-4" aria-hidden /></button></DropdownMenuTrigger>
+                  <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className={cn(CHROME_BUTTON, HOVER_CHROME, PHONE_HIDDEN)}><MoreHorizontal className="h-3.5 w-3.5" aria-hidden /></button></DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setEditingProjectId(project.id); setProjectName(project.name); setProjectError(undefined); setProjectDialog(true); }}>Rename project</DropdownMenuItem>
                     <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted max-md:hidden">Start a thread with + or move one here</p>}</div>}
+              {!project.collapsed && <div className="mt-0.5 space-y-0.5">{members.map(renderThread)}{members.length === 0 && <p className="py-1 pl-10 pr-4 text-xs text-muted max-md:hidden">Start a thread with + or move one here</p>}</div>}
             </section>;
           })}
-          <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className="px-4 pb-1 pt-4 text-xs font-medium text-muted">Recents</h2>
-          {listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
+          <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 space-y-0.5 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className={SIDEBAR_LABEL}>Recents</h2>
+          {shownRecents.map(renderThread)}
+          {recentsCollapsible && <button type="button" aria-expanded={recentsExpanded} onClick={() => setRecentsExpanded((expanded) => !expanded)}
+            className={cn(NESTED_ROW, "w-[calc(100%-1rem)] pl-8 pr-2 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none")}>{recentsExpanded ? "Show less" : "Show more"}</button>}
           </section>
-          {threadsQ.hasNextPage && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
-          </SpacesNav>
+          {threadsQ.hasNextPage && shownRecents.length === recents.length && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
+          </>}
         </nav>
         {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
         {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}
         {showChildren && !childrenQ.error && childrenQ.hasNextPage && <button className="px-4 py-2 text-xs text-moss" disabled={childrenQ.isFetchingNextPage} onClick={() => void childrenQ.fetchNextPage()}>{childrenQ.isFetchingNextPage ? "Loading…" : "Load more work"}</button>}
-        <div className="border-t border-line/60 px-2 py-1.5">
+        {(mobile || onThreadsPage) && <div className="border-t border-line/60 px-2 py-1.5">
           <button
             type="button"
             onClick={() => setShowArchived((v) => !v)}
@@ -1049,7 +1069,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               ))}
             </ul>
           )}
-        </div>
+        </div>}
       </div>
     </>
   );
@@ -1074,16 +1094,13 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   const question = thread ? pendingAgentQuestion(thread) : undefined;
   const unread = !active && thread !== undefined && isThreadUnread(thread);
   return (
-    <section aria-label="Home" className="pt-1">
+    <section aria-label="Home" className="pt-2">
       <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
         <Link
           to="/"
-          className={cn(
-            "flex items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
-            active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
-          )}
+          className={cn(TOP_ROW, "gap-2 px-2 transition-colors focus-visible:bg-ink-wash focus-visible:outline-none", active ? SELECTED_ROW : "hover:bg-ink-wash")}
         >
-          <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+          <House aria-hidden className="h-4 w-4 shrink-0 text-muted" />
           <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
           {question
             ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
@@ -1095,16 +1112,16 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   );
 }
 
-/** The indented list of a row's children. */
-const NESTED_LIST_CLASS = "ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5";
+/** The indented list of a row's children: under the thread's title, with no guide line. */
+const NESTED_LIST_CLASS = "ml-[3.375rem] mr-2 mt-0.5 mb-1 space-y-0.5";
 
 /** Pure: one nested row. Settled work recedes: its run is over. */
 function nestedRowClass(settled: boolean, active: boolean): string {
   return cn(
-    "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
+    "flex-1 min-w-0 h-6 max-md:h-auto max-md:min-h-11 flex items-center gap-2 rounded-md px-2 text-xs transition-colors",
     "focus-visible:outline-none focus-visible:bg-ink-wash",
     settled && "opacity-60",
-    active ? "bg-moss-wash-strong text-ink" : "text-muted hover:bg-ink-wash/60 hover:text-ink",
+    active ? SELECTED_ROW : "text-muted hover:bg-ink-wash hover:text-ink",
   );
 }
 
@@ -1260,14 +1277,12 @@ function ThreadNode({
           tint, accent bar, and hover cover it too. */}
       <div
         className={cn(
-          "group flex flex-wrap items-center pr-2 transition-colors",
-          active
-            ? "bg-moss-wash-strong border-l-2 border-moss"
-            : "hover:bg-ink-wash/60 border-l-2 border-transparent",
+          "group mx-2 flex flex-wrap items-center rounded-md pr-1 transition-colors",
+          active ? "bg-ink-wash-strong" : "hover:bg-ink-wash",
         )}
       >
         {isEditing ? (
-          <div className={cn("flex-1 min-w-0", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
+          <div className="flex-1 min-w-0 py-0.5 pl-6">
             <Input
               ref={inputRef}
               value={draft}
@@ -1297,9 +1312,9 @@ function ThreadNode({
                 child: undefined,
               })}
               className={cn(
-                "flex-1 min-w-0 max-md:min-h-11 flex items-center py-2 text-sm",
+                "flex-1 min-w-0 h-[26px] max-md:h-auto max-md:min-h-11 flex items-center rounded-md pl-8 text-[13px]",
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
-                active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
+                active ? "font-medium text-ink" : "text-ink/70 group-hover:text-ink",
               )}
               draggable
               // Start the transcript before the click lands, as a native app would.
@@ -1337,7 +1352,7 @@ function ThreadNode({
             aria-label={`${collapsed ? "Expand" : "Collapse"} subconversations for ${label}`}
             aria-expanded={!collapsed}
             onClick={toggleCollapsed}
-            className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+            className={cn(CHROME_BUTTON, HOVER_CHROME)}
           >
             <ChevronDown
               className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")}
@@ -1345,7 +1360,7 @@ function ThreadNode({
             />
           </button>
         )}
-        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:hidden hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
+        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className={cn(CHROME_BUTTON, HOVER_CHROME, "max-md:hidden")}>{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button

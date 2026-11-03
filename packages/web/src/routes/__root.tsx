@@ -17,7 +17,7 @@ import { TopNav } from "~/components/layout/top-nav";
 import { MobileTopNav } from "~/components/layout/mobile-top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { AppDrawer } from "~/components/layout/app-drawer";
-import { AssistantRail } from "~/components/session/assistant-rail";
+import { AssistantRail, AssistantRailCollapsed } from "~/components/session/assistant-rail";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
@@ -58,24 +58,22 @@ function NotFound() {
 }
 
 /**
- * Which sidebar (if any) a route gets on a wider screen, per assistant-centered
- * web UI decisions 12/14. This is a root-layout concern rather than
- * something each route/`SessionView` renders itself, because the sidebar
- * lives in the app shell's `<aside>`, outside the routed `<main>` content.
- *
- * - `/` and `/chat` — the nested thread-tree (children grouped under their
- *   spawning thread), replacing the flat thread list. `/` opens Home in it.
- * - everything else (`/sessions/$sessionId`,
- *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
- *   have no thread UI (decision 14); the memory explorer renders its own
- *   tree pane inside the route (Task 6); the dashboard and session list
- *   have no thread concept at all.
- *
- * A phone gets the drawer (`AppDrawer`) on every page instead.
+ * Which sidebar a route gets on a wider screen. Every signed-in page shows
+ * the app-wide sidebar (New thread, Home, and Spaces with their pages); on
+ * `/` and `/chat` it also lists the open space's Projects and threads.
+ * Settings keeps its own rail and pinned scope, so it has none. This is a
+ * root-layout concern because the sidebar lives in the shell's `<aside>`,
+ * outside the routed `<main>` content. A phone gets the drawer
+ * (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/" || pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
-  return null;
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) return null;
+  return <AssistantRail />;
+}
+
+/** The workflow editor has its own panes: it keeps its own collapsed state and starts collapsed. */
+function collapseScopeForPath(pathname: string): string | undefined {
+  return /^\/workflows\/(?!runs(\/|$))[^/]+$/.test(pathname) ? "workflow-editor" : undefined;
 }
 
 /** The development-only UI stress gallery, in any letter case, with or
@@ -132,7 +130,8 @@ function RootLayout() {
       <ChatKeybindingsHost />
       <Outlet />
     </AppShell>
-    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
+    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rail={<AssistantRailCollapsed />}
+      collapseScope={collapseScopeForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
       <ChatKeybindingsHost />
       <Outlet />
     </AppShell>;

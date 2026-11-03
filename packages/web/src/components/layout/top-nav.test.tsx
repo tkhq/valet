@@ -164,29 +164,21 @@ describe("TopNav", () => {
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
-  it("keeps every destination inside one scrollable primary nav", async () => {
+  it("keeps only global items: the space pages live in the sidebar", async () => {
     renderNav();
     await screen.findByText("Valet");
-    expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
-    expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
-    expect(screen.getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
-    expect(screen.getByRole("link", { name: "Workflows" }).getAttribute("href")).toBe("/workflows");
-    expect(screen.queryByRole("link", { name: "Events" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Automation" })).toBeNull();
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    const labels = within(nav)
-      .getAllByRole("link")
-      .map((el) => el.textContent);
-    expect(labels).toEqual(["Threads", "Artifacts", "Presence", "Workflows"]);
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    for (const name of ["Threads", "Artifacts", "Presence", "Workflows"]) expect(screen.queryByRole("link", { name })).toBeNull();
+    expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+    expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
 
-  it("keeps the other pages in a More menu", async () => {
+  it("keeps only pages no space owns in the More menu", async () => {
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "More" }));
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => [item.textContent, item.getAttribute("href")])).toEqual([
-      ["Skills", "/skills"], ["Integrations", "/integrations"], ["Usage", "/usage"], ["Changelog", "/changelog"],
+      ["Changelog", "/changelog"], ["Model comparison", "/settings/model-comparison"],
     ]);
   });
 
@@ -246,15 +238,6 @@ describe("TopNav", () => {
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put
   // while the links scroll. Regression guard: moving either inside the nav
   // would scroll them out of reach on a phone.
-  it("keeps the logo and the settings icon outside the scrolling nav", async () => {
-    renderNav();
-    await screen.findByText("Valet");
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByLabelText("Valet — Home")).toBeNull();
-    expect(within(nav).queryByLabelText("Settings")).toBeNull();
-    expect(screen.getByLabelText("Settings")).toBeTruthy();
-  });
-
   it("does not render a New runtime button", async () => {
     renderNav();
     await screen.findByText("Valet");
@@ -312,18 +295,10 @@ describe("TopNav — sidebar toggle", () => {
     expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");
   });
 
-  it("offers to collapse an open sidebar, and to expand it once collapsed", async () => {
+  it("leaves the desktop collapse toggle to the sidebar's own top row", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
-
-    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
-    expect(collapse.getAttribute("aria-expanded")).toBe("true");
-
-    await userEvent.click(collapse);
-
-    const expand = screen.getByRole("button", { name: "Expand sidebar" });
-    expect(expand.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /(Collapse|Expand) sidebar/ })).toBeNull();
   });
 
   it("keeps the mobile drawer control labelled for its own action", async () => {
@@ -347,42 +322,12 @@ describe("TopNav — sidebar toggle", () => {
       expect(control.className).toContain("max-md:min-h-11");
     }
   });
-
-  it("puts the toggle ahead of the logo, at the row's left edge", async () => {
-    renderNav({ withSidebar: true });
-    const logo = await screen.findByText("Valet");
-    const toggle = screen.getByRole("button", { name: "Collapse sidebar" });
-    // `compareDocumentPosition` is the only order check jsdom can make; the
-    // flex row does the rest.
-    expect(toggle.compareDocumentPosition(logo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
 });
 
 const openAssistant = vi.fn();
 vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
 
-it("opens Memory on hover while Artifacts remains a direct link", async () => {
-  const user = userEvent.setup();
-  renderNav();
-  expect((await screen.findByRole("link", { name: "Artifacts" })).getAttribute("href")).toBe("/artifacts");
-  await user.hover(screen.getByRole("link", { name: "Artifacts" }));
-  expect(screen.getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
-});
 
-it("navigates directly to Artifacts and opens the list with Arrow Down", async () => {
-  const user = userEvent.setup();
-  renderNav();
-  const link = await screen.findByRole("link", { name: "Artifacts" });
-  await user.click(link);
-  await waitFor(() => expect(link.getAttribute("aria-current")).toBe("page"));
-  expect(screen.queryByRole("menu")).toBeNull();
-  link.focus();
-  await user.keyboard("{ArrowDown}");
-  expect(screen.getByRole("menuitem", { name: "Memory" })).toBeTruthy();
-  await user.click(screen.getByRole("menuitem", { name: "Memory" }));
-  await waitFor(() => expect(link.getAttribute("aria-current")).toBeNull());
-  expect(screen.queryByRole("menu")).toBeNull();
-});
 
 it("opens Ask Valet from the bar", async () => {
   openAssistant.mockClear();

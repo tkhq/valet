@@ -12,40 +12,6 @@ import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
 
-/** One navigation link with a hover menu; clicking still opens Artifacts. */
-function ArtifactsNav() {
-  const [open, setOpen] = useState(false);
-  const hover = useRef(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const cancelClose = () => clearTimeout(closeTimer.current);
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
-  const leave = () => { closeTimer.current = setTimeout(() => setOpen(false), 150); };
-  return <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
-    <DropdownMenuTrigger asChild>
-      <Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}
-        className={cn(NAV_BASE, "gap-1")}
-        activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}
-        onPointerEnter={(event) => {
-          if (event.pointerType !== "mouse") return;
-          cancelClose(); hover.current = true; setOpen(true);
-        }}
-        onPointerLeave={leave}
-        onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
-        onClick={() => { cancelClose(); setOpen(false); }}
-        onKeyDown={(event) => {
-          hover.current = false;
-          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); }
-        }}
-      >Artifacts<ChevronDown className="h-3 w-3" aria-hidden /></Link>
-    </DropdownMenuTrigger>
-    <DropdownMenuContent align="start" aria-label="Artifacts and memory"
-      onPointerEnter={cancelClose} onPointerLeave={leave}
-      onCloseAutoFocus={(event) => { if (hover.current) event.preventDefault(); }}>
-      <DropdownMenuItem asChild><Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}>Artifacts</Link></DropdownMenuItem>
-      <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
-    </DropdownMenuContent>
-  </DropdownMenu>;
-}
 
 /**
  * Top-nav link with a working active state. Text color lives in
@@ -140,19 +106,6 @@ function SidebarToggle() {
       >
         <PanelLeftOpen className="h-4 w-4" aria-hidden />
       </button>
-      <button
-        type="button"
-        aria-label={controls.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        aria-expanded={!controls.collapsed}
-        onClick={controls.toggleCollapsed}
-        className={`hidden md:inline-flex ${buttonClass}`}
-      >
-        {controls.collapsed ? (
-          <PanelLeftOpen className="h-4 w-4" aria-hidden />
-        ) : (
-          <PanelLeftClose className="h-4 w-4" aria-hidden />
-        )}
-      </button>
     </>
   );
 }
@@ -179,25 +132,29 @@ export function TopNav() {
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
   const onSecurityPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") });
-  // Threads is the landing page: `/` opens Home in the Threads layout.
-  const onThreads = useRouterState({ select: (st) => st.location.pathname === "/" || st.location.pathname === "/chat" });
   // Gate the Security link on the `security` plugin's entitlement for this
   // caller. `undefined` (org not yet loaded) hides the link — no flash of a
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
+  // Threads, Workflows, Presence and Artifacts belong to a space: the
+  // sidebar lists them under each space. The bar keeps the global pages.
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
-    { to: "/chat", label: "Threads", active: onThreads },
+    { to: "/chat", label: "Threads" },
     { to: "/artifacts", label: "Artifacts" },
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
   ];
-  // The rest of the pages, in the More menu on desktop. Memory is in the
-  // Artifacts menu.
-  const more: Array<{ to: string; label: string; active?: boolean }> = [
+  // Memory, Skills, Integrations and Usage belong to a space too: the
+  // sidebar lists them in each space's More. A phone's menu keeps them.
+  const spaceMore: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },
     { to: "/usage", label: "Usage" },
+  ];
+  // The bar's More holds only pages that no space owns.
+  const more: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/changelog", label: "Changelog" },
+    { to: "/settings/model-comparison", label: "Model comparison" },
   ];
   const onMore = useRouterState({ select: (st) => more.some(({ to }) => st.location.pathname.startsWith(to)) });
   const destinationLabel = (label: string) => (
@@ -225,17 +182,9 @@ export function TopNav() {
         <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
-      {/* No space control here: the thread sidebar lists Spaces, and each
-          scoped page names its space in its header (`WorkspaceClause`). */}
-
-      <nav
-        aria-label="Primary"
-        className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {destinations.map(({ to, label, active }) => (
-          to === "/artifacts" ? <ArtifactsNav key={to} /> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
-        ))}
-      </nav>
+      {/* No page links or space control here: the sidebar lists each space
+          and its pages. */}
+      <div className="hidden min-w-0 flex-1 md:block" />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onMore ? NAV_ACTIVE : NAV_INACTIVE)}>
@@ -271,7 +220,7 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
             </DropdownMenuItem>
-            {[...destinations, ...more].map(({ to, label, active }) => (
+            {[...destinations, ...spaceMore, ...more].map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
                   to={to}

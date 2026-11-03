@@ -291,16 +291,15 @@ describe("other saved credentials", () => {
   });
 });
 
-describe("the switcher on a link that names the workspace", () => {
-  it("changes the page to the team chosen after ?workspace=user", async () => {
+describe("a link that names the workspace", () => {
+  it("changes the page to the team a later link names after ?workspace=user", async () => {
     window.sessionStorage.setItem("valet:workspace", "t1");
-    const user = userEvent.setup();
     const router = mount("/integrations?workspace=user");
     expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Space: Personal. Change space" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Platform" }));
+    // The sidebar's page rows name the space in the URL.
+    await act(async () => { await router.navigate({ to: "/integrations", search: { workspace: "t1" } }); });
     expect(await screen.findByText("Platform workspace")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Space: Platform. Change space" })).toBeTruthy();
+    expect(screen.getAllByText("Platform").length).toBeGreaterThan(0);
     expect(router.state.location.pathname).toBe("/integrations");
   });
 });

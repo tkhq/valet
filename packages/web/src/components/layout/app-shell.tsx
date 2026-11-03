@@ -55,11 +55,12 @@ export function useSidebarControls(): SidebarControls | null {
   return useContext(SidebarControlsContext);
 }
 
-function loadStoredCollapsed(): boolean {
+function loadStoredCollapsed(key: string, fallback: boolean): boolean {
   try {
-    return window.localStorage.getItem(COLLAPSED_KEY) === "1";
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "1";
   } catch {
-    return false;
+    return fallback;
   }
 }
 
@@ -84,11 +85,20 @@ function loadStoredCollapsed(): boolean {
 export function AppShell({
   topNav,
   sidebar,
+  rail,
+  collapseScope,
   rightPanel,
   children,
   className,
 }: {
   topNav: ReactNode;
+  /** The collapsed sidebar: a 44px icon rail shown in its place on desktop. */
+  rail?: ReactNode;
+  /**
+   * A page with its own panes, such as the workflow editor, keeps its own
+   * collapsed state under this name and starts collapsed.
+   */
+  collapseScope?: string;
   /**
    * `null`/`undefined` hides the sidebar entirely (no `<aside>` at all,
    * and no mobile toggle) — used by standalone session views (decision 14:
@@ -110,7 +120,9 @@ export function AppShell({
   });
   const drawerOpener = useRef<HTMLElement | null>(null);
   const drawer = useRef<HTMLDivElement>(null);
-  const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
+  const collapseKey = collapseScope ? `${COLLAPSED_KEY}:${collapseScope}` : COLLAPSED_KEY;
+  const [collapsedByKey, setCollapsedByKey] = useState<Record<string, boolean>>({});
+  const collapsed = collapsedByKey[collapseKey] ?? loadStoredCollapsed(collapseKey, collapseScope !== undefined);
 
   // Closes the drawer when a link inside it is clicked (thread/child
   // selection) without requiring `ThreadTree` to know about the drawer.
@@ -120,13 +132,13 @@ export function AppShell({
   }
 
   const setAndStoreCollapsed = useCallback((next: boolean) => {
-    setCollapsed(next);
+    setCollapsedByKey((current) => ({ ...current, [collapseKey]: next }));
     try {
-      window.localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0");
+      window.localStorage.setItem(collapseKey, next ? "1" : "0");
     } catch {
       // Non-persistent environments still get the in-session behavior.
     }
-  }, []);
+  }, [collapseKey]);
 
   // Stable, so a consumer can close the drawer from an effect without
   // re-running it on every shell render.
@@ -165,6 +177,7 @@ export function AppShell({
               >
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
               </aside>
+              {collapsed && rail != null && <aside aria-label="Sidebar rail" className="hidden w-11 shrink-0 flex-col border-r border-line md:flex">{rail}</aside>}
               {!collapsed && <div
                 {...sidebarPane.handleProps}
                 title="Drag to resize; use arrow keys when focused"

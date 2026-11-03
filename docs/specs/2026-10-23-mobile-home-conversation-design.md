@@ -112,7 +112,10 @@ metadata. Adjacent reasoning intervals combine into one timing line.
 Historical messages without timing metadata do not receive invented times.
 A thought line opens to the provider's reasoning summary. The model's own reasoning text is not stored, and the summary is never sent back to the model.
 
-Processing feedback covers the gap before text or tools stream. Slack work
+Processing feedback covers the gap before text or tools stream. While a thread compacts its context, during a turn or between turns, the
+same status line reads "Valet is compacting context…" with the pulse and the
+elapsed time. A pending response still takes priority. It replaces the
+separate compaction strip. Slack work
 status is tracked separately from response streaming and cleared when work
 settles, fails, or stops.
 On phones the composer status is a muted text line with a small Valet mascot,
@@ -235,8 +238,8 @@ earlier rule that Home changes only below 768px.
 
 - `/` shows the thread sidebar (New thread, Home, Projects, Recents) with
   Home selected, and the Home conversation in the main pane. Every thread is
-  one click away. The top navigation has no separate Home link; Threads is
-  active on `/` and on `/chat`. The logo also opens `/`.
+  one click away. The logo also opens `/`. The sidebar is app-wide; see the
+  [team workspace design](2026-08-17-team-workspace-ui-design.md).
 - The sidebar pins the Home row in every workspace. The row links to `/`.
   Home starts fresh: no tasks nest under it. Tasks that Home started stay in
   the Tasks panel and in their own workspace's thread list.

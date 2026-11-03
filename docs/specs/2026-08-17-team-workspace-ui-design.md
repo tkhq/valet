@@ -303,26 +303,71 @@ UI copy calls a workspace a **space**: Personal, and one space for each team.
 The data model does not change. A space is the same owner (`user` or a team
 id), and the server checks team membership as before.
 
-- **No top-bar switcher.** The top bar has Threads, Artifacts, Presence, and
-  Workflows, plus a More menu (Skills, Integrations, Usage, Changelog).
-- **Thread pages.** On `/` and `/chat` the sidebar lists Spaces under Home as
-  one short list, so every space stays near the top. The active space is
-  marked, and its Projects and threads follow the list. Selecting another row
-  switches to that space. A caller with one space sees the thread list alone.
-- **Other scoped pages.** The clause beside the page title (`WorkspaceClause`)
-  is the space control: it names the active space and opens a menu to switch.
-  Artifacts, Presence (overview and detail pages), Workflows, Memory, Skills,
-  Usage, Integrations, Security, and `/overview` show it. Workflow editor and
-  run pages show one resource; their space follows that resource, and a switch
-  happens on the Workflows list.
-- **Phones.** The drawer keeps its "Threads in" space dropdown, and a page's
-  clause only names the space. The phone Chat, Tasks, and Make tabs do not
-  change.
+- **One app-wide sidebar.** Every signed-in page except Settings shows it:
+  New thread (with its create menu), Search, Home, and Spaces. Settings keeps
+  its own rail and pinned scope.
+- **Spaces.** Each space is a row. Personal has a person icon, and each team
+  has a 16px square with its initial in a muted tint. An open space
+  lists its pages: Threads, Workflows, Presence, and Artifacts, then a More
+  row. More holds the space's Overview, Memory, Skills, Integrations, Usage,
+  and Security (with the plugin). Each page row opens that page with
+  `?workspace=` naming the space. The active space starts open and the others
+  closed. More starts closed, and opens by itself when one of its pages is
+  current. The browser remembers both open states. A closed space shows all
+  its pages in a menu on hover or from its chevron.
+- **Same-page switching.** On a space page, a space's name opens the same
+  page in that space: Engineering / Integrations goes to Sales /
+  Integrations. A detail page goes to its list page. From Home or a thread,
+  the name opens the space's Threads.
+- **Threads.** The open space's Projects and threads show below Spaces only
+  on Home and Threads. A phone's drawer always shows them.
+- **A space that cannot open.** If the space's assistant session fails to
+  start, the sidebar still lists Spaces. The error and Retry show where the
+  threads would be, so the person can switch to another space.
+- **One divider.** The sidebar's only horizontal divider is under its top
+  row, level with the thread header and the Tasks panel header. Rows below it
+  (Home, Spaces) draw none, so no sidebar line can sit off a thread's tab row.
+- **Headers.** A page's header is a breadcrumb: "Space / Page". A Presence
+  detail page puts the space above its breadcrumb, and the workflow editor
+  reads "Space / Workflows / name". A caller with one space sees no space
+  step. The workflow editor and run pages follow their resource's space.
+- **Top bar.** Only global items: the logo, More (Changelog and Model
+  comparison), Plugins, Ask Valet, notifications, and Settings. Pages that a
+  space owns are in the sidebar only. The phone menu keeps them.
+- **Icon rail.** The sidebar's top row collapses it to a 44px rail with
+  Expand, Home, and one icon per space whose pages open in a menu. The browser
+  remembers the choice. The workflow editor keeps its own choice and starts
+  collapsed.
+- **Phones.** The drawer shows the same Spaces tree. The phone Chat, Tasks,
+  and Make tabs do not change.
 - **One source of truth.** The scope provider reads `?workspace=` from the
-  URL first, then the tab's stored choice. Every switch (`useSelectWorkspace`)
-  only navigates: it writes `?workspace=` into the URL, and the provider stores
-  the new key for the tab. A navigation that unsaved edits block leaves the
-  space unchanged. A detail page returns to its list, and Chat opens the new
-  space's thread list. Deep links and reloads keep the space.
+  URL first, then the tab's stored choice. Every space switch is a link that
+  names the space in the URL, and the provider stores the key for the tab. A
+  navigation that unsaved edits block leaves the space unchanged. Deep links
+  and reloads keep the space.
 - **Projects** in the sidebar are still each person's folders, stored per
   space. Shared Projects with a repository binding are a later change.
+
+### Sidebar hierarchy
+
+The sidebar uses three type tiers, Linear style. `sidebar-rows.ts` holds the
+shared classes.
+
+- **Section labels** (Spaces, Projects, Pinned, Recents): 11px, medium
+  weight, muted, with space above and no divider line.
+- **Top-level rows** (Home, each space, each project): 13px primary text,
+  16px icons, 28px tall.
+- **Nested rows** (a space's pages, a project's threads, Recents): 13px
+  secondary text, 14px icons, 26px tall, indented 24px with no guide line.
+- **Rows** sit 2px apart. A phone keeps 44px touch targets.
+- **One selected row.** The open thread, Home, or the open page takes a
+  neutral fill with primary, medium-weight text. On Home and Threads the open
+  conversation holds the fill, so the Threads page row shows primary text
+  only. Unread stays a small dot.
+- **Row chrome.** Chevrons, "+" and "…" show when the row has hover or focus.
+  A screen that cannot hover always shows them. Chevrons sit at the right.
+- **Recents** shows five threads, plus the open one, then "Show more". The
+  next page loads only once every loaded row shows. The phone drawer lists
+  every thread.
+- The top row keeps its height, so the one divider stays level with the
+  main and Tasks headers.

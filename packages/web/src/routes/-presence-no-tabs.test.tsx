@@ -140,10 +140,9 @@ describe("INV-H5: no navigation under the top nav except the breadcrumb", () => 
     await screen.findByRole("heading", { level: 1, name: title });
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("tabpanel")).toBeNull();
-    // The top nav is `Primary`. Every other navigation landmark is a breadcrumb.
+    // The app-wide sidebar is `Sidebar`. Every other navigation landmark is a breadcrumb.
     const names = screen.queryAllByRole("navigation").map((nav) => nav.getAttribute("aria-label"));
-    expect(names.filter((name) => name !== "Primary").every((name) => name === "Breadcrumb")).toBe(true);
-    expect(names.filter((name) => name === "Primary")).toHaveLength(1);
+    expect(names.filter((name) => name !== "Sidebar").every((name) => name === "Breadcrumb")).toBe(true);
     // One page title. A detail page's breadcrumb starts at Presence, and the
     // section's title block, subtitle, and actions stay on the overview.
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);

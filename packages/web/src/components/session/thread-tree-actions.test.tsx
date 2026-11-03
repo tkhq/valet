@@ -1065,9 +1065,9 @@ describe("ThreadTree: timer wait line", () => {
       leases: [],
     };
     renderTree();
-    // The selected tint and accent bar sit on one element that holds the
-    // title and the line, so the line does not hang below the row.
-    const highlighted = screen.getByText("Plan the launch").closest(".bg-moss-wash-strong");
+    // The selected fill sits on one element that holds the title and the
+    // line, so the line does not hang below the row.
+    const highlighted = screen.getByText("Plan the launch").closest(".bg-ink-wash-strong");
     expect(highlighted?.contains(screen.getByText("Waiting · next wakeup in 5m"))).toBe(true);
   });
 
@@ -1186,9 +1186,15 @@ describe("ThreadTree: project row controls", () => {
     expect(create.className).not.toContain("max-md:hidden");
     expect(create.className).toContain("max-md:min-h-11");
     for (const name of ["Project menu: ACME", "New project"]) {
-      const control = screen.getByRole("button", { name });
-      expect(control.className).toContain("max-md:hidden");
-      expect(control.className).not.toContain("opacity-0");
+      expect(screen.getByRole("button", { name }).className).toContain("max-md:hidden");
+    }
+    // Row chrome hides only where a pointer can hover, so a touch screen
+    // always shows it.
+    for (const name of ["New thread in ACME", "Project menu: ACME", "New project", "Sidebar options"]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes).toContain("[@media(hover:hover)]:opacity-0");
+      expect(classes).toContain("group-hover:opacity-100");
+      expect(classes).not.toContain("opacity-0");
     }
     // The list-wide menu (sort, filter, mark all read) has no other home on a
     // phone, so it stays, with a 44px target.
@@ -1307,5 +1313,33 @@ describe("ThreadTree: search filter chips", () => {
     const firstWorkflow = screen.getByRole("option", { name: "Deploy workflow 0" });
     expect(firstWorkflow.getAttribute("aria-selected")).toBe("true");
     expect(input.getAttribute("aria-activedescendant")).toBe(firstWorkflow.id);
+  });
+});
+
+describe("ThreadTree: Recents length", () => {
+  // Thread 7 is the newest, so it is the open thread, but it has the oldest activity.
+  const eight = () => Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, title: `Thread ${i}`, createdAt: 1_000 + i, lastUserActivityAt: 10_000 - i }));
+  const recentTitles = () => within(screen.getByRole("region", { name: "Recents" })).getAllByText(/^Thread \d$/).map((node) => node.textContent);
+
+  it("shows five Recents and the open thread on a wider screen, then the rest on Show more", async () => {
+    threads = eight();
+    hasMoreThreads = true;
+    renderTree();
+    expect(recentTitles()).toEqual(["Thread 0", "Thread 1", "Thread 2", "Thread 3", "Thread 4", "Thread 7"]);
+    // The next page loads only once every loaded row shows.
+    expect(screen.queryByRole("button", { name: "Load more threads" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(recentTitles()).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "Load more threads" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(recentTitles()).toHaveLength(6);
+  });
+
+  it("lists every Recent in the phone drawer", () => {
+    mobile = true;
+    threads = eight();
+    renderTree();
+    expect(recentTitles()).toHaveLength(8);
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });

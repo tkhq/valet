@@ -5,22 +5,18 @@ import { Badge } from "~/components/primitives";
 import { useNeedsYouCount } from "~/components/home/tasks-panel";
 import { AssistantRail } from "~/components/session/assistant-rail";
 import { cn } from "~/lib/cn";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useSidebarControls } from "./app-shell";
-import { WorkspaceSwitcher, useWorkspaceOptions } from "./workspace-switcher";
 
 const ROW = "flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm max-md:min-h-11 hover:bg-ink-wash focus-visible:bg-ink-wash focus-visible:outline-none";
 
 /**
- * The one navigation surface for conversations: Home, the workspace whose
- * threads show below, and the threads. Valet's other pages live under Home's
+ * The one navigation surface for conversations: Home, the Spaces tree with
+ * each space's pages, and the open space's threads. Valet's other pages live under Home's
  * Make tab, and Settings under the avatar (`AccountMenu`). It is the left
  * column on desktop and a full-screen drawer on a phone (`AppShell`), on
  * every page.
  */
 export function AppDrawer() {
-  const scope = useWorkspaceScope();
-  const options = useWorkspaceOptions();
   const onHome = useRouterState({ select: (st) => st.location.pathname === "/" });
   const needsYou = useNeedsYouCount();
   // A navigation closes the phone drawer, including one from a thread's
@@ -41,10 +37,6 @@ export function AppDrawer() {
         <span className="flex-1">Home</span>
         {needsYou.count > 0 && <Badge variant="warning" aria-label={`${needsYou.count} need you`}>{needsYou.count}{needsYou.partial ? "+" : ""}</Badge>}
       </Link>
-      {options.length > 1 && <div className="flex items-center gap-2 px-2 pt-2">
-        <span className="text-xs font-medium text-muted">Threads in</span>
-        <WorkspaceSwitcher options={options} activeKey={scope.key} className="max-w-none -ml-1" />
-      </div>}
     </div>
     <div className="flex min-h-0 flex-1 flex-col pb-[env(safe-area-inset-bottom)]">
       <AssistantRail />

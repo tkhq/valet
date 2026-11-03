@@ -543,10 +543,10 @@ function mountApp(initial: string) {
   return router;
 }
 
-async function switchWorkspace(from: string, to: string) {
-  await userEvent.click(await screen.findByRole("button", { name: `Space: ${from}. Change space` }));
-  await userEvent.click(screen.getByRole("menuitem", { name: to }));
-  await screen.findByRole("button", { name: `Space: ${to}. Change space` });
+/** Switch space the way the sidebar's page rows do: name it in the URL. */
+async function switchWorkspace(router: ReturnType<typeof mountApp>, key: string) {
+  await act(async () => { await router.navigate({ to: ".", search: (prev: Record<string, unknown>) => ({ ...prev, workspace: key }) }); });
+  await waitFor(() => expect(window.sessionStorage.getItem("valet:workspace")).toBe(key));
 }
 
 /** The overview's header row: the `Presence` title, the subtitle, and the action pair. */
@@ -678,7 +678,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // P4: in the sre workspace, #incidents lists M and P as sentences,
     // Appears as Ops Bot, the active and the followed thread, and the C2 mention.
     await crumbToOverview(router);
-    await switchWorkspace("Personal", "SRE");
+    await switchWorkspace(router, "sre");
     const slack = await screen.findByRole("region", { name: "Slack" });
     await userEvent.click(await within(slack).findByRole("link", { name: "#incidents" }));
     expect(await screen.findByRole("heading", { level: 1, name: "#incidents" })).toBeTruthy();
@@ -734,7 +734,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // P6: Add, then On a schedule. When offers every service, the side
     // pane reads the Part E sentence, and the new row shows Next and Fire
     // now under On a schedule.
-    await switchWorkspace("SRE", "Personal");
+    await switchWorkspace(router, "user");
     await screen.findByRole("region", { name: "acme/api" });
     await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
     const routineEditor = within(await screen.findByRole("dialog", { name: "New" }));
@@ -832,7 +832,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // breadcrumb Presence › Activity. The Problems chip shows the
     // dead-lettered delivery; with the chip off, the C2 mention reads as
     // replied in t-inc.
-    await switchWorkspace("Personal", "SRE");
+    await switchWorkspace(router, "sre");
     await userEvent.click(within(overviewHeader()).getByRole("link", { name: "Activity" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/activity"));
     expect((await screen.findByRole("navigation", { name: "Breadcrumb" })).textContent).toBe("Presence›Activity");
@@ -848,7 +848,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     // P10: Workflows has the list and a Runs view at its own URL. The
     // editor's panel lists the workflow's lines and routines as sentences,
     // and its Add opens the editor fixed on the workflow.
-    await switchWorkspace("SRE", "Personal");
+    await switchWorkspace(router, "user");
     await act(async () => { await router.navigate({ to: "/workflows" }); });
     await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
     expect(await screen.findByRole("link", { name: "Triage failures" })).toBeTruthy();
