@@ -32,7 +32,7 @@
  */
 import { eq } from "drizzle-orm";
 import { credentialSecret, type CredentialStore, type NormalizedEvent, type ValetPlugin } from "@valet/engine";
-import { USER_ONLINE_EVENT_KEY, onlineEvent, readOnlineStatus } from "@valet/plugin-slack/actions";
+import { USER_ONLINE_EVENT_KEY, onlineEvent, readOnlineStatus, type OnlineStatusResult } from "@valet/plugin-slack/actions";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
 import { ingestEvent } from "../events/ingest.js";
@@ -171,24 +171,31 @@ export class OnlineStatusWatcher {
     const state = this.state.get(key) ?? { nextPollAt: 0, failures: 0, verified: false };
     this.state.set(key, state);
     const read = this.deps.readStatus ?? readOnlineStatus;
-    const result = await read(token, user, { ...(teamId ? { teamId } : {}), profile: !state.verified });
-    if (!result.ok) {
+    const opts = { ...(teamId ? { teamId } : {}) };
+    const fail = (result: Extract<OnlineStatusResult, { ok: false }>): void => {
       state.failures += 1;
+      state.verified = false;
       const permanent = PERMANENT_CODES.has(result.code);
       state.nextPollAt = now + backoffMs(state.failures, result.retryAfterSeconds, permanent);
       if (state.failures === 1 || permanent) console.warn(`[online-status] org ${orgId} user ${user}: ${result.error}`);
-      return;
-    }
+    };
+    const full = !state.verified;
+    const result = await read(token, user, { ...opts, profile: full });
+    if (!result.ok) return fail(result);
     state.failures = 0;
     state.verified = true;
     state.nextPollAt = now + POLL_INTERVAL_MS;
     const awaySince = state.awaySince;
     const away = applyPresence(state, result.status.presence, now);
     if (away === null || awaySince === undefined) return;
+    // Membership can change after the first read. Before an event fires,
+    // repeat the full read with its workspace check (`readOnlineStatus`).
+    const confirmed = full ? result : await read(token, user, { ...opts, profile: true });
+    if (!confirmed.ok) return fail(confirmed);
     const event = onlineEvent({
       user, ...(teamId ? { teamId } : {}), awayMs: away, observedAt: now,
       dedupeKey: `user_online:${teamId ?? orgId}:${user}:${awaySince}`,
-      status: result.status,
+      status: confirmed.status,
     });
     try {
       if (this.deps.ingest) await this.deps.ingest(orgId, event);

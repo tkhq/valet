@@ -99,6 +99,8 @@ describe("OnlineStatusWatcher", () => {
   let db: TestPgDb;
   let now: number;
   let presence: Map<string, "active" | "away" | OnlineStatusResult>;
+  /** The answer a full read (with the workspace check) gives instead, when set. */
+  let members: Map<string, OnlineStatusResult>;
   let reads: { user: string; profile: boolean | undefined }[];
   let events: NormalizedEvent[];
   let credentials: InMemoryCredentialStore;
@@ -107,6 +109,7 @@ describe("OnlineStatusWatcher", () => {
     db = await freshTestPgDb();
     now = 1_000_000;
     presence = new Map();
+    members = new Map();
     reads = [];
     events = [];
     credentials = new InMemoryCredentialStore();
@@ -122,6 +125,8 @@ describe("OnlineStatusWatcher", () => {
       db: db.appDb, plugins: [slackPlugin], credentials, now: () => now,
       readStatus: async (_token, user, opts) => {
         reads.push({ user, profile: opts?.profile });
+        const membership = opts?.profile !== false ? members.get(user) : undefined;
+        if (membership) return membership;
         const value = presence.get(user) ?? "away";
         if (typeof value === "object") return value;
         return { ok: true, status: { user, presence: value, online: value === "active" } };
@@ -147,8 +152,28 @@ describe("OnlineStatusWatcher", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ key: "slack.user_online", refs: { user: "U1", team: "T1" }, payload: { user: "U1", away_minutes: 5 } });
     expect(events[0]!.dedupeKey).toBe(`user_online:T1:U1:${1_000_000 + POLL_INTERVAL_MS}`);
-    // The first read checks the workspace with users.info; later reads only read presence.
-    expect(reads.map((r) => r.profile)).toEqual([true, false, false, false]);
+    // The first read checks the workspace with users.info; later reads only
+    // read presence, and the read that would fire checks the workspace again.
+    expect(reads.map((r) => r.profile)).toEqual([true, false, false, true, false]);
+  });
+
+  it("does not fire for a person who left the workspace after the baseline", async () => {
+    await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const w = watcher();
+    presence.set("U1", "away");
+    await w.tick(); // baseline, a member
+    members.set("U1", { ok: false, code: "other_workspace", error: "not a member" });
+    now += MIN_AWAY_MS;
+    presence.set("U1", "active");
+    await w.tick();
+    expect(events).toHaveLength(0);
+    // The next read waits the longest backoff and repeats the full check.
+    now += MAX_BACKOFF_MS;
+    await w.tick();
+    expect(reads.at(-1)?.profile).toBe(true);
+    expect(events).toHaveLength(0);
+    warn.mockRestore();
   });
 
   it("polls each person at most once per interval", async () => {
