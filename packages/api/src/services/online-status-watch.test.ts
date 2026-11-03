@@ -13,6 +13,7 @@ import {
   MIN_AWAY_MS,
   OnlineStatusWatcher,
   POLL_INTERVAL_MS,
+  type WatchState,
   applyPresence,
   backoffMs,
   watchedUsers,
@@ -55,10 +56,10 @@ describe("watchedUsers", () => {
 });
 
 describe("applyPresence", () => {
-  const state = () => ({ nextPollAt: 0, failures: 0, verified: true });
+  const state = (): WatchState => ({ nextPollAt: 0, failures: 0, verified: true });
 
   it("fires on away to active after the minimum away time, with the away length", () => {
-    const s = { ...state(), presence: "active" as const };
+    const s: WatchState = { ...state(), presence: "active" };
     expect(applyPresence(s, "away", 1_000)).toBeNull();
     expect(applyPresence(s, "away", 1_000 + POLL_INTERVAL_MS)).toBeNull();
     expect(applyPresence(s, "active", 1_000 + MIN_AWAY_MS)).toBe(MIN_AWAY_MS);
@@ -66,7 +67,7 @@ describe("applyPresence", () => {
   });
 
   it("ignores a short away blip (debounce)", () => {
-    const s = { ...state(), presence: "active" as const };
+    const s: WatchState = { ...state(), presence: "active" };
     applyPresence(s, "away", 0);
     expect(applyPresence(s, "active", MIN_AWAY_MS - 1)).toBeNull();
   });
@@ -79,7 +80,7 @@ describe("applyPresence", () => {
   });
 
   it("does not fire for active to active", () => {
-    const s = { ...state(), presence: "active" as const };
+    const s: WatchState = { ...state(), presence: "active" };
     expect(applyPresence(s, "active", MIN_AWAY_MS * 10)).toBeNull();
   });
 });

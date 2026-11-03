@@ -51,7 +51,7 @@ const PERMANENT_CODES = new Set([
   "not_authed", "invalid_auth", "account_inactive", "token_revoked", "missing_token",
 ]);
 
-interface WatchState {
+export interface WatchState {
   presence?: "active" | "away";
   /** When the current away period started. Set only while away. */
   awaySince?: number;
