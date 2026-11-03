@@ -39,19 +39,20 @@ async function sourceRows() {
   return api!.providers.db.select().from(imageSources).where(eq(imageSources.orgId, "local-org"));
 }
 
-/** A source that exists already, inserted as the seed path does. */
+/** A custom base that exists already. It is not one of the built-in
+ * sources (`stock-full`, `default-full`), which refuse API edits outright. */
 async function seedBase(setupCommands: string[] = []) {
   const now = Date.now();
   const row = {
-    id: "src_base_full",
+    id: "src_custom_tools",
     orgId: "local-org",
     kind: "base" as const,
     parentId: null,
-    name: "default-full",
+    name: "custom-tools",
     externalRef: null,
     pullSecretName: null,
     setupCommands,
-    profile: "full" as const,
+    profile: null,
     repoHost: null,
     repoFullName: null,
     cloneUrl: null,
@@ -92,7 +93,7 @@ describe("image-source changes wait for a second admin", () => {
     api = await bootTestApi();
     await seedBase([]);
     const implant = "echo aW1wbGFudA== | base64 -d | sh";
-    const res = await fetch(`${api.baseUrl}/api/org/sources/src_base_full`, {
+    const res = await fetch(`${api.baseUrl}/api/org/sources/src_custom_tools`, {
       method: "PATCH",
       headers: REQUESTER,
       body: JSON.stringify({ setupCommands: [implant] }),
@@ -112,7 +113,7 @@ describe("image-source changes wait for a second admin", () => {
   it("applies operational toggles at once", async () => {
     api = await bootTestApi();
     await seedBase();
-    const res = await fetch(`${api.baseUrl}/api/org/sources/src_base_full`, {
+    const res = await fetch(`${api.baseUrl}/api/org/sources/src_custom_tools`, {
       method: "PATCH",
       headers: REQUESTER,
       body: JSON.stringify({ schedule: "off" }),
@@ -151,13 +152,13 @@ describe("image-source changes wait for a second admin", () => {
   it("refuses approval when the source changed after the request", async () => {
     api = await bootTestApi();
     await seedBase();
-    const res = await fetch(`${api.baseUrl}/api/org/sources/src_base_full`, {
+    const res = await fetch(`${api.baseUrl}/api/org/sources/src_custom_tools`, {
       method: "PATCH",
       headers: REQUESTER,
       body: JSON.stringify({ setupCommands: ["apt-get install -y jq"] }),
     });
     const { pendingChange } = (await res.json()) as PendingSourceChangeResponse;
-    await api.providers.db.update(imageSources).set({ updatedAt: Date.now() + 1 }).where(eq(imageSources.id, "src_base_full"));
+    await api.providers.db.update(imageSources).set({ updatedAt: Date.now() + 1 }).where(eq(imageSources.id, "src_custom_tools"));
     const approve = await post(`/api/org/sources/changes/${pendingChange.id}/approve`, APPROVER);
     expect(approve.status).toBe(409);
     expect(((await approve.json()) as { error: string }).error).toMatch(/changed after this request was made\. Reject this request/);
