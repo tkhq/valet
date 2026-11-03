@@ -303,7 +303,9 @@ it("does not resurrect a completed workflow contract in later ordinary context",
 });
 
 it("does not pin a large completed signal task into later ordinary requests", async () => {
-  const faux = registerFauxProvider({ provider: "expired-large-task", models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
+  // The window leaves room for the built-in tool schemas, which grow as tools
+  // are added; the 60k-character task still overflows it.
+  const faux = registerFauxProvider({ provider: "expired-large-task", models: [{ id: "tiny", name: "tiny", contextWindow: 24_000, maxTokens: 5 }] });
   cleanups.push(() => faux.unregister());
   let later = "";
   faux.setResponses([fauxAssistantMessage("Report posted"), fauxAssistantMessage(COMPLETE_SUMMARY), context => {

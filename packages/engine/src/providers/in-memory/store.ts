@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
-import { countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
+import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, interruptibleBy, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
 import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -558,6 +558,7 @@ export class InMemorySessionStore implements SessionStore {
     opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
+    item = withoutCarriedInputs(item);
 
     // Normalize an empty-string dispatchId to "absent" so it never dedups — the
     // SQLite backend's partial unique index treats "" as a present value, so
@@ -587,13 +588,14 @@ export class InMemorySessionStore implements SessionStore {
     // admission semantics mirror the sqlite backend's in-transaction check
     // exactly: idempotent replays never trip the cap, and the count reflects
     // state as of immediately before this item lands.
-    if (opts?.maxPending !== undefined) {
+    if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
       const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
       }
     }
 
+    let promotionSource: QueueItem | undefined;
     if (opts?.promoteFromItemId) {
       const source = r.queueItems.get(opts.promoteFromItemId);
       if (
@@ -606,17 +608,31 @@ export class InMemorySessionStore implements SessionStore {
           "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
         );
       }
+      promotionSource = source;
     }
 
     const promotionScope = opts?.steerScope === "active-and-source";
     if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
       throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
     }
-    const activeScope = opts?.steerScope === "active";
+    const originScope = opts?.steerScope === "active-origin";
+    const activeScope = opts?.steerScope === "active" || originScope;
     if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
       throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
     }
-    const headScope = promotionScope || activeScope;
+    const carried = originScope ? queuedOriginInputs(r.queueItems.values(), item) : [];
+    const carriedIds = new Set(carried.map(candidate => candidate.id));
+    const matchingActive = !originScope || (isInteractiveSlackInput(item) && [...r.queueItems.values()].some(candidate =>
+      candidate.threadId === threadId && !candidate.supersededByItemId &&
+      (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
+      interruptibleBy(candidate, item) &&
+      (r.entriesByThread.get(threadId) ?? []).some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === candidate.id)));
+    if (originScope && opts?.maxPending !== undefined) {
+      const unsettled = [...r.queueItems.values()].filter(candidate => candidate.status !== "settled");
+      const remaining = countPendingForCap(unsettled, threadId) - (matchingActive ? 1 : 0) - carried.length;
+      if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
+    }
+    const headScope = promotionScope || (activeScope && matchingActive);
     const queuedCreatedAt = headScope
       ? [...r.queueItems.values()]
           .filter(
@@ -632,8 +648,13 @@ export class InMemorySessionStore implements SessionStore {
     // non-empty set; an active steer with no queued sibling keeps its time.
     const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
       ? Math.min(...queuedCreatedAt) - 1
+      // A correction that carries queued inputs takes the oldest one's
+      // place, so work queued after those inputs does not run first.
+      : carried.length > 0 ? Math.min(...carried.map((candidate) => candidate.createdAt))
       : item.createdAt;
-    const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt };
+    const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt,
+      ...((originScope || promotionSource) ? { metadata: carryInputMetadata(item, carried, promotionSource) } : {}),
+    };
     r.queueItems.set(stored.id, stored);
     if (stored.dispatchId) {
       r.dispatchIndex.set(stored.dispatchId, stored.id);
@@ -643,11 +664,13 @@ export class InMemorySessionStore implements SessionStore {
     if (opts?.steer) {
       for (const other of r.queueItems.values()) {
         if (other.id === stored.id) continue;
+        if (originScope && !carriedIds.has(other.id) &&
+          (!matchingActive || !interruptibleBy(other, item))) continue;
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
         if (
-          headScope &&
+          headScope && !carriedIds.has(other.id) &&
           other.id !== opts.promoteFromItemId &&
           other.status !== "running" &&
           other.status !== "blocked_on_decision_gate"
@@ -658,9 +681,14 @@ export class InMemorySessionStore implements SessionStore {
         // callers construct items with monotonic timestamps in practice, and
         // Map insertion order (== admission order) breaks any tie the same
         // way the SQL backends' insertion-ordered scan will.
-        if (!headScope && other.createdAt > stored.createdAt) continue;
+        if (!headScope && !carriedIds.has(other.id) && other.createdAt > stored.createdAt) continue;
         other.supersededByItemId = stored.id;
         other.updatedAt = Date.now();
+        if (carriedIds.has(other.id)) {
+          other.status = "settled";
+          other.outcome = { outcome: "superseded" };
+          other.settlePatch = { status: "skipped", reason: "no_work" };
+        }
         supersededItemIds.push(other.id);
       }
     }

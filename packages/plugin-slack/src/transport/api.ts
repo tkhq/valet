@@ -141,6 +141,7 @@ export class SlackApi {
     channel: string;
     text: string;
     attentionDeliveryId?: string;
+    progressDeliveryId?: string;
     attentionGateCard?: boolean;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
@@ -160,11 +161,14 @@ export class SlackApi {
     if (opts.attentionDeliveryId !== undefined) body.metadata = {
       event_type: opts.attentionGateCard ? "valet_attention_gate" : "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId },
     };
+    if (opts.progressDeliveryId !== undefined) body.metadata = {
+      event_type: "valet_progress", event_payload: { delivery_id: opts.progressDeliveryId },
+    };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
     if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
-    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined, opts.signal);
+    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined || opts.progressDeliveryId !== undefined, opts.signal);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };
@@ -196,6 +200,33 @@ export class SlackApi {
       if (!cursor) break;
     }
     return null;
+  }
+
+  /** Find an uncertain progress post without creating a second message. */
+  async findProgressMessage(
+    channel: string, threadTs: string, deliveryId: string, identity: { userId?: string; botId?: string },
+  ): Promise<string | null> {
+    if (!identity.userId && !identity.botId) throw new SlackApiError("conversations.replies", "Missing app identity. Reconnect Slack before recovering progress.");
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const response = await slackGetOnce("conversations.replies", this.token, {
+        channel, ts: threadTs, include_all_metadata: true, limit: 100, ...(cursor ? { cursor } : {}),
+      }, 2_000, this.baseUrl);
+      const body = rec(await response.json());
+      if (!response.ok || body?.ok !== true) throw new SlackApiError("conversations.replies", str(body?.error) ?? `http ${response.status}`);
+      for (const raw of Array.isArray(body.messages) ? body.messages : []) {
+        const message = rec(raw);
+        const own = (identity.userId && message?.user === identity.userId) || (identity.botId && message?.bot_id === identity.botId);
+        if (!own) continue;
+        const metadata = rec(message?.metadata);
+        if (metadata?.event_type !== "valet_progress" || rec(metadata.event_payload)?.delivery_id !== deliveryId) continue;
+        const ts = str(message?.ts);
+        if (ts) return ts;
+      }
+      cursor = str(rec(body.response_metadata)?.next_cursor);
+      if (!cursor) return null;
+    }
+    throw new SlackApiError("conversations.replies", "Progress recovery reached its thread history limit. Open Valet to check the turn.");
   }
 
   async updateMessage(opts: {

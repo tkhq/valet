@@ -404,6 +404,8 @@ export interface PromptOptions {
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
   queueMode?: QueueMode;
+  /** Stop only the sender's own active turn in the same external conversation. */
+  steerScope?: "active-origin";
   model?: string;
   role?: string;
   resultSchema?: TSchema;
@@ -829,7 +831,7 @@ export interface ToolContext {
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
-  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;
   /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
   seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
@@ -2186,7 +2188,7 @@ export interface ListOpts {
 
 export interface SubmissionAdmissionOptions {
   steer?: boolean;
-  steerScope?: "all" | "active-and-source" | "active";
+  steerScope?: "all" | "active-and-source" | "active" | "active-origin";
   maxPending?: number;
   promoteFromItemId?: string;
 }
@@ -2290,6 +2292,15 @@ export interface SessionStore {
    * inserts the promoted successor at the runnable head. "active" does the
    * same without a source item: a message edit stops the running turn and
    * runs next, and queued messages run after it.
+   * "active-origin" requires an explicit auto-reply human Slack signal.
+   * Callers send it only for a stop request. It interrupts only an active
+   * input from the same sender and conversation that is already in history.
+   * In the same transaction, it carries that sender's queued inputs from the
+   * conversation by durable, ordered IDs and settles them superseded.
+   * Caller metadata cannot create carry IDs.
+   * The successor keeps its own author, content, and authority metadata.
+   * Unrelated inputs retain their order and status. Carry overflow or an
+   * unsupported attachment rejects the entire admission without changing rows.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,
