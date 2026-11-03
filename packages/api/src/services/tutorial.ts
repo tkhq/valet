@@ -5,7 +5,7 @@
  * outcome, or while either stored version is below the current one. Raising
  * a version re-shows the tour without deleting any row.
  */
-import { eq, sql } from "drizzle-orm";
+import { eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, userTutorial } from "../schema/index.js";
 import type { TutorialOutcome, TutorialStateResponse, UpdateTutorialRequest } from "../wire/types.js";
@@ -64,7 +64,8 @@ function versionField(value: unknown, field: string, cap: number): number {
 /**
  * Save progress (`step`) or record an outcome. An outcome stamps the versions
  * the person saw, capped at the current ones, and clears the resume point.
- * Saving a step after an outcome starts a new in-progress pass (a replay).
+ * A step is saved only while the tour is due, so a late progress write
+ * cannot undo an outcome for the current versions.
  */
 export async function updateTutorial(
   db: AppDb,
@@ -103,9 +104,17 @@ export async function updateTutorial(
     if (step !== null && (typeof step !== "string" || step.length === 0 || step.length > MAX_STEP_LENGTH)) {
       throw new TutorialInputError(`step must be a step id of 1 to ${MAX_STEP_LENGTH} characters, or null.`);
     }
+    const orgVersion = await orgTutorialVersion(db, user.orgId);
     await db.insert(userTutorial).values({ userId: user.id, outcome: null, step, updatedAt: now }).onConflictDoUpdate({
       target: userTutorial.userId,
       set: { outcome: null, step, updatedAt: now },
+      // Only while the tour is due: a progress write that arrives after Done
+      // or Skip for the current versions must not reopen the tour.
+      setWhere: or(
+        isNull(userTutorial.outcome),
+        lt(userTutorial.seenVersion, current),
+        lt(userTutorial.seenOrgVersion, orgVersion),
+      ),
     });
   } else {
     throw new TutorialInputError("Send step, or outcome with the versions you saw.");

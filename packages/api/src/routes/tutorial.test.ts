@@ -78,6 +78,17 @@ describe("/api/tutorial", () => {
     expect(done).toMatchObject({ step: null, due: false });
   });
 
+  it("ignores a progress write that arrives after the tour is finished", async () => {
+    api = await bootTestApi();
+    await finish(await state(), "completed");
+    expect((await put({ step: "home" })).status).toBe(200);
+    expect(await state()).toMatchObject({ outcome: "completed", step: null, due: false });
+    // After a version bump the tour is due again, so progress saves.
+    api.providers.tutorialVersion = 2;
+    expect((await put({ step: "spaces" })).status).toBe(200);
+    expect(await state()).toMatchObject({ outcome: null, step: "spaces", due: true });
+  });
+
   it("an admin reset shows the tour to every member again", async () => {
     api = await bootTestApi();
     await finish(await state(), "completed");
