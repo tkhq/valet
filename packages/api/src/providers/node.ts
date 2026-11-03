@@ -53,6 +53,7 @@ import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
+import { diagnosticsTemplates } from "../diagnostics/template.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -430,8 +431,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
     version: "0.1.0",
-    description: "Agent-facing tool failure and request latency diagnostics.",
-    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }))],
+    description: "Agent-facing tool failure, thread outcome and request latency diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({
+      engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
+    }))],
+    templates: diagnosticsTemplates,
   };
 
   // Plugin filter: config file `plugins` block takes precedence over

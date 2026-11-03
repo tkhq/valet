@@ -1,24 +1,37 @@
 /**
- * Agent-facing diagnostics: which tools fail and why, and which API routes
- * are slow. They read what the Usage page and the request traces already
- * record, so Valet can investigate an error rate or a slow page itself.
+ * Agent-facing diagnostics: which tools fail and why, which threads ended
+ * without the work done, and which API routes are slow. They read what the
+ * Usage page and the request traces already record, so Valet can
+ * investigate an error rate, a slow page or where people get stuck itself.
  */
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { externalCalls, orgMembers } from "../schema/index.js";
+import { externalCalls, orgMembers, teamMembers } from "../schema/index.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
 import { requestTimingSummary } from "../observability/request-timings.js";
+import { taggingAvailable } from "../tagging/availability.js";
+import {
+  FRICTION_OUTCOMES, groupFrictionThreads, readThreadOutcomes, readThreadText, threadPerson,
+  type FrictionThread, type OutcomeScope,
+} from "./thread-outcomes.js";
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const OUTCOME_KEYS = ["completed", ...FRICTION_OUTCOMES] as const;
 const MAX_TOOLS = 15;
 /** Failed calls read to find samples the caller may see. */
 const SAMPLE_CANDIDATES = 50;
 const MESSAGE_CHARS = 300;
 /** A tool result is written within this long of the call's start. */
 const RESULT_WINDOW_MS = 30 * 60_000;
+
+export interface DiagnosticsDeps extends Omit<AccessDeps, "db"> {
+  /** This deployment's public base URL, for thread links. */
+  publicUrl?: string;
+}
 
 function action<TParams extends TSchema>(parameters: TParams) {
   return (rest: {
@@ -78,7 +91,11 @@ async function failedCallDetail(db: AppDb, call: { id: string; sessionId: string
   };
 }
 
-export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, "db">): ActionPlugin {
+export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps): ActionPlugin {
+  const access = (): AccessDeps => {
+    const { engineCredentials, onePassword } = deps();
+    return { db, engineCredentials, onePassword };
+  };
   const member = async (ctx: PluginActionContext) => {
     const userId = ctx.actor?.id ?? ctx.userId;
     if (!userId || !ctx.orgId) return undefined;
@@ -133,7 +150,7 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
           caller.teamRun ? undefined : sql`(${externalCalls.ownerType} = 'team' OR ${externalCalls.ownerId} = ${caller.userId})`))
         .orderBy(desc(externalCalls.createdAt)).limit(SAMPLE_CANDIDATES);
       const teamThreads = failures.flatMap((row) => row.ownerType === "team" && row.sessionId && row.threadId ? [{ sessionId: row.sessionId, threadId: row.threadId }] : []);
-      const visible = await visibleThreadIds({ db, ...deps() }, { ownerType: "team" },
+      const visible = await visibleThreadIds(access(), { ownerType: "team" },
         { orgId: ctx.orgId, userId: caller.teamRun ? undefined : caller.userId }, teamThreads);
       const shown = [];
       for (const row of failures) {
@@ -153,6 +170,90 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
           })),
           samples: shown,
           ...(wanted === 0 && samples !== 0 ? { note: "Error text is left out because other people read this conversation. Ask in a private conversation to see it." } : {}),
+        },
+      };
+    },
+  });
+
+  const listThreadOutcomes = action(Type.Object({
+    hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "How many hours back to read. Default 24." })),
+    outcomes: Type.Optional(Type.Array(Type.Union(OUTCOME_KEYS.map((key) => Type.Literal(key))), {
+      maxItems: OUTCOME_KEYS.length,
+      description: "Only threads with these outcomes. Default: every outcome except completed.",
+    })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Threads to return, newest first. Default 50." })),
+  }))({
+    id: "diagnostics.list_thread_outcomes",
+    name: "List thread outcomes",
+    description:
+      "Find the threads where people got stuck. Returns the outcome count for every label in the period, the threads with the requested outcomes " +
+      "grouped by person and main tool intent, and the threads themselves newest first: outcome, link, person, tool calls, tool errors and error codes. " +
+      "Outcomes: completed, partial, failed, blocked_on_human, abandoned, unclear. Only threads the outcome classifier labeled are counted. " +
+      "An organization admin in a private conversation reads the whole organization; a team workflow reads its team's threads. " +
+      "A thread title and a short excerpt of the first request come only from threads the caller can open.",
+    riskLevel: "low",
+    execute: async ({ hours, outcomes, limit }, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
+      const caller = await member(ctx);
+      if (!caller || !ctx.orgId) return { success: false, error: "You are not a member of this organization. Ask an organization admin to add you." };
+      const teamRun = caller.teamRun && ctx.owner?.type === "team" ? ctx.owner.id : undefined;
+      if (!teamRun && caller.role !== "admin") {
+        return { success: false, error: "Thread outcomes are for organization admins. Ask an admin to run this check, or run it from a team workflow to read that team's threads." };
+      }
+      if (!teamRun && transcriptIsShared(ctx)) {
+        return { success: false, error: "Thread outcomes list other people's threads, and other people read this conversation. Ask in a private conversation." };
+      }
+      const scope: OutcomeScope = teamRun ? { kind: "team", teamId: teamRun } : { kind: "organization" };
+      const until = Date.now();
+      const since = until - (hours ?? 24) * HOUR_MS;
+      const read = await readThreadOutcomes(db, {
+        orgId: ctx.orgId, scope, since, until, outcomes: outcomes ?? FRICTION_OUTCOMES, canManageIntents: !teamRun,
+      });
+
+      // Text comes from threads the caller could open in Valet: their own
+      // personal threads, and threads of their teams that the thread's
+      // audience rules allow. An admin opens a team's sessions only as a
+      // member (`canViewSession`), so admin rights alone do not count.
+      const teamIds = [...new Set(read.threads.filter((row) => row.ownerType === "team").map((row) => row.ownerId))];
+      const memberOf = teamRun ? new Set([teamRun]) : new Set(teamIds.length === 0 ? [] : (await db.select({ teamId: teamMembers.teamId })
+        .from(teamMembers).where(and(eq(teamMembers.userId, caller.userId), inArray(teamMembers.teamId, teamIds)))).map((row) => row.teamId));
+      const teamThreads = read.threads.filter((row) => row.ownerType === "team" && memberOf.has(row.ownerId));
+      const visibleTeam = await visibleThreadIds(access(), { ownerType: "team" }, { orgId: ctx.orgId, userId: teamRun ? undefined : caller.userId }, teamThreads);
+      const canOpen = (row: (typeof read.threads)[number]) => row.ownerType === "team"
+        ? memberOf.has(row.ownerId) && visibleTeam.has(`${row.sessionId}:${row.threadId}`)
+        : !teamRun && row.ownerType === "user" && (row.ownerId || row.userId) === caller.userId;
+      const shown = read.threads.slice(0, limit ?? 50);
+      const text = await readThreadText(db, shown.filter(canOpen));
+      const base = deps().publicUrl?.replace(/\/+$/, "") ?? "";
+      const threads: FrictionThread[] = read.threads.map((row) => {
+        const id = `${row.sessionId}:${row.threadId}`;
+        const calls = read.calls.get(id);
+        return {
+          threadId: row.threadId, sessionId: row.sessionId, link: `${base}/threads/${encodeURIComponent(row.threadId)}`,
+          outcome: row.outcome, classifiedAt: row.classifiedAt, workspace: row.ownerType === "team" ? "team" : "personal",
+          person: threadPerson(row, read.names), child: row.child,
+          intent: calls?.intent ?? { key: "no_tool_calls", label: "No tool calls" },
+          toolCalls: calls?.toolCalls ?? 0, toolErrors: calls?.toolErrors ?? 0, errorCodes: calls?.errorCodes ?? [],
+          canOpen: canOpen(row), ...text.get(id),
+        };
+      });
+      const notes: string[] = [];
+      if (read.counts.length === 0) {
+        notes.push(await taggingAvailable(db, ctx.orgId)
+          ? "No thread got an outcome label in this period."
+          : "No thread got an outcome label in this period. Outcome labels need the xs model tier: in Settings > Models, point tier xs at a provider this organization holds a key for.");
+      }
+      if (read.truncated) notes.push("More threads matched than one read covers. Groups count the newest 500; shorten the period to see the rest.");
+      if (!base) notes.push("This deployment has no public URL, so thread links are paths. Set the public URL to get full links.");
+      return {
+        success: true,
+        data: {
+          scope: scope.kind, since, until,
+          outcomes: read.counts,
+          groups: groupFrictionThreads(threads),
+          threads: threads.slice(0, limit ?? 50),
+          truncated: read.truncated || threads.length > (limit ?? 50),
+          note: notes.join(" "),
         },
       };
     },
@@ -180,7 +281,7 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => Omit<AccessDeps, 
 
   return {
     service: "diagnostics",
-    description: "Find which tools fail and why, and which Valet API routes are slow.",
-    actions: [listToolFailures, listSlowRequests],
+    description: "Find which tools fail and why, which threads ended without the work done, and which Valet API routes are slow.",
+    actions: [listToolFailures, listSlowRequests, listThreadOutcomes],
   };
 }

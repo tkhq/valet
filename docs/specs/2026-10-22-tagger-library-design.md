@@ -96,6 +96,7 @@ The Top tools table shows each tool's three most common error codes.
 
 `diagnostics.list_tool_failures` gives an agent the same view. An organization admin in a private conversation reads organization counts; other callers read their own calls, and a team run reads its team's calls. Failure samples join a hosted usage row (`<session>:<call id>`) to its transcript tool call for the requested tool id and the result text. Samples come only from the caller's own personal conversations and team conversations the caller may see. A transcript that other people read gets no error text.
 `diagnostics.list_slow_requests` reads an in-process window of request durations by route pattern (`observability/request-timings.ts`), fed by the HTTP tracing middleware. It keeps up to one hour, clears on restart, and is for organization admins.
+`diagnostics.list_thread_outcomes` returns the threads behind the session outcome counts, for organization admins and team runs (`docs/specs/2026-11-02-daily-friction-scan-design.md`).
 
 ## Validation limits
 
