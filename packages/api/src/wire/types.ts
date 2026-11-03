@@ -5410,6 +5410,9 @@ export interface SourceSummary {
   externalRef: string | null;
   pullSecretName: string | null;
   setupCommands: string[] | null;
+  /** `full` for the org's full base; null for other kinds and for a
+   * repository base layer. Optional because older servers omit it. */
+  profile?: "headless" | "full" | null;
   repoHost: string | null;
   repoFullName: string | null;
   cloneUrl: string | null;

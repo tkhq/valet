@@ -141,10 +141,29 @@ describe("SourcesSection", () => {
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   });
 
+  it("base card: shows the full base even when a repository base layer comes first", () => {
+    const layer = makeSource({
+      id: "src_layer",
+      kind: "base",
+      profile: null,
+      repoFullName: null,
+      repoHost: null,
+      name: "repo-base:acme/widgets",
+      setupCommands: ["npm ci --prefix /opt/acme"],
+      builtIn: true,
+    });
+    const base = makeSource({ id: "base_1", kind: "base", profile: "full", repoFullName: null, repoHost: null, name: "default-full", setupCommands: ["apt-get install -y jq"], builtIn: true });
+    sourcesData = { sources: [layer, base], builderAvailable: true };
+    render(<SourcesSection />);
+
+    expect((screen.getByLabelText("Setup commands") as HTMLTextAreaElement).value).toBe("apt-get install -y jq");
+  });
+
   it("base card: a built-in base is read-only, has no Save, and keeps Bake now", () => {
     const base = makeSource({
       id: "base_1",
       kind: "base",
+      profile: "full",
       repoFullName: null,
       repoHost: null,
       name: "default-full",
@@ -192,6 +211,7 @@ describe("SourcesSection", () => {
     const base = makeSource({
       id: "base_1",
       kind: "base",
+      profile: "full",
       repoFullName: null,
       repoHost: null,
       name: "Base",
@@ -214,6 +234,7 @@ describe("SourcesSection", () => {
     const base = makeSource({
       id: "base_1",
       kind: "base",
+      profile: "full",
       repoFullName: null,
       repoHost: null,
       name: "Base",
@@ -231,6 +252,7 @@ describe("SourcesSection", () => {
     const base = makeSource({
       id: "base_1",
       kind: "base",
+      profile: "full",
       repoFullName: null,
       repoHost: null,
       name: "Base",

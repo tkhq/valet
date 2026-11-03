@@ -45,6 +45,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const LABEL_NAME = /^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
+const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+
+/** A Kubernetes label key: an optional DNS-subdomain prefix (at most 253
+ * characters) and `/`, then a name of at most 63 characters. Kubernetes
+ * rejects any other key when it admits the Job, so check it at boot. */
+export function isLabelKey(key: string): boolean {
+  const slash = key.lastIndexOf("/");
+  const name = slash === -1 ? key : key.slice(slash + 1);
+  const prefix = slash === -1 ? undefined : key.slice(0, slash);
+  if (prefix !== undefined && (prefix.length === 0 || prefix.length > 253 || !DNS_SUBDOMAIN.test(prefix))) return false;
+  return LABEL_NAME.test(name);
+}
+
+/** A Kubernetes label value: empty, or a name of at most 63 characters. */
+export function isLabelValue(value: string): boolean {
+  return value === "" || LABEL_NAME.test(value);
+}
+
 /**
  * Parses `VALET_PREBUILD_BUILD_NODE_SELECTOR`: a JSON object of string
  * values, or `key=value` pairs separated by commas. Unset or empty returns
@@ -79,8 +98,8 @@ export function parseBuildNodeSelector(value: string | undefined): Record<string
     }
   }
   for (const [key, label] of Object.entries(out)) {
-    if (key === "" || /\s/.test(key)) return fail(`"${key}" is not a valid label key`);
-    if (/\s/.test(label)) return fail(`the value for "${key}" contains a space`);
+    if (!isLabelKey(key)) return fail(`"${key}" is not a valid Kubernetes label key`);
+    if (!isLabelValue(label)) return fail(`"${label}" (for "${key}") is not a valid Kubernetes label value`);
   }
   if (Object.keys(out).length === 0) return fail("the object has no labels");
   return out;
@@ -140,6 +159,12 @@ export function parseBuildTolerations(value: string | undefined): V1Toleration[]
         return fail(`entry ${index} tolerationSeconds is not an integer`);
       }
       toleration.tolerationSeconds = entry.tolerationSeconds;
+    }
+    if (toleration.key !== undefined && !isLabelKey(toleration.key)) {
+      return fail(`entry ${index} key "${toleration.key}" is not a valid Kubernetes label key`);
+    }
+    if (toleration.value !== undefined && !isLabelValue(toleration.value)) {
+      return fail(`entry ${index} value "${toleration.value}" is not a valid Kubernetes label value`);
     }
     if (toleration.operator === "Exists" && toleration.value !== undefined) {
       return fail(`entry ${index} sets a value with operator "Exists"`);

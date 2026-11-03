@@ -34,7 +34,9 @@ export function SourcesSection() {
   const sources = sourcesQ.data?.sources ?? [];
   const builderAvailable = sourcesQ.data?.builderAvailable ?? false;
 
-  const baseSource = sources.find((s) => s.kind === "base");
+  // The org's full base, never a repository base layer (`repo-base:*`,
+  // also kind='base'): the list response has no fixed order.
+  const baseSource = sources.find((s) => s.kind === "base" && s.profile === "full");
   const repoSources = sources.filter((s) => s.kind === "repo");
   const query = search.trim().toLowerCase();
   const sortedRepos = repoSources.sort((a, b) => {

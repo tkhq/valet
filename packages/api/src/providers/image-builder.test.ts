@@ -47,6 +47,7 @@ describe("parseBuildNodeSelector", () => {
   it("accepts a JSON object and key=value pairs", () => {
     expect(parseBuildNodeSelector('{"pool":"builds","valet.dev/tier":"untrusted"}')).toEqual({ pool: "builds", "valet.dev/tier": "untrusted" });
     expect(parseBuildNodeSelector("pool=builds, zone=a")).toEqual({ pool: "builds", zone: "a" });
+    expect(parseBuildNodeSelector('{"node.kubernetes.io/instance-type":"m7i.large","empty":""}')).toEqual({ "node.kubernetes.io/instance-type": "m7i.large", empty: "" });
   });
 
   it.each([
@@ -55,8 +56,14 @@ describe("parseBuildNodeSelector", () => {
     ['{"pool":1}', /value for "pool" is not a string/],
     ["{}", /no labels/],
     ["pool", /has no "="/],
-    ["=builds", /not a valid label key/],
-    ["pool=two words", /contains a space/],
+    ["=builds", /not a valid Kubernetes label key/],
+    ["pool=two words", /not a valid Kubernetes label value/],
+    ['{"pool?":"builds"}', /"pool\?" is not a valid Kubernetes label key/],
+    ['{"Valet.Dev/pool":"builds"}', /not a valid Kubernetes label key/],
+    ['{"/pool":"builds"}', /not a valid Kubernetes label key/],
+    [`{"${"a".repeat(64)}":"builds"}`, /not a valid Kubernetes label key/],
+    ['{"pool":"-builds"}', /not a valid Kubernetes label value/],
+    [`{"pool":"${"b".repeat(64)}"}`, /not a valid Kubernetes label value/],
   ])("throws a boot error that names the fix for %j", (value, detail) => {
     expect(() => parseBuildNodeSelector(value)).toThrow(detail);
     expect(() => parseBuildNodeSelector(value)).toThrow(/Set it to a JSON object such as/);
@@ -87,6 +94,8 @@ describe("parseBuildTolerations", () => {
     ['[{"key":1}]', /field "key" is not a string/],
     ['[{"key":"k","tolerationSeconds":"60"}]', /tolerationSeconds is not an integer/],
     ['[{"key":"k","operator":"Exists","value":"v"}]', /sets a value with operator "Exists"/],
+    ['[{"key":"pool?","operator":"Exists"}]', /key "pool\?" is not a valid Kubernetes label key/],
+    ['[{"key":"k","operator":"Equal","value":"a b"}]', /value "a b" is not a valid Kubernetes label value/],
   ])("throws a boot error that names the fix for %j", (value, detail) => {
     expect(() => parseBuildTolerations(value)).toThrow(detail);
     expect(() => parseBuildTolerations(value)).toThrow(/Set it to a JSON array such as/);
