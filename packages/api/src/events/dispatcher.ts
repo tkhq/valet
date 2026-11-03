@@ -68,6 +68,7 @@ import {
 } from "../observability/delivery-metrics.js";
 import { readStoredTarget } from "./target-names.js";
 import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
+import { reportError } from "@valet/engine";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -341,7 +342,7 @@ export class EventDispatcher {
     if (this.stopped) return;
     if (this.ingressInFlight) this.ingressWakeRequested = true;
     if (this.draining) { this.wakeRequested = true; return; }
-    void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
+    void this.pollOnce().catch((err) => reportError({ area: "events", reason: "dispatch_poll" }, "event dispatcher poll failed", err));
   };
 
   async pollOnce(): Promise<void> {
@@ -352,7 +353,7 @@ export class EventDispatcher {
       // Keep one ingress drain in flight; durable claims cover process restarts.
       if (this.drainIngress && !this.ingressInFlight) {
         this.ingressInFlight = Promise.resolve().then(() => this.drainIngress?.())
-          .catch(err => console.error("event ingress drain failed:", err))
+          .catch(err => reportError({ area: "events", reason: "ingress_drain" }, "event ingress drain failed", err))
           .finally(() => {
             this.ingressInFlight = null;
             if (this.ingressWakeRequested) { this.ingressWakeRequested = false; this.nudge(); }
@@ -362,11 +363,11 @@ export class EventDispatcher {
       if (this.deps.drainAttention) {
         // The outbox serializes each transport independently across ticks.
         void this.deps.drainAttention()
-          .catch(err => console.error("attention outbox drain failed:", err));
+          .catch(err => reportError({ area: "events", reason: "attention_drain" }, "attention outbox drain failed", err));
       }
-      void this.deps.retainExternalUsage?.().catch(() => console.warn("Intent retention failed. Check database availability."));
+      void this.deps.retainExternalUsage?.().catch(() => reportError({ area: "events", reason: "intent_retention", level: "warn" }, "Intent retention failed. Check database availability."));
       if (this.deps.drainTagging) {
-        void this.deps.drainTagging().catch(() => console.warn("Tagging batch failed. Check the model provider and queued tagging attempts."));
+        void this.deps.drainTagging().catch(() => reportError({ area: "events", reason: "tagging_batch", level: "warn" }, "Tagging batch failed. Check the model provider and queued tagging attempts."));
       }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
@@ -393,11 +394,11 @@ export class EventDispatcher {
         .returning({ id: eventDeliveries.id });
 
       for (const row of claimed) {
-        await this.deliverOne(row.id).catch((err) => console.error(`event dispatch ${row.id}:`, err));
+        await this.deliverOne(row.id).catch((err) => reportError({ area: "events", reason: "dispatch_delivery" }, `event dispatch ${row.id}`, err));
       }
       if (now - this.lastFailedTurnSweepAt >= FAILED_TURN_SWEEP_MS) {
         this.lastFailedTurnSweepAt = now;
-        await this.sweepFailedDeliveryTurns(now).catch((err) => console.error("event failed-turn sweep:", err));
+        await this.sweepFailedDeliveryTurns(now).catch((err) => reportError({ area: "events", reason: "failed_turn_sweep" }, "event failed-turn sweep", err));
       }
     } finally {
       this.draining = false;
@@ -720,7 +721,7 @@ export class EventDispatcher {
       // marks the row later.
       if (queueItemId) {
         await (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(db, { deliveryId })
-          .catch((err) => console.error(`event dispatch ${deliveryId}: failed-turn check:`, err));
+          .catch((err) => reportError({ area: "events", reason: "failed_turn_check" }, `event dispatch ${deliveryId}: failed-turn check`, err));
       }
     } catch (err) {
       const attempts = delivery.attempts + 1;
@@ -881,7 +882,7 @@ export class EventDispatcher {
     try {
       await end({ waiterId, sessionId: landed.sessionId, threadId: landed.threadId });
     } catch (err) {
-      console.error(`event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running:`, err);
+      reportError({ area: "events", reason: "waiter_redirect_end" }, `event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running`, err);
     }
   }
 

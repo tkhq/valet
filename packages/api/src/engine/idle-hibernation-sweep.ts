@@ -42,6 +42,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "./hibernation-hooks.js";
+import { reportError } from "@valet/engine";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 /** Rows per pass — bounds a post-restart backlog; hibernated rows leave
@@ -97,7 +98,7 @@ export class IdleHibernationSweep {
       try {
         await this.maybeHibernate(row.id, row.workspace, row.createdAt, cutoff);
       } catch (err) {
-        console.error(`IdleHibernationSweep: hibernate failed for session ${row.id}:`, err);
+        reportError({ area: "sandbox", reason: "idle_hibernate" }, `IdleHibernationSweep: hibernate failed for session ${row.id}`, err);
       }
     }
   }
@@ -129,9 +130,7 @@ export class IdleHibernationSweep {
       // Backend-assigned ids (docker/local) are unreachable without a live
       // attachment — and those backends are not hibernation-capable, so
       // the capability gate in sweep() normally prevents reaching here.
-      console.warn(
-        `IdleHibernationSweep: session ${sessionId} is idle but its sandbox id is not derivable; skipping`,
-      );
+      reportError({ area: "sandbox", reason: "idle_hibernate_no_sandbox_id", level: "warn" }, `IdleHibernationSweep: session ${sessionId} is idle but its sandbox id is not derivable; skipping`);
       return;
     }
 

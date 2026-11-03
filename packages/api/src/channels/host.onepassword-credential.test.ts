@@ -206,7 +206,7 @@ describe("ChannelHost.start() 1Password bot-token resolution", () => {
     // This is why PUT /api/credentials holds a reference's type to the plugin's
     // declaration: the save would otherwise verify green and boot would log this.
     expect(h.isRunning("fake")).toBe(false);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[channels] fake: transport not started"), expect.anything());
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/"error":"transport requires a bot token".*"message":"\[channels\] fake: transport not started"/));
     errorSpy.mockRestore();
   });
 });

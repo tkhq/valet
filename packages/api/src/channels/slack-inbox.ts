@@ -55,7 +55,7 @@ import { slackWebhookInbox, eventDropLog } from "../schema/index.js";
 import { encryptSecret, decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import type { Providers } from "../providers/types.js";
 import { createEventReceipt, appendReceiptStage } from "../events/receipts.js";
-import { credentialSecret } from "@valet/engine";
+import { credentialSecret, reportError } from "@valet/engine";
 import { withEventChannelName } from "@valet/plugin-slack/actions";
 import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -88,7 +88,7 @@ export function __resetSlackWebhookThrottle(): void {
 
 async function safeWriteDropLog(db: AppDb, args: Parameters<typeof writeDropLog>[1]): Promise<void> {
   try { await writeDropLog(db, args); }
-  catch { console.warn("[slack-webhook] problem diagnostic write unavailable"); }
+  catch { reportError({ area: "channels", reason: "slack_problem_diagnostic", provider: "slack", level: "warn" }, "[slack-webhook] problem diagnostic write unavailable"); }
 }
 
 export async function throttledDropLog(db: AppDb, args: { orgId: string; reason: string; detail: string }): Promise<void> {
@@ -244,7 +244,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
   } catch (err) {
     await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: "failed", detail: "Direct-channel processing failed. Line matching and followed-thread checks continue separately. Search the server logs for this Diagnostics entry's ID." });
     failed = true;
-    console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} channel consumer failed`, err);
+    reportError({ area: "channels", reason: "slack_inbox_channel_consumer", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} channel consumer failed`, err);
   }
 
   // Follow-router: a threaded message on a followed thread routes to the bound
@@ -269,7 +269,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
   } catch (err) {
     await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "failed", detail: "Followed-thread processing failed. Search the server logs for this Diagnostics entry's ID. The other checks ran separately." });
     failed = true;
-    console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} follow-router failed`, err);
+    reportError({ area: "channels", reason: "slack_inbox_follow_router", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} follow-router failed`, err);
   }
 
   // The trigger definitions re-verify over the same raw bytes so their own
@@ -320,7 +320,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
   } catch (err) {
     await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Event processing failed during ${eventPhase}. Search the server logs for this Diagnostics entry's ID. Valet keeps no error details here.` });
     failed = true;
-    console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} event consumer failed`, err);
+    reportError({ area: "channels", reason: "slack_inbox_event_consumer", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} event consumer failed`, err);
   }
   if (failed) throw new Error("Slack consumers did not all finish. The durable inbox will retry.");
 }
@@ -382,7 +382,7 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
           .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil))).returning({ id: slackWebhookInbox.id });
         if (!claimed) leaseLost = true;
         else leaseUntil = next;
-      }).catch(err => { leaseLost = true; console.error(`[slack-webhook] inbox ${row.id} lease renewal failed`, err); });
+      }).catch(err => { leaseLost = true; reportError({ area: "channels", reason: "slack_inbox_lease_renewal", provider: "slack" }, `[slack-webhook] inbox ${row.id} lease renewal failed`, err); });
     }, 20_000);
     heartbeat.unref?.();
     try {
@@ -454,7 +454,7 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
             .onConflictDoUpdate({ target: eventDropLog.id, set: { detail, createdAt: failedAt } });
         });
       }
-      console.error(`[slack-webhook] inbox ${row.id} processing failed`, err);
+      reportError({ area: "channels", reason: "slack_inbox_processing", provider: "slack" }, `[slack-webhook] inbox ${row.id} processing failed`, err);
     } finally {
       clearInterval(heartbeat);
       await renewal;

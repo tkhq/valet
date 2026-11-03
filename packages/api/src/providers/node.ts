@@ -53,6 +53,7 @@ import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
+import { podHealthTargetFromEnv } from "../diagnostics/pod-health.js";
 import { diagnosticsTemplates } from "../diagnostics/template.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
@@ -114,6 +115,7 @@ import type { InstanceConfig } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 import { valetBuildSha } from "../version.js";
+import { reportError } from "@valet/engine";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -431,10 +433,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
     version: "0.1.0",
-    description: "Agent-facing tool failure, thread outcome and request latency diagnostics.",
+    description: "Agent-facing tool failure, thread outcome, request latency, server error, and API health diagnostics.",
     actions: [diagnosticsActionPlugin(db, () => ({
       engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
-    }))],
+    }), {
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+      ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes" ? { podHealth: podHealthTargetFromEnv(process.env) } : {}),
+    })],
     templates: diagnosticsTemplates,
   };
 
@@ -709,7 +714,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       try {
         await prebuildService.seedDefaultBasesIfMissing(id);
       } catch (err) {
-        console.error(`seedDefaultBasesIfMissing(${id}) failed:`, err);
+        reportError({ area: "sandbox", reason: "seed_default_bases" }, `seedDefaultBasesIfMissing(${id}) failed`, err);
       }
     }
   })();
@@ -783,7 +788,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         });
       }
     } catch (err) {
-      console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "approval_grant_write" }, `workflow approval grant write failed for run ${info.runId}`, err);
     }
   };
 
@@ -806,7 +811,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         { status: info.outcome, resolvedBy: info.resolvedBy, error: info.error },
       );
     } catch (err) {
-      console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
+      reportError({ area: "workflows", reason: "gate_resolved_callback" }, `workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
     }
   };
 

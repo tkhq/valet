@@ -800,7 +800,7 @@ describe("ChannelHost outbound delivery", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(await replyFeedbackEntries(first.session.id, first.threadId)).toHaveLength(1);
-    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(false);
+    expect(error.mock.calls.some(([message]) => String(message).includes('"message":"[channels] reply-dropped feedback failed"'))).toBe(false);
   });
 
   it("keeps manual child settlements off-channel and nudges only once per assistant thread", async () => {
@@ -1472,7 +1472,7 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(send).toHaveBeenCalledTimes(1);
     expect(admit).toHaveBeenCalledTimes(2);
-    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(true);
+    expect(error.mock.calls.some(([message]) => String(message).includes('"message":"[channels] reply-dropped feedback failed"'))).toBe(true);
   });
 
   it("warns and does not retry feedback when the session is not live", async () => {
@@ -1522,7 +1522,7 @@ describe("ChannelHost outbound delivery", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     expect(await replyFeedbackEntries(emitted.session.id, emitted.threadId)).toHaveLength(1);
-    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(false);
+    expect(error.mock.calls.some(([message]) => String(message).includes('"message":"[channels] reply-dropped feedback failed"'))).toBe(false);
   });
 
   it("caps feedback admission and cancels backoff without retrying the normal send", async () => {
@@ -3350,7 +3350,7 @@ describe("ChannelHost.attentionDeliverer", () => {
       await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "after-hung-edit", userId: USER_ID, tierId: channels[0]!.id, event: event(), deliverAfter: 1 });
       await drainAttentionDeliveries({ db: testDb.appDb, channels });
       expect(fakeTransport.sent).toHaveLength(1);
-      if (mode === "reject") expect(log).toHaveBeenCalledWith(expect.stringContaining("gate prompt update failed"), expect.any(Error));
+      if (mode === "reject") expect(log).toHaveBeenCalledWith(expect.stringMatching(/"error_class":"Error".*gate prompt update failed/));
     } finally { release(); await work; update.mockRestore(); log.mockRestore(); }
   });
 

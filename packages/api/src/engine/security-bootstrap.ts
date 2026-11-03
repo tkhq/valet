@@ -33,6 +33,7 @@
  * `exec` command strings — they never `writeFile` an absolute path.
  */
 import type { Sandbox } from "@valet/engine";
+import { reportError } from "@valet/engine";
 
 /** Workspace-relative staging path for the preflight script — written via
  * `writeFile` (workspace-relative only), then `exec`d into place. */
@@ -113,15 +114,12 @@ async function bestEffortExec(
     const result = await sandbox.exec(command, opts);
     if (result.exitCode !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim();
-      console.warn(`security-bootstrap: ${label} exited ${result.exitCode}: ${detail}`);
+      reportError({ area: "engine", reason: "security_bootstrap", level: "warn" }, `security-bootstrap: ${label} exited ${result.exitCode}: ${detail}`);
     }
   } catch (err) {
     // Best-effort swallow: an absent tool is a NOT_ASSESSED row downstream,
     // and `critical: false` keeps the sandbox alive. Log and resolve.
-    console.warn(
-      `security-bootstrap: ${label} failed:`,
-      err instanceof Error ? err.message : String(err),
-    );
+    reportError({ area: "engine", reason: "security_bootstrap", level: "warn" }, `security-bootstrap: ${label} failed`, err);
   }
 }
 
@@ -171,10 +169,7 @@ export function securityToolPrepSteps(): import("@valet/engine").PrepStep[] {
         await sandbox
           .writeFile(PREFLIGHT_STAGING_PATH, SEC_PREFLIGHT_SCRIPT)
           .catch((err: unknown) => {
-            console.warn(
-              "security-bootstrap: staging sec-preflight failed:",
-              err instanceof Error ? err.message : String(err),
-            );
+            reportError({ area: "engine", reason: "security_preflight", level: "warn" }, "security-bootstrap: staging sec-preflight failed", err);
           });
         await bestEffortExec(
           sandbox,

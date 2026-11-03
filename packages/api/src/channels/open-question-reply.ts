@@ -11,6 +11,7 @@ import { userPrincipal } from "../lib/request-principal.js";
 import { agentSessions } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
 import { HOME_THREAD_KEY } from "../home/context.js";
+import { reportError } from "@valet/engine";
 
 export interface OpenQuestionReply {
   session: Session;
@@ -68,7 +69,7 @@ export async function answerOpenQuestion(db: AppDb, reply: OpenQuestionReply): P
       source: { channelType: reply.channelType, channelId: reply.channelId, messageId: reply.dispatchId },
     });
   } catch (err) {
-    console.warn(`[channels] reply could not answer open question ${gate.id}; it goes in as a message`, err);
+    reportError({ area: "channels", reason: "open_question_reply", level: "warn" }, `[channels] reply could not answer open question ${gate.id}; it goes in as a message`, err);
     return false;
   }
   // Resolving a gate another answer already settled does not throw. The

@@ -2095,10 +2095,8 @@ describe("sweep interval rejection guard", () => {
       session.ensureTimers();
       // First sweep tick — listUnsettledSubmissions throws, wrapper catches.
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[engine] sweep failed"),
-        expect.stringContaining("SQLITE_BUSY"),
-      );
+      expect(errSpy.mock.calls.some(([line]) =>
+        String(line).includes("[engine] sweep failed") && String(line).includes("SQLITE_BUSY"))).toBe(true);
       const callsAfterFirst = listSpy.mock.calls.length;
       expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
       // Second tick — the store recovered; sweep runs again cleanly.

@@ -1,17 +1,23 @@
 /**
  * Agent-facing diagnostics: which tools fail and why, which threads ended
- * without the work done, and which API routes are slow. They read what the
- * Usage page and the request traces already record, so Valet can
- * investigate an error rate, a slow page or where people get stuck itself.
+ * without the work done, which API routes are slow or answer 5xx, which
+ * error paths fired, and the health of the API process and its pods. They
+ * read what the Usage page, the request traces, `reportError`, and the
+ * kubernetes API already record, so Valet can investigate an error rate, a
+ * slow page, a 503, or where people get stuck itself. Every tool here only
+ * reads.
  */
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { externalCalls, orgMembers, teamMembers } from "../schema/index.js";
+import { externalCalls, orgMembers, teamMembers, users } from "../schema/index.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
-import { requestTimingSummary } from "../observability/request-timings.js";
+import { recentErrorReports } from "@valet/engine";
+import { requestTimingSummary, serverErrorSummary } from "../observability/request-timings.js";
+import { processHealthSummary } from "../observability/process-health.js";
+import { readPodHealth, type PodHealthTarget } from "./pod-health.js";
 import { taggingAvailable } from "../tagging/availability.js";
 import {
   FRICTION_OUTCOMES, groupFrictionThreads, readThreadOutcomes, readThreadText, threadPerson,
@@ -41,6 +47,15 @@ function action<TParams extends TSchema>(parameters: TParams) {
     riskLevel: PluginAction["riskLevel"];
     execute: (args: Static<TParams>, ctx: PluginActionContext) => Promise<PluginActionResult>;
   }): PluginAction<TParams> => ({ ...rest, parameters });
+}
+
+/** What the infrastructure tools may read. */
+export interface DiagnosticsInfra {
+  /** The sandbox backend this deployment runs (`VALET_SANDBOX_BACKEND`). */
+  sandboxBackend: string;
+  /** The kubernetes pod reader. Built on first use, so a bad kubeconfig
+   * fails the tool call and not the boot. Present on kubernetes only. */
+  podHealth?: () => PodHealthTarget;
 }
 
 const EXTERNAL_SENDER = {
@@ -91,7 +106,7 @@ async function failedCallDetail(db: AppDb, call: { id: string; sessionId: string
   };
 }
 
-export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps): ActionPlugin {
+export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps, infra: DiagnosticsInfra = { sandboxBackend: "docker" }): ActionPlugin {
   const access = (): AccessDeps => {
     const { engineCredentials, onePassword } = deps();
     return { db, engineCredentials, onePassword };
@@ -103,6 +118,31 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps):
     const [row] = await db.select({ role: orgMembers.role }).from(orgMembers)
       .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
     return row ? { userId, role: row.role, teamRun: false } : undefined;
+  };
+
+  /** The caller's organization when the caller is one of its admins, or the refusal to return. */
+  const adminOrg = async (ctx: PluginActionContext, what: string): Promise<{ orgId: string; userId: string } | { refusal: PluginActionResult }> => {
+    if (ctx.externalSender) return { refusal: EXTERNAL_SENDER };
+    const caller = await member(ctx);
+    if (!caller || !ctx.orgId) return { refusal: { success: false, error: "You are not a member of this organization. Ask an organization admin to add you." } };
+    if (caller.role !== "admin") return { refusal: { success: false, error: `${what} are for organization admins. Ask an admin to run this check.` } };
+    return { orgId: ctx.orgId, userId: caller.userId };
+  };
+
+  /** Why the caller may not read numbers that count every organization on
+   * the deployment (the error-path tally and sandbox pods), or undefined when
+   * they may. Only a deployment operator (`users.role`, not
+   * `org_members.role`) reads them, and only where nobody else reads the
+   * transcript. */
+  const deploymentWideRefusal = async (ctx: PluginActionContext, userId: string): Promise<string | undefined> => {
+    if (transcriptIsShared(ctx)) {
+      return "These numbers count every organization on this deployment, and other people read this conversation. Ask in a private conversation.";
+    }
+    const [row] = await db.select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
+    if (row?.role !== "admin") {
+      return "These numbers count every organization on this deployment, so only a deployment operator can read them. Ask an operator to run this check.";
+    }
+    return undefined;
   };
 
   const listToolFailures = action(Type.Object({
@@ -270,18 +310,87 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps):
       "slowest total first. Reads this API process only, up to the last 60 minutes; a restart clears it. Organization admins only.",
     riskLevel: "low",
     execute: async ({ minutes, limit }, ctx) => {
-      if (ctx.externalSender) return EXTERNAL_SENDER;
-      const caller = await member(ctx);
-      if (!caller || !ctx.orgId) return { success: false, error: "You are not a member of this organization. Ask an organization admin to add you." };
-      if (caller.role !== "admin") return { success: false, error: "Request timings are for organization admins. Ask an admin to run this check." };
-      const summary = requestTimingSummary({ orgId: ctx.orgId, sinceMs: Date.now() - (minutes ?? 15) * 60_000, limit: limit ?? 10 });
+      const gate = await adminOrg(ctx, "Request timings");
+      if ("refusal" in gate) return gate.refusal;
+      const summary = requestTimingSummary({ orgId: gate.orgId, sinceMs: Date.now() - (minutes ?? 15) * 60_000, limit: limit ?? 10 });
       return { success: true, data: summary };
+    },
+  });
+
+  const listServerErrors = action(Type.Object({
+    minutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, description: "How many minutes back to read. Default 15." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 30, description: "Routes and error paths to return. Default 10." })),
+  }))({
+    id: "diagnostics.list_server_errors",
+    name: "List server errors",
+    description:
+      "Find which Valet API routes answered 5xx and which internal error paths fired. Returns each route pattern with its request count and 5xx counts by status (500, 502, 503, 504). " +
+      "Routes count this organization's requests and requests with no organization. Error paths, such as channels/outbound_delivery/slack or workflows/schedule_fire, " +
+      "count every organization on the deployment, so only a deployment operator in a private conversation gets them. " +
+      "Reads this API process only, up to the last 60 minutes; a restart clears it. A 503 the load balancer returns while no API pod is ready never reaches this process: " +
+      "use diagnostics.list_pod_restarts for that. Organization admins only.",
+    riskLevel: "low",
+    execute: async ({ minutes, limit }, ctx) => {
+      const gate = await adminOrg(ctx, "Server errors");
+      if ("refusal" in gate) return gate.refusal;
+      const sinceMs = Date.now() - (minutes ?? 15) * 60_000;
+      const routes = serverErrorSummary({ orgId: gate.orgId, sinceMs, limit: limit ?? 10 });
+      // The tally has no organization: most error paths run in sweeps that serve every organization.
+      const refusal = await deploymentWideRefusal(ctx, gate.userId);
+      const errorPaths = refusal === undefined
+        ? { errorPaths: recentErrorReports({ sinceMs, limit: limit ?? 10 }) }
+        : { errorPathsOmitted: refusal };
+      return { success: true, data: { ...routes, ...errorPaths } };
+    },
+  });
+
+  const processHealth = action(Type.Object({
+    minutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, description: "How many minutes of samples the peaks cover. Default 15." })),
+  }))({
+    id: "diagnostics.process_health",
+    name: "Read API process health",
+    description:
+      "Read the health of the Valet API process that answers this call: RSS, V8 heap used, total and limit, the container's cgroup memory and limit, " +
+      "event-loop delay, uptime and start time, plus peak memory and event-loop delay over 10-second samples. " +
+      "A heap or cgroup usage near its limit means an OOM kill is close; a high event-loop delay means slow or failed requests. " +
+      "Reads this process only, up to the last 60 minutes; a restart clears the samples. For restart counts and OOM kills, use diagnostics.list_pod_restarts. Organization admins only.",
+    riskLevel: "low",
+    execute: async ({ minutes }, ctx) => {
+      const gate = await adminOrg(ctx, "Process health checks");
+      if ("refusal" in gate) return gate.refusal;
+      return { success: true, data: { ...processHealthSummary({ sinceMs: Date.now() - (minutes ?? 15) * 60_000 }), sandboxBackend: infra.sandboxBackend } };
+    },
+  });
+
+  const listPodRestarts = action(Type.Object({}))({
+    id: "diagnostics.list_pod_restarts",
+    name: "List pod restarts",
+    description:
+      "Find restarts and OOM kills of Valet's pods on the kubernetes backend. Returns the API namespace's pods, such as the API and its database, " +
+      "with each container's restart count, state and last termination reason (OOMKilled, Error), and the last hour's Warning events, such as failed liveness probes. " +
+      "Returns sandbox pods as counts by node and termination reason, without pod or session names, to a deployment operator in a private conversation only. " +
+      "If the API's service account may not read a namespace, the result names the RBAC rule an operator must add. Read-only. Organization admins only.",
+    riskLevel: "low",
+    execute: async (_args, ctx) => {
+      const gate = await adminOrg(ctx, "Pod restart checks");
+      if ("refusal" in gate) return gate.refusal;
+      if (!infra.podHealth) {
+        return { success: false, error: `Pod restarts exist only on the kubernetes sandbox backend. This deployment runs the ${infra.sandboxBackend} backend: read the API logs instead.` };
+      }
+      let target: PodHealthTarget;
+      try {
+        target = infra.podHealth();
+      } catch (err) {
+        return { success: false, error: `The kubernetes client could not start: ${err instanceof Error ? err.message : String(err)} Check the API's kubeconfig or in-cluster service account.` };
+      }
+      const refusal = await deploymentWideRefusal(ctx, gate.userId);
+      return { success: true, data: await readPodHealth(target, refusal === undefined ? {} : { omitSandboxes: refusal }) };
     },
   });
 
   return {
     service: "diagnostics",
-    description: "Find which tools fail and why, which threads ended without the work done, and which Valet API routes are slow.",
-    actions: [listToolFailures, listSlowRequests, listThreadOutcomes],
+    description: "Find which tools fail and why, which threads ended without the work done, which Valet API routes are slow or fail, and the health of the API process and its pods.",
+    actions: [listToolFailures, listSlowRequests, listThreadOutcomes, listServerErrors, processHealth, listPodRestarts],
   };
 }

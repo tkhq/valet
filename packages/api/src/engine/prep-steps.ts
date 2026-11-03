@@ -24,6 +24,7 @@ import {
   prepPrebuiltBinding,
   resolveStartRef,
 } from "./workspace-prep.js";
+import { reportError } from "@valet/engine";
 
 /**
  * Pairs each `StepSpec` in `specs` with an `apply` closure drawn from the
@@ -110,10 +111,7 @@ export function buildPrepSteps(
               if (ref) await onStartRef(ref);
               else console.error("prep-steps: start-ref unresolvable for primary binding — continuing");
             } catch (err) {
-              console.error(
-                "prep-steps: start-ref capture failed — continuing:",
-                err instanceof Error ? err.message : String(err),
-              );
+              reportError({ area: "sandbox", reason: "prep_start_ref" }, "prep-steps: start-ref capture failed — continuing", err);
             }
           }
         },

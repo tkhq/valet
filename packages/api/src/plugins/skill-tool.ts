@@ -19,7 +19,7 @@
 import { validSkillPath } from "../services/content-sync/skill-files.js";
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
-import { isPlaybook, playbookSeedNote, renderTemplate, skillFileManifest } from "@valet/engine";
+import { isPlaybook, playbookSeedNote, renderTemplate, skillFileManifest, reportError } from "@valet/engine";
 import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
@@ -187,7 +187,7 @@ export function buildSkillTool(
         try {
           await bound.refreshSkills();
         } catch (err) {
-          console.error(`skill tool: skill refresh failed while looking up "${args.name}":`, err);
+          reportError({ area: "plugins", reason: "skill_refresh" }, `skill tool: skill refresh failed while looking up "${args.name}"`, err);
         }
       }
       if (args.path === undefined && (args.offset !== undefined || args.limit !== undefined)) {

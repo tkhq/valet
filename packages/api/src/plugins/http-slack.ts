@@ -19,6 +19,7 @@ import { publicUrlFromEnv } from '../channels/host.js';
 import { admitSlackDelivery, throttledDropLog } from '../channels/slack-inbox.js';
 import { slackManifestEndpoints } from '../services/slack-app.js';
 import type { PluginHttpBinding } from './http-bindings.js';
+import { reportError } from "@valet/engine";
 
 /** Compile-time check: the plugin's setup response satisfies the web client's wire type. */
 export const slackSetupWireParity: (body: SlackAppSetupResponse) => GetSlackAppResponse = (body) => body;
@@ -43,7 +44,7 @@ export function slackIngressCapability(providers: Providers, request: PluginHttp
       try {
         await throttledDropLog(db, { orgId: orgId ?? await resolveOrgId(db), reason: problem.reason, detail: problem.detail });
       } catch (err) {
-        console.error('[slack-webhook] problem diagnostic failed', err);
+        reportError({ area: "channels", reason: "slack_problem_diagnostic", provider: "slack" }, '[slack-webhook] problem diagnostic failed', err);
       }
     },
     async admit(delivery) {

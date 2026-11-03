@@ -8,6 +8,7 @@
  * See CLAUDE.md's persistence-shape-drift guidance: this routing decision
  * used to be exercised only by the key-gated Docker E2E.
  */
+import { reportError } from "@valet/engine";
 import type { RepoBinding } from "./wire/types.js";
 
 /** The regular (non-workflow) session restore meta this module threads
@@ -162,7 +163,7 @@ export async function runBoundedRestore(
           try {
             opts.onTimeout?.(id);
           } catch (err) {
-            console.error(`boot restore: onTimeout hook threw for ${id}:`, err);
+            reportError({ area: "boot", reason: "restore_timeout_hook" }, `boot restore: onTimeout hook threw for ${id}`, err);
           }
           // The attempt is now unobserved by the race; keep watching it so
           // its outcome is never silent — a late failure logged here is the
@@ -173,12 +174,12 @@ export async function runBoundedRestore(
             .then(
               () => console.log(`boot restore: abandoned session ${id} finished restoring in the background`),
               (err: unknown) =>
-                console.error(`boot restore: abandoned session ${id} later failed in the background:`, err),
+                reportError({ area: "boot", reason: "restore_late_failure" }, `boot restore: abandoned session ${id} later failed in the background`, err),
             )
             .finally(() => {
               abandonedInFlight--;
             });
-          console.error(
+          reportError({ area: "boot", reason: "restore_timeout" },
             `boot restore: session ${id} exceeded ${opts.timeoutMs}ms — abandoning the wait ` +
               `(${abandonedInFlight} abandoned restore${abandonedInFlight === 1 ? "" : "s"} still running)`,
           );
@@ -187,7 +188,7 @@ export async function runBoundedRestore(
         }
       } catch (err) {
         result.failed++;
-        console.error(`boot restore: failed to restore session ${id}:`, err);
+        reportError({ area: "boot", reason: "restore_session" }, `boot restore: failed to restore session ${id}`, err);
       } finally {
         clearTimeout(timer);
       }

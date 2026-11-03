@@ -12,6 +12,7 @@ import {
   SandboxGoneError,
   SandboxSupersededError,
   SandboxUnavailableError,
+  reportError,
 } from "@valet/engine";
 import { tail, WATCH_BUFFER_BYTES } from "./wake-watcher-decide.js";
 import type {
@@ -396,9 +397,9 @@ async function deliverCancelSignal(
         (opts.signalLost ?? recordWakeupSignalLost)(kind);
       }
     } catch (claimError) {
-      console.error(`wakeups: loss reporting for ${dispatchId} failed; retention can retry the loss claim:`, claimError);
+      reportError({ area: "engine", reason: "wakeup_loss_report" }, `wakeups: loss reporting for ${dispatchId} failed; retention can retry the loss claim`, claimError);
     }
-    console.error(`wakeups: the human-cancel signal ${dispatchId} failed to submit; the work is already cancelled:`, err);
+    reportError({ area: "engine", reason: "wakeup_cancel_signal" }, `wakeups: the human-cancel signal ${dispatchId} failed to submit; the work is already cancelled`, err);
   }
 }
 

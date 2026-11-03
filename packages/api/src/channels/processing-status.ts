@@ -1,4 +1,5 @@
 import type { ChannelTransport, DecisionGate, DeliveredBusEvent, EventStream, Unsubscribe } from "@valet/engine";
+import { reportError } from "@valet/engine";
 
 interface StatusTurn {
   channelType: string;
@@ -129,7 +130,7 @@ export class ChannelProcessingStatus {
     const transport = this.transportFor(turn.channelType);
     const next = (this.chains.get(key) ?? Promise.resolve()).then(async () => {
       try { await transport?.setStatus?.(turn.conversationKey, turn.threadTs, value); }
-      catch (error) { console.error(`[channels] ${turn.channelType}: processing status failed`, error); }
+      catch (error) { reportError({ area: "channels", reason: "processing_status", provider: turn.channelType }, `[channels] ${turn.channelType}: processing status failed`, error); }
     });
     this.chains.set(key, next);
     void next.then(() => { if (this.chains.get(key) === next) this.chains.delete(key); });
