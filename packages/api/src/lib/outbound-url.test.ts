@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -246,5 +247,17 @@ describe("createGuardedFetch", () => {
 
   it("stops after five redirects", async () => {
     await expect(guarded()(`http://a.test:${port}/loop`)).rejects.toThrow(/Stopped after 5 redirects/);
+  });
+});
+
+describe("global fetch isolation", () => {
+  it("never installs the undici package's Agent as the process-wide dispatcher", async () => {
+    // Node's built-in fetch reads this symbol. If the guard loaded the undici
+    // package root, every fetch in the api would run through its Agent.
+    await createGuardedFetch(outboundPolicyFromEnv({}))("http://169.254.169.254/").catch(() => undefined);
+    await fetch("http://127.0.0.1:1/").catch(() => undefined);
+    const PackageAgent: unknown = createRequire(import.meta.url)("undici/lib/dispatcher/agent.js");
+    const installed: unknown = Reflect.get(globalThis, Symbol.for("undici.globalDispatcher.1"));
+    expect(typeof PackageAgent === "function" && installed instanceof PackageAgent).toBe(false);
   });
 });

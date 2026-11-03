@@ -23,7 +23,18 @@
 import { BlockList, isIP } from "node:net";
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { metrics } from "@opentelemetry/api";
-import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { createRequire } from "node:module";
+import { Readable } from "node:stream";
+import type { Agent as UndiciAgent, Dispatcher } from "undici";
+
+// Load only undici's Agent. The package root (and its fetch) register an
+// Agent as the process-wide dispatcher on load, and Node's built-in fetch
+// then sends every request in the api through it. This module must not
+// change global fetch.
+const requireUndici = createRequire(import.meta.url);
+const Agent: typeof UndiciAgent = requireUndici("undici/lib/dispatcher/agent.js");
+// The package root adds `request` to every dispatcher; call it directly.
+const undiciRequest: Dispatcher["request"] = requireUndici("undici/lib/api/index.js").request;
 
 const BLOCKED_V4: ReadonlyArray<readonly [string, number]> = [
   ["0.0.0.0", 8],
@@ -345,6 +356,10 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
     let body = await bufferedBody(init?.body ?? (request ? await request.arrayBuffer() : undefined), headers);
     const signal = init?.signal ?? request?.signal;
     const origin = new URL(url).origin;
+    // The dispatcher does not decompress responses, so ask for identity
+    // encoding. It also sets content-length from the buffered body.
+    headers.delete("accept-encoding");
+    headers.delete("content-length");
 
     for (let hop = 0; ; hop++) {
       const check = checkOutboundUrlShape(url, active);
@@ -352,41 +367,44 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
         recordOutboundRefusal(hop === 0 ? "request" : "redirect");
         throw new OutboundUrlError(hop === 0 ? check.reason : `Refused a redirect to ${url}. ${check.reason}`);
       }
-      let response: Awaited<ReturnType<typeof undiciFetch>>;
+      const target = new URL(url);
+      let response: Dispatcher.ResponseData<unknown>;
       try {
-        response = await undiciFetch(url, {
-          method,
-          // A plain record: the undici package and Node's fetch declare
-          // separate Headers types.
+        response = await undiciRequest.call(dispatcher, {
+          origin: target.origin,
+          path: `${target.pathname}${target.search}`,
+          // The cast narrows the free-form method string to undici's union;
+          // undici sends the method token as given.
+          method: method as Dispatcher.HttpMethod,
           headers: Object.fromEntries(headers),
           body,
           signal: signal ?? undefined,
-          redirect: "manual",
-          dispatcher,
         });
       } catch (err) {
-        // undici reports a refused connect-time lookup as "fetch failed" with
-        // the guard's error as the cause. Surface the guard's reason.
         if (err instanceof Error && err.cause instanceof OutboundUrlError) throw err.cause;
         throw err;
       }
-      const location = response.headers.get("location");
-      if (!REDIRECT_STATUSES.has(response.status) || !location) {
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: new Headers([...response.headers]),
-        });
+      const status = response.statusCode;
+      const responseHeaders = new Headers();
+      for (const [name, value] of Object.entries(response.headers)) {
+        if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item);
+        else if (value !== undefined) responseHeaders.set(name, value);
+      }
+      const location = responseHeaders.get("location");
+      if (!REDIRECT_STATUSES.has(status) || !location) {
+        const noBody = status === 204 || status === 205 || status === 304 || method === "HEAD";
+        if (noBody) response.body.resume();
+        return new Response(noBody ? null : Readable.toWeb(response.body), { status, headers: responseHeaders });
       }
       if (hop >= MAX_REDIRECTS) {
         throw new OutboundUrlError(`Stopped after ${MAX_REDIRECTS} redirects from ${origin}. Check the endpoint URL.`);
       }
-      await response.body?.cancel();
+      response.body.resume();
       url = new URL(location, url).href;
       if (new URL(url).origin !== origin) {
         for (const name of CREDENTIAL_HEADERS) headers.delete(name);
       }
-      if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST")) {
+      if (status === 303 || ((status === 301 || status === 302) && method === "POST")) {
         method = "GET";
         body = undefined;
         headers.delete("content-type");
