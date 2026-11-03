@@ -193,6 +193,50 @@ describe("OnlineStatusWatcher", () => {
     expect(events).toHaveLength(1);
   });
 
+  it("keeps a return when the confirming read fails once", async () => {
+    await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const w = watcher();
+    presence.set("U1", "away");
+    await w.tick(); // baseline
+    now += MIN_AWAY_MS;
+    presence.set("U1", "active");
+    members.set("U1", { ok: false, code: "http_503", error: "Slack is unavailable" });
+    await w.tick();
+    expect(events).toHaveLength(0);
+    members.delete("U1");
+    now += POLL_INTERVAL_MS;
+    await w.tick();
+    expect(events).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("retries an event whose ingest failed, with the same dedupe key", async () => {
+    await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    let failIngest = true;
+    const keys: string[] = [];
+    const w = new OnlineStatusWatcher({
+      db: db.appDb, plugins: [slackPlugin], credentials, now: () => now,
+      readStatus: async (_token, user) => ({ ok: true, status: { user, presence: presence.get(user) === "active" ? "active" : "away", online: false } }),
+      ingest: async (_org, event) => {
+        keys.push(event.dedupeKey);
+        if (failIngest) throw new Error("db down");
+      },
+    });
+    presence.set("U1", "away");
+    await w.tick();
+    now += MIN_AWAY_MS;
+    presence.set("U1", "active");
+    await w.tick();
+    failIngest = false;
+    now += POLL_INTERVAL_MS;
+    await w.tick();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    error.mockRestore();
+  });
+
   it("polls each person at most once per interval", async () => {
     await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
     const w = watcher();

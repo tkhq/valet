@@ -191,7 +191,12 @@ export class OnlineStatusWatcher {
     // Membership can change after the first read. Before an event fires,
     // repeat the full read with its workspace check (`readOnlineStatus`).
     const confirmed = full ? result : await read(token, user, { ...opts, profile: true });
-    if (!confirmed.ok) return fail(confirmed);
+    if (!confirmed.ok) {
+      // Keep the away period, so the next good read still sees the return.
+      state.presence = "away";
+      state.awaySince = awaySince;
+      return fail(confirmed);
+    }
     // The person went away again between the two reads: no event, and a new away period starts.
     if (confirmed.status.presence !== "active") {
       applyPresence(state, confirmed.status.presence, now);
@@ -206,6 +211,9 @@ export class OnlineStatusWatcher {
       if (this.deps.ingest) await this.deps.ingest(orgId, event);
       else await ingestEvent({ db: this.deps.db, plugins: this.deps.plugins, ...(this.deps.onIngest ? { onIngest: this.deps.onIngest } : {}) }, { orgId, service: "slack", event });
     } catch (error) {
+      // Retry on the next poll. The dedupe key is the away start, so a retry adds no second event.
+      state.presence = "away";
+      state.awaySince = awaySince;
       console.error(`[online-status] org ${orgId} user ${user}: ingest failed`, error);
     }
   }
