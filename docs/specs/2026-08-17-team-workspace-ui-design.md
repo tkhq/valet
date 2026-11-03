@@ -308,11 +308,17 @@ id), and the server checks team membership as before.
   its own rail and pinned scope.
 - **Spaces.** Each space is a row. Personal has a person icon, and each team
   has a 16px square with its initial in a muted tint. An open space
-  lists its pages: Threads, Workflows, Presence, and Artifacts. Each page row
-  opens that page with `?workspace=` naming the space. The active space starts
-  open and the others closed; the browser remembers each space's open state.
-  A closed space shows its pages in a menu on hover or from its chevron, and
-  its name opens the space and its Threads.
+  lists its pages: Threads, Workflows, Presence, and Artifacts, then a More
+  row. More holds the space's Overview, Memory, Skills, Integrations, Usage,
+  and Security (with the plugin). Each page row opens that page with
+  `?workspace=` naming the space. The active space starts open and the others
+  closed. More starts closed, and opens by itself when one of its pages is
+  current. The browser remembers both open states. A closed space shows all
+  its pages in a menu on hover or from its chevron.
+- **Same-page switching.** On a space page, a space's name opens the same
+  page in that space: Engineering / Integrations goes to Sales /
+  Integrations. A detail page goes to its list page. From Home or a thread,
+  the name opens the space's Threads.
 - **Threads.** The open space's Projects and threads show below Spaces only
   on Home and Threads. A phone's drawer always shows them.
 - **One divider.** The sidebar's only horizontal divider is under its top
@@ -322,9 +328,9 @@ id), and the server checks team membership as before.
   detail page puts the space above its breadcrumb, and the workflow editor
   reads "Space / Workflows / name". A caller with one space sees no space
   step. The workflow editor and run pages follow their resource's space.
-- **Top bar.** Only global items: the logo, More (Memory, Skills,
-  Integrations, Usage, Changelog), Plugins, Ask Valet, notifications, and
-  Settings.
+- **Top bar.** Only global items: the logo, More (Changelog and Model
+  comparison), Plugins, Ask Valet, notifications, and Settings. Pages that a
+  space owns are in the sidebar only. The phone menu keeps them.
 - **Icon rail.** The sidebar's top row collapses it to a 44px rail with
   Expand, Home, and one icon per space whose pages open in a menu. The browser
   remembers the choice. The workflow editor keeps its own choice and starts

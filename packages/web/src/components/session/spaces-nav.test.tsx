@@ -11,9 +11,10 @@ import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { SpacesNav, spaceInitial, spacePageFor, spaceTint } from "./spaces-nav";
 
 let teams: TeamSummary[] = [];
+let plugins: Array<{ name: string; enabledForCaller: boolean }> = [];
 vi.mock("~/api/settings", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/settings")>(),
-  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true }, plugins }, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
 }));
 
@@ -22,7 +23,7 @@ const team = (id: string, name: string): TeamSummary =>
 
 function mount(path: string) {
   const root = createRootRoute({ component: () => <WorkspaceScopeProvider><SpacesNav /><Outlet /></WorkspaceScopeProvider> });
-  const routes = ["/", "/chat", "/workflows", "/presence", "/artifacts"].map(p => createRoute({ getParentRoute: () => root, path: p, component: () => null }));
+  const routes = ["/", "/chat", "/workflows", "/presence", "/artifacts", "/overview", "/memory", "/skills", "/integrations", "/usage", "/security"].map(p => createRoute({ getParentRoute: () => root, path: p, component: () => null }));
   // An editor with unsaved edits that refuses to be left.
   const editor = createRoute({ getParentRoute: () => root, path: "/workflows/$id", component: function Editor() { useBlocker({ shouldBlockFn: () => true }); return null; } });
   const router = createRouter({ routeTree: root.addChildren([...routes, editor]), history: createMemoryHistory({ initialEntries: [path] }) });
@@ -33,6 +34,7 @@ function mount(path: string) {
 describe("SpacesNav", () => {
   beforeEach(() => {
     teams = [];
+    plugins = [];
     window.sessionStorage.clear();
     window.localStorage.clear();
   });
@@ -63,9 +65,9 @@ describe("SpacesNav", () => {
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
   });
 
-  it("opens a space and its Threads from the space name, and remembers it open", async () => {
+  it("opens a space and its Threads from the space name on Home, and remembers it open", async () => {
     teams = [team("t1", "Platform")];
-    const router = mount("/artifacts");
+    const router = mount("/");
     await userEvent.click(await screen.findByRole("link", { name: "Platform" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/chat"));
     expect(router.state.location.search).toEqual({ workspace: "t1" });
@@ -146,12 +148,77 @@ describe("SpacesNav", () => {
     expect(spaceTint("t1")).toBe(spaceTint("t1"));
   });
 
+  it("keeps the page when switching space from a space page", async () => {
+    teams = [team("t1", "Engineering"), team("t2", "Sales")];
+    const router = mount("/integrations?workspace=t1");
+    await userEvent.click(await screen.findByRole("link", { name: "Sales" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "t2" }));
+    expect(router.state.location.pathname).toBe("/integrations");
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("t2");
+  });
+
+  it("opens the list page of the same kind from a detail page", async () => {
+    teams = [team("t1", "Engineering"), team("t2", "Sales")];
+    const router = mount("/workflows/wf-1?workspace=t1");
+    expect((await screen.findByRole("link", { name: "Sales" })).getAttribute("href")).toBe("/workflows?workspace=t2");
+    expect(router.state.location.pathname).toBe("/workflows/wf-1");
+  });
+
+  it("opens Threads when switching space from a thread", async () => {
+    teams = [team("t1", "Engineering"), team("t2", "Sales")];
+    const router = mount("/chat?workspace=t1");
+    await userEvent.click(await screen.findByRole("link", { name: "Sales" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "t2" }));
+    expect(router.state.location.pathname).toBe("/chat");
+  });
+
+  it("keeps a space's other pages behind its More row, closed until opened, and remembers it", async () => {
+    mount("/chat");
+    await screen.findByRole("list", { name: "Personal pages" });
+    expect(screen.queryByRole("list", { name: "More Personal pages" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show more Personal pages" }));
+    const more = screen.getByRole("list", { name: "More Personal pages" });
+    expect(within(more).getAllByRole("link").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
+      ["Overview", "/overview?workspace=user"], ["Memory", "/memory?workspace=user"], ["Skills", "/skills?workspace=user"],
+      ["Integrations", "/integrations?workspace=user"], ["Usage", "/usage?workspace=user"],
+    ]);
+    expect(JSON.parse(window.localStorage.getItem("valet:spaces-more-expanded") ?? "{}")).toEqual({ user: true });
+  });
+
+  it("opens More and selects the row on one of its pages", async () => {
+    teams = [team("t1", "Platform")];
+    mount("/memory?workspace=t1");
+    const more = await screen.findByRole("list", { name: "More Platform pages" });
+    const memory = within(more).getByRole("link", { name: "Memory" });
+    expect(memory.getAttribute("aria-current")).toBe("page");
+    expect(memory.className.split(/\s+/)).toContain("bg-ink-wash-strong");
+    expect(screen.getByRole("button", { name: "Hide more Platform pages" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("lists Security under More only with the plugin", async () => {
+    plugins = [{ name: "security", enabledForCaller: true }];
+    mount("/security");
+    const more = await screen.findByRole("list", { name: "More Personal pages" });
+    expect(within(more).getByRole("link", { name: "Security" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("lists every page in a closed space's menu", async () => {
+    teams = [team("t1", "Platform")];
+    mount("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Show Platform pages" }));
+    const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+    expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Overview", "Memory", "Skills", "Integrations", "Usage"]);
+  });
+
   it("maps paths to the space page they belong to", () => {
     expect(spacePageFor("/")).toBe("/chat");
     expect(spacePageFor("/chat")).toBe("/chat");
     expect(spacePageFor("/workflows/runs/r1")).toBe("/workflows");
     expect(spacePageFor("/presence/activity")).toBe("/presence");
     expect(spacePageFor("/artifacts")).toBe("/artifacts");
-    expect(spacePageFor("/memory")).toBeUndefined();
+    expect(spacePageFor("/memory/graph")).toBe("/memory");
+    expect(spacePageFor("/integrations")).toBe("/integrations");
+    expect(spacePageFor("/changelog")).toBeUndefined();
+    expect(spacePageFor("/settings/model-comparison")).toBeUndefined();
   });
 });

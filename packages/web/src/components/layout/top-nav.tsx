@@ -144,12 +144,17 @@ export function TopNav() {
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
   ];
-  const more: Array<{ to: string; label: string; active?: boolean }> = [
-    { to: "/memory", label: "Memory" },
+  // Memory, Skills, Integrations and Usage belong to a space too: the
+  // sidebar lists them in each space's More. A phone's menu keeps them.
+  const spaceMore: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },
     { to: "/usage", label: "Usage" },
+  ];
+  // The bar's More holds only pages that no space owns.
+  const more: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/changelog", label: "Changelog" },
+    { to: "/settings/model-comparison", label: "Model comparison" },
   ];
   const onMore = useRouterState({ select: (st) => more.some(({ to }) => st.location.pathname.startsWith(to)) });
   const destinationLabel = (label: string) => (
@@ -215,7 +220,7 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
             </DropdownMenuItem>
-            {[...destinations, ...more.filter(({ to }) => to !== "/memory")].map(({ to, label, active }) => (
+            {[...destinations, ...spaceMore, ...more].map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
                   to={to}

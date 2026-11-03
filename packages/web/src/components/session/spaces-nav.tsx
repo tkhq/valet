@@ -1,31 +1,59 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, FileText, MessageSquare, Radio, User, Workflow, type LucideIcon } from "lucide-react";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
+import { BarChart3, Brain, ChevronDown, ChevronRight, FileText, LayoutDashboard, MessageSquare, MoreHorizontal, Plug, Radio, ShieldCheck, Sparkles, User, Workflow, type LucideIcon } from "lucide-react";
+import { pluginEnabledForCaller, useOrg } from "~/api/settings";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "~/components/primitives";
 import { useWorkspaceOptions, type WorkspaceOption } from "~/components/layout/workspace-options";
 import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { CHROME_BUTTON, HOVER_CHROME, NESTED_IDLE, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
 
-/** The pages every space has, in sidebar order. */
-export const SPACE_PAGES: ReadonlyArray<{ label: string; to: "/chat" | "/workflows" | "/presence" | "/artifacts"; icon: LucideIcon }> = [
+type SpacePage = {
+  label: string;
+  to: "/chat" | "/workflows" | "/presence" | "/artifacts" | "/overview" | "/memory" | "/skills" | "/integrations" | "/usage" | "/security";
+  icon: LucideIcon;
+};
+
+/** The pages every space lists, in sidebar order. */
+export const SPACE_PAGES: readonly SpacePage[] = [
   { label: "Threads", to: "/chat", icon: MessageSquare },
   { label: "Workflows", to: "/workflows", icon: Workflow },
   { label: "Presence", to: "/presence", icon: Radio },
   { label: "Artifacts", to: "/artifacts", icon: FileText },
 ];
 
+/** A space's other pages, behind its More row. Security shows only when the caller has the plugin. */
+export const SPACE_MORE_PAGES: readonly SpacePage[] = [
+  { label: "Overview", to: "/overview", icon: LayoutDashboard },
+  { label: "Memory", to: "/memory", icon: Brain },
+  { label: "Skills", to: "/skills", icon: Sparkles },
+  { label: "Integrations", to: "/integrations", icon: Plug },
+  { label: "Usage", to: "/usage", icon: BarChart3 },
+  { label: "Security", to: "/security", icon: ShieldCheck },
+];
+
 /** Pure: the space page a path belongs to. Home counts as Threads. */
-export function spacePageFor(pathname: string): (typeof SPACE_PAGES)[number]["to"] | undefined {
+export function spacePageFor(pathname: string): SpacePage["to"] | undefined {
   if (pathname === "/" || pathname === "/chat" || pathname.startsWith("/threads/")) return "/chat";
-  return SPACE_PAGES.find((page) => page.to !== "/chat" && (pathname === page.to || pathname.startsWith(`${page.to}/`)))?.to;
+  return [...SPACE_PAGES, ...SPACE_MORE_PAGES].find((page) => page.to !== "/chat" && (pathname === page.to || pathname.startsWith(`${page.to}/`)))?.to;
+}
+
+function isMorePage(page: string | undefined): boolean {
+  return SPACE_MORE_PAGES.some((candidate) => candidate.to === page);
+}
+
+/** The caller's More pages: Security only with the plugin. */
+function useMorePages(): readonly SpacePage[] {
+  const security = pluginEnabledForCaller(useOrg().data, "security") === true;
+  return security ? SPACE_MORE_PAGES : SPACE_MORE_PAGES.filter((page) => page.to !== "/security");
 }
 
 const EXPANDED_KEY = "valet:spaces-expanded";
+const MORE_EXPANDED_KEY = "valet:spaces-more-expanded";
 
-function loadExpanded(): Record<string, boolean> {
+function loadExpanded(key = EXPANDED_KEY): Record<string, boolean> {
   try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(EXPANDED_KEY) ?? "{}");
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(key) ?? "{}");
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
       ? Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"))
       : {};
@@ -34,9 +62,9 @@ function loadExpanded(): Record<string, boolean> {
   }
 }
 
-function storeExpanded(value: Record<string, boolean>): void {
+function storeExpanded(value: Record<string, boolean>, key = EXPANDED_KEY): void {
   try {
-    window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(value));
+    window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
     // Without storage the active space opens and the others close on reload.
   }
@@ -92,38 +120,79 @@ function teamLabelsOf(options: readonly WorkspaceOption[]): string[] {
  * lists its pages (Threads, Workflows, Presence, Artifacts); each row opens
  * that page with `?workspace=` naming the space, so the URL stays the one
  * source of truth for scope. The active space starts open and the others
- * closed; this browser remembers each space's open state. A closed space
- * shows its pages in a menu on hover or from its chevron, and its name opens
- * the space and its Threads.
+ * closed; this browser remembers each space's open state. Each open space
+ * also has a More row for its other pages (Overview, Memory, Skills,
+ * Integrations, Usage), closed until opened or until one of them is the
+ * current page. A closed space shows all its pages in a menu on hover or
+ * from its chevron. Its name opens the same page in that space, or its
+ * Threads from Home and threads.
  */
 export function SpacesNav() {
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
+  const morePages = useMorePages();
   const page = spacePageFor(useRouterState({ select: (state) => state.location.pathname }));
-  const [stored, setStored] = useState(loadExpanded);
+  const [stored, setStored] = useState(() => loadExpanded());
   const isOpen = (key: string) => stored[key] ?? key === scope.key;
   const setOpen = (key: string, open: boolean) => {
     const next = { ...stored, [key]: open };
     setStored(next);
     storeExpanded(next);
   };
+  const [moreStored, setMoreStored] = useState(() => loadExpanded(MORE_EXPANDED_KEY));
+  const setMoreOpen = (key: string, open: boolean) => {
+    setMoreStored((current) => {
+      const next = { ...current, [key]: open };
+      storeExpanded(next, MORE_EXPANDED_KEY);
+      return next;
+    });
+  };
+  // Arriving on one of a space's More pages opens its More, so the current
+  // row shows. The person can close it again while they stay.
+  const onMorePage = isMorePage(page);
+  useEffect(() => {
+    if (onMorePage && moreStored[scope.key] !== true) setMoreOpen(scope.key, true);
+    // Runs on arrival only: a manual close while on the page must hold.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onMorePage, page, scope.key]);
   const teamLabels = teamLabelsOf(options);
+  // A space's name opens the page you are on in that space, so switching
+  // keeps your place (Eng / Integrations to Sales / Integrations). From
+  // Home, a thread, or a page no space owns, it opens the space's Threads.
+  const nameTarget = page ?? "/chat";
   return <section aria-label="Spaces">
     <p className={SIDEBAR_LABEL}>Spaces</p>
     <ul className="space-y-0.5">
-      {options.map((option) => <SpaceRow key={option.key} option={option} teamLabels={teamLabels}
-        open={isOpen(option.key)} activePage={option.key === scope.key ? page : undefined} onOpenChange={(open) => setOpen(option.key, open)} />)}
+      {options.map((option) => <SpaceRow key={option.key} option={option} teamLabels={teamLabels} morePages={morePages} nameTarget={nameTarget}
+        open={isOpen(option.key)} activePage={option.key === scope.key ? page : undefined} onOpenChange={(open) => setOpen(option.key, open)}
+        moreOpen={moreStored[option.key] ?? (option.key === scope.key && onMorePage)} onMoreOpenChange={(open) => setMoreOpen(option.key, open)} />)}
     </ul>
   </section>;
 }
 
-function SpaceRow({ option, teamLabels, open, activePage, onOpenChange }: {
-  option: WorkspaceOption; teamLabels: readonly string[]; open: boolean;
-  activePage: string | undefined; onOpenChange: (open: boolean) => void;
+function SpaceRow({ option, teamLabels, morePages, nameTarget, open, activePage, onOpenChange, moreOpen, onMoreOpenChange }: {
+  option: WorkspaceOption; teamLabels: readonly string[]; morePages: readonly SpacePage[]; nameTarget: SpacePage["to"];
+  open: boolean; activePage: string | undefined; onOpenChange: (open: boolean) => void;
+  moreOpen: boolean; onMoreOpenChange: (open: boolean) => void;
 }) {
+  const pageRow = (page: SpacePage) => {
+    const current = page.to === activePage;
+    // On Threads the open thread (or Home) holds the selected fill, so
+    // its page shows as current with primary text only: one highlighted
+    // row at a time.
+    const filled = current && page.to !== "/chat";
+    return <li key={page.to}>
+      <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined}
+        className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none",
+          filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
+        <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+        {page.label}
+      </Link>
+    </li>;
+  };
   return <li>
     <div className={cn("group pr-1 hover:bg-ink-wash", TOP_ROW)}>
-      <Link to="/chat" search={{ workspace: option.key }} onClick={() => onOpenChange(true)}
+      <Link to={nameTarget} search={{ workspace: option.key }} onClick={() => onOpenChange(true)}
         className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 focus-visible:bg-ink-wash focus-visible:outline-none">
         <SpaceMark option={option} teamLabels={teamLabels} />
         <span className="truncate">{option.label}</span>
@@ -131,27 +200,22 @@ function SpaceRow({ option, teamLabels, open, activePage, onOpenChange }: {
       {open
         ? <button type="button" aria-label={`Collapse ${option.label}`} aria-expanded onClick={() => onOpenChange(false)}
           className={cn(CHROME_BUTTON, HOVER_CHROME)}><ChevronDown aria-hidden className="h-3.5 w-3.5" /></button>
-        : <SpacePagesMenu option={option}>
+        : <SpacePagesMenu option={option} morePages={morePages}>
           <button type="button" aria-label={`Show ${option.label} pages`} aria-expanded={false}
             className={cn(CHROME_BUTTON, HOVER_CHROME)}><ChevronRight aria-hidden className="h-3.5 w-3.5" /></button>
         </SpacePagesMenu>}
     </div>
     {open && <ul aria-label={`${option.label} pages`} className="mt-0.5 space-y-0.5">
-      {SPACE_PAGES.map((page) => {
-        const current = page.to === activePage;
-        // On Threads the open thread (or Home) holds the selected fill, so
-        // its page shows as current with primary text only: one highlighted
-        // row at a time.
-        const filled = current && page.to !== "/chat";
-        return <li key={page.to}>
-          <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined}
-            className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none",
-              filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
-            <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
-            {page.label}
-          </Link>
-        </li>;
-      })}
+      {SPACE_PAGES.map(pageRow)}
+      <li>
+        <button type="button" aria-expanded={moreOpen} aria-label={`${moreOpen ? "Hide" : "Show"} more ${option.label} pages`} onClick={() => onMoreOpenChange(!moreOpen)}
+          className={cn(NESTED_ROW, "group w-[calc(100%-1rem)] gap-2 pl-8 pr-1 text-left focus-visible:bg-ink-wash focus-visible:outline-none", NESTED_IDLE)}>
+          <MoreHorizontal aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+          <span className="flex-1">More</span>
+          <ChevronRight aria-hidden className={cn("mr-1 h-3.5 w-3.5 text-muted transition-transform", HOVER_CHROME, moreOpen && "rotate-90")} />
+        </button>
+      </li>
+      {moreOpen && <li><ul aria-label={`More ${option.label} pages`} className="space-y-0.5">{morePages.map(pageRow)}</ul></li>}
     </ul>}
   </li>;
 }
@@ -161,7 +225,7 @@ function SpaceRow({ option, teamLabels, open, activePage, onOpenChange }: {
  * Closed space rows and the collapsed icon rail use it, so another space's
  * page is one click away.
  */
-export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; children: ReactNode }) {
+export function SpacePagesMenu({ option, morePages, children }: { option: WorkspaceOption; morePages: readonly SpacePage[]; children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const cancelClose = () => clearTimeout(closeTimer.current);
@@ -178,11 +242,17 @@ export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; 
     onClick={() => { cancelClose(); setMenuOpen(true); }}>{children}</DropdownMenuTrigger>
     <DropdownMenuContent side="right" align="start" className="w-44" onPointerEnter={cancelClose} onPointerLeave={leave}>
       <DropdownMenuLabel className="text-xs font-normal text-muted">{option.label}</DropdownMenuLabel>
-      {SPACE_PAGES.map((page) => <DropdownMenuItem key={page.to} asChild>
-        <Link to={page.to} search={{ workspace: option.key }}><page.icon aria-hidden className="h-4 w-4" />{page.label}</Link>
-      </DropdownMenuItem>)}
+      {SPACE_PAGES.map((page) => <SpacePageItem key={page.to} option={option} page={page} />)}
+      <DropdownMenuSeparator />
+      {morePages.map((page) => <SpacePageItem key={page.to} option={option} page={page} />)}
     </DropdownMenuContent>
   </DropdownMenu>;
+}
+
+function SpacePageItem({ option, page }: { option: WorkspaceOption; page: SpacePage }) {
+  return <DropdownMenuItem asChild>
+    <Link to={page.to} search={{ workspace: option.key }}><page.icon aria-hidden className="h-4 w-4" />{page.label}</Link>
+  </DropdownMenuItem>;
 }
 
 /**
@@ -193,11 +263,12 @@ export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; 
 export function SpacesRail({ top }: { top: ReactNode }) {
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
+  const morePages = useMorePages();
   const teamLabels = teamLabelsOf(options);
   return <nav aria-label="Sidebar" className="flex flex-col items-center gap-1 py-2">
     {top}
     <div className="my-1 h-px w-6 bg-line" aria-hidden />
-    {options.map((option) => <SpacePagesMenu key={option.key} option={option}>
+    {options.map((option) => <SpacePagesMenu key={option.key} option={option} morePages={morePages}>
       <button type="button" aria-label={`${option.label} pages`}
         className={cn("flex h-8 w-8 items-center justify-center rounded-md hover:bg-ink-wash", option.key === scope.key ? "bg-ink-wash-strong text-ink" : "text-muted hover:text-ink")}>
         <SpaceMark option={option} teamLabels={teamLabels} />

@@ -173,12 +173,12 @@ describe("TopNav", () => {
     expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
 
-  it("keeps the other pages in a More menu", async () => {
+  it("keeps only pages no space owns in the More menu", async () => {
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "More" }));
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => [item.textContent, item.getAttribute("href")])).toEqual([
-      ["Memory", "/memory"], ["Skills", "/skills"], ["Integrations", "/integrations"], ["Usage", "/usage"], ["Changelog", "/changelog"],
+      ["Changelog", "/changelog"], ["Model comparison", "/settings/model-comparison"],
     ]);
   });
 
