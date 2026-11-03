@@ -131,79 +131,11 @@ describe("TopNav", () => {
     ];
   });
 
-  it.each([
-    ["/presence/places/slack%3AC123?workspace=t1", "/presence"],
-    ["/presence/rules/sub-old?workspace=t1", "/presence"],
-    ["/presence/events/ev-old?workspace=t1", "/presence/activity"],
-    ["/workflows/wf-old?workspace=t1", "/workflows"],
-    ["/workflows/runs/run-old?workspace=t1", "/workflows/runs"],
-    ["/workflows?run=old&gate=old&workspace=t1", "/workflows"],
-  ])("returns to the new workspace's Presence list from %s", async (path, list) => {
+  it("has no space control: Spaces live in the thread sidebar and page headers", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const { router } = renderNav({path});
-    await userEvent.click(await screen.findByRole("button", {name: "Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name: "Personal"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe(list));
-    expect(router.state.location.search).toEqual({workspace: "user"});
-    expect(await screen.findByRole("button", {name: "Workspace: Personal. Change workspace"})).toBeTruthy();
-  });
-
-  it.each(["user", "t2"])("opens the selected team's Workflows tab from %s", async (workspace) => {
-    const base: TeamSummary = { id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null };
-    navTeams = [base, {...base, id:"t2", name:"People"}];
-    const {router} = renderNav({path:`/workflows/wf-old?workspace=${workspace}`});
-    await userEvent.click(await screen.findByRole("button", {name:`Workspace: ${workspace === "user" ? "Personal" : "People"}. Change workspace`}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
-    expect(router.state.location.search).toEqual({workspace:"t1"});
-    expect(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
-  });
-
-  it.each([
-    "/presence?workspace=t1",
-    "/presence/activity?workspace=t1&status=problems",
-    "/workflows/runs?workspace=t1",
-  ])("renames the workspace in place on a list page reached as %s", async (path) => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const { router } = renderNav({ path });
-    const pathname = path.split("?")[0];
-    await userEvent.click(await screen.findByRole("button", { name: "Workspace: Platform. Change workspace" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Personal" }));
-    await waitFor(() => expect(router.state.location.search).toMatchObject({ workspace: "user" }));
-    expect(router.state.location.pathname).toBe(pathname);
-    if (path.includes("status=")) expect(router.state.location.search).toEqual({ workspace: "user", status: "problems" });
-    expect(await screen.findByRole("button", { name: "Workspace: Personal. Change workspace" })).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
-  });
-
-  it("keeps a Presence tab in place when the workspace changes", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    const {router} = renderNav({path:"/presence/activity?status=problems"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(await screen.findByRole("button", {name:"Workspace: Personal. Change workspace"})).toBeTruthy();
-    expect(router.state.location.pathname).toBe("/presence/activity");
-    expect(router.state.location.search).toEqual({status: "problems"});
-  });
-
-  it("keeps the original workspace when unsaved edits block leaving", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    const {router} = renderNav({path:"/workflows/wf-old", blockNavigation:true});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
-    expect(screen.getByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
-  });
-
-  it("keeps the detail open when reselecting the same workspace", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const {router} = renderNav({path:"/workflows/wf-old?workspace=t1"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
+    renderNav({ path: "/workflows?workspace=t1" });
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /Change space/ })).toBeNull();
   });
 
   it("opens a mobile navigation menu and closes after selecting a destination", async () => {
@@ -236,7 +168,6 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
-    expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
     expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
     expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
     expect(screen.getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
@@ -247,15 +178,15 @@ describe("TopNav", () => {
     const labels = within(nav)
       .getAllByRole("link")
       .map((el) => el.textContent);
-    expect(labels).toEqual([
-      "Threads",
-      "Artifacts",
-      "Presence",
-      "Workflows",
-      "Usage",
-      "Skills",
-      "Integrations",
-      "Changelog",
+    expect(labels).toEqual(["Threads", "Artifacts", "Presence", "Workflows"]);
+  });
+
+  it("keeps the other pages in a More menu", async () => {
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "More" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => [item.textContent, item.getAttribute("href")])).toEqual([
+      ["Skills", "/skills"], ["Integrations", "/integrations"], ["Usage", "/usage"], ["Changelog", "/changelog"],
     ]);
   });
 
@@ -319,7 +250,7 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByLabelText("Valet — dashboard")).toBeNull();
+    expect(within(nav).queryByLabelText("Valet — Home")).toBeNull();
     expect(within(nav).queryByLabelText("Settings")).toBeNull();
     expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
@@ -375,7 +306,7 @@ describe("TopNav — sidebar toggle", () => {
   it("hides the logo on a phone, where the menu carries Home", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
-    const logo = screen.getByRole("link", { name: "Valet — dashboard" });
+    const logo = screen.getByRole("link", { name: "Valet — Home" });
     expect(logo.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "md:inline-flex"]));
     await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
     expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");

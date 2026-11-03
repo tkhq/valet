@@ -83,6 +83,8 @@ vi.mock("@tanstack/react-router", () => ({
   // The page keeps its filters and both cursor stacks in the search params.
   useSearch: () => ({}),
   useNavigate: () => vi.fn(),
+  // The header's space control reads the path to decide where a switch goes.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/skills" } }),
 }));
 
 vi.mock("~/api/skills", () => ({

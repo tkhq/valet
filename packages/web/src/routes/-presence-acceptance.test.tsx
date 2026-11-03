@@ -544,9 +544,9 @@ function mountApp(initial: string) {
 }
 
 async function switchWorkspace(from: string, to: string) {
-  await userEvent.click(await screen.findByRole("button", { name: `Workspace: ${from}. Change workspace` }));
+  await userEvent.click(await screen.findByRole("button", { name: `Space: ${from}. Change space` }));
   await userEvent.click(screen.getByRole("menuitem", { name: to }));
-  await screen.findByRole("button", { name: `Workspace: ${to}. Change workspace` });
+  await screen.findByRole("button", { name: `Space: ${to}. Change space` });
 }
 
 /** The overview's header row: the `Presence` title, the subtitle, and the action pair. */

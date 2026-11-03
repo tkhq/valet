@@ -43,6 +43,8 @@ export function PresenceLayout() {
             actions={<OverviewActions />}
           />
         )}
+        {/* A detail page has a breadcrumb, not a page header: the space control sits above it. */}
+        {!onOverview && <div className="mb-1 flex justify-end"><WorkspaceClause /></div>}
         <div className="min-w-0">
           <Outlet />
         </div>

@@ -1,6 +1,7 @@
 # Team workspace UI
 
-Status: Implemented 2026-08-17.
+Status: Implemented 2026-08-17. The top-bar switcher is replaced by Spaces
+on 2026-11-03; see [Spaces replace the top-bar switcher](#spaces-replace-the-top-bar-switcher-2026-11-03).
 
 ## Problem
 
@@ -295,3 +296,33 @@ Switching workspace from a channel, workflow, run, or Automation list returns to
 The destination carries the selected workspace and clears the previous detail parameters.
 An old URL workspace must not override the new selection during navigation.
 Selecting the current workspace leaves the page unchanged. Other list pages retain their existing behavior.
+
+## Spaces replace the top-bar switcher (2026-11-03)
+
+UI copy calls a workspace a **space**: Personal, and one space for each team.
+The data model does not change. A space is the same owner (`user` or a team
+id), and the server checks team membership as before.
+
+- **No top-bar switcher.** The top bar has Threads, Artifacts, Presence, and
+  Workflows, plus a More menu (Skills, Integrations, Usage, Changelog).
+- **Thread pages.** On `/` and `/chat` the sidebar lists Spaces under Home as
+  one short list, so every space stays near the top. The active space is
+  marked, and its Projects and threads follow the list. Selecting another row
+  switches to that space. A caller with one space sees the thread list alone.
+- **Other scoped pages.** The clause beside the page title (`WorkspaceClause`)
+  is the space control: it names the active space and opens a menu to switch.
+  Artifacts, Presence (overview and detail pages), Workflows, Memory, Skills,
+  Usage, Integrations, Security, and `/overview` show it. Workflow editor and
+  run pages show one resource; their space follows that resource, and a switch
+  happens on the Workflows list.
+- **Phones.** The drawer keeps its "Threads in" space dropdown, and a page's
+  clause only names the space. The phone Chat, Tasks, and Make tabs do not
+  change.
+- **One source of truth.** The scope provider reads `?workspace=` from the
+  URL first, then the tab's stored choice. Every switch (`useSelectWorkspace`)
+  only navigates: it writes `?workspace=` into the URL, and the provider stores
+  the new key for the tab. A navigation that unsaved edits block leaves the
+  space unchanged. A detail page returns to its list, and Chat opens the new
+  space's thread list. Deep links and reloads keep the space.
+- **Projects** in the sidebar are still each person's folders, stored per
+  space. Shared Projects with a repository binding are a later change.

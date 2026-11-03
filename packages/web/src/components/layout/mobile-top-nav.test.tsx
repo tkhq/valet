@@ -150,22 +150,22 @@ describe("AppDrawer workspace switcher", () => {
   ])("returns to the new workspace's Presence list from %s", async (path, list) => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     const { router } = renderNav({path});
-    await userEvent.click(await screen.findByRole("button", {name: "Workspace: Platform. Change workspace"}));
+    await userEvent.click(await screen.findByRole("button", {name: "Space: Platform. Change space"}));
     await userEvent.click(screen.getByRole("menuitem", {name: "Personal"}));
     await waitFor(() => expect(router.state.location.pathname).toBe(list));
     expect(router.state.location.search).toEqual({workspace: "user"});
-    expect(await screen.findByRole("button", {name: "Workspace: Personal. Change workspace"})).toBeTruthy();
+    expect(await screen.findByRole("button", {name: "Space: Personal. Change space"})).toBeTruthy();
   });
 
   it.each(["user", "t2"])("opens the selected team's Workflows tab from %s", async (workspace) => {
     const base: TeamSummary = { id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null };
     navTeams = [base, {...base, id:"t2", name:"People"}];
     const {router} = renderNav({path:`/workflows/wf-old?workspace=${workspace}`});
-    await userEvent.click(await screen.findByRole("button", {name:`Workspace: ${workspace === "user" ? "Personal" : "People"}. Change workspace`}));
+    await userEvent.click(await screen.findByRole("button", {name:`Space: ${workspace === "user" ? "Personal" : "People"}. Change space`}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
     await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
     expect(router.state.location.search).toEqual({workspace:"t1"});
-    expect(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
+    expect(await screen.findByRole("button", {name:"Space: Platform. Change space"})).toBeTruthy();
   });
 
   it.each([
@@ -176,12 +176,12 @@ describe("AppDrawer workspace switcher", () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     const { router } = renderNav({ path });
     const pathname = path.split("?")[0];
-    await userEvent.click(await screen.findByRole("button", { name: "Workspace: Platform. Change workspace" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Space: Platform. Change space" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Personal" }));
     await waitFor(() => expect(router.state.location.search).toMatchObject({ workspace: "user" }));
     expect(router.state.location.pathname).toBe(pathname);
     if (path.includes("status=")) expect(router.state.location.search).toEqual({ workspace: "user", status: "problems" });
-    expect(await screen.findByRole("button", { name: "Workspace: Personal. Change workspace" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Space: Personal. Change space" })).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
   });
 
@@ -189,28 +189,29 @@ describe("AppDrawer workspace switcher", () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     window.sessionStorage.setItem("valet:workspace", "t1");
     const {router} = renderNav({path:"/presence/activity?status=problems"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Space: Platform. Change space"}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(await screen.findByRole("button", {name:"Workspace: Personal. Change workspace"})).toBeTruthy();
+    expect(await screen.findByRole("button", {name:"Space: Personal. Change space"})).toBeTruthy();
     expect(router.state.location.pathname).toBe("/presence/activity");
-    expect(router.state.location.search).toEqual({status: "problems"});
+    // The URL names the new space, so a reload or a shared link keeps it.
+    expect(router.state.location.search).toEqual({status: "problems", workspace: "user"});
   });
 
   it("keeps the original workspace when unsaved edits block leaving", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     window.sessionStorage.setItem("valet:workspace", "t1");
     const {router} = renderNav({path:"/workflows/wf-old", blockNavigation:true});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Space: Platform. Change space"}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
     expect(router.state.location.pathname).toBe("/workflows/wf-old");
-    expect(screen.getByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
+    expect(screen.getByRole("button", {name:"Space: Platform. Change space"})).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
   });
 
   it("keeps the detail open when reselecting the same workspace", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     const {router} = renderNav({path:"/workflows/wf-old?workspace=t1"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Space: Platform. Change space"}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
     expect(router.state.location.pathname).toBe("/workflows/wf-old");
   });

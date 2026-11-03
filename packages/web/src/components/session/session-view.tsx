@@ -105,6 +105,8 @@ export function SessionView({
   composerAccessory,
   suppressComposer = false,
   emptyState,
+  cover,
+  headerActions,
 }: {
   /** Shown above the composer, under the thread's own pending gate. Home
    * uses it for approvals from work in other threads. */
@@ -113,6 +115,11 @@ export function SessionView({
   suppressComposer?: boolean;
   /** Shown in place of the transcript while the thread has no messages. */
   emptyState?: ReactNode;
+  /** Shown in place of the transcript, under the header, while set. Desktop
+   * Home uses it for its idle view; the composer stays below. */
+  cover?: ReactNode;
+  /** Extra controls at the end of the thread header, before the summary. */
+  headerActions?: ReactNode;
   /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
   active?: boolean;
   chatOnly?: boolean;
@@ -405,7 +412,7 @@ export function SessionView({
       sandbox={stream.sandbox}
       threadId={effectiveThreadId}
       messages={stream.messages}
-      summaryControl={summaryControl}
+      summaryControl={headerActions ? <>{headerActions}{summaryControl}</> : summaryControl}
       onOpenView={hideBrowser && !mobileConversation ? undefined : changeTab}
       compact={mobileConversation}
       modelControlTarget={mobileConversation || !panel ? composerModelTarget : null}
@@ -444,27 +451,32 @@ export function SessionView({
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             <ThreadReplyContext.Provider value={widgetReplyTarget}>
             <ChildTitlesContext.Provider value={childTitles}>
-            <MessageList
-              footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
-              header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
-              messages={stream.messages}
-              threadId={effectiveThreadId}
-              loading={messagesQ.isPending}
-              onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
-              loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
-              onOpenChild={onOpenChild}
-              agentBusy={agentBusy}
-              pendingIds={threadQueueState?.pendingIds}
-              viewerId={me.data?.id}
-              onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
-              {...edit.list}
-              onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
-              onBranch={onOpenThread ? (message) => void branch(message) : undefined}
-              onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
-              onOpenThread={onOpenThread}
-              newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
-              emptyState={emptyState}
-            />
+            {cover ? <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              {!(panel || mobileNavigation) && <div className="sticky top-0 z-20 shrink-0 bg-paper">{sessionHeader}{sandboxTabs}</div>}
+              {cover}
+            </div> : (
+              <MessageList
+                footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
+                header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+                messages={stream.messages}
+                threadId={effectiveThreadId}
+                loading={messagesQ.isPending}
+                onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
+                loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
+                onOpenChild={onOpenChild}
+                agentBusy={agentBusy}
+                pendingIds={threadQueueState?.pendingIds}
+                viewerId={me.data?.id}
+                onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
+                {...edit.list}
+                onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
+                onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+                onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
+                onOpenThread={onOpenThread}
+                newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
+                emptyState={emptyState}
+              />
+            )}
             </ChildTitlesContext.Provider>
             </ThreadReplyContext.Provider>
             {chatActive && !mobileBrowser && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (

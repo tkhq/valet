@@ -1,41 +1,31 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useCallback } from "react";
 import type { TeamSummary } from "@valet/api/wire";
+import { useOrg, useTeams } from "~/api/settings";
+import { eligibleTeams } from "~/components/session/assistant-rail";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { Check, ChevronsUpDown, User, Users } from "lucide-react";
 import {
   Button,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 
 /**
- * Which workspace you are working in: your own, or one of your teams.
+ * Spaces: your own, and one per team you belong to. Desktop lists them in
+ * the thread sidebar (`SpacesNav`) and names the active one in each scoped
+ * page header (`WorkspaceClause`); the phone drawer keeps this dropdown.
  *
- * It sits beside the logo because it scopes the surfaces below it rather
- * than filtering one list — the same position Slack and Linear give a
- * workspace control, and the position that reads as "everything under here
- * belongs to this".
+ * No space control carries an unread badge. Notifications stay global: the
+ * bell polls every space, and each notification links to the conversation
+ * that needs you, which switches space on arrival.
  *
- * **It has no unread badge, deliberately.** In a switcher the other
- * workspaces are off-screen by construction, so hiding attention behind it
- * would be the one real cost of this shape. Notifications stay global — the
- * bell already polls every workspace and every notification links straight
- * to the conversation that needs you, which switches context on arrival.
- * A badge here would be a second, weaker answer to a question the bell
- * already answers completely.
- *
- * Selecting a workspace keeps list pages in place, and renames the
- * workspace in the URL when the URL names one. A Presence detail page
- * (a place, a line of presence, an event) returns to its Presence list, and a
- * workflow or a run returns to its Workflows list, so an old resource is not
- * requested under the new owner. Chat opens the selected workspace's thread
- * list.
- *
- * A workspace with no assistant is therefore selectable now. It could not be
- * before, because the only thing selecting it did was open an assistant that
- * did not exist. A team with no assistant still owns skills and workflows.
+ * A team with no assistant is still listed. It owns skills and workflows,
+ * and hiding it would read as removal from the team.
  */
 /**
  * The Presence or Workflows list to open after a workspace switch, or
@@ -80,89 +70,100 @@ export function workspaceOptions(teams: TeamSummary[]): WorkspaceOption[] {
   ];
 }
 
+/** The caller's spaces: Personal, then each team they can open. */
+export function useWorkspaceOptions(): WorkspaceOption[] {
+  const teamsQ = useTeams();
+  const orgQ = useOrg();
+  return workspaceOptions(eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations));
+}
+
+/**
+ * Switch the active space from anywhere: the Spaces sidebar, a page header's
+ * space control, or the phone drawer. The URL is the source of truth, so a
+ * switch names the new space in it (`?workspace=`); the scope provider then
+ * stores it for the tab. A detail page returns to its list, so an old
+ * resource is not requested under the new owner, and Chat opens the new
+ * space's thread list.
+ */
+export function useSelectWorkspace(): (key: string) => void {
+  const navigate = useNavigate();
+  const scope = useWorkspaceScope();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  return useCallback((key: string) => {
+    if (key === scope.key) return;
+    // Only navigate: the scope reads the new key from the URL and stores it.
+    // A navigation that unsaved edits block therefore leaves the scope as is.
+    const list = presenceListAfterSwitch(pathname);
+    if (list) {
+      // Drop old detail parameters and make the new workspace authoritative.
+      void navigate({ to: list, search: { workspace: key } });
+      return;
+    }
+    if (pathname === "/chat") {
+      void navigate({ to: "/chat", search: { workspace: key, thread: undefined, child: undefined } });
+      return;
+    }
+    // Every other page stays in place under the new name.
+    void navigate({ to: ".", search: (prev) => ({ ...prev, workspace: key }) });
+  }, [navigate, pathname, scope.key]);
+}
+
 export function WorkspaceSwitcher({
   options,
   activeKey,
-  onSelect,
-  /** True on `/chat`, where the open conversation must follow the scope. */
-  navigateOnSelect,
+  variant = "button",
+  note,
   className,
 }: {
   options: WorkspaceOption[];
   activeKey: string;
-  onSelect: (key: string) => void;
-  navigateOnSelect: boolean;
+  /** `clause`: quiet text beside a page title (`WorkspaceClause`). */
+  variant?: "button" | "clause";
+  /** One line above the choices, such as who can see the active space. */
+  note?: string;
   className?: string;
 }) {
-  const navigate = useNavigate();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
-  // A URL that names the workspace outranks the stored key, so a switch must rename it.
-  const urlNamesWorkspace = useRouterState({ select: (state) => "workspace" in state.location.search });
+  const select = useSelectWorkspace();
 
   // One workspace is not a choice. A solo user sees the logo alone, exactly
   // as before teams existed.
   if (options.length < 2 && options.some(o => o.key === activeKey)) return null;
 
   const active = options.find((o) => o.key === activeKey) ?? { key: activeKey, label: "Unavailable workspace", isTeam: true };
-  if (!active) return null;
+  const label = `Space: ${active.label}. Change space`;
+  const face = <>
+    {active.isTeam ? <Users className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <User className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+    <span className="truncate text-sm">{active.label}</span>
+    <ChevronsUpDown className="h-3 w-3 shrink-0 text-muted" aria-hidden />
+  </>;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className={cn("min-w-0 shrink gap-1.5 max-w-[11rem] md:shrink-0", className)}
-          aria-label={`Workspace: ${active.label}. Change workspace`}
-        >
-          {active.isTeam ? (
-            <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          ) : (
-            <User className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          )}
-          <span className="truncate text-sm">{active.label}</span>
-          <ChevronsUpDown className="h-3 w-3 shrink-0 text-muted" aria-hidden />
-        </Button>
+        {variant === "clause" ? (
+          <button
+            type="button"
+            className={cn("inline-flex min-w-0 max-w-full items-center gap-1 rounded px-1 text-sm font-normal text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none", className)}
+            aria-label={label}
+          >
+            {face}
+          </button>
+        ) : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn("min-w-0 shrink gap-1.5 max-w-[11rem] md:shrink-0", className)}
+            aria-label={label}
+          >
+            {face}
+          </Button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[12rem]">
+        {note && <DropdownMenuLabel className="max-w-[16rem] text-xs font-normal text-muted">{note}</DropdownMenuLabel>}
         {options.map((o) => (
-          <DropdownMenuItem
-            key={o.key}
-            onSelect={() => {
-              if (o.key === activeKey) return;
-              const list = presenceListAfterSwitch(pathname);
-              if (list) {
-                // Drop old detail parameters and make the new workspace authoritative.
-                void navigate({ to: list, search: { workspace: o.key } });
-                return;
-              }
-              if (pathname === "/integrations") {
-                // A link may name the workspace (`?workspace=user` from
-                // a personal settings page), and the URL outranks the stored key.
-                // Name the new one, or the page snaps back to the old.
-                void navigate({ to: "/integrations", search: { workspace: o.key } });
-                return;
-              }
-              if (navigateOnSelect) {
-                onSelect(o.key);
-                void navigate({
-                  to: "/chat",
-                  search: { workspace: o.key, thread: undefined, child: undefined },
-                });
-                return;
-              }
-              if (urlNamesWorkspace) {
-                // A list page reached with `?workspace=` (a switch from a
-                // detail page, a link from Settings, a redirect) stays in
-                // place under the new name. Without it the scope reads the
-                // old key back from the URL.
-                void navigate({ to: ".", search: (prev) => ({ ...prev, workspace: o.key }) });
-                return;
-              }
-              onSelect(o.key);
-            }}
-          >
+          <DropdownMenuItem key={o.key} onSelect={() => select(o.key)}>
             <span className={cn("flex w-full items-center gap-2", o.key === activeKey && "font-medium")}>
               {o.isTeam ? (
                 <Users className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />

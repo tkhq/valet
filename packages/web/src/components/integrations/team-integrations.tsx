@@ -1,3 +1,4 @@
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
 import { ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -30,7 +31,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={cn(pageClass, "max-w-3xl")}>
-        <PageHeader title="Integrations" description={team && `${team.name} workspace`} />
+        <PageHeader title="Integrations" clause={<WorkspaceClause />} description={team && `${team.name} workspace`} />
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
         <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
         <div className="mt-8 space-y-10">
@@ -39,7 +40,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
             <ErrorRow>Could not load team integrations. Reload the page to try again.</ErrorRow>
           )}
           {!loading && !failed && !team && (
-            <ErrorRow>This team is unavailable. Select another workspace or ask a team admin to restore your access.</ErrorRow>
+            <ErrorRow>This team is unavailable. Select another space beside the page title, or ask a team admin to restore your access.</ErrorRow>
           )}
           {!loading && !failed && team && (
             <>

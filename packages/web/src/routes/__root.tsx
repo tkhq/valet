@@ -41,17 +41,16 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  * (via `RootLayout`'s `<Outlet/>` boundary), so it isn't a bare white page.
  */
 function NotFound() {
-  const mobile = useMobileLayout();
   return (
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
         <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
-        <p className="text-sm text-muted">{mobile ? "Valet is on Home." : "The dashboard does."}</p>
+        <p className="text-sm text-muted">Valet is on Home.</p>
         <Link
           to="/"
           className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
         >
-          {mobile ? "Back to Home" : "Back to the dashboard"}
+          Back to Home
         </Link>
       </div>
     </div>
@@ -64,9 +63,9 @@ function NotFound() {
  * something each route/`SessionView` renders itself, because the sidebar
  * lives in the app shell's `<aside>`, outside the routed `<main>` content.
  *
- * - `/chat` — the nested thread-tree (children grouped under their
- *   spawning thread), replacing the flat thread list.
- * - everything else (`/`, `/sessions/$sessionId`,
+ * - `/` and `/chat` — the nested thread-tree (children grouped under their
+ *   spawning thread), replacing the flat thread list. `/` opens Home in it.
+ * - everything else (`/sessions/$sessionId`,
  *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
  *   have no thread UI (decision 14); the memory explorer renders its own
  *   tree pane inside the route (Task 6); the dashboard and session list
@@ -75,7 +74,7 @@ function NotFound() {
  * A phone gets the drawer (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
+  if (pathname === "/" || pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
   return null;
 }
 

@@ -254,7 +254,7 @@ describe("ThreadTree — Home row", () => {
     // The router Link mock renders a bare anchor, so query it by tag.
     const link = section.querySelector("a");
     expect(link?.textContent).toContain("Home");
-    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(link?.getAttribute("to")).toBe("/");
     expect(within(section).getByLabelText("Unread")).toBeTruthy();
     // One Home, above everything else in the list.
     expect(screen.getAllByText("Home")).toHaveLength(1);
@@ -268,7 +268,7 @@ describe("ThreadTree — Home row", () => {
     threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
     renderTree();
     const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
-    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    expect(homeLink?.getAttribute("to")).toBe("/");
     const recents = screen.getByRole("region", { name: "Recents" });
     expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
     expect(within(recents).queryByText("Home")).toBeNull();
@@ -283,11 +283,21 @@ describe("ThreadTree — Home row", () => {
     expect(screen.queryByText("Home")).toBeNull();
   });
 
-  it("shows no Home row in another workspace's sidebar", () => {
+  it("pins Home in another workspace's sidebar too, without that list's thread marks", () => {
     homeConversation = { sessionId: "orchestrator:someone-else", threadId: "home-9" };
     threads = [thread()];
     renderTree();
-    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+    const section = screen.getByRole("region", { name: "Home" });
+    expect(section.querySelector("a")?.getAttribute("to")).toBe("/");
+    expect(within(section).queryByLabelText("Unread")).toBeNull();
+  });
+
+  it("starts Home fresh: no tasks nest under the Home row", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    expect(screen.queryByRole("list", { name: "Tasks from Home" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /tasks for Home/ })).toBeNull();
   });
 
   it("finds Home in search when its content matches", async () => {
