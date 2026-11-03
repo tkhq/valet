@@ -76,6 +76,16 @@ const incidents = { field: "channel", op: "eq" as const, value: "C900", label: "
 const acmeApi = { field: "repo", op: "eq" as const, value: "acme/api" };
 
 describe("presenceSentence <do>", () => {
+  it("a comes-back-online line names the person and no channel", () => {
+    const s = sub({
+      eventKeys: ["slack.user_online"],
+      filters: [{ field: "user", op: "eq", value: "U0AB", label: "Ada" }],
+      target: { kind: "assistant", thread: { mode: "new" } },
+    });
+    expect(presenceSentence(s, catalog, workflows, threads)).not.toMatch(/channel/);
+    expect(presenceSentence(s, catalog, workflows, threads)).toMatch(/^When someone comes back online from Ada, /);
+  });
+
   it("assistant, conversational keys, new: reply in a new thread", () => {
     const s = sub({ filters: [incidents], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
     expect(presenceSentence(s, catalog, workflows, threads)).toBe(
