@@ -6206,7 +6206,7 @@ export class Thread {
             // when no resolver is wired (env-fallback path) — behavior unchanged.
             // The idle pass runs after that finally and passes its own key.
             apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
-            fetch: this.session.options.modelFetch,
+            fetch: this.session.options.modelFetch?.(model),
           });
           break;
         } catch (err) {
@@ -6552,7 +6552,7 @@ export class Thread {
                 : message,
             ),
         };
-        const modelFetch = this.session.options.modelFetch;
+        const modelFetch = this.session.options.modelFetch?.(model);
         return this.nativeImages.stream(model, transcript, {
           ...options,
           ...(modelFetch && !options?.fetch ? { fetch: modelFetch } : {}),

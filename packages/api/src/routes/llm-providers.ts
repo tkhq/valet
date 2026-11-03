@@ -23,7 +23,7 @@ import { completeSimple, getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin } from "../services/org.js";
-import { checkOutboundUrl, guardedFetch, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
+import { checkOutboundUrl, guardedFetch, modelFetchFor, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -509,7 +509,7 @@ llmProvidersRouter.post("/:id/test", async (c) => {
       {
         messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
       },
-      { apiKey, maxTokens: 1, fetch: guardedFetch },
+      { apiKey, maxTokens: 1, fetch: modelFetchFor(resolved.model) },
     );
     if (result.stopReason === "error" || result.stopReason === "aborted") {
       const resp: TestLlmProviderResponse = {

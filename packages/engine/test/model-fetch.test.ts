@@ -12,7 +12,7 @@ import {
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 describe("modelFetch session option", () => {
-  it("passes the host fetch to every model request of the session", async () => {
+  it("asks the host for each model request's fetch and passes it on", async () => {
     const faux = registerFauxProvider({ provider: "model-fetch" });
     const model = faux.getModel();
     const seen: Array<SimpleStreamOptions["fetch"]> = [];
@@ -32,7 +32,7 @@ describe("modelFetch session option", () => {
     const engine = new Engine({
       providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
     });
-    const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {}, model, modelFetch: hostFetch });
+    const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {}, model, modelFetch: (requestModel) => (requestModel.api === "google-generative-ai" ? undefined : hostFetch) });
     try {
       const thread = session.thread("main");
       const receipt = await thread.submitPrompt("hello", {});

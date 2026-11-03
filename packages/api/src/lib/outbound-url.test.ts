@@ -6,6 +6,8 @@ import {
   checkOutboundUrl,
   checkOutboundUrlShape,
   createGuardedFetch,
+  guardedFetch,
+  modelFetchFor,
   outboundPolicyFromEnv,
   OutboundUrlError,
   type Resolver,
@@ -258,5 +260,16 @@ describe("global fetch isolation", () => {
     await fetch("http://127.0.0.1:1/").catch(() => undefined);
     const installed: unknown = Reflect.get(globalThis, Symbol.for("undici.globalDispatcher.1"));
     expect(installed instanceof PackageAgent).toBe(false);
+  });
+});
+
+describe("modelFetchFor", () => {
+  it("guards adapters that accept a custom fetch", () => {
+    for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) expect(modelFetchFor({ api })).toBe(guardedFetch);
+  });
+
+  it("leaves the Google adapters on pi-ai's default fetch, which they require", () => {
+    expect(modelFetchFor({ api: "google-generative-ai" })).toBeUndefined();
+    expect(modelFetchFor({ api: "google-vertex" })).toBeUndefined();
   });
 });

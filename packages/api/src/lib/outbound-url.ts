@@ -413,3 +413,14 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
 
 /** The process-wide guarded fetch, bound to `currentOutboundPolicy()`. */
 export const guardedFetch: typeof fetch = createGuardedFetch();
+
+/** pi-ai adapters that refuse a custom fetch. Their endpoints come from the
+ * pi-ai registry or the deployment, never from an admin-set base URL (the
+ * provider API refuses a base URL on known kinds). */
+const NO_CUSTOM_FETCH_APIS = new Set(["google-generative-ai", "google-vertex"]);
+
+/** The fetch for one model request: `guardedFetch`, or undefined (pi-ai's
+ * default) for an adapter that refuses a custom fetch. */
+export function modelFetchFor(model: { api: string }): typeof fetch | undefined {
+  return NO_CUSTOM_FETCH_APIS.has(model.api) ? undefined : guardedFetch;
+}
