@@ -838,8 +838,17 @@ export class EventDispatcher {
       inArray(eventDeliveries.status, ["pending", "failed"]),
       eq(eventDeliveries.nextAttemptAt, lease),
     );
+    // Lease writes run one at a time. Two renewals that both read the same
+    // `lease` would race: one moves it, and the other misses the fence and
+    // reads as a lost lease although this run still owns the row.
+    let leaseWrites: Promise<unknown> = Promise.resolve();
+    const serialLeaseWrite = <T>(write: () => Promise<T>): Promise<T> => {
+      const next = leaseWrites.then(write);
+      leaseWrites = next.catch(() => {});
+      return next;
+    };
     /** Move the lease to a new value, fenced on the current one. False when another run took the row. */
-    const takeLease = async (set: Partial<typeof eventDeliveries.$inferInsert> = {}): Promise<boolean> => {
+    const takeLease = (set: Partial<typeof eventDeliveries.$inferInsert> = {}): Promise<boolean> => serialLeaseWrite(async () => {
       // Jitter keeps two writes in the same millisecond from minting one value.
       const next = Date.now() + CLAIM_LEASE_MS + Math.floor(Math.random() * 1000);
       const moved = await db.update(eventDeliveries).set({ ...set, nextAttemptAt: next }).where(owned())
@@ -847,12 +856,16 @@ export class EventDispatcher {
       if (moved.length === 0) return false;
       lease = next;
       return true;
-    };
+    });
     const finish = () => {
       clearInterval(renew);
       this.pluginRuns.delete(delivery.id);
     };
+    /** True while a renewal tick runs. A slow tick makes the next ones skip, not pile up. */
+    let renewing = false;
     const renew = setInterval(() => {
+      if (renewing) return;
+      renewing = true;
       void (async () => {
         const [line] = await db.select({ enabled: eventSubscriptions.enabled }).from(eventSubscriptions)
           .where(eq(eventSubscriptions.id, sub.id)).limit(1);
@@ -861,7 +874,9 @@ export class EventDispatcher {
           return;
         }
         if (!(await takeLease())) abort.abort(PLUGIN_LEASE_LOST);
-      })().catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err));
+      })()
+        .catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err))
+        .finally(() => { renewing = false; });
     }, this.deps.pluginHandlers?.leaseRenewMs ?? CLAIM_LEASE_MS / 3);
 
     void (async () => {
@@ -884,6 +899,10 @@ export class EventDispatcher {
       } catch (err) {
         failure = { err };
       }
+      // No renewal may move the lease after this point: the outcome write
+      // below is fenced on the last value, so it waits for any write in flight.
+      clearInterval(renew);
+      await leaseWrites;
       if (abort.signal.aborted && abort.signal.reason === PLUGIN_LEASE_LOST) {
         // Another run owns the row now; its outcome is the one that counts.
       } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {

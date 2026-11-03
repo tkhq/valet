@@ -223,6 +223,26 @@ describe("EventDispatcher plugin target", () => {
     await d.stop();
   });
 
+  it("a stalled database never makes two renewals race and abandon a run it still owns", async () => {
+    const { deliveryId } = await seed();
+    let aborted = false;
+    const d = dispatcher(pluginWith(async (_event, ctx) => {
+      ctx.signal.addEventListener("abort", () => { aborted = true; });
+      await new Promise((r) => setTimeout(r, 300));
+    }));
+    await d.pollOnce();
+    for (let i = 0; i < 100 && (await delivery(deliveryId)).attempts === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    // An open transaction holds the one database connection for several
+    // renewal intervals, so renewal ticks pile up behind it.
+    await tdb.appDb.transaction(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    const row = await settled(deliveryId);
+    expect(aborted).toBe(false);
+    expect(row.status).toBe("delivered");
+    await d.stop();
+  });
+
   it("refuses an app token for a service the plugin does not declare", async () => {
     const { deliveryId } = await seed();
     const d = dispatcher(pluginWith(async (_event, ctx) => {
