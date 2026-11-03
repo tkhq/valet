@@ -192,6 +192,11 @@ export class OnlineStatusWatcher {
     // repeat the full read with its workspace check (`readOnlineStatus`).
     const confirmed = full ? result : await read(token, user, { ...opts, profile: true });
     if (!confirmed.ok) return fail(confirmed);
+    // The person went away again between the two reads: no event, and a new away period starts.
+    if (confirmed.status.presence !== "active") {
+      applyPresence(state, confirmed.status.presence, now);
+      return;
+    }
     const event = onlineEvent({
       user, ...(teamId ? { teamId } : {}), awayMs: away, observedAt: now,
       dedupeKey: `user_online:${teamId ?? orgId}:${user}:${awaySince}`,

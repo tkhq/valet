@@ -176,6 +176,23 @@ describe("OnlineStatusWatcher", () => {
     warn.mockRestore();
   });
 
+  it("does not fire when the confirming read sees the person away again", async () => {
+    await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
+    const w = watcher();
+    presence.set("U1", "away");
+    await w.tick(); // baseline
+    now += MIN_AWAY_MS;
+    presence.set("U1", "active");
+    members.set("U1", { ok: true, status: { user: "U1", name: "u1", presence: "away", online: false } });
+    await w.tick();
+    expect(events).toHaveLength(0);
+    // The next return counts from the away the confirming read saw.
+    members.delete("U1");
+    now += MIN_AWAY_MS;
+    await w.tick();
+    expect(events).toHaveLength(1);
+  });
+
   it("polls each person at most once per interval", async () => {
     await db.appDb.insert(eventSubscriptions).values(line("l1", "U1"));
     const w = watcher();
