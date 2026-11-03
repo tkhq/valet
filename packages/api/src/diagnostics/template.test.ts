@@ -14,7 +14,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
-import { nextFireAt } from "../workflows/schedule-service.js";
+import { nextFireAt } from "../workflows/next-fire.js";
 import { listCatalogTemplates } from "../workflows/templates.js";
 import { toolNodesOf } from "../workflows/tool-nodes.js";
 import { diagnosticsActionPlugin } from "./actions.js";
