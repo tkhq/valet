@@ -306,7 +306,8 @@ id), and the server checks team membership as before.
 - **One app-wide sidebar.** Every signed-in page except Settings shows it:
   New thread (with its create menu), Search, Home, and Spaces. Settings keeps
   its own rail and pinned scope.
-- **Spaces.** Each space is a row with a user or users icon. An open space
+- **Spaces.** Each space is a row. Personal has a person icon, and each team
+  has a 16px square with its initial in a muted tint. An open space
   lists its pages: Threads, Workflows, Presence, and Artifacts. Each page row
   opens that page with `?workspace=` naming the space. The active space starts
   open and the others closed; the browser remembers each space's open state.
@@ -337,3 +338,27 @@ id), and the server checks team membership as before.
   and reloads keep the space.
 - **Projects** in the sidebar are still each person's folders, stored per
   space. Shared Projects with a repository binding are a later change.
+
+### Sidebar hierarchy
+
+The sidebar uses three type tiers, Linear style. `sidebar-rows.ts` holds the
+shared classes.
+
+- **Section labels** (Spaces, Projects, Pinned, Recents): 11px, medium
+  weight, muted, with space above and no divider line.
+- **Top-level rows** (Home, each space, each project): 13px primary text,
+  16px icons, 28px tall.
+- **Nested rows** (a space's pages, a project's threads, Recents): 13px
+  secondary text, 14px icons, 26px tall, indented 24px with no guide line.
+- **Rows** sit 2px apart. A phone keeps 44px touch targets.
+- **One selected row.** The open thread, Home, or the open page takes a
+  neutral fill with primary, medium-weight text. On Home and Threads the open
+  conversation holds the fill, so the Threads page row shows primary text
+  only. Unread stays a small dot.
+- **Row chrome.** Chevrons, "+" and "…" show when the row has hover or focus.
+  A screen that cannot hover always shows them. Chevrons sit at the right.
+- **Recents** shows five threads, plus the open one, then "Show more". The
+  next page loads only once every loaded row shows. The phone drawer lists
+  every thread.
+- The top row keeps its height, so the one divider stays level with the
+  main and Tasks headers.

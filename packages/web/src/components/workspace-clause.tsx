@@ -65,7 +65,7 @@ export function workspaceName(ws: ActiveWorkspace): string {
 }
 
 /**
- * The space step of a page's breadcrumb ("XORS Eng Team / Workflows"):
+ * The space step of a page's breadcrumb ("Engineering / Workflows"):
  * plain text naming the active space. The sidebar switches space; this only
  * says where the page is. `crumb` is the small size for a detail page's
  * breadcrumb line.

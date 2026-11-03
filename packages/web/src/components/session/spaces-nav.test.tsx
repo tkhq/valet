@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import type { TeamSummary } from "@valet/api/wire";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
-import { SpacesNav, spacePageFor } from "./spaces-nav";
+import { SpacesNav, spaceInitial, spacePageFor, spaceTint } from "./spaces-nav";
 
 let teams: TeamSummary[] = [];
 vi.mock("~/api/settings", async (importOriginal) => ({
@@ -97,6 +97,53 @@ describe("SpacesNav", () => {
     mount("/chat");
     const spaces = await screen.findByRole("region", { name: "Spaces" });
     for (const node of [spaces, ...spaces.querySelectorAll("*")]) expect(node.className.toString()).not.toMatch(/\bborder-(t|b)\b/);
+  });
+
+  it("fills the open page's row, but leaves Threads to the open thread", async () => {
+    mount("/workflows");
+    const pages = await screen.findByRole("list", { name: "Personal pages" });
+    const fill = (name: string) => within(pages).getByRole("link", { name }).className.split(/\s+/);
+    expect(fill("Workflows")).toContain("bg-ink-wash-strong");
+    expect(fill("Threads")).not.toContain("bg-ink-wash-strong");
+    // No saturated block anywhere in the Spaces list.
+    const spaces = screen.getByRole("region", { name: "Spaces" });
+    for (const node of [spaces, ...spaces.querySelectorAll("*")]) expect(node.className.toString()).not.toMatch(/moss/);
+  });
+
+  it("names Threads as the current page without a fill while a thread is open", async () => {
+    mount("/chat");
+    const threads = within(await screen.findByRole("list", { name: "Personal pages" })).getByRole("link", { name: "Threads" });
+    expect(threads.getAttribute("aria-current")).toBe("page");
+    expect(threads.className.split(/\s+/)).not.toContain("bg-ink-wash-strong");
+  });
+
+  it("marks each team with its initial and keeps the person icon for Personal", async () => {
+    teams = [team("t1", "Acme Platform"), team("t2", "Acme Design")];
+    mount("/chat");
+    const marks = (await screen.findAllByRole("link", { name: /Acme/ })).map((link) => link.querySelector("[data-space-mark]")?.textContent);
+    expect(marks).toEqual(["P", "D"]);
+    expect(screen.getByRole("link", { name: "Personal" }).querySelector("[data-space-mark]")).toBeNull();
+  });
+
+  it("shows a space's chevron on hover or focus only, where the screen can hover", async () => {
+    teams = [team("t1", "Platform")];
+    mount("/chat");
+    for (const name of ["Collapse Personal", "Show Platform pages"]) {
+      const classes = (await screen.findByRole("button", { name })).className.split(/\s+/);
+      expect(classes).toContain("[@media(hover:hover)]:opacity-0");
+      expect(classes).toContain("group-hover:opacity-100");
+      expect(classes).toContain("group-focus-within:opacity-100");
+    }
+  });
+
+  it("picks a team initial past a shared first word", () => {
+    expect(spaceInitial("Platform", ["Platform"])).toBe("P");
+    expect(spaceInitial("Acme Eng Team", ["Acme Eng Team", "Acme Sales Team", "Acme Ops"])).toBe("E");
+    expect(spaceInitial("Acme Ops", ["Acme Eng Team", "Acme Sales Team", "Acme Ops"])).toBe("O");
+    // A name that is only the shared word keeps it.
+    expect(spaceInitial("Acme", ["Acme", "Acme Design"])).toBe("A");
+    expect(spaceInitial("  ", ["  "])).toBe("?");
+    expect(spaceTint("t1")).toBe(spaceTint("t1"));
   });
 
   it("maps paths to the space page they belong to", () => {

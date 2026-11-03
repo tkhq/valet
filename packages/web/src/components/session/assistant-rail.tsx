@@ -31,7 +31,7 @@ export function AssistantRailCollapsed() {
     <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={controls?.toggleCollapsed} className={cn(RAIL_BUTTON, "text-muted hover:text-ink")}>
       <PanelLeftOpen aria-hidden className="h-4 w-4" />
     </button>
-    <Link to="/" aria-label="Home" title="Home" className={cn(RAIL_BUTTON, onHome ? "bg-moss-wash-strong text-ink" : "text-muted hover:text-ink")}>
+    <Link to="/" aria-label="Home" title="Home" className={cn(RAIL_BUTTON, onHome ? "bg-ink-wash-strong text-ink" : "text-muted hover:text-ink")}>
       <House aria-hidden className="h-4 w-4" />
     </Link>
   </>} />;

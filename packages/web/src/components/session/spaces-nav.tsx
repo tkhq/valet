@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, FileText, MessageSquare, Radio, User, Users, Workflow, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, MessageSquare, Radio, User, Workflow, type LucideIcon } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
 import { useWorkspaceOptions, type WorkspaceOption } from "~/components/layout/workspace-options";
 import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { CHROME_BUTTON, HOVER_CHROME, NESTED_IDLE, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
 
 /** The pages every space has, in sidebar order. */
 export const SPACE_PAGES: ReadonlyArray<{ label: string; to: "/chat" | "/workflows" | "/presence" | "/artifacts"; icon: LucideIcon }> = [
@@ -41,6 +42,51 @@ function storeExpanded(value: Record<string, boolean>): void {
   }
 }
 
+/** Muted tints for team marks. Static strings, so Tailwind emits each one. */
+const SPACE_TINTS = [
+  "bg-[oklch(70%_0.10_30/0.22)] text-[oklch(45%_0.12_30)] dark:text-[oklch(82%_0.09_30)]",
+  "bg-[oklch(75%_0.10_75/0.25)] text-[oklch(45%_0.10_75)] dark:text-[oklch(85%_0.09_75)]",
+  "bg-[oklch(70%_0.10_150/0.22)] text-[oklch(42%_0.10_150)] dark:text-[oklch(82%_0.09_150)]",
+  "bg-[oklch(70%_0.08_210/0.22)] text-[oklch(42%_0.09_210)] dark:text-[oklch(82%_0.08_210)]",
+  "bg-[oklch(68%_0.10_270/0.22)] text-[oklch(45%_0.13_270)] dark:text-[oklch(82%_0.09_270)]",
+  "bg-[oklch(70%_0.10_330/0.22)] text-[oklch(45%_0.12_330)] dark:text-[oklch(82%_0.09_330)]",
+] as const;
+
+/** Pure: a team's tint, stable for its id. */
+export function spaceTint(key: string): string {
+  let hash = 0;
+  for (const char of key) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return SPACE_TINTS[hash % SPACE_TINTS.length] ?? SPACE_TINTS[0];
+}
+
+/**
+ * Pure: the letter on a team's mark. Words that every team name starts with
+ * (a company name) are skipped, so "Acme Platform" and "Acme Design" read
+ * P and D, not A and A.
+ */
+export function spaceInitial(label: string, teamLabels: readonly string[]): string {
+  const words = (name: string) => name.trim().split(/\s+/).filter(Boolean);
+  const own = words(label);
+  let skip = 0;
+  if (teamLabels.length > 1) {
+    const all = teamLabels.map(words);
+    while (skip < own.length - 1 && all.every((other) => other.length > skip + 1 && other[skip]?.toLowerCase() === own[skip]?.toLowerCase())) skip += 1;
+  }
+  return (own[skip]?.[0] ?? "?").toUpperCase();
+}
+
+/** A space's 16px mark: the person icon for Personal, a tinted initial for a team. */
+export function SpaceMark({ option, teamLabels }: { option: WorkspaceOption; teamLabels: readonly string[] }) {
+  if (!option.isTeam) return <User aria-hidden className="h-4 w-4 shrink-0 text-muted" />;
+  return <span aria-hidden data-space-mark className={cn("flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-semibold leading-none", spaceTint(option.key))}>
+    {spaceInitial(option.label, teamLabels)}
+  </span>;
+}
+
+function teamLabelsOf(options: readonly WorkspaceOption[]): string[] {
+  return options.filter((option) => option.isTeam).map((option) => option.label);
+}
+
 /**
  * The sidebar's Spaces, Linear style: Personal, then each team. An open space
  * lists its pages (Threads, Workflows, Presence, Artifacts); each row opens
@@ -61,43 +107,46 @@ export function SpacesNav() {
     setStored(next);
     storeExpanded(next);
   };
-  return <section aria-label="Spaces" className="pt-2">
-    <p className="px-4 pb-1 text-xs font-medium text-muted">Spaces</p>
-    <ul>
-      {options.map((option) => <SpaceRow key={option.key} option={option} active={option.key === scope.key}
+  const teamLabels = teamLabelsOf(options);
+  return <section aria-label="Spaces">
+    <p className={SIDEBAR_LABEL}>Spaces</p>
+    <ul className="space-y-0.5">
+      {options.map((option) => <SpaceRow key={option.key} option={option} teamLabels={teamLabels}
         open={isOpen(option.key)} activePage={option.key === scope.key ? page : undefined} onOpenChange={(open) => setOpen(option.key, open)} />)}
     </ul>
   </section>;
 }
 
-function SpaceRow({ option, active, open, activePage, onOpenChange }: {
-  option: WorkspaceOption; active: boolean; open: boolean;
+function SpaceRow({ option, teamLabels, open, activePage, onOpenChange }: {
+  option: WorkspaceOption; teamLabels: readonly string[]; open: boolean;
   activePage: string | undefined; onOpenChange: (open: boolean) => void;
 }) {
-  const Icon = option.isTeam ? Users : User;
   return <li>
-    <div className="flex items-center pr-2">
+    <div className={cn("group pr-1 hover:bg-ink-wash", TOP_ROW)}>
       <Link to="/chat" search={{ workspace: option.key }} onClick={() => onOpenChange(true)}
-        className={cn("flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-4 text-sm focus-visible:bg-ink-wash focus-visible:outline-none",
-          active ? "font-medium text-ink" : "text-ink/85 hover:text-ink")}>
-        <Icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+        className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 focus-visible:bg-ink-wash focus-visible:outline-none">
+        <SpaceMark option={option} teamLabels={teamLabels} />
         <span className="truncate">{option.label}</span>
       </Link>
       {open
         ? <button type="button" aria-label={`Collapse ${option.label}`} aria-expanded onClick={() => onOpenChange(false)}
-          className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><ChevronDown aria-hidden className="h-3.5 w-3.5" /></button>
+          className={cn(CHROME_BUTTON, HOVER_CHROME)}><ChevronDown aria-hidden className="h-3.5 w-3.5" /></button>
         : <SpacePagesMenu option={option}>
           <button type="button" aria-label={`Show ${option.label} pages`} aria-expanded={false}
-            className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><ChevronDown aria-hidden className="h-3.5 w-3.5 -rotate-90" /></button>
+            className={cn(CHROME_BUTTON, HOVER_CHROME)}><ChevronRight aria-hidden className="h-3.5 w-3.5" /></button>
         </SpacePagesMenu>}
     </div>
-    {open && <ul aria-label={`${option.label} pages`}>
+    {open && <ul aria-label={`${option.label} pages`} className="mt-0.5 space-y-0.5">
       {SPACE_PAGES.map((page) => {
         const current = page.to === activePage;
+        // On Threads the open thread (or Home) holds the selected fill, so
+        // its page shows as current with primary text only: one highlighted
+        // row at a time.
+        const filled = current && page.to !== "/chat";
         return <li key={page.to}>
           <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined}
-            className={cn("flex items-center gap-2 border-l-2 py-1.5 pr-3 pl-[calc(2.25rem-2px)] text-sm focus-visible:bg-ink-wash focus-visible:outline-none",
-              current ? "border-moss bg-moss-wash-strong font-medium text-ink" : "border-transparent text-ink/85 hover:bg-ink-wash/60")}>
+            className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none",
+              filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
             <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
             {page.label}
           </Link>
@@ -144,17 +193,15 @@ export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; 
 export function SpacesRail({ top }: { top: ReactNode }) {
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
+  const teamLabels = teamLabelsOf(options);
   return <nav aria-label="Sidebar" className="flex flex-col items-center gap-1 py-2">
     {top}
     <div className="my-1 h-px w-6 bg-line" aria-hidden />
-    {options.map((option) => {
-      const Icon = option.isTeam ? Users : User;
-      return <SpacePagesMenu key={option.key} option={option}>
-        <button type="button" aria-label={`${option.label} pages`}
-          className={cn("flex h-8 w-8 items-center justify-center rounded hover:bg-ink-wash", option.key === scope.key ? "bg-moss-wash-strong text-ink" : "text-muted hover:text-ink")}>
-          <Icon aria-hidden className="h-4 w-4" />
-        </button>
-      </SpacePagesMenu>;
-    })}
+    {options.map((option) => <SpacePagesMenu key={option.key} option={option}>
+      <button type="button" aria-label={`${option.label} pages`}
+        className={cn("flex h-8 w-8 items-center justify-center rounded-md hover:bg-ink-wash", option.key === scope.key ? "bg-ink-wash-strong text-ink" : "text-muted hover:text-ink")}>
+        <SpaceMark option={option} teamLabels={teamLabels} />
+      </button>
+    </SpacePagesMenu>)}
   </nav>;
 }
