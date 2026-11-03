@@ -198,6 +198,16 @@ describe("SpacesNav", () => {
     expect(JSON.parse(window.localStorage.getItem("valet:spaces-settings-expanded") ?? "{}")).toEqual({ user: true });
   });
 
+  it("indents the settings pages one level past the Settings row", async () => {
+    mount("/memory");
+    const settings = await screen.findByRole("list", { name: "Personal settings" });
+    const indent = (link: HTMLElement) => link.className.split(/\s+/).filter((name) => /^pl-/.test(name));
+    for (const link of within(settings).getAllByRole("link")) expect(indent(link)).toEqual(["pl-12"]);
+    expect(indent(within(screen.getByRole("list", { name: "Personal pages" })).getByRole("link", { name: "Workflows" }))).toEqual(["pl-8"]);
+    // The Settings row holds no fill of its own, so nothing spreads under its open pages.
+    expect(screen.getByRole("button", { name: "Hide Personal settings" }).className.split(/\s+/)).not.toContain("bg-ink-wash-strong");
+  });
+
   it("opens Settings and selects the row on one of its pages", async () => {
     teams = [team("t1", "Platform")];
     mount("/memory?workspace=t1");

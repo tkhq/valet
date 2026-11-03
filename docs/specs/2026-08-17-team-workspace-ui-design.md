@@ -310,7 +310,8 @@ id), and the server checks team membership as before.
   has a 16px square with its initial in a muted tint. An open space
   lists its pages: Threads, Workflows, Presence, and Artifacts, then a
   Settings row with a gear icon. Settings holds the space's Integrations,
-  Skills, Memory, and Usage. Each page row opens that page with `?workspace=`
+  Skills, Memory, and Usage, indented one more level with a faint guide line
+  so they read as its contents. Each page row opens that page with `?workspace=`
   naming the space. Only the active space opens on load. A space the person
   opens or closes stays that way until they go to another space. Settings
   starts closed, opens by itself when one of its pages is current, and the

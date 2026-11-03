@@ -167,7 +167,9 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
   open: boolean; activePage: string | undefined; onOpenChange: (open: boolean) => void;
   settingsOpen: boolean; onSettingsOpenChange: (open: boolean) => void;
 }) {
-  const pageRow = (page: SpacePage) => {
+  // `inSettings` indents a row 16px past the Settings icon, so the four
+  // settings pages read as its contents, not its siblings.
+  const pageRow = (page: SpacePage, inSettings = false) => {
     const current = page.to === activePage;
     // On Threads the open thread (or Home) holds the selected fill, so
     // its page shows as current with primary text only: one highlighted
@@ -175,7 +177,7 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
     const filled = current && page.to !== "/chat";
     return <li key={page.to}>
       <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined}
-        className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none",
+        className={cn(NESTED_ROW, "gap-2 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none", inSettings ? "pl-12" : "pl-8",
           filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
         <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
         {page.label}
@@ -198,7 +200,7 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
         </SpacePagesMenu>}
     </div>
     {open && <ul aria-label={`${option.label} pages`} className="mt-0.5 space-y-0.5">
-      {SPACE_PAGES.map(pageRow)}
+      {SPACE_PAGES.map((page) => pageRow(page))}
       <li>
         <button type="button" aria-expanded={settingsOpen} aria-label={`${settingsOpen ? "Hide" : "Show"} ${option.label} settings`} onClick={() => onSettingsOpenChange(!settingsOpen)}
           className={cn(NESTED_ROW, "group w-[calc(100%-1rem)] gap-2 pl-8 pr-1 text-left focus-visible:bg-ink-wash focus-visible:outline-none", NESTED_IDLE)}>
@@ -207,7 +209,10 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
           <ChevronRight aria-hidden className={cn("mr-1 h-3.5 w-3.5 text-muted transition-transform", HOVER_CHROME, settingsOpen && "rotate-90")} />
         </button>
       </li>
-      {settingsOpen && <li><ul aria-label={`${option.label} settings`} className="space-y-0.5">{SPACE_SETTINGS_PAGES.map(pageRow)}</ul></li>}
+      {/* A faint guide runs down the Settings icon's column (8px inset + 32px + half the 14px icon). */}
+      {settingsOpen && <li><ul aria-label={`${option.label} settings`}
+        className="relative space-y-0.5 before:absolute before:inset-y-0 before:left-[47px] before:w-px before:bg-line/50">
+        {SPACE_SETTINGS_PAGES.map((page) => pageRow(page, true))}</ul></li>}
     </ul>}
   </li>;
 }
