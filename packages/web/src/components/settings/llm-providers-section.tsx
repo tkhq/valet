@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { errorText } from "~/lib/error-text";
+import { ApiError } from "~/api/client";
 import { Trash2 } from "lucide-react";
 import type { LlmProviderKindWire, LlmProviderModelWire, LlmProviderSummary } from "@valet/api/wire";
 import {
@@ -14,7 +16,6 @@ import {
   Switch,
 } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { ApiError } from "~/api/client";
 import {
   useCreateLlmProvider,
   useDeleteLlmProvider,
@@ -135,7 +136,7 @@ function KnownProviderCard({
       await putKey.mutateAsync({ id, body: { apiKey: trimmed } });
       setApiKey("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -149,7 +150,7 @@ function KnownProviderCard({
       const id = await ensureRowId();
       await patchProvider.mutateAsync({ id, body: { enabled: checked } });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -214,7 +215,7 @@ function KnownProviderCard({
             disabled={createProvider.isPending}
             onClick={() =>
               void ensureRowId().catch((err) =>
-                setError(err instanceof Error ? err.message : String(err)),
+                setError(errorText(err)),
               )
             }
           >
@@ -415,7 +416,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
       await putKey.mutateAsync({ id: provider.id, body: { apiKey: trimmed } });
       setApiKey("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -423,7 +424,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
     setError(null);
     probe.mutate(provider.id, {
       onSuccess: (resp) => setProbedIds(resp.models.map((m) => m.id)),
-      onError: (err) => setError(err.message),
+      onError: (err) => setError(errorText(err)),
     });
   }
 
@@ -452,7 +453,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
       {
         onSuccess: (resp) =>
           setTestResult(resp.ok ? `OK — ${resp.latencyMs}ms` : resp.error),
-        onError: (err) => setTestResult(err.message),
+        onError: (err) => setTestResult(errorText(err)),
       },
     );
   }
@@ -582,12 +583,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
                   onSuccess: () => setConfirmDelete(false),
                   onError: (err) => {
                     setConfirmDelete(false);
-                    if (err instanceof ApiError && typeof err.payload === "object" && err.payload !== null) {
-                      const payload = err.payload as { error?: string };
-                      setError(payload.error ?? err.message);
-                    } else {
-                      setError(err.message);
-                    }
+                    setError(err instanceof ApiError ? errorText(err) : err.message);
                   },
                 });
               }}
@@ -621,7 +617,7 @@ function CreateCustomProviderRow() {
           setBaseUrl("");
           setOpen(false);
         },
-        onError: (err) => setError(err.message),
+        onError: (err) => setError(errorText(err)),
       },
     );
   }
