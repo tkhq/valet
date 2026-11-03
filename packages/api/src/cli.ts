@@ -48,10 +48,11 @@ const COMMANDS: Record<string, CommandImporter> = {
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
   proxy: () => import("./cli/commands/proxy.js"),
+  validate: () => import("./cli/commands/validate.js"),
 };
 
 /** Commands that never call an instance with the selected profile's credential. */
-const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset"]);
+const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset", "validate"]);
 
 /** Whether the command skips the device sign-in refresh. `valet proxy token`
  * is a harness key helper: it must print the key fast, with no network call. */
@@ -80,6 +81,7 @@ Commands:
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
   proxy       Point a local coding tool (claude-code) at the Valet LLM proxy
+  validate    Check a brain repository's skills, playbooks, memory, and workflows
 
 Global options:
   --json          Machine-readable JSON output (where supported)

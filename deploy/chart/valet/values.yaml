@@ -70,6 +70,13 @@ api:
   # Optional social/SSO env (non-secret half — client IDs, issuer, domain).
   # Secret halves (client secrets) live under api.secrets below.
   auth:
+    # Sign-in methods to turn on, as a comma list: password, oidc, google,
+    # github. Login is off for every method not listed. When this is empty
+    # and oidcIssuer is set, the api turns on oidc alone (SSO only, no
+    # password). Example for password sign-in only: "password".
+    methods: ""
+    # The method the login page shows first. Empty: the first listed method.
+    primaryMethod: ""
     oidcIssuer: ""
     oidcClientId: ""
     oidcName: ""
@@ -78,6 +85,11 @@ api:
     githubClientId: ""
     trustedOrigins: ""
     allowedEmailDomains: ""
+    # Comma-separated administrator emails (AUTH_ADMIN_EMAILS). Each becomes
+    # an org admin on SSO sign-in, or on Google/GitHub sign-in with a verified
+    # email. With SSO on, the api refuses to boot until an admin exists or one
+    # is listed here.
+    adminEmails: ""
 
   # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
   # env fallback). Set these three plus the api.secrets.githubApp* values

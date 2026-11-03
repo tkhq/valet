@@ -41,6 +41,7 @@ export {
   type ReasoningLevel,
 } from "./reasoning.js";
 export {
+  frontmatterBlock,
   parseMarkdownArtifact,
   renderTemplate,
   loadRoleFromMarkdown,
@@ -48,6 +49,7 @@ export {
   skillFileManifest,
   validateSkillFrontmatter,
   isLoadable,
+  type FrontmatterBlock,
   type FrontmatterValue,
   type ParsedArtifact,
   type SkillSpecField,
@@ -59,7 +61,9 @@ export {
   playbookPlanItems,
   playbookSeedNote,
   readPlaybookSteps,
+  scanPlaybookSteps,
   type PlaybookSeedResult,
+  type PlaybookStepLine,
   type PlaybookSteps,
 } from "./roles-skills/index.js";
 export {

@@ -1,0 +1,16 @@
+valet: workflow/v1
+name: Nightly
+definition:
+  version: dag/v1
+  nodes:
+    - id: trigger
+      type: trigger
+    - id: done
+      type: stop
+  edges:
+    - from: trigger
+      to: done
+schedule:
+  name: Nightly
+  cron: "0 3 * * *"
+  timezone: UTC

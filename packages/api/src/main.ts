@@ -34,6 +34,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { AdminBootstrapError, ensureAdminAccess } from "./auth/bootstrap-admin.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
@@ -43,6 +44,8 @@ import { wireHomeTaskReports } from "./home/service.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
+import { memoryUsageRecorder } from "./services/memory-usage.js";
+import { wirePrincipleCitations } from "./orchestrator/principle-citations.js";
 import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
 import { initSandboxMetrics, reportError } from "@valet/engine";
@@ -310,7 +313,7 @@ try {
     sandboxJwtMaster: authConfig?.sandboxJwtMaster,
     sandboxApiUrl,
     // Real auth configured → skip seeding the local-dev identity so the
-    // "zero users → first signup becomes admin" provisioning rule can fire
+    // first admin comes from an invite (`auth/bootstrap-admin.ts`)
     // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
     // here — the boot check above refuses that pair.
     seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
@@ -343,6 +346,7 @@ wireAttentionRouter({
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
 wireThreadPullRequests(providers.eventStream, providers.db);
+wirePrincipleCitations(providers.eventStream, providers.db);
 // A task started from home reports back to home when its first run ends.
 wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
@@ -545,6 +549,20 @@ async function runBootChain(): Promise<void> {
   const seededTeams = await seedMissingTeamDefaults(providers.db);
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
+  }
+  // With real auth, make sure an admin exists or can sign in: promote
+  // AUTH_ADMIN_EMAILS users, print the one-time admin link, or stop boot
+  // (SSO with no admin declared). After the reconcile, so config-declared
+  // admin invites count, and before the ready flip, so a bad setup never
+  // takes traffic.
+  if (authConfig) {
+    try {
+      await ensureAdminAccess(providers.db, authConfig, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
+    } catch (e) {
+      if (!(e instanceof AdminBootstrapError)) throw e;
+      console.error(e.message);
+      process.exit(1);
+    }
   }
 
   if (closed) return;
@@ -794,6 +812,12 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    // Write the memory reads and injections still in the buffer.
+    await memoryUsageRecorder(providers.db).stop();
+  } catch (err) {
+    console.error("memory usage flush failed:", err);
   }
   try {
     // Flush any batched spans before the process goes away.

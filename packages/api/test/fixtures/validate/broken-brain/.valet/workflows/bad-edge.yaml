@@ -1,0 +1,12 @@
+valet: workflow/v1
+name: Bad edge
+definition:
+  version: dag/v1
+  nodes:
+    - id: trigger
+      type: trigger
+    - id: done
+      type: stop
+  edges:
+    - from: trigger
+      to: missing

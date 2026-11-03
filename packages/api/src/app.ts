@@ -318,13 +318,15 @@ export function createApp(
       ...(authConfig
         ? {
             stub: false,
+            password: authConfig.methods.includes("password"),
+            primary: authConfig.primaryMethod,
             social: [
               ...(authConfig.social.google ? (["google"] as const) : []),
               ...(authConfig.social.github ? (["github"] as const) : []),
             ],
             sso: authConfig.oidc ? { name: authConfig.oidc.name } : null,
           }
-        : { stub: true, social: [], sso: null }),
+        : { stub: true, password: false, primary: null, social: [], sso: null }),
       ...(publicOrigin ? { publicOrigin } : {}),
     };
     return c.json(body);

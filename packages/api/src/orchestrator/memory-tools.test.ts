@@ -19,12 +19,13 @@ import type {
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
-import { agentSessions, artifacts, teamMembers } from "../schema/index.js";
+import { agentSessions, artifacts, memoryFiles, teamMembers } from "../schema/index.js";
 import { writeFile } from "../services/memory.js";
 import { addArtifactComment, resolveArtifactComment } from "../services/artifacts.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
+  savePrincipleTool,
   memWriteTool,
   memPatchTool,
   memReadTool,
@@ -90,6 +91,7 @@ describe("buildMemoryTools", () => {
     const names = buildMemoryTools().map((t) => t.name);
     expect(names).toEqual([
       "mem_write",
+      "save_principle",
       "mem_patch",
       "mem_read",
       "mem_search",
@@ -148,6 +150,33 @@ describe("mem_* tools: apiBaseUrl/internalToken not configured", () => {
   });
 });
 
+describe("mem_* tools: workflow step reads", () => {
+  it("name the step's session, so the route resolves the step's memory audience", async () => {
+    const seen: Headers[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      seen.push(new Headers(init?.headers));
+      return new Response(JSON.stringify({ kind: "file", rendered: "x", results: [] }));
+    };
+    try {
+      const ctx = makeCtx({
+        sessionId: "wf:run1:node1",
+        owner: { type: "team", id: "t1" },
+        config: { apiBaseUrl: "http://api.test", internalToken: "t", workflowStep: true },
+      });
+      await memReadTool.execute({ path: "notes/a.md" }, ctx);
+      await memSearchTool.execute({ query: "a" }, ctx);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toHaveLength(2);
+    for (const headers of seen) {
+      expect(headers.get("x-valet-session-id")).toBe("wf:run1:node1");
+      expect(headers.get("x-valet-source")).toBeNull();
+    }
+  });
+});
+
 describe("mem_* tools: network-level failure", () => {
   it("mem_read against an unreachable port returns [memory_error] instead of throwing", async () => {
     const ctx = makeCtx({
@@ -176,6 +205,29 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const readResult = await memReadTool.execute({ path: "notes/hello.md" }, ctx);
     expect(readResult.text).toContain("World.");
+  });
+
+  it("save_principle writes a principle the Principles index lists", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const saved = await savePrincipleTool.execute({
+      name: "prove-it-works",
+      rule: "Prove a fix works before saying it is done",
+      when: "Any bug fix or change a person will rely on",
+      details: "Run the failing case again after the fix. A passing build is not proof.",
+    }, ctx);
+    expect(saved.text).toBe("wrote principles/prove-it-works.md (v1)");
+
+    const read = await memReadTool.execute({ path: "principles/prove-it-works.md" }, ctx);
+    expect(read.text).toContain("# Prove a fix works before saying it is done");
+    expect(read.text).toContain("A passing build is not proof.");
+    const files = await api.providers.db.select().from(memoryFiles).where(eq(memoryFiles.path, "principles/prove-it-works.md"));
+    expect(files[0]).toMatchObject({ type: "principle", description: "Any bug fix or change a person will rely on" });
   });
 
   it("mem_write relays ⚠ warnings from the service", async () => {
@@ -212,6 +264,34 @@ describe("mem_* tools: real HTTP round trip", () => {
     const readResult = await memReadTool.execute({ path: "notes/patchable.md" }, ctx);
     expect(readResult.text).toContain("Beta.");
     expect(readResult.text).not.toContain("Alpha.");
+  });
+
+  it("mem_patch applies a batch of patches in one call, or none of them", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+    await memWriteTool.execute({ path: "principles/a.md", content: "# A\n\nOld rule.\n" }, ctx);
+    await memWriteTool.execute({ path: "notes/b.md", content: "# B\n\nOld note.\n" }, ctx);
+
+    const ok = await memPatchTool.execute({ patches: [
+      { path: "principles/a.md", oldString: "Old rule", newString: "New rule" },
+      { path: "notes/b.md", oldString: "Old note", newString: "New note" },
+    ] }, ctx);
+    expect(ok.text).toBe("patched 2 files: principles/a.md (v2), notes/b.md (v2)");
+
+    const refused = await memPatchTool.execute({ patches: [
+      { path: "notes/b.md", oldString: "New note", newString: "Newer note" },
+      { path: "principles/a.md", oldString: "absent", newString: "x" },
+    ] }, ctx);
+    expect(refused.text).toMatch(/^\[memory_error\] Patch 2 of 2 \(principles\/a\.md\)/);
+    expect((await memReadTool.execute({ path: "notes/b.md" }, ctx)).text).toContain("New note.");
+
+    const mixed = await memPatchTool.execute({ path: "notes/b.md", oldString: "a", newString: "b",
+      patches: [{ path: "notes/b.md", oldString: "a", newString: "b" }] }, ctx);
+    expect(mixed.text).toMatch(/^\[memory_error\] Send either/);
   });
 
   it("mem_patch with oldString '' creates a new file (journal-append idiom)", async () => {

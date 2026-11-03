@@ -36,7 +36,7 @@
 
 ## Exit criteria (the dogfood)
 
-On a clean Rancher Desktop k3s: `make k8s-build k8s-up`, then in the browser — sign up (becomes admin), start a session, run a command that provisions a sandbox (verify `kubectl get sandboxes,pods -n valet-sandboxes` shows the Sandbox CR + backing pod with the session label), run a >60s command (job-mode path over exec), `kubectl delete pod` the backing pod mid-session and watch recovery (controller-recreate or attachment re-provision — either path) land on the same workspace storage with files intact, invite flow works (create invite → second browser profile signs up as member), and everything survives `kubectl rollout restart deployment/valet-api` (boot restore over the bundled Postgres).
+On a clean Rancher Desktop k3s: `make k8s-build k8s-up`, then in the browser — sign up with the one-time admin link from the api log (`grep "No admin yet"`), start a session, run a command that provisions a sandbox (verify `kubectl get sandboxes,pods -n valet-sandboxes` shows the Sandbox CR + backing pod with the session label), run a >60s command (job-mode path over exec), `kubectl delete pod` the backing pod mid-session and watch recovery (controller-recreate or attachment re-provision — either path) land on the same workspace storage with files intact, invite flow works (create invite → second browser profile signs up as member), and everything survives `kubectl rollout restart deployment/valet-api` (boot restore over the bundled Postgres).
 
 ## Testing
 

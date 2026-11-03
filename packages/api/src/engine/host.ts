@@ -3,7 +3,8 @@ import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js"
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
-import { assistantMemoryNamespace } from "../services/memory-scope.js";
+import { assistantMemoryNamespace, delegatedMemoryScope, memorySessionId } from "../services/memory-scope.js";
+import { NotFoundError } from "@valet/shared";
 import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
@@ -167,7 +168,7 @@ import { codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool, generatedFileStore } from "../services/generated-files.js";
-import { artifactPublishTool, buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { artifactPublishTool, buildMemoryTools, buildReadOnlyMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
 import {
@@ -184,7 +185,7 @@ import {
 } from "./security-provisioning.js";
 import { egressHostInScope } from "@valet/plugin-security";
 import { isValidTimezone } from "../lib/timezone.js";
-import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
+import { assembleMemorySnapshot, DELEGATED_SNAPSHOT_BUDGET_CHARS } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
@@ -4474,6 +4475,14 @@ export class EngineHost {
       ? [...provisionedExtras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
       : provisionedExtras.roles;
 
+    // A security persona child reads no memory (its tool scope grants none,
+    // and the memory routes refuse its writes). Every other child reads its
+    // owner's memory like the assistant that spawned it.
+    // A child reads its parent's memory namespace: it has no execution row of
+    // its own, so resolving its own id would select an empty namespace.
+    const childMemory = personaCell ? undefined : await this.delegatedMemory(childSessionId, opts.owner, opts.actorUserId, opts.orgId, (this.opts.db ? await memorySessionId(this.opts.db, opts.parentSessionId) : opts.parentSessionId));
+    const childToolsWithMemory = [...(childMemory?.tools ?? []), ...childTools];
+
     const existing = await this.opts.engineStore.getSession(childSessionId);
     // Team- and org-owned builds are shared: omit `userId` so the acting
     // member's personal default cannot freeze onto the shared session.
@@ -4652,11 +4661,14 @@ export class EngineHost {
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
-      tools: childTools.length ? childTools : undefined,
+      tools: childToolsWithMemory.length ? childToolsWithMemory : undefined,
+      ...(childMemory ? { systemContext: childMemory.systemContext } : {}),
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
       // The persona tools' HTTP seam only — still NO childSpawner (the
-      // depth-limit contract) and no child seams.
+      // depth-limit contract) and no child seams. A plain child gets the
+      // same seam for its read-only memory tools.
+      ...(childMemory ? { toolConfig: childMemory.toolConfig } : {}),
       ...(personaCell
         ? {
             toolConfig: {
@@ -4687,6 +4699,39 @@ export class EngineHost {
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
+  }
+
+  /**
+   * The memory a child session or a workflow step reads (brain spec,
+   * "Principles everywhere", TKAI-578): the snapshot an assistant gets, with
+   * a smaller budget, and the read-only memory tools. The scope is the one
+   * the memory routes resolve for this session id, so the prompt lists only
+   * files the tools can open. When a team audience cannot be resolved, the
+   * session gets no memory: it must never widen to the whole team.
+   */
+  private async delegatedMemory(
+    sessionId: string,
+    owner: Principal,
+    actorUserId: string,
+    orgId: string,
+    namespaceSessionId: string = sessionId,
+  ): Promise<{ systemContext: Array<{ name: string; content: string; order: number }>; tools: ToolDef[]; toolConfig: { apiBaseUrl: string; internalToken: string } } | undefined> {
+    const db = this.opts.db;
+    const apiBaseUrl = this.opts.apiBaseUrl;
+    if (!db || !apiBaseUrl) return undefined;
+    let scope: MemoryScope;
+    try {
+      scope = await delegatedMemoryScope(db, { sessionId: namespaceSessionId, owner, actorUserId, orgId });
+    } catch (err) {
+      if (err instanceof NotFoundError) return undefined;
+      throw err;
+    }
+    const content = await assembleMemorySnapshot(db, scope, { budgetChars: DELEGATED_SNAPSHOT_BUDGET_CHARS, readOnly: true });
+    return {
+      systemContext: [{ name: "memory-snapshot", content, order: 10 }],
+      tools: buildReadOnlyMemoryTools(),
+      toolConfig: { apiBaseUrl, internalToken: internalToken() },
+    };
   }
 
   /**
@@ -4747,6 +4792,8 @@ export class EngineHost {
     // skills, not those of whoever last edited the workflow.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
+
+    const stepMemory = await this.delegatedMemory(sessionId, opts.owner, opts.actorUserId, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const workspace = existing?.workspace ?? opts.workspace;
@@ -4847,10 +4894,12 @@ export class EngineHost {
       compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
-      // never has to travel between steps as model output. A step gets this one
-      // tool, not the memory tools. Its pages belong to the run owner and name
-      // no source session: a step session has no `agent_sessions` row.
-      tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...extras.tools] : extras.tools.length ? extras.tools : undefined,
+      // never has to travel between steps as model output. Its pages belong to
+      // the run owner and name no source session: a step session has no
+      // `agent_sessions` row. Of the memory tools it gets only the read-only
+      // pair, so it can open a principle its snapshot lists.
+      tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...(stepMemory?.tools ?? []), ...extras.tools] : extras.tools.length ? extras.tools : undefined,
+      ...(stepMemory ? { systemContext: stepMemory.systemContext } : {}),
       ...(this.opts.apiBaseUrl ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken(), workflowStep: true } } : {}),
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

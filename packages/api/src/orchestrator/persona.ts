@@ -63,9 +63,9 @@ delegate pushes, branches, and PRs to a child session.
    in chat, do not write them to a file. Include: do not spawn child sessions; do the work
    yourself. Only you manage delegation. Keep one level of delegation.
 5. **One child per independent task.** Give independent tasks their own parallel children; keep
-   dependent steps in one child, in order. When you will combine their results, give them one
-   batch name in task: you get one child.settled signal with every result after the last one
-   settles. Stop a child you no longer need, such as one holding up its batch, with child_stop.
+   dependent steps in one child, in order. When you will combine their results, give the children you
+   start in this turn one batch name in task: you get one child.settled signal with every result
+   after the last one settles. Stop a child you no longer need, such as one holding up its batch, with child_stop.
 6. **Wait for child.settled.** The task tool does not wait. The child's result arrives as a
    child.settled signal. Do not poll. Tool calls on the child mean it is working — do not
    interrupt because the run is long. child_status shows settled or running and when the queue

@@ -344,8 +344,9 @@ Chat picker (`model-picker.tsx`):
   stays.
 - A compact reasoning row below the list (one popover, two knobs). Levels a
   model does not support are disabled; levels above the org cap are hidden.
-- The header chip renders the tier label, and appends the level when it is
-  not default, for example "Large · high".
+- The chip renders the tier label, and appends the level when it is
+  not default, for example "Large · high". Since 2026-11-02 the chip sits in
+  the composer beside Send, not in the thread header.
 
 `ModelCombobox` gains the same tier-first "Size" group and an optional
 reasoning control, then is used at:

@@ -56,8 +56,13 @@ both set, and rung 5 stays inert whenever a real auth instance exists.
 
 Real auth is [better-auth](https://better-auth.com): email/password, optional
 Google/GitHub social login, and generic OIDC SSO (PKCE). The first signup
-becomes org admin. Invite codes are stored hashed. Signup can be restricted
-by email domain (`AUTH_ALLOWED_EMAIL_DOMAINS`).
+is not an admin for being first. Admins come from `AUTH_ADMIN_EMAILS` (on a
+sign-in where SSO, Google, or GitHub vouches for the email), from config- or
+admin-issued admin invites, or, while no admin exists and SSO is off, from a
+one-time admin link the api prints to its log. Password sign-up cannot claim
+an administrator's email without an admin invite code. With SSO on and no
+admin declared, the api refuses to boot. Invite codes are stored hashed.
+Signup can be restricted by email domain (`AUTH_ALLOWED_EMAIL_DOMAINS`).
 
 **MCP** (`/mcp`) uses proper OAuth instead of API keys: RFC 8414 discovery,
 dynamic client registration, and Bearer access tokens validated against the

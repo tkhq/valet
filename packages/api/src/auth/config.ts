@@ -7,11 +7,30 @@
 /** Better Auth's documented default session lifetime, made explicit for eligibility expiry. */
 export const AUTH_SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7;
 
+/** A way to sign in. A deployment turns each one on in `AUTH_METHODS`. */
+export type LoginMethod = "password" | "oidc" | "google" | "github";
+
+export const LOGIN_METHODS: readonly LoginMethod[] = ["password", "oidc", "google", "github"];
+
 export interface AuthConfig {
+  /** The sign-in methods this deployment offers, from `AUTH_METHODS`. Empty
+   * means nobody can sign in: login is off until a deployment lists a method. */
+  methods: LoginMethod[];
+  /** The method the login page shows first, from `AUTH_PRIMARY_METHOD`, or
+   * the first listed method. Null when no method is on. */
+  primaryMethod: LoginMethod | null;
   secret: string;
   baseUrl: string;
   trustedOrigins: string[];
   allowedEmailDomains: string[];
+  /**
+   * `AUTH_ADMIN_EMAILS`, lowercased: the deployment's administrators. Each
+   * becomes an org admin on SSO sign-in, or on Google/GitHub sign-in with a
+   * provider-verified email. Password sign-up cannot claim one without the
+   * one-time admin code (`auth/bootstrap-admin.ts`). Nobody is demoted when
+   * an email leaves the list.
+   */
+  adminEmails?: string[];
   /** Explicit deployment opt-in: admit new users without invitations. */
   allowSignup?: boolean;
   oidc?: {
@@ -55,6 +74,20 @@ export interface AuthConfig {
     };
   };
   sandboxJwtMaster: string;
+}
+
+/** Parses `AUTH_ADMIN_EMAILS`: comma-separated, trimmed, lowercased, deduplicated. */
+export function parseAdminEmails(raw: string | undefined): string[] {
+  const emails = (raw ?? "").split(",").map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0);
+  for (const email of emails) {
+    if (!/^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(email)) {
+      throw new Error(
+        `AUTH_ADMIN_EMAILS has "${email}", which is not an email address. ` +
+        `Set AUTH_ADMIN_EMAILS to a comma-separated list of administrator emails, then restart the api.`,
+      );
+    }
+  }
+  return [...new Set(emails)];
 }
 
 /** Reads an optional variable, treating whitespace-only as unset. */
@@ -112,6 +145,10 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
       .filter((domain) => domain.length > 0);
     allowedEmailDomains.push(...domains);
   }
+
+  // adminEmails: lowercased; a malformed entry stops boot instead of
+  // silently leaving the deployment without its intended admin.
+  const adminEmails = parseAdminEmails(env.AUTH_ADMIN_EMAILS);
 
   // OIDC configuration: requires all three (issuer, clientId, clientSecret) or none
   let oidc: AuthConfig["oidc"] | undefined;
@@ -225,17 +262,67 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
   // sandboxJwtMaster: defaults to secret if not set
   const sandboxJwtMaster = env.VALET_SANDBOX_JWT_MASTER ?? secret;
 
+  const { methods, primaryMethod } = parseLoginMethods(env, {
+    oidc: oidc !== undefined,
+    google: googleConfig !== undefined,
+    github: githubConfig !== undefined,
+  });
+
   return {
+    methods,
+    primaryMethod,
     secret,
     baseUrl,
     trustedOrigins,
     allowedEmailDomains,
+    ...(adminEmails.length ? { adminEmails } : {}),
     ...(env.AUTH_ALLOW_SIGNUP === "1" ? { allowSignup: true } : {}),
-    oidc,
+    // A provider with credentials but no place in AUTH_METHODS stays off.
+    ...(methods.includes("oidc") ? { oidc } : {}),
     social: {
-      ...(googleConfig && { google: googleConfig }),
-      ...(githubConfig && { github: githubConfig }),
+      ...(googleConfig && methods.includes("google") && { google: googleConfig }),
+      ...(githubConfig && methods.includes("github") && { github: githubConfig }),
     },
     sandboxJwtMaster,
   };
+}
+
+/**
+ * Reads `AUTH_METHODS` (a comma list of `password`, `oidc`, `google`,
+ * `github`) and `AUTH_PRIMARY_METHOD`. Login is off by default: a deployment
+ * turns on each method by name, so credentials alone never open a door. The
+ * one default: with `AUTH_METHODS` unset and OIDC configured, SSO alone is on. A
+ * listed provider without its credentials stops the boot, so a typo cannot
+ * leave everyone locked out without a message.
+ */
+export function parseLoginMethods(
+  env: NodeJS.ProcessEnv,
+  configured: { oidc: boolean; google: boolean; github: boolean },
+): { methods: LoginMethod[]; primaryMethod: LoginMethod | null } {
+  // Unset (not empty) with SSO configured means SSO alone: an SSO deployment
+  // keeps working, with no password, before its config names a method. Any
+  // other unset case turns login off, and an empty value always does.
+  const raw = env.AUTH_METHODS ?? (configured.oidc ? "oidc" : "");
+  const listed = raw.split(",").map((m) => m.trim().toLowerCase()).filter((m) => m.length > 0);
+  const unknown = listed.filter((m) => !LOGIN_METHODS.includes(m as LoginMethod));
+  if (unknown.length > 0) {
+    throw new Error(`AUTH_METHODS has unknown methods: ${unknown.join(", ")}. Use ${LOGIN_METHODS.join(", ")}.`);
+  }
+  // Narrowed by the check above; deduplicated in the order listed.
+  const methods = [...new Set(listed as LoginMethod[])];
+  const missing: Record<Exclude<LoginMethod, "password">, string> = {
+    oidc: "AUTH_OIDC_ISSUER, AUTH_OIDC_CLIENT_ID, and AUTH_OIDC_CLIENT_SECRET",
+    google: "AUTH_GOOGLE_CLIENT_ID and AUTH_GOOGLE_CLIENT_SECRET",
+    github: "AUTH_GITHUB_CLIENT_ID and AUTH_GITHUB_CLIENT_SECRET",
+  };
+  for (const method of methods) {
+    if (method !== "password" && !configured[method]) {
+      throw new Error(`AUTH_METHODS turns on ${method}, but it is not configured. Set ${missing[method]}, or remove ${method} from AUTH_METHODS.`);
+    }
+  }
+  const primary = env.AUTH_PRIMARY_METHOD?.trim().toLowerCase();
+  if (primary && !methods.includes(primary as LoginMethod)) {
+    throw new Error(`AUTH_PRIMARY_METHOD is ${primary}, which AUTH_METHODS does not turn on. Add it to AUTH_METHODS, or choose one of: ${methods.join(", ") || "(none)"}.`);
+  }
+  return { methods, primaryMethod: (primary as LoginMethod | undefined) ?? methods[0] ?? null };
 }

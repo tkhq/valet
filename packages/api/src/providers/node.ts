@@ -54,6 +54,7 @@ import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
 import { podHealthTargetFromEnv } from "../diagnostics/pod-health.js";
+import { diagnosticsTemplates } from "../diagnostics/template.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -210,8 +211,8 @@ export interface NodeProviderOpts {
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
    * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * the one-time admin invite (`auth/bootstrap-admin.ts`) is minted only
+   * while there are no users, so with a local user pre-seeded a
    * fresh real deployment could never mint its first admin and every real
    * signup would land in the seeded "Local Dev" org. The stub identity is an
    * admin, so seeding it next to real auth also leaves an admin row nobody
@@ -432,11 +433,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
     version: "0.1.0",
-    description: "Agent-facing tool failure, request latency, server error, and API health diagnostics.",
-    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }), {
+    description: "Agent-facing tool failure, thread outcome, request latency, server error, and API health diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({
+      engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
+    }), {
       sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
       ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes" ? { podHealth: podHealthTargetFromEnv(process.env) } : {}),
     })],
+    templates: diagnosticsTemplates,
   };
 
   // Plugin filter: config file `plugins` block takes precedence over

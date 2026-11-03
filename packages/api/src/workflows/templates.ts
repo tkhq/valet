@@ -67,7 +67,7 @@ import {
 } from "./team-service-readiness.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
 import { TIER_SET } from "../services/model-tiers.js";
-import { nextFireAt } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.

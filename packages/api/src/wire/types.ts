@@ -41,6 +41,10 @@ export interface ApiError {
  */
 export interface AuthConfigResponse {
   stub: boolean;
+  /** True when email and password sign-in is on (`AUTH_METHODS` lists `password`). */
+  password: boolean;
+  /** The method the login page shows first. Null when no method is on, or in stub mode. */
+  primary: "password" | "oidc" | "google" | "github" | null;
   social: ("google" | "github")[];
   sso: { name: string } | null;
   /** The configured public origin that generated file links use. Absent
@@ -1715,7 +1719,7 @@ export interface ForkThreadResponse {
 
 /** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
 export interface MoveThreadRequest {
-  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  /** "private": a team thread to the caller's private threads. A team: a thread into that team, which the caller is on. */
   to: "private" | { teamId: string };
   /** Required to move into a team, which then reads the thread. */
   confirm?: true;
@@ -2498,6 +2502,14 @@ export interface MemoryTreeEntry {
   /** Stored content length in UTF-16 code units — display-grade size, not
    * exact UTF-8 bytes. */
   sizeBytes: number;
+  /** The last time an agent chose to read the file or a turn cited it, in
+   * ms epoch. Null when no agent has used it. */
+  lastUsedAt: number | null;
+  /** Agent reads plus citations. */
+  useCount: number;
+  /** The last time the memory snapshot loaded the file into a prompt. A
+   * load is not a use: the agent did not choose it. */
+  lastLoadedAt: number | null;
 }
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
@@ -3499,8 +3511,24 @@ export interface GetWorkflowTriggerCatalogResponse {
   catalog: { service: string; entries: WorkflowTriggerCatalogEntry[]; readiness?: EventIngressReadiness }[];
 }
 
+/** One principle file the scope reads, for the Principles view. */
+export interface MemoryPrincipleEntry {
+  /** The read path: own, `team:{id}/…`, or `org:{id}/…`. */
+  path: string;
+  title: string;
+  /** When the rule applies. */
+  description: string;
+}
+
+export interface GetMemoryPrinciplesResponse {
+  principles: MemoryPrincipleEntry[];
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
+  /** When Valet started to track memory use, in ms epoch. Before it, a
+   * file's "never used" only means "not seen". */
+  usageSince: number;
 }
 
 // ── REST: plugins + credentials (plugin-system-v2 plan Task 15) ───────────

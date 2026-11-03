@@ -1,6 +1,8 @@
 export {
+  frontmatterBlock,
   parseMarkdownArtifact,
   renderTemplate,
+  type FrontmatterBlock,
   type FrontmatterValue,
   type ParsedArtifact,
 } from "./parser.js";
@@ -19,6 +21,8 @@ export {
   playbookPlanItems,
   playbookSeedNote,
   readPlaybookSteps,
+  scanPlaybookSteps,
   type PlaybookSeedResult,
+  type PlaybookStepLine,
   type PlaybookSteps,
 } from "./playbook.js";

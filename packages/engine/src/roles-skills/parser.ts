@@ -26,19 +26,39 @@ export interface ParsedArtifact {
 const FRONTMATTER_OPEN = /^---\s*\n/;
 const FRONTMATTER_CLOSE = /\n---\s*(?:\n|$)/;
 
-export function parseMarkdownArtifact(content: string): ParsedArtifact {
+/**
+ * Where a file keeps its frontmatter. `text` is the YAML between the fences
+ * and `startLine` is the 1-based file line that holds its first line. An
+ * opening fence with no closing fence gives `closed: false`, and the parser
+ * then reads the whole file as the body. A validator reads this to say
+ * which line broke the frontmatter, because the parser drops it silently.
+ */
+export type FrontmatterBlock =
+  | { closed: true; text: string; startLine: number; body: string }
+  | { closed: false };
+
+/** The frontmatter block of `content`, or null when the file has none. */
+export function frontmatterBlock(content: string): FrontmatterBlock | null {
   const open = content.match(FRONTMATTER_OPEN);
-  if (!open || open.index !== 0) {
-    return { frontmatter: {}, body: content };
-  }
+  if (!open || open.index !== 0) return null;
   const after = content.slice(open[0].length);
   const close = after.match(FRONTMATTER_CLOSE);
-  if (!close || close.index === undefined) {
+  if (!close || close.index === undefined) return { closed: false };
+  return {
+    closed: true,
+    text: after.slice(0, close.index),
+    // The opening fence can swallow blank lines, so count its newlines.
+    startLine: open[0].split("\n").length,
+    body: after.slice(close.index + close[0].length),
+  };
+}
+
+export function parseMarkdownArtifact(content: string): ParsedArtifact {
+  const block = frontmatterBlock(content);
+  if (block === null || !block.closed) {
     return { frontmatter: {}, body: content };
   }
-  const fmText = after.slice(0, close.index);
-  const body = after.slice(close.index + close[0].length);
-  return { frontmatter: parseFrontmatter(fmText), body };
+  return { frontmatter: parseFrontmatter(block.text), body: block.body };
 }
 
 /**
