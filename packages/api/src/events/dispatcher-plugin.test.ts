@@ -4,6 +4,7 @@
  * the outcome on the delivery row.
  */
 import { randomUUID } from "node:crypto";
+import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { PluginEventContext, PluginEventHandler, PluginThreads, ValetPlugin } from "@valet/engine";
@@ -11,7 +12,9 @@ import type { RunHost as WorkflowRunHost } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { eventDeliveries, eventSubscriptions, events } from "../schema/index.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { EventDispatcher, type PluginHandlerHost } from "./dispatcher.js";
+import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
 
 const ORG = "org-1";
 
@@ -27,12 +30,12 @@ function fakeRunHost(): WorkflowRunHost {
 }
 
 /** A plugin with one handler whose body the test supplies. */
-function pluginWith(handle: PluginEventHandler["handle"]): ValetPlugin {
+function pluginWith(handle: PluginEventHandler["handle"], extra: Partial<PluginEventHandler> = {}): ValetPlugin {
   return {
     name: "reviewer",
     version: "0.0.1",
     credentials: [{ service: "github", type: "oauth2", configKeys: ["accessToken"] }],
-    eventHandlers: [{ id: "review", description: "Review a pull request.", events: ["github.pull_request.*"], handle }],
+    eventHandlers: [{ id: "review", description: "Review a pull request.", events: ["github.pull_request.*"], handle, ...extra }],
   };
 }
 
@@ -43,6 +46,7 @@ const noThreads: PluginThreads = {
   spawnChild: async () => { throw new Error("threads are not used in this test"); },
   awaitChild: async () => { throw new Error("threads are not used in this test"); },
   awaitReply: async () => { throw new Error("threads are not used in this test"); },
+  stopChild: async () => { throw new Error("threads are not used in this test"); },
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {
@@ -56,11 +60,14 @@ describe("EventDispatcher plugin target", () => {
     tdb = await freshTestPgDb();
   });
 
-  async function seed(opts: { ownerType?: "user" | "team"; ownerId?: string; attempts?: number } = {}) {
+  async function seed(opts: {
+    ownerType?: "user" | "team"; ownerId?: string; attempts?: number;
+    config?: Record<string, unknown>; subscriptionId?: string; occurredAt?: number; pr?: string; status?: "pending" | "delivered";
+  } = {}) {
     const db = tdb.appDb;
     const now = Date.now();
     const eventId = randomUUID();
-    const subscriptionId = randomUUID();
+    const subscriptionId = opts.subscriptionId ?? randomUUID();
     const deliveryId = randomUUID();
     await db.insert(events).values({
       id: eventId,
@@ -69,14 +76,14 @@ describe("EventDispatcher plugin target", () => {
       eventKey: "github.pull_request.synchronize",
       dedupeKey: randomUUID(),
       actor: null,
-      refs: { repo: "acme/site", pr_number: "7", head_sha: "abc" },
-      summary: "PR #7 updated",
+      refs: { repo: "acme/site", pr_number: opts.pr ?? "7", head_sha: "abc" },
+      summary: `PR #${opts.pr ?? "7"} updated`,
       payload: { action: "synchronize" },
-      occurredAt: now - 5_000,
+      occurredAt: opts.occurredAt ?? now - 5_000,
       receivedAt: now,
-      subjects: ["github:acme/site#7"],
+      subjects: [`github:acme/site#${opts.pr ?? "7"}`],
     });
-    await db.insert(eventSubscriptions).values({
+    if (!opts.subscriptionId) await db.insert(eventSubscriptions).values({
       id: subscriptionId,
       orgId: ORG,
       ownerType: opts.ownerType ?? "user",
@@ -84,7 +91,7 @@ describe("EventDispatcher plugin target", () => {
       name: "review PRs",
       eventKeys: ["github.pull_request.*"],
       filters: [],
-      target: { kind: "plugin", plugin: "reviewer", handler: "review" },
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", ...(opts.config !== undefined ? { config: opts.config } : {}) },
       enabled: true,
       createdBy: "user-1",
       createdAt: now,
@@ -94,12 +101,12 @@ describe("EventDispatcher plugin target", () => {
       id: deliveryId,
       eventId,
       subscriptionId,
-      status: "pending",
+      status: opts.status ?? "pending",
       attempts: opts.attempts ?? 0,
       nextAttemptAt: now - 1,
       createdAt: now,
     });
-    return { deliveryId, eventId };
+    return { deliveryId, eventId, subscriptionId };
   }
 
   async function delivery(id: string) {
@@ -113,7 +120,8 @@ describe("EventDispatcher plugin target", () => {
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
       deliverToAssistant: vi.fn(async () => ({ sessionId: "s", threadId: "t" })),
-      plugins: [plugin],
+      // The GitHub plugin gives events their natural subject (one pull request).
+      plugins: [plugin, githubPlugin],
       ...(host !== "none" ? { pluginHandlers: host } : {}),
     });
   }
@@ -297,5 +305,121 @@ describe("EventDispatcher plugin target", () => {
     expect(row.status).toBe("dead");
     expect(handle).not.toHaveBeenCalled();
     await d.stop();
+  });
+  describe("line settings", () => {
+    const schema = Type.Object({ instructions: Type.Optional(Type.String()), minSeverity: Type.String({ default: "low" }) });
+
+    it("hands the handler its line's settings with defaults filled in", async () => {
+      const { deliveryId } = await seed({ config: { instructions: "Check auth." } });
+      let config: Record<string, unknown> | undefined;
+      const d = dispatcher(pluginWith(async (_event, ctx) => { config = ctx.config; }, { configSchema: schema }));
+      await d.pollOnce();
+      expect((await settled(deliveryId)).status).toBe("delivered");
+      expect(config).toEqual({ instructions: "Check auth.", minSeverity: "low" });
+      await d.stop();
+    });
+
+    it("fails the delivery when the saved settings no longer match the handler's schema", async () => {
+      const { deliveryId } = await seed({ config: { minSeverity: 3 } });
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle, { configSchema: schema }));
+      await d.pollOnce();
+      const row = await settled(deliveryId);
+      expect(row.status).toBe("failed");
+      expect(row.lastError).toContain("This line's settings do not match reviewer/review: /minSeverity");
+      expect(handle).not.toHaveBeenCalled();
+      await d.stop();
+    });
+  });
+
+  describe("supersede", () => {
+    /** A handler that blocks until released, recording each run's event and cancel signal. */
+    function gatedHandler() {
+      const runs: { eventId: string; signal: AbortSignal; cancelChildren: AbortSignal | undefined }[] = [];
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => { release = r; });
+      const scopes: PluginThreadsScope[] = [];
+      const host: PluginHandlerHost = { ...handlerHost(), threads: (scope) => { scopes.push(scope); return noThreads; } };
+      const handle: PluginEventHandler["handle"] = async (event, ctx) => {
+        runs.push({ eventId: event.id, signal: ctx.signal, cancelChildren: scopes.at(-1)?.cancelChildren });
+        await Promise.race([gate, new Promise((r) => ctx.signal.addEventListener("abort", r))]);
+      };
+      return { runs, host, handle, release: () => release() };
+    }
+
+    it("skips an older pending delivery and aborts an older run in this process, stopping its children", async () => {
+      const now = Date.now();
+      const first = await seed({ occurredAt: now - 30_000 });
+      const { runs, host, handle, release } = gatedHandler();
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }), host);
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      // A queued older event that has not run yet, and a newer push.
+      const queued = await seed({ subscriptionId: first.subscriptionId, occurredAt: now - 20_000 });
+      const newer = await seed({ subscriptionId: first.subscriptionId, occurredAt: now - 10_000 });
+      // Only the newer delivery is due: the queued one waits behind it.
+      await tdb.appDb.update(eventDeliveries).set({ nextAttemptAt: now + 600_000 }).where(eq(eventDeliveries.id, queued.deliveryId));
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(2));
+      expect(runs[0]?.signal.aborted).toBe(true);
+      expect(runs[0]?.cancelChildren?.aborted).toBe(true);
+      release();
+      expect((await settled(newer.deliveryId)).status).toBe("delivered");
+      for (const id of [first.deliveryId, queued.deliveryId]) {
+        const row = await delivery(id);
+        expect(row.status).toBe("skipped");
+        expect(row.lastError).toBe("A newer event for acme/site#7 superseded this one.");
+      }
+      await d.stop();
+    });
+
+    it("skips a late older delivery when a newer event for the subject already ran", async () => {
+      const now = Date.now();
+      const newer = await seed({ occurredAt: now - 10_000, status: "delivered" });
+      const older = await seed({ subscriptionId: newer.subscriptionId, occurredAt: now - 20_000 });
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }));
+      await d.pollOnce();
+      expect((await settled(older.deliveryId)).status).toBe("skipped");
+      expect(handle).not.toHaveBeenCalled();
+      await d.stop();
+    });
+
+    it("stops a run in another process at its next renewal, without writing an outcome", async () => {
+      const { deliveryId } = await seed();
+      const { runs, host, handle, release } = gatedHandler();
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }), host);
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      // What a superseding run in another process writes.
+      await tdb.appDb.update(eventDeliveries).set({ status: "skipped", lastError: "A newer event for acme/site#7 superseded this one." })
+        .where(eq(eventDeliveries.id, deliveryId));
+      await vi.waitFor(() => expect(runs[0]?.signal.aborted).toBe(true));
+      expect(runs[0]?.cancelChildren?.aborted).toBe(true);
+      release();
+      await new Promise((r) => setTimeout(r, 100));
+      expect((await delivery(deliveryId)).lastError).toBe("A newer event for acme/site#7 superseded this one.");
+      await d.stop();
+    });
+
+    it("runs every delivery for a parallel handler, and other subjects for a supersede handler", async () => {
+      const now = Date.now();
+      const a = await seed({ occurredAt: now - 20_000 });
+      const b = await seed({ subscriptionId: a.subscriptionId, occurredAt: now - 10_000, pr: "8" });
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }));
+      await d.pollOnce();
+      expect((await settled(a.deliveryId)).status).toBe("delivered");
+      expect((await settled(b.deliveryId)).status).toBe("delivered");
+      await d.stop();
+
+      const c = await seed({ occurredAt: now - 20_000 });
+      const e = await seed({ subscriptionId: c.subscriptionId, occurredAt: now - 10_000 });
+      const d2 = dispatcher(pluginWith(handle));
+      await d2.pollOnce();
+      expect((await settled(c.deliveryId)).status).toBe("delivered");
+      expect((await settled(e.deliveryId)).status).toBe("delivered");
+      await d2.stop();
+    });
   });
 });

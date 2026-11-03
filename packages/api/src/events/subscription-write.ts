@@ -11,8 +11,11 @@
 import { USER_ONLINE_EVENT_KEY } from "@valet/plugin-slack/actions";
 import { validateOncePerHours } from "./once-per.js";
 import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
-import { pluginHandlerAccepts, type EventCatalogEntry, type ValetPlugin } from "@valet/engine";
+import { pluginHandlerAccepts, prepareActionArgs, type EventCatalogEntry, type PluginEventHandler, type ValetPlugin } from "@valet/engine";
+
+type PluginEventHandlerSchema = PluginEventHandler["configSchema"];
 import type { AppDb } from "../lib/drizzle.js";
+import { isRecord } from "../lib/oauth-state.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
 import { eventKeyMatches, FILTER_OPS, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
@@ -51,7 +54,23 @@ function validatePluginTarget(target: Record<string, unknown>, patterns: string[
   for (const field of ["thread", "systemPrompt", "userPromptTemplate", "follow", "assistant"]) {
     if (target[field] !== undefined) return `A plugin target does not take ${field}. Remove it.`;
   }
-  return undefined;
+  const config = target.config;
+  if (config !== undefined && (!isRecord(config) || Array.isArray(config))) {
+    return "config must be an object of handler settings. Remove it, or pass an object.";
+  }
+  if (!handler.configSchema) {
+    return config === undefined ? undefined : `Handler ${target.plugin}/${target.handler} takes no settings. Remove config.`;
+  }
+  // The same check runs at each delivery (`dispatcher.ts`), in case the
+  // plugin's schema changed after the line was saved.
+  const checked = pluginHandlerConfig(handler.configSchema, config);
+  return checked.ok ? undefined : `Settings for ${target.plugin}/${target.handler} do not match its schema: ${checked.error}. Fix config.`;
+}
+
+/** A line's handler settings with defaults filled in, checked against the handler's schema. */
+export function pluginHandlerConfig(schema: NonNullable<PluginEventHandlerSchema>, config: unknown): ReturnType<typeof prepareActionArgs> {
+  if (config !== undefined && (!isRecord(config) || Array.isArray(config))) return { ok: false, error: "config is not an object" };
+  return prepareActionArgs(schema, config ?? {});
 }
 
 /**

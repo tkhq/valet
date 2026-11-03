@@ -8,11 +8,13 @@
  * plugin never receives a `Session`; it holds `PluginThreadRef` values.
  */
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { UNATTENDED_DELIVERY_KEY } from "@valet/shared";
 import {
   settledSubmissionResult,
   TimeoutError,
   type ChildSpawner,
+  type ChildStopper,
   type PluginChild,
   type PluginThreadRef,
   type PluginThreads,
@@ -23,7 +25,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import type { TSchema } from "typebox";
-import { eq, like, or } from "drizzle-orm";
+import { and, eq, like, or } from "drizzle-orm";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -43,6 +45,7 @@ export interface PluginThreadsDeps {
   resolveThread?: (key: string) => Promise<{ sessionId: string; threadId: string }>;
   engineStore: SessionStore;
   childSpawner: ChildSpawner;
+  childStopper: ChildStopper;
   /** Poll interval while a child runs. Tests shorten it. */
   pollMs?: number;
 }
@@ -52,6 +55,15 @@ export interface PluginThreadsScope {
   orgId: string;
   owner: Principal;
   actorUserId: string;
+  /** The handler run's signal. When it aborts, `awaitReply` and `awaitChild` end with an `AbortError`. */
+  signal?: AbortSignal;
+  /**
+   * Aborts when the run is cancelled for good (its line turned off, or a
+   * newer event superseded it). The host then stops every child this run
+   * started or found. Shutdown does not abort it: a later process resumes
+   * the run and finds the same children by dispatch id.
+   */
+  cancelChildren?: AbortSignal;
 }
 
 const DEFAULT_POLL_MS = 2_000;
@@ -77,6 +89,25 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
   const { plugin, orgId, owner, actorUserId } = scope;
   const prefix = pluginThreadKey(plugin.name, "");
   const meta = { actorUserId, orgId };
+
+  /** The children this run started or found, with their parent thread, for `cancelChildren`. */
+  const runChildren = new Map<string, { parentSessionId: string; parentThreadId: string }>();
+  const stopRunChildren = () => {
+    for (const [childSessionId, parent] of runChildren) {
+      void deps.childStopper({ childSessionId }, parent)
+        .catch((err) => console.error(`plugin ${plugin.name}: stopping child ${childSessionId} failed:`, err));
+    }
+  };
+  scope.cancelChildren?.addEventListener("abort", stopRunChildren, { once: true });
+  const track = (child: PluginChild, parent: { sessionId: string; threadId: string }): PluginChild => {
+    runChildren.set(child.childSessionId, { parentSessionId: parent.sessionId, parentThreadId: parent.threadId });
+    // A cancel that landed while the spawn was in flight still stops it.
+    if (scope.cancelChildren?.aborted) {
+      void deps.childStopper({ childSessionId: child.childSessionId }, { parentSessionId: parent.sessionId, parentThreadId: parent.threadId })
+        .catch((err) => console.error(`plugin ${plugin.name}: stopping child ${child.childSessionId} failed:`, err));
+    }
+    return child;
+  };
 
   const openThread = async (key: string, title?: string) => {
     if (!deps.engineHost) throw new Error("Plugin threads need the engine host. Wire engineHost into the plugin threads deps.");
@@ -131,7 +162,7 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
     },
 
     async awaitReply(reply, opts) {
-      return awaitSubmission(deps, { sessionId: reply.sessionId, queueItemId: reply.queueItemId }, opts);
+      return awaitSubmission(deps, { sessionId: reply.sessionId, queueItemId: reply.queueItemId }, { ...opts, signal: scope.signal });
     },
 
     async spawnChild(ref, req, opts) {
@@ -142,11 +173,12 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       if (req.ref !== undefined && req.repo === undefined) {
         throw new Error("A child ref needs a repo. Pass repo with ref.");
       }
+      if (scope.cancelChildren?.aborted) throw new DOMException("This plugin run was cancelled. Start no more children.", "AbortError");
       // The parent comes from the key, never from the caller's ids.
       const parent = await resolveThread(ref.key);
       const baseId = pluginChildSessionId(plugin.name, owner, ref.key, opts.dispatchId);
       const existing = await findChild(deps, baseId, parent.sessionId);
-      if (existing) return existing;
+      if (existing) return track(existing, parent);
       const childSessionId = await freeChildId(deps, baseId);
 
       const spawned = await deps.childSpawner(
@@ -174,11 +206,33 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           reportToParent: false,
         },
       );
-      return { childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId };
+      return track({ childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId }, parent);
     },
 
     async awaitChild(child, opts) {
-      return awaitSubmission(deps, { sessionId: child.childSessionId, queueItemId: child.queueItemId }, opts);
+      return awaitSubmission(deps, { sessionId: child.childSessionId, queueItemId: child.queueItemId }, { ...opts, signal: scope.signal });
+    },
+
+    async stopChild(child) {
+      // The child must hang off one of this plugin's threads in this
+      // owner's workspace, whichever run started it.
+      const [watch] = await deps.db
+        .select({ parentSessionId: childWatches.parentSessionId, parentThreadId: childWatches.parentThreadId })
+        .from(childWatches)
+        .where(eq(childWatches.childSessionId, child.childSessionId))
+        .limit(1);
+      const notOurs = new Error(`Child ${child.childSessionId} was not started by plugin ${plugin.name} for this workspace. Stop only children from threads.spawnChild.`);
+      if (!watch) throw notOurs;
+      const [parentRow] = await deps.db
+        .select({ id: agentSessions.id })
+        .from(agentSessions)
+        .where(and(eq(agentSessions.id, watch.parentSessionId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id)))
+        .limit(1);
+      const parentThread = await deps.engineStore.getThread(watch.parentSessionId, watch.parentThreadId);
+      if (!parentRow || !parentThread?.key.startsWith(prefix)) throw notOurs;
+      const result = await deps.childStopper({ childSessionId: child.childSessionId }, watch);
+      if (!result) throw notOurs;
+      return result;
     },
   };
 }
@@ -192,13 +246,14 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
 export async function awaitSubmission(
   deps: Pick<PluginThreadsDeps, "engineStore" | "pollMs">,
   target: { sessionId: string; queueItemId: string },
-  opts: Parameters<PluginThreads["awaitChild"]>[1] = {},
+  opts: Parameters<PluginThreads["awaitChild"]>[1] & { signal?: AbortSignal | undefined } = {},
 ): Promise<SubmissionResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   let itemId = target.queueItemId;
   for (let hop = 0; hop <= MAX_MERGE_HOPS; hop++) {
     for (;;) {
+      if (opts.signal?.aborted) throw new DOMException("The plugin run was stopped.", "AbortError");
       const item = await deps.engineStore.getQueueItem(target.sessionId, itemId);
       if (!item) throw new Error(`Submission ${itemId} is missing from session ${target.sessionId}.`);
       if (item.status === "settled") {
@@ -213,7 +268,8 @@ export async function awaitSubmission(
         // The work keeps running; a later wait with the same handle picks it up.
         throw new TimeoutError(itemId, timeoutMs);
       }
-      await new Promise((resolve) => setTimeout(resolve, deps.pollMs ?? DEFAULT_POLL_MS));
+      // Rejects with an AbortError when the handler run stops.
+      await sleep(deps.pollMs ?? DEFAULT_POLL_MS, undefined, opts.signal ? { signal: opts.signal } : undefined);
     }
   }
   return { queueItemId: itemId, outcome: "failed", error: `merge chain longer than ${MAX_MERGE_HOPS} hops` };

@@ -932,6 +932,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
           if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
           return spawnerRef(req, ctx);
         },
+        childStopper: (req, ctx) => {
+          if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+          return stopperRef(req, ctx);
+        },
       }, scope),
       appToken: (() => {
         const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });

@@ -503,3 +503,19 @@ describe("channel-name reply setup", () => {
     expect(draft.anyChannel).toBe(true);
   });
 });
+
+describe("plugin line settings", () => {
+  const sub = line("l-review", { target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } } });
+
+  it("keeps a plugin line's settings through an unrelated patch, and replaces or clears them like the server", () => {
+    expect(applyLinePatch(sub, { name: "renamed" }).target).toMatchObject({ config: { instructions: "Check auth." } });
+    expect(applyLinePatch(sub, { config: { instructions: "Check SQL." } }).target).toMatchObject({ config: { instructions: "Check SQL." } });
+    expect(applyLinePatch(sub, { config: null }).target).not.toHaveProperty("config");
+  });
+
+  it("keeps a plugin line's oncePerHours", () => {
+    const limited = line("l-limited", { target: { kind: "plugin", plugin: "reviewer", handler: "review", oncePerHours: 6 } });
+    expect(applyLinePatch(limited, { name: "renamed" }).target).toMatchObject({ oncePerHours: 6 });
+    expect(applyLinePatch(limited, { oncePerHours: null }).target).not.toHaveProperty("oncePerHours");
+  });
+});

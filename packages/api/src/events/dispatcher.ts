@@ -27,10 +27,10 @@
 import type { Appearance } from "@valet/shared";
 import { slackEventChannel } from "../services/thread-access.js";
 import type { EventHead } from "../services/event-columns.js";
-import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginEventHandler, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import { and, asc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
+import { and, arrayContains, asc, eq, gt, inArray, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -70,6 +70,7 @@ import { readStoredTarget } from "./target-names.js";
 import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { buildPluginMemory } from "../plugins/plugin-memory.js";
+import { pluginHandlerConfig } from "./subscription-write.js";
 import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import { actorUserIdFor } from "../workflows/engine-deps.js";
 import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
@@ -91,6 +92,21 @@ const PLUGIN_BUSY_RETRY_MS = 10_000;
 const PLUGIN_LINE_OFF = "plugin-line-off";
 /** Abort reason when another run re-claimed the delivery after this run's lease lapsed. */
 const PLUGIN_LEASE_LOST = "plugin-lease-lost";
+/** Abort reason when a newer event for the same subject superseded this run (`concurrency: "supersede"`). */
+const PLUGIN_SUPERSEDED = "plugin-superseded";
+
+/** The skip reason a superseded plugin delivery records. */
+function supersededText(label: string): string {
+  return `A newer event for ${label} superseded this one.`;
+}
+
+/** Events after `event`: later `occurred_at`, ties broken by id so exactly one of two events is newer. */
+function newerThan(event: typeof events.$inferSelect): SQL {
+  const cond = or(gt(events.occurredAt, event.occurredAt), and(eq(events.occurredAt, event.occurredAt), gt(events.id, event.id)));
+  // `or` is typed as possibly undefined only for an empty argument list.
+  if (!cond) throw new Error("newerThan: empty condition");
+  return cond;
+}
 
 /** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
 function pluginServices(plugin: ValetPlugin): Set<string> {
@@ -322,6 +338,8 @@ interface SubscriptionTarget {
   /** Plugin targets: the plugin and its handler id. */
   plugin?: string;
   handler?: string;
+  /** Plugin targets: the handler's settings, checked against its `configSchema`. */
+  config?: unknown;
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
    * delivery with a channel origin, `subject` for other Slack channel
@@ -829,6 +847,12 @@ export class EventDispatcher {
     }
     const abort = new AbortController();
     this.pluginRuns.set(delivery.id, abort);
+    // A run cancelled for good stops the children it started. Shutdown and
+    // a lost lease do not: the next run finds those children by dispatch id.
+    const cancelChildren = new AbortController();
+    abort.signal.addEventListener("abort", () => {
+      if (abort.signal.reason === PLUGIN_LINE_OFF || abort.signal.reason === PLUGIN_SUPERSEDED) cancelChildren.abort(abort.signal.reason);
+    }, { once: true });
     // The lease value is the fence. This run owns the row only while
     // `next_attempt_at` still holds the value it last wrote, so a run that
     // outlived its lease (and was re-claimed elsewhere) can neither renew
@@ -874,7 +898,7 @@ export class EventDispatcher {
           abort.abort(PLUGIN_LINE_OFF);
           return;
         }
-        if (!(await takeLease())) abort.abort(PLUGIN_LEASE_LOST);
+        if (!(await takeLease())) abort.abort(await this.lostLeaseReason(delivery.id));
       })()
         .catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err))
         .finally(() => { renewing = false; });
@@ -891,12 +915,26 @@ export class EventDispatcher {
       // Take the claim this poll made. A miss means another process
       // re-claimed the row between the claim and here.
       if (!(await takeLease({ attempts }))) return;
+      // `concurrency: "supersede"`: only the newest event per subject runs.
+      const superseding = this.supersedeSubject(target, event);
+      if (superseding) {
+        if (await this.newerSubjectDelivery(sub.id, event, superseding.subject)) {
+          await serialLeaseWrite(() => db.update(eventDeliveries)
+            .set({ status: "skipped", lastError: supersededText(superseding.label) }).where(owned()));
+          return;
+        }
+        for (const id of await this.supersedeOlder(sub.id, event, superseding)) {
+          // Same process: stop now. Another process finds its row skipped at
+          // its next renewal and stops then.
+          this.pluginRuns.get(id)?.abort(PLUGIN_SUPERSEDED);
+        }
+      }
       // The outcome is decided after the run, abort reason first: a handler
       // that ignores `ctx.signal` and returns normally after its line was
       // turned off must not read as delivered.
       let failure: { err: unknown } | undefined;
       try {
-        await this.runPluginDelivery(event, sub, target, abort.signal);
+        await this.runPluginDelivery(event, sub, target, abort.signal, cancelChildren.signal);
       } catch (err) {
         failure = { err };
       }
@@ -904,8 +942,9 @@ export class EventDispatcher {
       // below is fenced on the last value, so it waits for any write in flight.
       clearInterval(renew);
       await leaseWrites;
-      if (abort.signal.aborted && abort.signal.reason === PLUGIN_LEASE_LOST) {
-        // Another run owns the row now; its outcome is the one that counts.
+      if (abort.signal.aborted && (abort.signal.reason === PLUGIN_LEASE_LOST || abort.signal.reason === PLUGIN_SUPERSEDED)) {
+        // Another run owns the row now, or the superseding run already
+        // marked it skipped; that outcome is the one that counts.
       } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
         await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
       } else if (abort.signal.aborted && this.stopped) {
@@ -921,18 +960,88 @@ export class EventDispatcher {
       .finally(finish);
   }
 
+  /** The loaded handler a plugin target names, or undefined. */
+  private pluginHandler(target: SubscriptionTarget): { plugin: ValetPlugin; handler: PluginEventHandler } | undefined {
+    const plugin = (this.deps.plugins ?? []).find((p) => p.name === target.plugin);
+    const handler = plugin?.eventHandlers?.find((h) => h.id === target.handler);
+    return plugin && handler ? { plugin, handler } : undefined;
+  }
+
+  /** The subject this run supersedes on, or null when the handler runs in parallel or the event has none. */
+  private supersedeSubject(target: SubscriptionTarget, event: typeof events.$inferSelect): { subject: string; label: string } | null {
+    if (this.pluginHandler(target)?.handler.concurrency !== "supersede") return null;
+    return this.naturalSubject(event);
+  }
+
+  /**
+   * Whether a newer event for `subject` already has a live or finished
+   * delivery on this line. Skipped deliveries do not count: a newer event
+   * the line skipped never ran.
+   */
+  private async newerSubjectDelivery(subscriptionId: string, event: typeof events.$inferSelect, subject: string): Promise<boolean> {
+    const [row] = await this.deps.db.select({ id: eventDeliveries.id })
+      .from(eventDeliveries)
+      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
+      .where(and(
+        eq(eventDeliveries.subscriptionId, subscriptionId),
+        inArray(eventDeliveries.status, ["pending", "failed", "delivered", "dead"]),
+        arrayContains(events.subjects, [subject]),
+        newerThan(event),
+      ))
+      .limit(1);
+    return row !== undefined;
+  }
+
+  /** Skip this line's unfinished deliveries of older events for the subject. Returns their ids. */
+  private async supersedeOlder(subscriptionId: string, event: typeof events.$inferSelect, subject: { subject: string; label: string }): Promise<string[]> {
+    const { db } = this.deps;
+    const older = db.select({ id: eventDeliveries.id })
+      .from(eventDeliveries)
+      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
+      .where(and(
+        eq(eventDeliveries.subscriptionId, subscriptionId),
+        arrayContains(events.subjects, [subject.subject]),
+        ne(events.id, event.id),
+        sql`NOT ${newerThan(event)}`,
+      ));
+    const rows = await db.update(eventDeliveries)
+      .set({ status: "skipped", lastError: supersededText(subject.label) })
+      .where(and(inArray(eventDeliveries.id, older), inArray(eventDeliveries.status, ["pending", "failed"])))
+      .returning({ id: eventDeliveries.id });
+    return rows.map((r) => r.id);
+  }
+
+  /** Why a renewal missed its fence: a superseding run skipped the row, or another run re-claimed it. */
+  private async lostLeaseReason(deliveryId: string): Promise<string> {
+    const [row] = await this.deps.db.select({ status: eventDeliveries.status }).from(eventDeliveries)
+      .where(eq(eventDeliveries.id, deliveryId)).limit(1);
+    return row?.status === "skipped" ? PLUGIN_SUPERSEDED : PLUGIN_LEASE_LOST;
+  }
+
   private async runPluginDelivery(
     event: typeof events.$inferSelect,
     sub: typeof eventSubscriptions.$inferSelect,
     target: SubscriptionTarget,
     signal: AbortSignal,
+    cancelChildren: AbortSignal,
   ): Promise<void> {
     const host = this.deps.pluginHandlers;
     if (!host) throw new Error("Plugin handlers are not configured on this server. Restart the API with plugin handler support.");
-    const plugin = (this.deps.plugins ?? []).find((p) => p.name === target.plugin);
-    const handler = plugin?.eventHandlers?.find((h) => h.id === target.handler);
-    if (!plugin || !handler) {
+    const loaded = this.pluginHandler(target);
+    if (!loaded) {
       throw new Error(`Plugin handler ${target.plugin}/${target.handler} is not loaded. Enable the plugin or delete this line.`);
+    }
+    const { plugin, handler } = loaded;
+    let config: Record<string, unknown> = {};
+    if (handler.configSchema) {
+      // Checked again here: the plugin's schema may have changed since the line was saved.
+      const checked = pluginHandlerConfig(handler.configSchema, target.config);
+      if (!checked.ok) {
+        throw new Error(`This line's settings do not match ${plugin.name}/${handler.id}: ${checked.error}. Edit the line's settings.`);
+      }
+      config = checked.args;
+    } else if (target.config !== undefined) {
+      throw new Error(`Handler ${plugin.name}/${handler.id} no longer takes settings. Remove the settings from this line.`);
     }
     if (sub.ownerType !== "user" && sub.ownerType !== "team") {
       throw new Error("A plugin handler acts for a person or a team. Arm it from a personal or team workspace.");
@@ -963,7 +1072,8 @@ export class EventDispatcher {
         orgId: sub.orgId,
         owner,
         actorUserId,
-        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId }),
+        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, signal, cancelChildren }),
+        config,
         store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
         memory: buildPluginMemory(this.deps.db, owner, actorUserId),
         appToken: async (service, scope) => {

@@ -843,6 +843,20 @@ describe("plugin event handlers", () => {
     ]));
   });
 
+  it("accepts a settings schema and a concurrency mode, and rejects bad ones", () => {
+    const configured = { ...handler, configSchema: { type: "object", properties: {} }, concurrency: "supersede" };
+    expect(validateValetPlugin({ ...minimalPlugin(), eventHandlers: [configured] }).ok).toBe(true);
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      eventHandlers: [{ ...handler, id: "bad-mode", concurrency: "latest" }, { ...handler, id: "bad-schema", configSchema: "object" }],
+    });
+    const paths = res.ok ? [] : res.issues.map((i) => `${i.path}: ${i.message}`);
+    expect(paths).toEqual([
+      'eventHandlers[0].concurrency: must be "parallel" or "supersede"',
+      "eventHandlers[1].configSchema: must be a JSON Schema object",
+    ]);
+  });
+
   it("matches exact keys and trailing-wildcard families", () => {
     expect(pluginHandlerAccepts(handler, "github.pull_request.synchronize")).toBe(true);
     expect(pluginHandlerAccepts(handler, "github.issues.opened")).toBe(false);

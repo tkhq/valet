@@ -1362,6 +1362,20 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
+  // A plugin line's handler settings. `null` clears them; the merged
+  // re-validation below checks a new value against the handler's schema.
+  if (body.config !== undefined) {
+    if (patchedTarget.kind !== "plugin") {
+      return c.json({ error: "config is only valid on a plugin line. Remove config, or point the line at a plugin handler." }, 400);
+    }
+    if (body.config === null) {
+      const { config: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else {
+      patchedTarget = { ...patchedTarget, config: body.config };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {

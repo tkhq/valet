@@ -741,9 +741,18 @@ export function applyLinePatch(sub: EventSubscriptionWire, patch: PatchEventSubs
   } else if (sub.target.kind === "workflow") {
     target = { kind: "workflow", workflowId: sub.target.workflowId, ...(appearance !== undefined ? { appearance } : {}) };
   } else {
-    // A plugin handler line: only its appearance is editable here.
+    // A plugin handler line: its appearance and handler settings. `null`
+    // clears the settings, as the server does.
     const { plugin, handler, teamId } = sub.target;
-    target = { kind: "plugin", plugin, handler, ...(teamId !== undefined ? { teamId } : {}), ...(appearance !== undefined ? { appearance } : {}) };
+    const config = patch.config === undefined ? sub.target.config : patch.config ?? undefined;
+    const oncePerHours = patch.oncePerHours === undefined ? sub.target.oncePerHours : patch.oncePerHours ?? undefined;
+    target = {
+      kind: "plugin", plugin, handler,
+      ...(teamId !== undefined ? { teamId } : {}),
+      ...(config !== undefined ? { config } : {}),
+      ...(oncePerHours !== undefined ? { oncePerHours } : {}),
+      ...(appearance !== undefined ? { appearance } : {}),
+    };
   }
   return {
     ...sub,
