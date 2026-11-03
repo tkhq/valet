@@ -3,7 +3,8 @@
  *
  * Archive is app-side display state (`session_threads.archived_at`): an
  * archived thread leaves the default GET /threads list, appears under
- * `?archived=1`, and comes back on unarchive. The engine thread is
+ * `?archived=1` (and with active threads under `?archived=all`), and comes
+ * back on unarchive. The engine thread is
  * untouched — no Anthropic key needed, virtual sandbox only.
  */
 import { sql } from "drizzle-orm";
@@ -69,6 +70,25 @@ describe("api integration: thread archive", () => {
       ).json()) as ListThreadsResponse;
       expect(archivedList.threads.map((t) => t.id)).toEqual([thread.id]);
       expect(typeof archivedList.threads[0]?.archivedAt).toBe("number");
+
+      // ?archived=all lists both, so search can find an archived thread.
+      const allList = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads?archived=all`)
+      ).json()) as ListThreadsResponse;
+      expect(allList.threads.map((t) => t.id).sort()).toEqual(before.threads.map((t) => t.id).sort());
+      await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Quarterly report" }),
+      });
+      const searched = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads?archived=all&q=quarterly`)
+      ).json()) as ListThreadsResponse;
+      expect(searched.threads.map((t) => t.id)).toEqual([thread.id]);
+      const defaultSearch = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads?q=quarterly`)
+      ).json()) as ListThreadsResponse;
+      expect(defaultSearch.threads).toEqual([]);
 
       // Unarchive restores it to the default list.
       const unpatch = await fetch(

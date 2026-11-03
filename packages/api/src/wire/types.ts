@@ -1041,6 +1041,12 @@ export interface ThreadSummary {
   /** Set when the thread is archived (display state; history is intact). */
   archivedAt?: number;
   /**
+   * Set when the idle sweep archived the thread, not a person: the number of
+   * days without use that triggered it (`VALET_THREAD_ARCHIVE_DAYS`). Absent
+   * on older APIs.
+   */
+  autoArchived?: { idleDays: number };
+  /**
    * The engine thread key — encodes the thread's ORIGIN by convention:
    * `web:{nonce}` (created from the UI), `events` (event-subscription
    * deliveries), `signal:workflow:{runId}` (workflow orchestrator/llm

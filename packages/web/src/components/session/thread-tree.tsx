@@ -560,7 +560,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   function renderSearchOption(item: SearchItem) {
     const selected = item.key === selectedSearchKey;
     const project = item.kind === "thread" ? projects.value.projects.find((p) => p.id === projects.value.assignments[item.thread.id]) : undefined;
-    const [label, detail] = item.kind === "thread" ? [item.thread.title || untitledThreadLabel(item.thread, item.thread.id === defaultId), project?.name]
+    const [label, detail] = item.kind === "thread" ? [item.thread.title || untitledThreadLabel(item.thread, item.thread.id === defaultId),
+      [project?.name, item.thread.archivedAt ? "Archived" : undefined].filter(Boolean).join(" · ") || undefined]
       : item.kind === "workflow" ? [item.workflow.name, undefined]
       : [item.artifact.title, item.artifact.path];
     return <button key={item.key} id={`thread-search-${item.key}`} type="button" role="option" aria-selected={selected}

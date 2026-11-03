@@ -3,6 +3,8 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewerFaces } from "./viewer-faces";
 import type { ActiveViewer, Message, SessionDetail } from "@valet/api/wire";
 import {
+  Archive,
+  ArchiveRestore,
   Check,
   ClipboardCopy,
   Code2,
@@ -31,6 +33,7 @@ import {
   useSetSessionReasoning,
   useSetThreadModel,
   useSetThreadApprovalBypass,
+  useSetThreadArchived,
   useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
@@ -220,6 +223,7 @@ export function SessionHeader({
   // The picker disables until the thread row resolves instead.
   const threads = useThreads(session.id, undefined, threadId);
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
+  const setArchived = useSetThreadArchived(session.id);
   const threadScoped = threadId !== undefined;
   const modelConfigurationResolved = !threadScoped || activeThread !== undefined;
   const modelSaving = threadScoped
@@ -747,6 +751,21 @@ export function SessionHeader({
         {modelPicker(mobile ? "trigger" : "menu")}
         {modelSaving && <span role="status" className="sr-only">Saving model…</span>}
       </>, modelControlTarget)}
+      {!compact && activeThread?.archivedAt !== undefined && (
+        <div role="status" className="flex basis-full items-center gap-2 text-xs text-muted">
+          <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            {activeThread.autoArchived
+              ? `Archived automatically after ${activeThread.autoArchived.idleDays} ${activeThread.autoArchived.idleDays === 1 ? "day" : "days"} idle.`
+              : "Archived."}{" "}A new message brings it back to the list.
+          </span>
+          <Button type="button" variant="secondary" size="sm" disabled={setArchived.isPending}
+            onClick={() => setArchived.mutateAsync({ threadId: activeThread.id, archived: false })
+              .catch((err: unknown) => setActionError(extractActionError(err, "Could not unarchive the thread. Try again.")))}>
+            <ArchiveRestore className="h-3.5 w-3.5" aria-hidden />Unarchive
+          </Button>
+        </div>
+      )}
       <ConfirmDialog
         open={confirmBypass}
         onOpenChange={setConfirmBypass}

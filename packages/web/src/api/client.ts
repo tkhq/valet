@@ -945,9 +945,9 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string; limit?: number; cursor?: string; sort?: string; origin?: string; fixedIds?: string[]; fixedOnly?: boolean }) => {
+  listThreads: (sessionId: string, opts?: { archived?: boolean | "all"; q?: string; threadId?: string; limit?: number; cursor?: string; sort?: string; origin?: string; fixedIds?: string[]; fixedOnly?: boolean }) => {
     const params = new URLSearchParams();
-    if (opts?.archived) params.set("archived", "1");
+    if (opts?.archived) params.set("archived", opts.archived === "all" ? "all" : "1");
     if (opts?.q) params.set("q", opts.q);
     if (opts?.threadId) params.set("threadId", opts.threadId);
     if (opts?.limit) params.set("limit", String(opts.limit));

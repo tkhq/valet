@@ -12,7 +12,7 @@ import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/r
 import type { ClientFrame, ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
 import { useActiveViewersStore } from "./active-viewers";
-import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
+import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread, threadsIn } from "./queries";
 import { qkThreadContext } from "./thread-context";
 import { qkThreadPlan } from "./thread-plan";
 import { api, ApiError } from "./client";
@@ -332,6 +332,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           useActiveViewersStore.getState().set(sessionId, wire.threadId, wire.viewers);
         }
         if (wire.type === "thread.activity") {
+          // A message in an archived thread unarchives it on the server. Reload the lists so it moves back.
+          const reopened = qc.getQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId))
+            .some(([, data]) => threadsIn(data).some(thread => thread.id === wire.threadId && thread.archivedAt !== undefined));
+          if (reopened) void qc.invalidateQueries(threadListFilters(sessionId));
           qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
             thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
           // Unloaded rows can move above the saved cursor. Fetch just that row.

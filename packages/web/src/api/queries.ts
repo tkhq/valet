@@ -195,7 +195,8 @@ export function useThreadSearch(id: string, query: string, enabled: boolean, fix
   return useQuery<ListThreadsResponse>({
     queryKey: [...qk.threadSearch(id, query), fixedIds],
     queryFn: async () => {
-      const matches = await api.listThreads(id, { q: query });
+      // Search covers archived threads too, including ones the idle sweep archived.
+      const matches = await api.listThreads(id, { q: query, archived: "all" });
       const fixed = await readFixedThreads(id, fixedIds);
       return { ...matches, threads: [...new Map([...matches.threads, ...fixed.threads].map(thread => [thread.id, thread])).values()] };
     },
@@ -535,7 +536,7 @@ export function useMarkThreadsRead(sessionId: string) {
 
 type ThreadListData = ListThreadsResponse | InfiniteData<ListThreadsResponse>;
 
-function threadsIn(data: ThreadListData | undefined): ThreadSummary[] {
+export function threadsIn(data: ThreadListData | undefined): ThreadSummary[] {
   return !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads;
 }
 
