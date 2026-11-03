@@ -9,6 +9,7 @@
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { imageSourceApprovalMode } from "./bakes/source-change-requests.js";
 import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
 import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
@@ -202,6 +203,10 @@ const authConflict = authModeConflict(process.env);
 if (authConflict) {
   console.error(authConflict);
   process.exit(1);
+}
+
+if (imageSourceApprovalMode() === "off") {
+  console.warn("[security] VALET_IMAGE_SOURCE_APPROVAL=off: image-source changes apply without a second org admin.");
 }
 
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;

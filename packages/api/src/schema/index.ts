@@ -2793,6 +2793,31 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
 ]);
 
 /**
+ * Image-source changes that wait for a second org admin
+ * (`bakes/source-change-requests.ts`). `payload` holds the validated row to
+ * insert (`create`) or the field patch to apply (`update`). `target_key` is
+ * the source id, or `new:<name>` for a create, so one target has at most one
+ * pending request. `base_updated_at` is the source's `updated_at` when the
+ * request was made; approval refuses a request whose source moved since.
+ */
+export const imageSourceChangeRequests = pgTable("image_source_change_requests", {
+  id: text("id").primaryKey(), orgId: text("org_id").notNull(), targetKey: text("target_key").notNull(),
+  sourceId: text("source_id"), sourceName: text("source_name").notNull(),
+  action: text("action").$type<"create" | "update">().notNull(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  baseUpdatedAt: bigint("base_updated_at", { mode: "number" }),
+  requestedBy: text("requested_by").notNull(),
+  requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  status: text("status").$type<"pending" | "approved" | "rejected" | "withdrawn">().notNull().default("pending"),
+  decidedBy: text("decided_by"), decidedAt: bigint("decided_at", { mode: "number" }),
+  decisionNote: text("decision_note"),
+}, (t) => [
+  uniqueIndex("image_source_change_requests_pending").on(t.orgId, t.targetKey).where(sql`${t.status} = 'pending'`),
+  index("image_source_change_requests_org_status").on(t.orgId, t.status, t.requestedAt),
+]);
+
+/**
  * `valet login` device sign-in (`routes/cli-device.ts`). A request waits
  * here until the person enters its user code on `/cli/device` and allows
  * it. Only a hash of the device code is stored.

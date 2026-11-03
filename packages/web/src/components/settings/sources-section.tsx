@@ -3,6 +3,7 @@ import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-r
 import type { BakeSummary, SourceSummary } from "~/api/sources";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
 import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
+import { SourceChangesPanel } from "~/components/settings/source-changes-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
 import { ApiError } from "~/api/client";
@@ -51,6 +52,7 @@ export function SourcesSection() {
 
   return (
     <div className="space-y-10">
+      <SourceChangesPanel />
       <BakeQueuePanel />
       {/* ── Base image ─────────────────────────────────────────────────── */}
       <Section
