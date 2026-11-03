@@ -63,9 +63,9 @@ function NotFound() {
  * something each route/`SessionView` renders itself, because the sidebar
  * lives in the app shell's `<aside>`, outside the routed `<main>` content.
  *
- * - `/chat` — the nested thread-tree (children grouped under their
- *   spawning thread), replacing the flat thread list.
- * - everything else (`/`, `/sessions/$sessionId`,
+ * - `/` and `/chat` — the nested thread-tree (children grouped under their
+ *   spawning thread), replacing the flat thread list. `/` opens Home in it.
+ * - everything else (`/sessions/$sessionId`,
  *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
  *   have no thread UI (decision 14); the memory explorer renders its own
  *   tree pane inside the route (Task 6); the dashboard and session list
@@ -74,7 +74,7 @@ function NotFound() {
  * A phone gets the drawer (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
+  if (pathname === "/" || pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
   return null;
 }
 

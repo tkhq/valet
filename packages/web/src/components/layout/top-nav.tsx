@@ -197,15 +197,14 @@ export function TopNav() {
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
   const onSecurityPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") });
-  const onHome = useRouterState({ select: (st) => st.location.pathname === "/" });
+  // Threads is the landing page: `/` opens Home in the Threads layout.
+  const onThreads = useRouterState({ select: (st) => st.location.pathname === "/" || st.location.pathname === "/chat" });
   // Gate the Security link on the `security` plugin's entitlement for this
   // caller. `undefined` (org not yet loaded) hides the link — no flash of a
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
-    // Every path starts with "/", so Home is active only on an exact match.
-    { to: "/", label: "Home", active: onHome },
-    { to: "/chat", label: "Threads" },
+    { to: "/chat", label: "Threads", active: onThreads },
     { to: "/artifacts", label: "Artifacts" },
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
@@ -278,6 +277,9 @@ export function TopNav() {
           <DropdownMenuContent align="end" aria-label="Navigation" className="w-64 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
             <DropdownMenuItem onSelect={() => assistant.open()}><Sparkles className="h-4 w-4" aria-hidden />Ask Valet</DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
+            </DropdownMenuItem>
             {destinations.map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link

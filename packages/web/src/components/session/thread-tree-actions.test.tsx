@@ -16,6 +16,8 @@ import { TooltipProvider } from "~/components/primitives";
 import { ApiError } from "~/api/client";
 import type {
   ArtifactListItem,
+  HomeTaskItem,
+  HomeTasksResponse,
   BackgroundWorkConflict,
   ListTeamsResponse,
   DecisionGate,
@@ -140,9 +142,11 @@ vi.mock("~/api/workspace-runtime", () => ({
 
 // The person's home conversation, which the web sidebar pins above the list.
 let homeConversation: { sessionId: string; threadId: string } | undefined;
+let homeTasks: HomeTasksResponse | undefined;
 vi.mock("~/api/home", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/home")>(),
   useHomeConversation: () => ({ data: homeConversation, isError: false, error: null, refetch: vi.fn() }),
+  useHomeTasks: () => ({ data: homeTasks }),
 }));
 
 // Applies the component's real selectors against a minimal store shape:
@@ -254,7 +258,7 @@ describe("ThreadTree — Home row", () => {
     // The router Link mock renders a bare anchor, so query it by tag.
     const link = section.querySelector("a");
     expect(link?.textContent).toContain("Home");
-    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(link?.getAttribute("to")).toBe("/");
     expect(within(section).getByLabelText("Unread")).toBeTruthy();
     // One Home, above everything else in the list.
     expect(screen.getAllByText("Home")).toHaveLength(1);
@@ -268,7 +272,7 @@ describe("ThreadTree — Home row", () => {
     threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
     renderTree();
     const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
-    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    expect(homeLink?.getAttribute("to")).toBe("/");
     const recents = screen.getByRole("region", { name: "Recents" });
     expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
     expect(within(recents).queryByText("Home")).toBeNull();
@@ -283,11 +287,30 @@ describe("ThreadTree — Home row", () => {
     expect(screen.queryByText("Home")).toBeNull();
   });
 
-  it("shows no Home row in another workspace's sidebar", () => {
+  it("pins Home in another workspace's sidebar too, without that list's thread marks", () => {
     homeConversation = { sessionId: "orchestrator:someone-else", threadId: "home-9" };
     threads = [thread()];
     renderTree();
-    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+    const section = screen.getByRole("region", { name: "Home" });
+    expect(section.querySelector("a")?.getAttribute("to")).toBe("/");
+    expect(within(section).queryByLabelText("Unread")).toBeNull();
+  });
+
+  it("nests the tasks Home started under the Home row, with their state", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    const task = (id: string, state: HomeTaskItem["state"]): HomeTaskItem =>
+      ({ id, threadId: `th-${id}`, sessionId: "s", title: `Task ${id}`, workspace: { key: "user", name: "Personal" }, state, updatedAt: 1 });
+    homeTasks = { needsYou: [task("a", "needs_you")], working: [task("b", "working")], updates: [], finished: [task("c", "done"), task("d", "done"), task("e", "done"), task("f", "done")] };
+    renderTree();
+    const list = screen.getByRole("list", { name: "Tasks from Home" });
+    // The router Link mock renders a bare anchor, so query it by tag.
+    expect([...list.querySelectorAll("a")].map(link => link.querySelector("span")?.textContent)).toEqual(["Task a", "Task b", "Task c", "Task d", "Task e"]);
+    expect(within(list).getByLabelText("Needs you")).toBeTruthy();
+    expect(within(list).getByLabelText("running")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse tasks for Home" }));
+    expect(screen.queryByRole("list", { name: "Tasks from Home" })).toBeNull();
+    homeTasks = undefined;
   });
 
   it("finds Home in search when its content matches", async () => {

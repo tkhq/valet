@@ -32,10 +32,10 @@ export function TasksPanel({ className }: { className?: string }) {
     <ApprovalsInbox />
     {tasks.isPending && <LoadingRow label="Loading tasks…" />}
     {tasks.isError && <ErrorRow>Could not load tasks. <button type="button" className="underline" onClick={() => void tasks.refetch()}>Retry</button></ErrorRow>}
-    {data && data.needsYou.length > 0 && <Section title="Needs you" icon={<CircleAlert className="h-4 w-4 text-amber" />} items={data.needsYou} />}
-    {data && data.working.length > 0 && <Section title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} items={data.working} />}
-    {data && data.updates.length > 0 && <Section title="Replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} items={data.updates} />}
-    {data && data.finished.length > 0 && <Section title="Finished" icon={<CheckCheck className="h-4 w-4 text-moss" />} items={data.finished}
+    {data && data.needsYou.length > 0 && <TaskSection title="Needs you" icon={<CircleAlert className="h-4 w-4 text-amber" />} items={data.needsYou} />}
+    {data && data.working.length > 0 && <TaskSection title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} items={data.working} />}
+    {data && data.updates.length > 0 && <TaskSection title="Replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} items={data.updates} />}
+    {data && data.finished.length > 0 && <TaskSection title="Finished" icon={<CheckCheck className="h-4 w-4 text-moss" />} items={data.finished}
       actions={item => item.homeTaskId && <Button size="sm" variant="secondary" disabled={markDone.isPending}
         onClick={() => item.homeTaskId && markDone.mutate(item.homeTaskId)}>Mark done</Button>} />}
     {empty && <p className="text-sm text-muted">Nothing is in flight. Ask Valet for something in Chat.</p>}
@@ -46,7 +46,7 @@ export function TasksPanel({ className }: { className?: string }) {
 /** Rows a section shows before "Show more": Tasks stays short enough to read at a glance. */
 const SECTION_LIMIT = 5;
 
-function Section({ title, icon, items, actions }: {
+export function TaskSection({ title, icon, items, actions }: {
   title: string; icon: React.ReactNode; items: HomeTaskItem[]; actions?: (item: HomeTaskItem) => React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);

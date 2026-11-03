@@ -2,7 +2,7 @@ import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
-import { useHomeConversation } from "~/api/home";
+import { useHomeConversation, useHomeTasks } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -30,6 +30,8 @@ import {
   ChevronDown,
   FileText,
   GitMerge,
+  LayoutDashboard,
+  ListChecks,
   GitPullRequest,
   GitPullRequestClosed,
   MessageSquare,
@@ -49,6 +51,8 @@ import type {
   ActiveViewer,
   ArtifactListItem,
   DecisionGate,
+  HomeTaskItem,
+  HomeTasksResponse,
   ChildWorkSummary,
   ThreadPullRequest,
   ThreadSummary,
@@ -72,6 +76,7 @@ import {
 } from "~/api/queries";
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { prefillComposerDraft } from "~/stores/composer-drafts";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
 import { backgroundWorkConflict } from "~/api/client";
@@ -383,10 +388,13 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   // conversations live in the Ask Valet panel.
   const mobile = useMobileLayout();
   const unlisted = (thread: Pick<ThreadSummary, "key">) => isHiddenFromThreadList(thread) || (!mobile && isAppAssistantThread(thread));
-  // Home is a place, not a row. The web sidebar pins it above the list in the
-  // person's own workspace; a phone opens Home as its first screen instead.
+  // Home is a place, not a row. The web sidebar pins it above the list in
+  // every workspace and opens it at `/`; a phone opens Home as its first
+  // screen instead. Its thread lives in the personal session only.
   const home = useHomeConversation(!mobile);
-  const homeId = !mobile && home.data?.sessionId === sessionId ? home.data.threadId : undefined;
+  const homeId = !mobile ? home.data?.threadId : undefined;
+  const homeInList = homeId !== undefined && home.data?.sessionId === sessionId;
+  const onHome = useRouterState({ select: (state) => state.location.pathname === "/" });
   // Who is in which thread now: faces on the rows.
   const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
@@ -429,7 +437,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
   // The home thread rides along as a fixed thread so its row has live state.
-  const fixedIds = [...new Set([...(homeId ? [homeId] : []), ...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
+  const fixedIds = [...new Set([...(homeInList ? [homeId] : []), ...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
     projects.value.grouped && projects.value.projects.some(project => project.id === projects.value.assignments[id]))])].sort();
   const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -522,6 +530,13 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   // One list for the arrow keys, in the order the groups show.
   const searchItems = [...threadItems, ...workflowItems, ...fileItems];
   const searchIndex = Math.max(0, searchItems.findIndex((item) => item.key === searchSelectedId));
+  function openNewProject() { setEditingProjectId(undefined); setProjectError(undefined); setProjectName(""); setProjectDialog(true); }
+  /** Task and Artifact start in Home: open it with a starter in the message box. */
+  function askHome(starter: string) {
+    if (!home.data) return;
+    prefillComposerDraft(home.data.sessionId, home.data.threadId, starter);
+    void navigate({ to: "/" });
+  }
   function openSearch() { setSearchQuery(""); setSearchSelectedId(undefined); setSearchScope("all"); setSearchOpen(true); }
   function selectSearchItem(item: SearchItem) {
     setSearchOpen(false);
@@ -810,6 +825,20 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
+        {!mobile && <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" aria-label="More to create" title="More to create" className="flex h-8 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><ChevronDown className="h-3.5 w-3.5" /></button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-52">
+            <DropdownMenuItem onSelect={() => void createAndNavigate()}><MessageSquare className="h-4 w-4" aria-hidden />Thread</DropdownMenuItem>
+            <DropdownMenuItem disabled={!home.data} onSelect={() => askHome("Start a task: ")}><ListChecks className="h-4 w-4" aria-hidden />Task</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void navigate({ to: "/workflows", search: { create: true } })}><Workflow className="h-4 w-4" aria-hidden />Workflow</DropdownMenuItem>
+            <DropdownMenuItem disabled={!home.data} onSelect={() => askHome("Make a document: ")}><FileText className="h-4 w-4" aria-hidden />Artifact</DropdownMenuItem>
+            <DropdownMenuItem disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onSelect={openNewProject}><Folder className="h-4 w-4" aria-hidden />Project</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void navigate({ to: "/overview" })}><LayoutDashboard className="h-4 w-4" aria-hidden />Workspace overview</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>}
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
       </div>
       {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
@@ -870,8 +899,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           width, which defeats row truncation within the fixed-width sidebar. */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
-          {homeId && <HomeRow sessionId={sessionId} threadId={homeId} thread={threadsQ.data?.threads.find((t) => t.id === homeId)}
-            active={openThreadId === homeId} hasPendingGate={gatedThreadIds.has(homeId)} />}
+          {homeId && home.data && <HomeRow sessionId={home.data.sessionId} threadId={homeId} thread={homeInList ? threadsQ.data?.threads.find((t) => t.id === homeId) : undefined}
+            active={onHome} hasPendingGate={homeInList && gatedThreadIds.has(homeId)} />}
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
             <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
@@ -896,7 +925,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
                 </DropdownMenuSub>
               </DropdownMenuContent>
             </DropdownMenu>
-            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={() => { setEditingProjectId(undefined); setProjectError(undefined); setProjectName(""); setProjectDialog(true); }} className={cn("rounded p-1 text-muted hover:bg-ink-wash hover:text-ink", PHONE_HIDDEN)}><Plus className="h-4 w-4" /></button>
+            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={openNewProject} className={cn("rounded p-1 text-muted hover:bg-ink-wash hover:text-ink", PHONE_HIDDEN)}><Plus className="h-4 w-4" /></button>
           </div>
           {projects.isLoading && <p role="status" className="px-4 py-2 text-xs text-muted">Syncing project folders…</p>}
           {projects.isSaving && <p role="status" className="px-4 py-2 text-xs text-muted">Saving sidebar changes…</p>}
@@ -1042,26 +1071,78 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   const queueState = useQueueStateForThread(sessionId, threadId);
   const question = thread ? pendingAgentQuestion(thread) : undefined;
   const unread = !active && thread !== undefined && isThreadUnread(thread);
+  // Tasks Home started nest under it, like a thread's children.
+  const tasks = homeTaskRows(useHomeTasks().data);
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <section aria-label="Home" className="pt-1">
-      <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
-        <Link
-          to="/chat"
-          search={(prev) => ({ ...prev, thread: threadId, child: undefined })}
-          className={cn(
-            "flex items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
-            active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
-          )}
-        >
-          <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
-          <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
-          {question
-            ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
-            : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
-          <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
-        </Link>
-      </Tooltip>
+      <div className="flex items-center">
+        <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
+          <Link
+            to="/"
+            className={cn(
+              "flex flex-1 min-w-0 items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
+              active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
+            )}
+          >
+            <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+            <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
+            {question
+              ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+              : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+            <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
+          </Link>
+        </Tooltip>
+        {tasks.length > 0 && <button type="button" aria-label={`${collapsed ? "Expand" : "Collapse"} tasks for Home`} aria-expanded={!collapsed}
+          onClick={() => setCollapsed(!collapsed)} className="mr-2 inline-flex shrink-0 items-center justify-center rounded p-1 text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:bg-ink-wash">
+          <ChevronDown aria-hidden className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")} />
+        </button>}
+      </div>
+      {tasks.length > 0 && !collapsed && (
+        <ul aria-label="Tasks from Home" className={NESTED_LIST_CLASS}>
+          {tasks.map((task) => (
+            <li key={task.id} className="flex items-center gap-1">
+              <Link to="/threads/$threadId" params={{ threadId: task.threadId }} className={nestedRowClass(task.state === "done", false)}>
+                <MessageSquare className="h-3 w-3 shrink-0" />
+                <span className="flex-1 truncate" title={`${task.title} · ${task.workspace.name}`}>{task.title}</span>
+                <HomeTaskMark state={task.state} />
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
+  );
+}
+
+/** Done tasks the Home row keeps nested; Tasks lists the rest. */
+const HOME_ROW_DONE = 3;
+
+/** Pure: the tasks nested under Home, in Tasks order: what needs the person,
+ * what is running, unread replies, then the newest few finished. */
+export function homeTaskRows(data: HomeTasksResponse | undefined): HomeTaskItem[] {
+  if (!data) return [];
+  return [...data.needsYou, ...data.working, ...data.updates, ...data.finished.slice(0, HOME_ROW_DONE)];
+}
+
+function HomeTaskMark({ state }: { state: HomeTaskItem["state"] }) {
+  if (state === "needs_you") return <StatusDot tone="warning" label="Needs you" className="shrink-0" />;
+  if (state === "failed") return <StatusDot tone="danger" label="Failed" className="shrink-0" />;
+  if (state === "working") return <span role="img" aria-label="running" className={cn("h-1.5 w-1.5 shrink-0 rounded-full", childStatusDotClassName("running"))} />;
+  if (state === "waiting") return <StatusDot tone="info" label="Unread reply" className="shrink-0" />;
+  return <span role="img" aria-label="done" className="shrink-0 text-muted">✓</span>;
+}
+
+/** The indented list of a row's children, and of Home's tasks. */
+const NESTED_LIST_CLASS = "ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5";
+
+/** Pure: one nested row. Settled work recedes: its run is over. */
+function nestedRowClass(settled: boolean, active: boolean): string {
+  return cn(
+    "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
+    "focus-visible:outline-none focus-visible:bg-ink-wash",
+    settled && "opacity-60",
+    active ? "bg-moss-wash-strong text-ink" : "text-muted hover:bg-ink-wash/60 hover:text-ink",
   );
 }
 
@@ -1373,22 +1454,13 @@ function ThreadNode({
         {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className={WAIT_LINE_CLASS} />}
       </div>
       {childSessions.length > 0 && !collapsed && (
-        <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
+        <ul className={NESTED_LIST_CLASS}>
           {childSessions.map((c) => (
             <li key={c.sessionId} className="group/child flex items-center gap-1">
               <Link
                 to="/chat"
                 search={(prev) => ({ ...prev, child: c.sessionId })}
-                className={cn(
-                  "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
-                  "focus-visible:outline-none focus-visible:bg-ink-wash",
-                  // Settled children recede: their work is done and their
-                  // compute reclaimed — visually distinct from live ones.
-                  c.status === "settled" && "opacity-60",
-                  c.sessionId === activeChildId
-                    ? "bg-moss-wash-strong text-ink"
-                    : "text-muted hover:bg-ink-wash/60 hover:text-ink",
-                )}
+                className={nestedRowClass(c.status === "settled", c.sessionId === activeChildId)}
               >
                 <MessageSquare className="h-3 w-3 shrink-0" />
                 <span className="flex-1 truncate" title={c.title || c.sessionId}>{c.title || c.sessionId}</span>

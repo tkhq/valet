@@ -12,8 +12,8 @@ access rules.
 
 | Surface | Below 768px | At or above 768px |
 | --- | --- | --- |
-| Home route | Conversation with Chat, Tasks, and Make | The same conversation, with Tasks or Make beside it |
-| Workspace dashboard | Make links to `/overview` | `/overview`, linked from Make |
+| Home route | Conversation with Chat, Tasks, and Make | Threads layout with Home selected and a Tasks panel |
+| Workspace dashboard | Make links to `/overview` | `/overview`, linked from Home and the New thread menu |
 | Top navigation | Drawer toggle and account menu | Existing navigation, notifications, Settings, and Ask Valet |
 | Thread navigation | App drawer on signed-in pages | Existing conversation rail on chat routes |
 | Conversation components | Shared cards, plans, activity, and presence | The same shared components |
@@ -229,19 +229,36 @@ Assistant reply, rating, copy, and branch actions appear together below the resp
 
 ### Home on desktop
 
-Added 2026-11-02. Desktop uses the same Home flow as a phone. This replaces
-the earlier rule that Home changes only below 768px.
+Added 2026-11-02, revised 2026-11-03. Desktop opens Home inside the Threads
+layout, the way a chat app opens on its conversation list. This replaces the
+earlier rule that Home changes only below 768px.
 
-- `/` shows the Home conversation at every width. A phone switches between
-  Chat, Tasks, and Make. A wider screen keeps the conversation in view and
-  shows Tasks or Make in a panel beside it. Tasks is the default panel.
-- `?view=make` opens Make on both layouts. `?view=tasks` opens Tasks. On a
-  wider screen, selecting Tasks clears the parameter, so a phone that opens
-  the same URL starts in Chat.
+- `/` shows the thread sidebar (New thread, Home, Projects, Recents) with
+  Home selected, and the Home conversation in the main pane. Every thread is
+  one click away. The top navigation has no separate Home link; Threads is
+  active on `/` and on `/chat`. The logo also opens `/`.
+- The sidebar pins the Home row in every workspace. The row links to `/`.
+  Tasks that Home started nest under it, the way a thread's children nest:
+  first what needs the person, then running tasks, unread replies, and the
+  newest three finished tasks. Each nested row shows its state. The tasks
+  remain top-level threads in their own workspace; only the sidebar nests
+  them.
+- While Home is idle, an idle view covers the transcript. It shows a
+  greeting with the starters, a one-line status, the tasks waiting on the
+  person, recent work, Show conversation, and a link to the workspace
+  overview. Typing, a starter, Show conversation, or a running turn removes
+  the idle view until the person leaves Home.
+- The thread header has a Tasks button with the count of items that need the
+  person. It opens a collapsible Tasks panel beside the conversation.
+  `?view=tasks` opens the panel; closing it clears the parameter.
+- The New thread button keeps its one-click action. A menu beside it offers
+  Thread, Task, Workflow, Artifact, Project, and Workspace overview. Task and
+  Artifact open Home with a starter in the message box. Workflow opens the
+  workflow composer. Project opens the new-project dialog.
+- The full personal and team dashboard is at `/overview`. It still follows
+  the workspace switcher.
 - The wider layout uses the full thread header. The model picker and thread
-  menu stay the same as on `/chat`.
-- The approvals dock stays above the composer. An expanded question does not
-  hide the desktop composer.
-- The personal and team dashboard moves to `/overview`. It still follows the
-  workspace switcher. Make links to it as "Workspace overview".
-- The top navigation starts with a Home link. The logo also opens Home.
+  menu stay the same as on `/chat`. An expanded question in the approvals
+  dock does not hide the desktop composer.
+- Phones keep Chat, Tasks, and Make unchanged. Make on a phone also links to
+  the workspace overview.

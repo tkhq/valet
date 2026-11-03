@@ -236,7 +236,6 @@ describe("TopNav", () => {
     renderNav();
     await screen.findByText("Valet");
     expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
-    expect(within(screen.getByRole("navigation", { name: "Primary" })).getByRole("link", { name: "Home" }).getAttribute("href")).toBe("/");
     expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
     expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
     expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
@@ -249,7 +248,6 @@ describe("TopNav", () => {
       .getAllByRole("link")
       .map((el) => el.textContent);
     expect(labels).toEqual([
-      "Home",
       "Threads",
       "Artifacts",
       "Presence",

@@ -1,12 +1,15 @@
-import { useState } from "react";
-import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { useEffect, useState, type ReactNode } from "react";
+import { ListChecks, X } from "lucide-react";
+import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
 import { useHomeConversation } from "~/api/home";
 import { errorText } from "~/lib/error-text";
+import { queueBusy, useQueueStateForThread } from "~/stores/stream";
 import { HomeEmptyState } from "./home-empty-state";
-import { HomeWideLayout } from "./home-wide-layout";
+import { HomeLanding } from "./home-landing";
 import { MobileConversationLayout, type MobileConversationView } from "./mobile-conversation-layout";
 import { NeedsYouDock } from "./needs-you-dock";
+import { TasksPanel, useNeedsYouCount } from "./tasks-panel";
 export type HomeView = MobileConversationView;
 
 /**
@@ -15,7 +18,7 @@ export type HomeView = MobileConversationView;
  * skills and memory). On a phone they sit behind a Chat/Tasks/Make switch
  * under the top bar, and the conversation stays mounted while another tab
  * shows, so a draft or a running turn is not lost. A wider screen (`wide`)
- * keeps the conversation in view and shows Tasks or Make beside it.
+ * shows Home inside the Threads layout: see `HomeDesktop`.
  */
 export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeView; onViewChange: (view: HomeView) => void; wide?: boolean }) {
   const home = useHomeConversation();
@@ -28,14 +31,8 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
   if (!home.data) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening Valet…" /></div>;
   const dock = <NeedsYouDock homeThreadId={home.data.threadId} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />;
   const empty = <HomeEmptyState sessionId={home.data.sessionId} threadId={home.data.threadId} />;
-  if (wide) {
-    // The full thread header keeps the desktop model picker and thread menu.
-    return <HomeWideLayout side={view === "make" ? "make" : "tasks"}
-      onSideChange={(side) => onViewChange(side === "make" ? "make" : "chat")}>
-      <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} chatOnly enableReplies
-        composerAccessory={dock} emptyState={empty} />
-    </HomeWideLayout>;
-  }
+  if (wide) return <HomeDesktop sessionId={home.data.sessionId} threadId={home.data.threadId} dock={dock} empty={empty}
+    tasksOpen={view === "tasks"} onTasksOpenChange={(open) => onViewChange(open ? "tasks" : "chat")} />;
   return <MobileConversationLayout view={view} onViewChange={onViewChange}>
     <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} panel hidePanelHeader chatOnly sharedConversationChrome enableReplies
       active={!showSide}
@@ -43,4 +40,38 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
       composerAccessory={dock}
       emptyState={empty} />
   </MobileConversationLayout>;
+}
+
+/**
+ * Desktop Home, in the main pane of the Threads layout. While Home is idle it
+ * shows `HomeLanding` over the transcript; typing, a starter, or a running
+ * turn gives way to the conversation. The header's Tasks button opens a
+ * collapsible status panel beside it.
+ */
+function HomeDesktop({ sessionId, threadId, dock, empty, tasksOpen, onTasksOpenChange }: {
+  sessionId: string; threadId: string; dock: ReactNode; empty: ReactNode;
+  tasksOpen: boolean; onTasksOpenChange: (open: boolean) => void;
+}) {
+  const [landing, setLanding] = useState(true);
+  const busy = queueBusy(useQueueStateForThread(sessionId, threadId));
+  useEffect(() => { if (busy) setLanding(false); }, [busy]);
+  const needsYou = useNeedsYouCount();
+  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen} onClick={() => onTasksOpenChange(!tasksOpen)}>
+    <ListChecks aria-hidden className="h-4 w-4" />Tasks
+    {needsYou.count > 0 && <Badge variant="warning" className="px-1.5 py-0 text-[11px]">{needsYou.count}{needsYou.partial ? "+" : ""}</Badge>}
+  </Button>;
+  return <div data-home-desktop className="flex min-h-0 min-w-0 flex-1" onInput={() => setLanding(false)}>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <SessionView sessionId={sessionId} activeThreadId={threadId} chatOnly enableReplies composerAccessory={dock} emptyState={empty}
+        headerActions={tasksButton}
+        cover={landing ? <HomeLanding sessionId={sessionId} threadId={threadId} onShowConversation={() => setLanding(false)} /> : undefined} />
+    </div>
+    {tasksOpen && <aside aria-label="Tasks" className="flex min-h-0 w-[clamp(18rem,30vw,24rem)] shrink-0 flex-col border-l border-line">
+      <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-2">
+        <h2 className="text-sm font-medium text-ink">Tasks</h2>
+        <Button size="sm" variant="ghost" aria-label="Close tasks" onClick={() => onTasksOpenChange(false)}><X aria-hidden className="h-4 w-4" /></Button>
+      </div>
+      <TasksPanel className="min-h-0 flex-1 overflow-y-auto p-4" />
+    </aside>}
+  </div>;
 }
