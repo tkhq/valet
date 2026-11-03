@@ -6,7 +6,7 @@ import { usePageTitle } from "~/lib/page-title";
 /** Home is the person's one conversation with Valet across every workspace,
  * with Tasks and Make: `?view=tasks` or `?view=make` opens that tab. A phone
  * switches between them; a wider screen keeps the conversation in view with
- * Tasks or Make beside it. The workspace dashboard is at `/overview`. */
+ * Tasks or Make beside it. */
 export const Route = createFileRoute("/")({
   validateSearch: (raw: Record<string, unknown>): { view?: "tasks" | "make" } =>
     (raw.view === "tasks" || raw.view === "make" ? { view: raw.view } : {}),

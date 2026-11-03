@@ -71,7 +71,7 @@ describe("MakePanel", () => {
     const hrefs = screen.getAllByRole("link").map(link => [link.textContent, link.getAttribute("href")]);
     expect(hrefs).toEqual([
       ["All files", "/artifacts"], ["All workflows", "/workflows"], ["All skills", "/skills"], ["All memory", "/memory"],
-      ["Workspace overview", "/overview"], ["Presence", "/presence"], ["Connected apps", "/integrations"],
+      ["Presence", "/presence"], ["Connected apps", "/integrations"],
     ]);
   });
 

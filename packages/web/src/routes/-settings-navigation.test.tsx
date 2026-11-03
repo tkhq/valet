@@ -12,7 +12,7 @@ vi.mock("~/lib/workspace-scope", () => ({
 }));
 vi.mock("~/api/settings", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/settings")>(),
-  useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true } } }),
+  useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true }, plugins: [] } }),
   useTeams: () => ({ data: { teams: [] } }),
 }));
 

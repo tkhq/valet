@@ -308,13 +308,23 @@ id), and the server checks team membership as before.
   its own rail and pinned scope.
 - **Spaces.** Each space is a row. Personal has a person icon, and each team
   has a 16px square with its initial in a muted tint. An open space
-  lists its pages: Threads, Workflows, Presence, and Artifacts, then a More
-  row. More holds the space's Overview, Memory, Skills, Integrations, Usage,
-  and Security (with the plugin). Each page row opens that page with
-  `?workspace=` naming the space. The active space starts open and the others
-  closed. More starts closed, and opens by itself when one of its pages is
-  current. The browser remembers both open states. A closed space shows all
-  its pages in a menu on hover or from its chevron.
+  lists its pages: Threads, Workflows, Presence, and Artifacts, then a
+  Settings row with a gear icon. Settings holds the space's Integrations,
+  Skills, Memory, and Usage, indented one more level with a faint guide line
+  so they read as its contents. Each page row opens that page with `?workspace=`
+  naming the space. Only the active space opens on load. A space the person
+  opens or closes stays that way until they go to another space. Settings
+  starts closed, opens by itself when one of its pages is current, and the
+  browser remembers it per space. A closed space shows all its pages in a
+  menu on hover or from its chevron.
+- **Security.** Security is an admin setting, so the Settings page lists
+  Valet Security under Plugins for a caller with the plugin. The top bar's
+  Plugins menu also opens it.
+- **No workspace overview.** Home is the landing page. The `/overview`
+  dashboard is deleted, and `/overview` redirects to `/`.
+- **New thread** is one button that starts a thread. It has no create menu:
+  Workflows and Artifacts have their own space rows, Projects has its "+"
+  button, and tasks start from a message to Home.
 - **Same-page switching.** On a space page, a space's name opens the same
   page in that space: Engineering / Integrations goes to Sales /
   Integrations. A detail page goes to its list page. From Home or a thread,

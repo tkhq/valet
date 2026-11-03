@@ -171,26 +171,16 @@ vi.mock("~/api/child-work", async (importOriginal) => {
 });
 
 
-describe("ThreadTree — create menu", () => {
+describe("ThreadTree — New thread", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
   });
 
-  it("folds what Valet can make into a menu beside New thread", async () => {
+  it("is a plain button with no create menu beside it", () => {
     render(<TooltipProvider><ThreadTree /></TooltipProvider>);
-    await userEvent.click(screen.getByRole("button", { name: "More to create" }));
-    const menu = await screen.findByRole("menu");
-    expect([...menu.querySelectorAll('[role="menuitem"]')].map(item => item.textContent)).toEqual(
-      ["Thread", "Task", "Workflow", "Artifact", "Project", "Workspace overview"]);
-    await userEvent.click(screen.getByRole("menuitem", { name: "Workspace overview" }));
-    expect(navigate).toHaveBeenCalledWith({ to: "/overview" });
-    await userEvent.click(screen.getByRole("button", { name: "More to create" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Workflow" }));
-    expect(navigate).toHaveBeenLastCalledWith({ to: "/workflows", search: { create: true } });
-    await userEvent.click(screen.getByRole("button", { name: "More to create" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Project" }));
-    expect(await screen.findByRole("dialog", { name: "New project" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New thread" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "More to create" })).toBeNull();
   });
 });
 

@@ -13,7 +13,6 @@ access rules.
 | Surface | Below 768px | At or above 768px |
 | --- | --- | --- |
 | Home route | Conversation with Chat, Tasks, and Make | Threads layout with Home selected and a Tasks panel |
-| Workspace dashboard | Make links to `/overview` | `/overview`, linked from Home and the New thread menu |
 | Top navigation | Drawer toggle and account menu | Existing navigation, notifications, Settings, and Ask Valet |
 | Thread navigation | App drawer on signed-in pages | Existing conversation rail on chat routes |
 | Conversation components | Shared cards, plans, activity, and presence | The same shared components |
@@ -244,8 +243,7 @@ earlier rule that Home changes only below 768px.
   Home starts fresh: no tasks nest under it. Tasks that Home started stay in
   the Tasks panel and in their own workspace's thread list.
 - While Home is idle, an idle view covers the transcript. It shows a
-  greeting with the starters, Show conversation, and a link to the workspace
-  overview. What waits on the person is in the Tasks panel, not here. Typing, a starter, Show conversation, or a running turn removes
+  greeting with the starters and Show conversation. What waits on the person is in the Tasks panel, not here. Typing, a starter, Show conversation, or a running turn removes
   the idle view until the person leaves Home.
 - The thread header has a Tasks button with the count of items that need the
   person. It opens a collapsible Tasks panel beside the conversation. The
@@ -256,14 +254,10 @@ earlier rule that Home changes only below 768px.
   browser storage keeps that choice, and the choice wins on later visits. A
   link or the approvals dock can open it without storing a choice. The Tasks button shows the count of
   items that need the person ("Tasks · 3") whether the panel is open or not.
-- The New thread button keeps its one-click action. A menu beside it offers
-  Thread, Task, Workflow, Artifact, Project, and Workspace overview. Task and
-  Artifact open Home with a starter in the message box. Workflow opens the
-  workflow composer. Project opens the new-project dialog.
-- The full personal and team dashboard is at `/overview`. It still follows
-  the workspace switcher.
+- The New thread button starts a thread. It has no create menu (removed
+  2026-11-03). The workspace dashboard at `/overview` is deleted; the path
+  redirects to `/`.
 - The wider layout uses the full thread header. The model picker and thread
   menu stay the same as on `/chat`. An expanded question in the approvals
   dock does not hide the desktop composer.
-- Phones keep Chat, Tasks, and Make unchanged. Make on a phone also links to
-  the workspace overview.
+- Phones keep Chat, Tasks, and Make unchanged.

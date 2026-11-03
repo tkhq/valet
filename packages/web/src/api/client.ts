@@ -17,7 +17,6 @@ import type {
   ListTeamDeletionRequestsResponse,
   ListTeamDeletionTargetsResponse,
   SubmitTeamDeletionRequest,
-  WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
   ListPresencePlacesResponse,
@@ -28,8 +27,6 @@ import type {
   ActiveViewersResponse,
   ThreadPlanResponse,
   ThreadRecapResponse,
-  WaitingThreadsResponse,
-  WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
@@ -645,10 +642,6 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
-  listWorkspaceActiveWork: (owner: OwnerFilter, cursor?: string) =>
-    request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
-  getWaitingThreads: (owner: OwnerFilter) =>
-    request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
   listWorkspaceChannels: (owner: OwnerFilter) =>
     request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
   getIntegrationLimit: (owner: OwnerFilter) =>
@@ -683,8 +676,6 @@ export const api = {
   /** Download URL for a file attached to the thread; an `<a download>` target. */
   threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
     `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
-  listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
-    request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getThreadAddress: (id: string) =>
     request<ThreadAddress>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
@@ -1165,8 +1156,6 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
-  dismissWorkflowRun: (runId: string) =>
-    request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
   retryWorkflowRun: (runId: string, body?: RetryWorkflowRunRequest) =>
     request<RetryWorkflowRunResponse>(
       "POST",

@@ -5,7 +5,6 @@ import { SessionView } from "~/components/session/session-view";
 import { useHomeConversation } from "~/api/home";
 import { errorText } from "~/lib/error-text";
 import { queueBusy, useQueueStateForThread } from "~/stores/stream";
-import { Link } from "@tanstack/react-router";
 import { HomeEmptyState, greeting } from "./home-empty-state";
 import { MobileConversationLayout, type MobileConversationView } from "./mobile-conversation-layout";
 import { NeedsYouDock } from "./needs-you-dock";
@@ -77,7 +76,6 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasks
         cover={landing ? <HomeEmptyState sessionId={sessionId} threadId={threadId} title={greeting(new Date())} onPick={() => setLanding(false)}>
           <p className="flex gap-4 text-sm text-muted">
             <button type="button" className="hover:text-ink hover:underline" onClick={() => setLanding(false)}>Show conversation</button>
-            <Link to="/overview" className="hover:text-ink hover:underline">Workspace overview</Link>
           </p>
         </HomeEmptyState> : undefined} />
     </div>
