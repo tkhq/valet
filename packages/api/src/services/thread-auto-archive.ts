@@ -35,6 +35,8 @@ import { HOME_THREAD_KEY } from "../home/context.js";
 
 /** Days without use before a thread is archived when `VALET_THREAD_ARCHIVE_DAYS` is unset. */
 export const DEFAULT_THREAD_ARCHIVE_DAYS = 7;
+/** Largest accepted period. Ten years keeps the millisecond cutoff far inside bigint. */
+export const MAX_THREAD_ARCHIVE_DAYS = 3650;
 /** The `archived_by` value that marks an archive the sweep made. */
 export const SYSTEM_ARCHIVER = "system";
 
@@ -49,14 +51,15 @@ type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
 let archivedCounter: Counter | undefined;
 
 /**
- * Reads `VALET_THREAD_ARCHIVE_DAYS`: whole days, 0 turns auto-archive off.
- * Unset or blank means 7. An invalid value throws at boot, naming the variable.
+ * Reads `VALET_THREAD_ARCHIVE_DAYS`: whole days from 0 to 3650, 0 turns
+ * auto-archive off. Unset or blank means 7. An invalid or out-of-range value
+ * throws at boot, naming the variable.
  */
 export function parseThreadArchiveDays(env: NodeJS.ProcessEnv): number {
   const raw = env.VALET_THREAD_ARCHIVE_DAYS?.trim();
   if (raw === undefined || raw === "") return DEFAULT_THREAD_ARCHIVE_DAYS;
-  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
-    throw new Error(`VALET_THREAD_ARCHIVE_DAYS is "${env.VALET_THREAD_ARCHIVE_DAYS}". Set a whole number of days (0 turns auto-archive off), or remove it to use ${DEFAULT_THREAD_ARCHIVE_DAYS}.`);
+  if (!/^\d+$/.test(raw) || Number(raw) > MAX_THREAD_ARCHIVE_DAYS) {
+    throw new Error(`VALET_THREAD_ARCHIVE_DAYS is "${env.VALET_THREAD_ARCHIVE_DAYS}". Set a whole number of days from 0 to ${MAX_THREAD_ARCHIVE_DAYS} (0 turns auto-archive off), or remove it to use ${DEFAULT_THREAD_ARCHIVE_DAYS}.`);
   }
   return Number(raw);
 }
@@ -113,6 +116,9 @@ async function archiveIdleBatch(db: AppDb, days: number, now: number): Promise<n
  */
 export async function archiveIdleThreads(db: AppDb, days: number, now = Date.now()): Promise<number> {
   if (days <= 0) return 0;
+  if (!Number.isInteger(days) || days > MAX_THREAD_ARCHIVE_DAYS) {
+    throw new RangeError(`Thread archive period must be a whole number of days from 0 to ${MAX_THREAD_ARCHIVE_DAYS}.`);
+  }
   let total = 0;
   for (;;) {
     const archived = await archiveIdleBatch(db, days, now);

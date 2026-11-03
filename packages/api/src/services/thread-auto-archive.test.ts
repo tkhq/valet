@@ -6,7 +6,7 @@ import { agentSessions, assistants, assistantExecutions, pluginStore, sessionThr
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { recordThreadUserActivity } from "./thread-activity.js";
 import { reopenIdleArchivedThread } from "../events/delivery-thread.js";
-import { archiveIdleThreads, DEFAULT_THREAD_ARCHIVE_DAYS, parseThreadArchiveDays } from "./thread-auto-archive.js";
+import { archiveIdleThreads, DEFAULT_THREAD_ARCHIVE_DAYS, MAX_THREAD_ARCHIVE_DAYS, parseThreadArchiveDays } from "./thread-auto-archive.js";
 
 const DAY = 86_400_000;
 const NOW = 100 * DAY;
@@ -44,6 +44,17 @@ describe("parseThreadArchiveDays", () => {
     for (const bad of ["-1", "2.5", "seven"]) {
       expect(() => parseThreadArchiveDays({ VALET_THREAD_ARCHIVE_DAYS: bad })).toThrow(/VALET_THREAD_ARCHIVE_DAYS/);
     }
+  });
+
+  it("accepts up to 3650 days and refuses a larger value at boot", async () => {
+    expect(parseThreadArchiveDays({ VALET_THREAD_ARCHIVE_DAYS: String(MAX_THREAD_ARCHIVE_DAYS) })).toBe(3650);
+    for (const bad of ["3651", "107000000000", "99999999999999999999"]) {
+      expect(() => parseThreadArchiveDays({ VALET_THREAD_ARCHIVE_DAYS: bad })).toThrow(/from 0 to 3650/);
+    }
+    // The longest period still runs: its cutoff fits in bigint and the pass archives an older thread.
+    await thread("t-ancient", 1);
+    expect(await archiveIdleThreads(tdb.appDb, MAX_THREAD_ARCHIVE_DAYS, (MAX_THREAD_ARCHIVE_DAYS + 1) * DAY)).toBe(1);
+    await expect(archiveIdleThreads(tdb.appDb, 107_000_000_000)).rejects.toThrow(RangeError);
   });
 });
 

@@ -8,7 +8,7 @@ Threads stay in the sidebar list until a person archives them by hand. Lists fil
 
 ## Behavior
 
-- An hourly sweep (`packages/api/src/services/thread-auto-archive.ts`) archives each thread that nobody used for `VALET_THREAD_ARCHIVE_DAYS` days. The default is 7. 0 turns auto-archive off. An invalid value stops the API at startup and names the variable.
+- An hourly sweep (`packages/api/src/services/thread-auto-archive.ts`) archives each thread that nobody used for `VALET_THREAD_ARCHIVE_DAYS` days. The default is 7. 0 turns auto-archive off. The largest accepted value is 3650, so the millisecond cutoff always fits in a Postgres bigint. An invalid or larger value stops the API at startup and names the variable.
 - The archive is the same display-only state as a manual archive: `session_threads.archived_at`. The engine thread and its history do not change. `session_threads.archived_by` records who archived the thread: `system` for the sweep, or the user id for a manual archive.
 - "Used" means the later of the newest engine entry (`engine_threads.updated_at`) and the last user action (`session_threads.last_user_activity_at`). Each entry moves `updated_at`, so a message from anyone, a turn, or a tool run counts. A message the user sends moves `last_user_activity_at`.
 - The sweep skips these threads:
