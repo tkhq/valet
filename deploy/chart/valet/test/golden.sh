@@ -684,4 +684,14 @@ grep -q 'AUTH_MCP_MAX_REDIRECT_URIS: "2"' <<<"$MCP" || fail "mcp.maxRedirectUris
 grep -q 'AUTH_MCP_APP_SCHEMES: "claude"' <<<"$MCP" || fail "mcp.appSchemes must render"
 pass "MCP registration settings render only when set"
 
+echo "== outbound URL guard =="
+if grep -qE 'VALET_OUTBOUND_URL_ALLOWLIST|VALET_INTERNAL_HOSTS' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave the outbound URL guard settings unset"
+fi
+GUARD=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set 'api.security.outboundUrlAllowlist=vllm.corp.example\,10.20.0.0/16' --set 'api.security.internalHosts=ecr-proxy.corp.example')
+grep -q 'VALET_OUTBOUND_URL_ALLOWLIST: "vllm.corp.example,10.20.0.0/16"' <<<"$GUARD" || fail "security.outboundUrlAllowlist must render"
+grep -q 'VALET_INTERNAL_HOSTS: "ecr-proxy.corp.example"' <<<"$GUARD" || fail "security.internalHosts must render"
+pass "outbound URL guard settings render only when set"
+
 echo "All golden assertions passed."
