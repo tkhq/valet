@@ -24,6 +24,8 @@ import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin } from "../services/org.js";
 import { checkOutboundUrl, guardedFetch, modelFetchFor, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
+import { auditRequest } from "./_admin-audit.js";
+import { diffFields, displayUrl } from "../services/admin-audit.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -246,6 +248,14 @@ llmProvidersRouter.post("/", async (c) => {
         ? body.models ?? defaultModelsFor(body.kind)
         : undefined,
     });
+    await auditRequest(c, {
+      action: "llm_provider.create",
+      targetType: "llm_provider",
+      targetId: row.id,
+      targetName: row.name,
+      changes: { kind: row.kind, baseUrl: row.baseUrl ? displayUrl(row.baseUrl) : null, enabled: row.enabled, modelCount: row.models?.length ?? 0 },
+      alert: "llm_provider_created",
+    });
     const resp: CreateLlmProviderResponse = await toSummary(c, row);
     return c.json(resp, 201);
   } catch (err) {
@@ -308,6 +318,24 @@ llmProvidersRouter.patch("/:id", async (c) => {
 
   const updated = await updateLlmProvider(db, user.orgId, id, patch);
   if (!updated) return c.json(PROVIDER_NOT_FOUND, 404);
+  const changes: Record<string, unknown> = diffFields(
+    { name: existing.name, enabled: existing.enabled, baseUrl: existing.baseUrl ? displayUrl(existing.baseUrl) : null },
+    { name: updated.name, enabled: updated.enabled, baseUrl: updated.baseUrl ? displayUrl(updated.baseUrl) : null },
+    ["name", "enabled", "baseUrl"],
+  );
+  if (patch.models !== undefined && JSON.stringify(existing.models) !== JSON.stringify(updated.models)) {
+    changes.models = { from: (existing.models ?? []).map((m) => m.id), to: (updated.models ?? []).map((m) => m.id) };
+  }
+  // Compare the stored values, not the display form: a changed query string is a changed target too.
+  const baseUrlChanged = (existing.baseUrl ?? null) !== (updated.baseUrl ?? null);
+  await auditRequest(c, {
+    action: "llm_provider.update",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: updated.name,
+    changes,
+    alert: baseUrlChanged ? "llm_provider_base_url_changed" : null,
+  });
   const resp: PatchLlmProviderResponse = await toSummary(c, updated);
   return c.json(resp);
 });
@@ -346,6 +374,15 @@ llmProvidersRouter.put("/:id/key", async (c) => {
     metadata: { last4 },
   });
 
+  // Only the fact that the key changed, and its last four characters.
+  await auditRequest(c, {
+    action: "llm_provider.key_set",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: existing.name,
+    changes: { keyLast4: last4 },
+  });
+
   const resp: PutLlmProviderKeyResponse = { hasKey: true, keyLast4: last4 };
   return c.json(resp);
 });
@@ -363,6 +400,7 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
 
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
+  await auditRequest(c, { action: "llm_provider.key_clear", targetType: "llm_provider", targetId: id, targetName: existing.name });
 
   return c.body(null, 204);
 });
@@ -383,6 +421,13 @@ llmProvidersRouter.delete("/:id", async (c) => {
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
   await deleteLlmProvider(db, user.orgId, id);
+  await auditRequest(c, {
+    action: "llm_provider.delete",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: existing.name,
+    changes: { kind: existing.kind, baseUrl: existing.baseUrl ? displayUrl(existing.baseUrl) : null },
+  });
 
   return c.body(null, 204);
 });

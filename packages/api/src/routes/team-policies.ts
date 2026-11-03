@@ -6,7 +6,12 @@ import { validateOverrideBounds, upsertSimpleTeamPolicy, listTeamGrants, revokeT
 import { validateParamMatchers } from "../policies/matchers.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { toGrantWire } from "./me-policies.js";
-import { toPolicyWire } from "./policies.js";
+import { policyAudit, policyTargetName, toPolicyWire } from "./policies.js";
+import { auditRequest } from "./_admin-audit.js";
+import type { AdminAuditEntry } from "../services/admin-audit.js";
+
+/** An audit row a team-policy write queues inside its transaction and records after commit. PGlite serves one connection, so the row cannot be written while the transaction holds it. */
+type PendingAudit = Omit<AdminAuditEntry, "orgId" | "actor">;
 
 export const teamPoliciesRouter = new Hono<AppEnv>();
 const NOT_FOUND = { error: "Team or policy not found. Open a team you belong to." };
@@ -56,11 +61,13 @@ teamPoliciesRouter.on(["POST", "PATCH", "DELETE"], ["/:id/policies", "/:id/polic
   const method = c.req.method;
   if ((method === "POST") === (policyId !== undefined)) return c.json(NOT_FOUND, 404);
   // Serialize creation with team deletion, and check roles inside the write.
-  return db.transaction(async (tx) => {
+  let pending: PendingAudit | undefined;
+  const res = await db.transaction(async (tx) => {
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change action policies." }, 403);
     const scope = { orgId: user.orgId, type: "team" as const, id };
     if (method === "DELETE" && policyId) {
       const row = await revokePolicy(tx, scope, policyId, Date.now());
+      if (row) pending = { action: "team_policy.revoke", targetType: "team_policy", targetId: row.id, targetName: policyTargetName(row), changes: { teamId: id, ...policyAudit(row) } };
       return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);
     }
     let fields: ReturnType<typeof parsePolicyFields>;
@@ -75,12 +82,16 @@ teamPoliciesRouter.on(["POST", "PATCH", "DELETE"], ["/:id/policies", "/:id/polic
     if (method === "POST" && target) {
       if (!fields.mode) return c.json({ error: "Choose allow, require_approval, or deny." }, 400);
       const row = await createPolicy(tx, scope, { ...target, ...fields, mode: fields.mode, managedBy: user.id, now: Date.now() });
+      pending = { action: "team_policy.create", targetType: "team_policy", targetId: row.id, targetName: policyTargetName(row), changes: { teamId: id, ...policyAudit(row) } };
       return c.json(toPolicyWire(row), 201);
     }
     if (!policyId) return c.json(NOT_FOUND, 404);
     const row = await updatePolicy(tx, scope, policyId, { ...fields, now: Date.now() });
+    if (row) pending = { action: "team_policy.update", targetType: "team_policy", targetId: row.id, targetName: policyTargetName(row), changes: { teamId: id, ...policyAudit(row) } };
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);
   });
+  if (pending) await auditRequest(c, pending);
+  return res;
 });
 
 teamPoliciesRouter.get("/:id/grants", async (c) => {
@@ -108,11 +119,14 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
   const dynamicActions = !grantId && (await getTeamInOrg(db, user.orgId, id)) && (await canAdministerTeam(db, id, user.id))
     ? await serviceProbes.listedActionsSnapshot({ type: "team", id }, actionPluginByService.values())
     : undefined;
-  return db.transaction(async (tx) => {
+  let pending: PendingAudit | undefined;
+  const res = await db.transaction(async (tx) => {
     // Shared authority lock protects against role revocation and team deletion.
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change policies or grants." }, 403);
     if (grantId) {
-      return await revokeTeamGrant(tx, user.orgId, id, grantId, Date.now()) ? c.json({ ok: true }) : c.json(NOT_FOUND, 404);
+      const revoked = await revokeTeamGrant(tx, user.orgId, id, grantId, Date.now());
+      if (revoked) pending = { action: "team_policy.grant_revoke", targetType: "team_policy", targetId: grantId, changes: { teamId: id } };
+      return revoked ? c.json({ ok: true }) : c.json(NOT_FOUND, 404);
     }
     let target: ReturnType<typeof parseTarget>;
     let fields: ReturnType<typeof parsePolicyFields>;
@@ -130,6 +144,9 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
     const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), { actionPluginByService, dynamicActions });
     if (!bounds.ok) return c.json({ error: bounds.error }, 400);
     const row = await upsertSimpleTeamPolicy(tx, { orgId: user.orgId, type: "team", id }, { ...target, mode: fields.mode, managedBy: user.id, now: Date.now() });
+    if (row) pending = { action: "team_policy.override_set", targetType: "team_policy", targetId: row.id, targetName: policyTargetName(row), changes: { teamId: id, ...policyAudit(row) } };
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);
   });
+  if (pending) await auditRequest(c, pending);
+  return res;
 });

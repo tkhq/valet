@@ -327,6 +327,33 @@ export const mcpRegistrations = pgTable(
   (t) => [index("mcp_registrations_address_idx").on(t.address, t.createdAt)],
 );
 
+// `admin_audit_events` — one row per successful admin configuration change
+// (docs/specs/2026-11-03-admin-audit-log-design.md). Written only by
+// `services/admin-audit.ts`. `changes` holds a redacted field summary and
+// never holds a secret value. Reads are keyset-paginated on
+// (org_id, created_at desc, id desc).
+export const adminAuditEvents = pgTable(
+  "admin_audit_events",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    /** Null when the system made the change (for example a boot promotion). */
+    actorUserId: text("actor_user_id"),
+    actorEmail: text("actor_email"),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id"),
+    targetName: text("target_name"),
+    changes: jsonb("changes").$type<Record<string, unknown>>(),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("admin_audit_events_org_created").on(t.orgId, t.createdAt.desc(), t.id.desc())],
+);
+
+export type AdminAuditEventRow = typeof adminAuditEvents.$inferSelect;
+
 // ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
 //
 // `invites` and `sandbox_tokens` are Valet-owned (not part of the CLI-

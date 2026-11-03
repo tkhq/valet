@@ -50,6 +50,7 @@ const APP_TABLES = [
   "oauth_consent",
   "invites",
   "sandbox_tokens",
+  "admin_audit_events",
   "org_members",
   "agent_sessions",
   "session_threads",

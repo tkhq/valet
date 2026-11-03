@@ -38,6 +38,28 @@ import {
   withdrawSourceChange,
   type SourceChangeRequestRow,
 } from "../bakes/source-change-requests.js";
+import { auditRequest } from "./_admin-audit.js";
+import { diffFields, displayUrl } from "../services/admin-audit.js";
+
+/** The org's seeded `default-full` base (`seedDefaultBasesIfMissing`). Every sandbox image inherits it. */
+const BUILTIN_BASE_NAME = "default-full";
+
+function isBuiltInSource(row: Pick<ImageSourceRow, "kind" | "name">): boolean {
+  return row.kind === "base" && row.name === BUILTIN_BASE_NAME;
+}
+
+/** The audited fields of an image source. `externalRef` can embed registry credentials, so it is shown as a display URL. */
+function auditView(row: ImageSourceRow) {
+  return {
+    name: row.name,
+    enabled: row.enabled,
+    schedule: row.schedule,
+    externalRef: row.externalRef ? displayUrl(row.externalRef) : null,
+    setupCommands: row.setupCommands,
+    parentId: row.parentId,
+    sandboxResources: row.sandboxResources,
+  };
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -233,6 +255,14 @@ sourcesRouter.post("/", async (c) => {
       }
     }
     await db.insert(imageSources).values(row);
+    await auditRequest(c, {
+      action: "image_source.create",
+      targetType: "image_source",
+      targetId: row.id,
+      targetName: row.name,
+      changes: { kind: row.kind, externalRef: displayUrl(row.externalRef), pullSecretName: row.pullSecretName },
+      alert: "image_source_created",
+    });
     return c.json({ source: row }, 201);
   }
 
@@ -292,6 +322,14 @@ sourcesRouter.post("/", async (c) => {
       }
       throw err;
     }
+    await auditRequest(c, {
+      action: "image_source.create",
+      targetType: "image_source",
+      targetId: row.id,
+      targetName: row.name,
+      changes: { kind: row.kind, profile: row.profile, setupCommands: row.setupCommands },
+      alert: "image_source_created",
+    });
     return c.json({ source: row }, 201);
   }
 
@@ -497,6 +535,23 @@ sourcesRouter.patch("/:id", async (c) => {
 
   await db.update(imageSources).set(patch).where(eq(imageSources.id, id));
   const updated = await getOwnedSource(db, id, c.var.user.orgId);
+  if (updated) {
+    const changes = diffFields(auditView(existing), auditView(updated),
+      ["name", "enabled", "schedule", "externalRef", "setupCommands", "parentId", "sandboxResources"]);
+    // What a bake runs or builds FROM is the risky part. A toggle of
+    // `enabled` or `schedule` on a custom source is recorded without an alert.
+    const buildInputChanged = (existing.externalRef ?? null) !== (updated.externalRef ?? null) ||
+      "setupCommands" in changes || "parentId" in changes;
+    const builtIn = isBuiltInSource(existing);
+    await auditRequest(c, {
+      action: "image_source.update",
+      targetType: "image_source",
+      targetId: id,
+      targetName: updated.name,
+      changes: builtIn ? { ...changes, builtIn: true } : changes,
+      alert: builtIn && Object.keys(changes).length > 0 ? "builtin_image_changed" : buildInputChanged ? "image_source_changed" : null,
+    });
+  }
   return c.json({ source: updated });
 });
 
@@ -511,6 +566,15 @@ sourcesRouter.delete("/:id", async (c) => {
   if (!existing) return c.json({ error: "source not found" }, 404);
 
   await db.delete(imageSources).where(eq(imageSources.id, id));
+  const builtIn = isBuiltInSource(existing);
+  await auditRequest(c, {
+    action: "image_source.delete",
+    targetType: "image_source",
+    targetId: id,
+    targetName: existing.name,
+    changes: { kind: existing.kind, ...(builtIn ? { builtIn: true } : {}) },
+    alert: builtIn ? "builtin_image_changed" : null,
+  });
   return c.json({ ok: true });
 });
 
@@ -526,6 +590,13 @@ sourcesRouter.post("/:id/bake", async (c) => {
 
   try {
     const row = await prebuildService.startBuild(id);
+    await auditRequest(c, {
+      action: "bake.start",
+      targetType: "bake",
+      targetId: row.id,
+      targetName: source.name,
+      changes: { sourceId: id, sourceKind: source.kind },
+    });
     return c.json({ bake: row }, 202);
   } catch (err) {
     if (err instanceof AnonymousImageBakesDisabledError) return c.json({ error: err.message }, 403);

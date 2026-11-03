@@ -213,3 +213,9 @@ default).
   targets, `.env`, or any deployed environment.
 - The API serves one process per deployment. There is no multi-tenant
   cross-org surface — the data model is single-org.
+- Each admin configuration change writes one row to `admin_audit_events`.
+  An org admin reads it at Settings > Organization > Audit log. High-risk
+  changes log `security.admin_change` and count in
+  `valet.security.admin_changes`. To forward these alerts, set
+  `VALET_SECURITY_ALERT_WEBHOOK_URL` at deploy time. See
+  `docs/specs/2026-11-03-admin-audit-log-design.md`.

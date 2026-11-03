@@ -5,6 +5,7 @@
  * better-auth's verified hook points.
  */
 import { createAuthMiddleware, APIError } from "better-auth/api";
+import { recordAdminAudit } from "../services/admin-audit.js";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
@@ -282,6 +283,19 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     if (admission?.allowed && admission.inviteId) {
       await acceptInvite(db, admission.inviteId, user.id);
     }
+
+    // Every new account joins the org here, whatever the sign-in method, so
+    // this is the one audit point for new users and new admins.
+    await recordAdminAudit(db, {
+      orgId: org.id,
+      actor: { userId: user.id, email: user.email },
+      action: "user.join",
+      targetType: "user",
+      targetId: user.id,
+      targetName: user.email,
+      changes: { role, inviteId: admission?.allowed ? admission.inviteId ?? null : null },
+      alert: role === "admin" ? "new_admin" : "new_user",
+    });
 
     // Bind the user to any config-declared teams whose member list includes
     // this email. Team rows are resolved by name within the org — if a team

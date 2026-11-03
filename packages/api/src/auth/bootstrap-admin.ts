@@ -21,6 +21,7 @@ import { account, invites, orgMembers, users } from "../schema/index.js";
 import { findOrg, setOrgMemberRole } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import { createInvite, revokeInvite } from "./invites.js";
+import { recordAdminAudit } from "../services/admin-audit.js";
 
 /** `invites.created_by` of a bootstrap invite. Config invites use "config". */
 export const BOOTSTRAP_INVITE_CREATOR = "bootstrap";
@@ -119,6 +120,16 @@ async function promoteAdminEmails(db: AppDb, cfg: AuthConfig, log: (line: string
     await db.update(users).set({ role: "admin" }).where(eq(users.id, user.id));
     if (member) await setOrgMemberRole(db, org.id, user.id, "admin");
     else await db.insert(orgMembers).values({ orgId: org.id, userId: user.id, role: "admin", createdAt: Date.now() }).onConflictDoNothing();
+    await recordAdminAudit(db, {
+      orgId: org.id,
+      actor: { userId: null, email: null },
+      action: "org_member.grant_admin",
+      targetType: "org_member",
+      targetId: user.id,
+      targetName: email,
+      changes: { role: { from: member?.role ?? null, to: "admin" }, via: "AUTH_ADMIN_EMAILS" },
+      alert: "new_admin",
+    });
     log(`Made ${email} an org admin (AUTH_ADMIN_EMAILS).`);
   }
 }
