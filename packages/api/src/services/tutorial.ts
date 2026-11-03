@@ -5,7 +5,7 @@
  * outcome, or while either stored version is below the current one. Raising
  * a version re-shows the tour without deleting any row.
  */
-import { eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, userTutorial } from "../schema/index.js";
 import type { TutorialOutcome, TutorialStateResponse, UpdateTutorialRequest } from "../wire/types.js";
@@ -54,20 +54,20 @@ export async function getTutorialState(
   };
 }
 
-function versionField(value: unknown, field: string, cap: number): number {
-  if (value === undefined) return cap;
+function versionField(value: unknown, field: string, what: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new TutorialInputError(`${field} must be a whole number of 0 or more.`);
+    throw new TutorialInputError(`Send ${field} with ${what}: the version of the tour you show, a whole number of 0 or more.`);
   }
-  return Math.min(value, cap);
+  return value;
 }
 
 /**
- * Save progress (`step`) or record an outcome. An outcome stamps the versions
- * the person saw, capped at the current ones, and clears the resume point.
- * A step is saved only while the tour is due and only for the current
- * versions, so a late progress write cannot undo an outcome or carry a
- * resume point into a newer tour.
+ * Save progress (`step`) or record an outcome. Each write carries the
+ * versions of the tour shown, and applies only when they equal the current
+ * ones: a tab left open across a version bump or an org reset cannot finish
+ * or resume the newer tour. A write never lowers a stored version, and a
+ * step is saved only while the tour is due, so a late progress write cannot
+ * undo an outcome.
  */
 export async function updateTutorial(
   db: AppDb,
@@ -81,61 +81,39 @@ export async function updateTutorial(
     if (body.outcome !== "completed" && body.outcome !== "skipped") {
       throw new TutorialInputError("outcome must be completed or skipped.");
     }
-    const orgVersion = await orgTutorialVersion(db, user.orgId);
-    const values = {
-      userId: user.id,
-      seenVersion: versionField(body.version, "version", current),
-      seenOrgVersion: versionField(body.orgVersion, "orgVersion", orgVersion),
-      outcome: body.outcome,
-      step: null,
-      updatedAt: now,
-    };
-    await db.insert(userTutorial).values(values).onConflictDoUpdate({
-      target: userTutorial.userId,
-      // Never lower a stored version: a stale tab must not re-show the tour.
-      set: {
-        seenVersion: sql`GREATEST(${userTutorial.seenVersion}, ${values.seenVersion})`,
-        seenOrgVersion: sql`GREATEST(${userTutorial.seenOrgVersion}, ${values.seenOrgVersion})`,
-        outcome: values.outcome,
-        step: null,
-        updatedAt: now,
-      },
-    });
   } else if ("step" in body) {
     const step = body.step;
     if (step !== null && (typeof step !== "string" || step.length === 0 || step.length > MAX_STEP_LENGTH)) {
       throw new TutorialInputError(`step must be a step id of 1 to ${MAX_STEP_LENGTH} characters, or null.`);
     }
-    if (body.version === undefined || body.orgVersion === undefined) {
-      throw new TutorialInputError("Send version and orgVersion with step: the versions of the tour you show.");
-    }
-    const orgVersion = await orgTutorialVersion(db, user.orgId);
-    // A step from a tour loaded before a version bump or an org reset is
-    // stale: the new tour must start at its first step.
-    if (body.version !== current || body.orgVersion !== orgVersion) return getTutorialState(db, version, user);
-    // While a pass is in progress, the seen versions record the tour the
-    // step belongs to. A reset that lands after this write raises the org
-    // version past it, so the step no longer resumes (getTutorialState).
-    await db.insert(userTutorial).values({
-      userId: user.id, seenVersion: current, seenOrgVersion: orgVersion, outcome: null, step, updatedAt: now,
-    }).onConflictDoUpdate({
-      target: userTutorial.userId,
-      set: {
-        seenVersion: sql`GREATEST(${userTutorial.seenVersion}, ${current})`,
-        seenOrgVersion: sql`GREATEST(${userTutorial.seenOrgVersion}, ${orgVersion})`,
-        outcome: null, step, updatedAt: now,
-      },
-      // Only while the tour is due: a progress write that arrives after Done
-      // or Skip for the current versions must not reopen the tour.
-      setWhere: or(
-        isNull(userTutorial.outcome),
-        lt(userTutorial.seenVersion, current),
-        lt(userTutorial.seenOrgVersion, orgVersion),
-      ),
-    });
   } else {
-    throw new TutorialInputError("Send step, or outcome with the versions you saw.");
+    throw new TutorialInputError("Send step, or outcome, with the versions of the tour you show.");
   }
+  const what = body.outcome !== undefined ? "outcome" : "step";
+  const seen = { version: versionField(body.version, "version", what), orgVersion: versionField(body.orgVersion, "orgVersion", what) };
+  const orgVersion = await orgTutorialVersion(db, user.orgId);
+  if (seen.version !== current || seen.orgVersion !== orgVersion) return getTutorialState(db, version, user);
+
+  // While a pass is in progress, the seen versions record the tour its step
+  // belongs to (getTutorialState resumes only at a current step). The
+  // predicates make each write a no-op if a newer write landed first: a
+  // reset between the check above and this write leaves the tour due.
+  const notNewer = and(lte(userTutorial.seenVersion, seen.version), lte(userTutorial.seenOrgVersion, seen.orgVersion));
+  const values = body.outcome !== undefined
+    ? { seenVersion: seen.version, seenOrgVersion: seen.orgVersion, outcome: body.outcome, step: null, updatedAt: now }
+    : { seenVersion: seen.version, seenOrgVersion: seen.orgVersion, outcome: null, step: body.step ?? null, updatedAt: now };
+  await db.insert(userTutorial).values({ userId: user.id, ...values }).onConflictDoUpdate({
+    target: userTutorial.userId,
+    set: values,
+    setWhere: body.outcome !== undefined
+      ? notNewer
+      // A step only while the tour is due, so it cannot reopen a finished one.
+      : and(notNewer, or(
+        isNull(userTutorial.outcome),
+        lt(userTutorial.seenVersion, seen.version),
+        lt(userTutorial.seenOrgVersion, seen.orgVersion),
+      )),
+  });
   return getTutorialState(db, version, user);
 }
 

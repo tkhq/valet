@@ -6772,15 +6772,14 @@ export interface TutorialStateResponse {
 
 /**
  * `PUT /api/tutorial`. Send `step` to save progress, or `outcome` to finish
- * or skip, each with the `version` and `orgVersion` of the tour shown. A step
- * for other than the current versions is ignored. Outcome versions above the
- * current ones are capped.
+ * or skip, each with the `version` and `orgVersion` of the tour shown. A
+ * write for other than the current versions is ignored.
  */
 export interface UpdateTutorialRequest {
   step?: string | null;
   outcome?: TutorialOutcome;
-  version?: number;
-  orgVersion?: number;
+  version: number;
+  orgVersion: number;
 }
 
 /** `POST /api/tutorial/reset` (org admin). */

@@ -83,7 +83,8 @@ export function FeatureTourProvider({ children, enabled = true }: { children: Re
 
   const step = index === null ? undefined : TOUR_STEPS[index];
   useEffect(() => {
-    if (step) save.mutate({ step: step.id, version: stateQ.data?.version, orgVersion: stateQ.data?.orgVersion });
+    const state = stateQ.data;
+    if (step && state) save.mutate({ step: step.id, version: state.version, orgVersion: state.orgVersion });
     // Save once per step shown; the mutation object changes every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step?.id]);
@@ -91,7 +92,7 @@ export function FeatureTourProvider({ children, enabled = true }: { children: Re
   const finish = useCallback((outcome: "completed" | "skipped") => {
     setIndex(null);
     const state: TutorialStateResponse | undefined = stateQ.data;
-    save.mutate({ outcome, version: state?.version, orgVersion: state?.orgVersion });
+    if (state) save.mutate({ outcome, version: state.version, orgVersion: state.orgVersion });
   }, [save, stateQ.data]);
 
   const move = useCallback((direction: 1 | -1, available: (step: TourStep) => boolean) => {

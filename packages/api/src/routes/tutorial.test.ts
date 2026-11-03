@@ -132,18 +132,24 @@ describe("/api/tutorial", () => {
     expect((await state()).due).toBe(true);
   });
 
-  it("caps versions above the current ones and never lowers a stored one", async () => {
+  it("ignores an outcome from a tab that showed another version", async () => {
     api = await bootTestApi();
+    const v1 = await state();
+    // Versions above the current ones are not current either.
     expect((await put({ outcome: "completed", version: 99, orgVersion: 99 })).status).toBe(200);
-    expect(await state()).toMatchObject({ seenVersion: 1, seenOrgVersion: 0, due: false });
-    // A stale tab that saw version 0 must not re-show the tour.
-    expect((await put({ outcome: "skipped", version: 0, orgVersion: 0 })).status).toBe(200);
-    expect(await state()).toMatchObject({ seenVersion: 1, due: false });
+    expect((await state()).due).toBe(true);
+    // An old tab finishes the version 1 tour after the bump to version 2.
+    api.providers.tutorialVersion = 2;
+    const v2 = await state();
+    await step("tasks", v2);
+    await finish(v1, "skipped");
+    expect(await state()).toMatchObject({ outcome: null, step: "tasks", due: true });
+    expect((await finish(v2, "completed")).due).toBe(false);
   });
 
   it("rejects bad input with the fix", async () => {
     api = await bootTestApi();
-    for (const body of [{}, { outcome: "done" }, { step: "", version: 1, orgVersion: 0 }, { step: "x".repeat(65), version: 1, orgVersion: 0 }, { step: "home" }, { outcome: "completed", version: -1 }, []]) {
+    for (const body of [{}, { outcome: "done", version: 1, orgVersion: 0 }, { step: "", version: 1, orgVersion: 0 }, { step: "x".repeat(65), version: 1, orgVersion: 0 }, { step: "home" }, { outcome: "completed" }, { outcome: "completed", version: -1, orgVersion: 0 }, []]) {
       const res = await put(body);
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toMatch(/\./);
