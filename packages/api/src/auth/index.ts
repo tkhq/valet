@@ -23,6 +23,7 @@ import {
 } from "../schema/index.js";
 import { AUTH_SESSION_LIFETIME_SECONDS, type AuthConfig } from "./config.js";
 import type { buildAuthHooks } from "./provisioning.js";
+import { OIDC_PROVIDER_ID } from "./sso-hooks.js";
 
 export interface BuildAuthOpts {
   db: AppDb;
@@ -235,7 +236,7 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
           ? {
               defaultSSO: [
                 {
-                  providerId: "oidc",
+                  providerId: OIDC_PROVIDER_ID,
                   domain: cfg.oidc.domain,
                   oidcConfig: {
                     clientId: cfg.oidc.clientId,

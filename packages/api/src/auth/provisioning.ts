@@ -18,6 +18,7 @@ import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
 import { guardPersonalApiKeyRoutes } from "./api-key-hooks.js";
+import { guardSsoRoutes } from "./sso-hooks.js";
 
 export type Admission =
   | { allowed: true; role: "admin" | "member"; inviteId?: string }
@@ -227,6 +228,8 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       }
       return;
     }
+    const params = "params" in ctx && ctx.params && typeof ctx.params === "object" ? (ctx.params as Record<string, unknown>) : null;
+    guardSsoRoutes({ path: ctx.path, body: ctx.body ?? null, params }, cfg.oidc !== undefined);
     const query = "query" in ctx && ctx.query && typeof ctx.query === "object" ? (ctx.query as Record<string, unknown>) : null;
     await guardPersonalApiKeyRoutes({ path: ctx.path, body: ctx.body ?? null, query }, db);
   });
