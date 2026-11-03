@@ -1,6 +1,6 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, interruptibleBy, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
-import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, steerKeepsSubmission, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -679,6 +679,7 @@ export class InMemorySessionStore implements SessionStore {
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
+        if (other.id !== opts.promoteFromItemId && steerKeepsSubmission(other.metadata)) continue;
         if (
           headScope && !carriedIds.has(other.id) &&
           other.id !== opts.promoteFromItemId &&

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../errors.js";
 import { SUBMISSION_TIMEOUT_MS } from "../submission.js";
-import { CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import type {
   MessageEntry,
   QueueItem,
@@ -876,6 +876,23 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loadedA?.supersededByItemId).toBe(s.id);
       expect(loadedB?.supersededByItemId).toBe(s.id);
       expect(loadedS?.supersededByItemId).toBeUndefined();
+    });
+
+    it("steer leaves workflow tasks and steps queued and running", async () => {
+      const step = makeItem({ createdAt: 100, updatedAt: 100, metadata: { [UNATTENDED_WORKFLOW_KEY]: true, [WORKFLOW_STEP_KEY]: { runId: "run", nodeId: "node" } } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, step);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: step.id, attemptId: "att-step", ownerId: "o" });
+      const task = makeItem({ createdAt: 150, updatedAt: 150, metadata: { [UNATTENDED_WORKFLOW_KEY]: true } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, task);
+      const followup = makeItem({ createdAt: 200, updatedAt: 200, content: "follow-up" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, followup);
+
+      const steer = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 300, updatedAt: 300 }), { steer: true });
+      expect(steer.supersededItemIds).toEqual([followup.id]);
+      const active = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, steerScope: "active" });
+      expect(active.supersededItemIds).toEqual([]);
+      expect((await store.getQueueItem(SESSION_ID, step.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, task.id))?.supersededByItemId).toBeUndefined();
     });
 
     it("steer does not stamp settled items or items admitted after it", async () => {

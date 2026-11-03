@@ -16,6 +16,15 @@ export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
 export const UNATTENDED_DELIVERY_KEY = "unattendedDelivery";
 /** The workflow agent step `{ runId, nodeId }` a submission belongs to. Only host dispatch writes it. */
 export const WORKFLOW_STEP_KEY = "workflowStep";
+
+/**
+ * True for a submission a steer must not supersede: a workflow task or step.
+ * A person's message in the same thread queues behind it instead. A
+ * superseded workflow step fails its run (submission outcome "superseded").
+ */
+export function steerKeepsSubmission(metadata: Record<string, unknown> | undefined): boolean {
+  return metadata?.[WORKFLOW_STEP_KEY] !== undefined || metadata?.[UNATTENDED_WORKFLOW_KEY] === true;
+}
 /** The most model calls one submission may make. The engine stops before the next call and fails the submission. */
 export const MODEL_CALL_LIMIT_KEY = "modelCallLimit";
 
