@@ -13,6 +13,7 @@ import {
   MIN_AWAY_MS,
   OnlineStatusWatcher,
   POLL_INTERVAL_MS,
+  TICK_MS,
   type WatchState,
   applyPresence,
   backoffMs,
@@ -235,6 +236,28 @@ describe("OnlineStatusWatcher", () => {
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBe(keys[1]);
     error.mockRestore();
+  });
+
+  it("keeps reading the other people when one read throws", async () => {
+    await db.appDb.insert(eventSubscriptions).values(line("l1", ["U1", "U2"]));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const seen: string[] = [];
+    const w = new OnlineStatusWatcher({
+      db: db.appDb, plugins: [slackPlugin], credentials, now: () => now,
+      readStatus: async (_token, user) => {
+        seen.push(user);
+        if (user === "U1") throw new TypeError("fetch failed");
+        return { ok: true, status: { user, presence: "away", online: false } };
+      },
+      ingest: async () => {},
+    });
+    await w.tick();
+    expect(seen).toEqual(["U1", "U2"]);
+    // U1 backs off like any failed read instead of staying due every tick.
+    now += TICK_MS;
+    await w.tick();
+    expect(seen).toEqual(["U1", "U2"]);
+    warn.mockRestore();
   });
 
   it("polls each person at most once per interval", async () => {

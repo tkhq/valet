@@ -155,7 +155,12 @@ export class OnlineStatusWatcher {
       if (budget <= 0) break;
       const due = users.filter((user) => (this.state.get(`${orgId}:${user}`)?.nextPollAt ?? 0) <= now);
       if (due.length === 0) continue;
-      const credential = await this.deps.credentials.get({ type: "org", id: orgId }, "slack");
+      // One org's credential failure must not stop the other orgs' reads.
+      const credential = await this.deps.credentials.get({ type: "org", id: orgId }, "slack").catch((error: unknown) => {
+        console.warn(`[online-status] org ${orgId}: Slack credential read failed`, error);
+        return undefined;
+      });
+      if (credential === undefined) continue;
       const token = credential ? credentialSecret(credential) : undefined;
       const teamId = typeof credential?.metadata?.teamId === "string" ? credential.metadata.teamId : undefined;
       for (const user of due) {
@@ -170,7 +175,16 @@ export class OnlineStatusWatcher {
     const key = `${orgId}:${user}`;
     const state = this.state.get(key) ?? { nextPollAt: 0, failures: 0, verified: false };
     this.state.set(key, state);
-    const read = this.deps.readStatus ?? readOnlineStatus;
+    const base = this.deps.readStatus ?? readOnlineStatus;
+    // A thrown read (a network error or an abort) is a failed read with the
+    // normal backoff, so one person cannot stop the reads of the rest.
+    const read: typeof readOnlineStatus = async (...args) => {
+      try {
+        return await base(...args);
+      } catch (error) {
+        return { ok: false, code: "read_failed", error: `Slack online status read failed (${error instanceof Error ? error.message : String(error)}). Valet retries with backoff.` };
+      }
+    };
     const opts = { ...(teamId ? { teamId } : {}) };
     const fail = (result: Extract<OnlineStatusResult, { ok: false }>): void => {
       state.failures += 1;
