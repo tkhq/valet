@@ -1,6 +1,7 @@
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
+import { SpacesNav } from "./spaces-nav";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useHomeConversation, useHomeTasks } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
@@ -901,6 +902,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
         <nav className="pb-3">
           {homeId && home.data && <HomeRow sessionId={home.data.sessionId} threadId={homeId} thread={homeInList ? threadsQ.data?.threads.find((t) => t.id === homeId) : undefined}
             active={onHome} hasPendingGate={homeInList && gatedThreadIds.has(homeId)} />}
+          <SpacesNav bare={mobile}>
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
             <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
@@ -1002,6 +1004,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           {listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
           </section>
           {threadsQ.hasNextPage && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
+          </SpacesNav>
         </nav>
         {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
         {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}

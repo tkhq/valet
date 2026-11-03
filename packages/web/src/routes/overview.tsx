@@ -4,6 +4,7 @@ import { MemoryCard } from "~/components/assistant/memory-card";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { Button, ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { cn } from "~/lib/cn";
@@ -48,7 +49,7 @@ function DashboardBody() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className={cn(pageClass, "space-y-8")}>
-        <PageHeader title="Personal" description="Your recent work and items that need attention." />
+        <PageHeader title="Personal" clause={<WorkspaceClause />} description="Your recent work and items that need attention." />
         <WorkspaceCatchUp />
         <div className="grid gap-4 md:grid-cols-2">
           <MemoryCard />

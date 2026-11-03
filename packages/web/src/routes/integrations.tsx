@@ -1,3 +1,4 @@
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
@@ -178,6 +179,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
       <div className={pageClass}>
         <PageHeader
           title="Integrations"
+          clause={<WorkspaceClause />}
           // The box stays up through an empty match — hiding it would leave
           // the search with no box to clear it in.
           actions={!isLoading && !error && showSearch && (

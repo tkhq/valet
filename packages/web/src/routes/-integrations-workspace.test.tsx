@@ -20,6 +20,8 @@ vi.mock("@tanstack/react-router", () => ({
   useSearch: () => searchState,
   useNavigate: () => vi.fn(),
   useRouter: () => ({ history: { back: vi.fn() } }),
+  // The header's space control reads the path to decide where a switch goes.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/integrations" } }),
   Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a>,
 }));
 

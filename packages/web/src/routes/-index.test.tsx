@@ -47,7 +47,10 @@ describe("Home", () => {
     const home = screen.getByTestId("home-screen");
     expect(home.dataset.view).toBe("tasks");
     home.click();
-    expect(navigate).toHaveBeenCalledWith({ search: { view: "make" }, replace: true });
+    const options = navigate.mock.lastCall?.[0] as { search: (prev: Record<string, unknown>) => Record<string, unknown>; replace: boolean };
+    expect(options.replace).toBe(true);
+    // The space in the URL survives a tab change.
+    expect(options.search({ workspace: "t1" })).toEqual({ workspace: "t1", view: "make" });
   });
 
   it("reads only view=tasks and view=make from the URL", () => {

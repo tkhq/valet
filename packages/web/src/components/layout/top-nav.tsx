@@ -4,17 +4,11 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
 import { useSession } from "~/api/queries";
-import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
-import {
-  WorkspaceSwitcher,
-  workspaceOptions,
-} from "~/components/layout/workspace-switcher";
+import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
-import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
 
@@ -166,24 +160,12 @@ function SidebarToggle() {
 export function TopNav() {
   const assistant = useWorkspaceAssistant();
   const mobileNav = useResponsiveOverlay("md");
-  const scope = useWorkspaceScope();
-
-  // The switcher reads the same three queries the rail does, so switching
-  // costs no extra request — react-query serves all three from cache.
-  const teamsQ = useTeams();
   const orgQ = useOrg();
   const meQ = useMe();
   const changelogQ = useChangelog();
   const newestCheckpoint = changelogQ.data?.manifest.checkpoints[0];
   const seenCheckpoint = useLastSeenCheckpoint(meQ.data?.id);
   const changelogUnread = !!meQ.data && !!newestCheckpoint && seenCheckpoint !== newestCheckpoint.id;
-  const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
-  const options = workspaceOptions(teams);
-  // The active workspace is no longer derived here from `?assistant=`. That
-  // only ever resolved on `/chat`, so every other page read "Personal"
-  // regardless of the workspace the reader was in. The scope owns it now and
-  // still lets the open assistant win — see `workspace-scope.tsx`.
-  const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
   // A security session lives at /sessions/:id like any other, so the URL
   // cannot distinguish it — read the id off the path and check its kind so
   // the nav lights "Security". The query is shared
@@ -208,15 +190,20 @@ export function TopNav() {
     { to: "/artifacts", label: "Artifacts" },
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
-    { to: "/usage", label: "Usage" },
+  ];
+  // The rest of the pages, in the More menu on desktop. Memory is in the
+  // Artifacts menu.
+  const more: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },
+    { to: "/usage", label: "Usage" },
     { to: "/changelog", label: "Changelog" },
   ];
+  const onMore = useRouterState({ select: (st) => more.some(({ to }) => st.location.pathname.startsWith(to)) });
   const destinationLabel = (label: string) => (
     <span className="inline-flex items-center gap-1.5">
       {label}
-      {label === "Changelog" && changelogUnread && (
+      {(label === "Changelog" || label === "More") && changelogUnread && (
         <StatusDot tone="accent" size="sm" label="New releases" />
       )}
     </span>
@@ -238,14 +225,8 @@ export function TopNav() {
         <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
-      {/* Beside the logo, not in the sidebar: it scopes the surfaces below
-          rather than filtering one list. */}
-      <WorkspaceSwitcher
-        options={options}
-        activeKey={scope.key}
-        onSelect={scope.setKey}
-        navigateOnSelect={onChat}
-      />
+      {/* No space control here: the thread sidebar lists Spaces, and each
+          scoped page names its space in its header (`WorkspaceClause`). */}
 
       <nav
         aria-label="Primary"
@@ -255,6 +236,16 @@ export function TopNav() {
           to === "/artifacts" ? <ArtifactsNav key={to} /> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
         ))}
       </nav>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onMore ? NAV_ACTIVE : NAV_INACTIVE)}>
+            {destinationLabel("More")} <ChevronDown className="h-3 w-3" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label="More pages" className="w-48">
+          {more.map(({ to, label }) => <DropdownMenuItem key={to} asChild><Link to={to}>{destinationLabel(label)}</Link></DropdownMenuItem>)}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
@@ -280,7 +271,7 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
             </DropdownMenuItem>
-            {destinations.map(({ to, label, active }) => (
+            {[...destinations, ...more].map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
                   to={to}

@@ -84,7 +84,6 @@ vi.mock("~/api/policies", async (importOriginal) => ({
 }));
 
 import { WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
-import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
 import { Route as IntegrationsRoute } from "./integrations";
 
 function service(name: string, extra: Partial<PluginServiceSummary> = {}): PluginServiceSummary {
@@ -95,19 +94,14 @@ function plugin(name: string, services: PluginServiceSummary[], description = ""
   return { name, version: "1", actionCount: 3, description, services };
 }
 
-/** The workspace switcher as the top nav wires it, off `/chat`. */
-function Switcher() {
-  const scope = useWorkspaceScope();
-  return <WorkspaceSwitcher options={workspaceOptions([team])} activeKey={scope.key} onSelect={scope.setKey} navigateOnSelect={false} />;
-}
-
 /** The real route's component and search schema under a memory history.
  * `/elsewhere` is the page the reader came from, one entry back. */
 function mount(initial = "/integrations") {
   // The real scope provider in the root route, as in `__root.tsx`, so it
   // reads `?workspace=` through the page route's own search schema.
   const root = createRootRoute({
-    component: () => <WorkspaceScopeProvider><Switcher /><Outlet /></WorkspaceScopeProvider>,
+    // The page's own header carries the space control (`WorkspaceClause`).
+    component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider>,
   });
   const page = createRoute({
     getParentRoute: () => root,
@@ -303,10 +297,10 @@ describe("the switcher on a link that names the workspace", () => {
     const user = userEvent.setup();
     const router = mount("/integrations?workspace=user");
     expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Workspace: Personal. Change workspace" }));
+    await user.click(screen.getByRole("button", { name: "Space: Personal. Change space" }));
     await user.click(await screen.findByRole("menuitem", { name: "Platform" }));
     expect(await screen.findByText("Platform workspace")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Workspace: Platform. Change workspace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Space: Platform. Change space" })).toBeTruthy();
     expect(router.state.location.pathname).toBe("/integrations");
   });
 });

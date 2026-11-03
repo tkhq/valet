@@ -19,5 +19,6 @@ export function Home() {
   const navigate = useNavigate({ from: Route.fullPath });
   usePageTitle("Valet");
   return <HomeScreen view={view ?? "chat"} wide={wide}
-    onViewChange={(next: HomeView) => void navigate({ search: next === "chat" ? {} : { view: next }, replace: true })} />;
+    // Keep the other params: `?workspace=` names the space the sidebar shows.
+    onViewChange={(next: HomeView) => void navigate({ search: (prev) => ({ ...prev, view: next === "chat" ? undefined : next }), replace: true })} />;
 }

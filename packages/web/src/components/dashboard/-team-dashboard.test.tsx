@@ -4,6 +4,7 @@ import { expect, it, vi } from "vitest";
 import { TeamDashboard } from "./team-dashboard";
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: { teams: [{ id: "team-1", name: "Engineering", memberCount: 3 }] }, error: null }) }));
+vi.mock("~/components/workspace-clause", () => ({ WorkspaceClause: () => null }));
 vi.mock("~/api/usage", () => ({ useUsageBreakdown: () => ({ data: undefined, error: null }) }));
 vi.mock("~/api/memory", () => ({ useMemoryTree: () => ({ data: undefined, error: null }) }));
 vi.mock("~/components/assistant/memory-card", () => ({ memoryStats: () => ({ files: 0, notes: 0, journalDays: 0, pinned: 0 }) }));
