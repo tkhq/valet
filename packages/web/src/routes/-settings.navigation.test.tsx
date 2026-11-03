@@ -19,7 +19,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useOrg: () => ({
-      data: { callerRole: "admin", features: { organizations: true } },
+      data: { callerRole: "admin", features: { organizations: true }, plugins: [] },
       isLoading: false,
       error: null,
     }),

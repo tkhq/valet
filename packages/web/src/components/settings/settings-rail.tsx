@@ -15,7 +15,7 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
-import { useOrg, useTeams } from "~/api/settings";
+import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -31,6 +31,8 @@ import { cn } from "~/lib/cn";
  *   and policies.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
+ * - **Plugins**: Valet Security, for a caller with the plugin. It opens the
+ *   Security hub in the active space; the sidebar's space rows leave it out.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
@@ -176,6 +178,8 @@ const MCP_SERVERS_ITEM: RailItem = {
   active: exact("/settings/mcp-servers"),
 };
 
+const SECURITY_ITEM: RailItem = { to: "/security", label: "Valet Security", icon: ShieldCheck, active: (p) => onRoute(p, "/security") };
+
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
   { to: ORG_ONEPASSWORD_PATH, label: "1Password", icon: KeyRound, active: exact(ORG_ONEPASSWORD_PATH) },
@@ -215,6 +219,7 @@ export function SettingsRail() {
     { label: "Account", items: ACCOUNT_ITEMS },
     { label: "Personal workspace", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
+    ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [{ label: "Plugins", items: [SECURITY_ITEM] }] : []),
     ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));

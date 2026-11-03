@@ -65,22 +65,35 @@ describe("SpacesNav", () => {
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
   });
 
-  it("opens a space and its Threads from the space name on Home, and remembers it open", async () => {
+  it("opens a space and its Threads from the space name on Home", async () => {
     teams = [team("t1", "Platform")];
     const router = mount("/");
     await userEvent.click(await screen.findByRole("link", { name: "Platform" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/chat"));
     expect(router.state.location.search).toEqual({ workspace: "t1" });
     expect(await screen.findByRole("list", { name: "Platform pages" })).toBeTruthy();
-    expect(JSON.parse(window.localStorage.getItem("valet:spaces-expanded") ?? "{}")).toEqual({ t1: true });
   });
 
-  it("keeps a space closed after the person collapses it", async () => {
+  it("keeps a space closed after the person collapses it, while they stay in that space", async () => {
     teams = [team("t1", "Platform")];
     mount("/chat");
     await userEvent.click(await screen.findByRole("button", { name: "Collapse Personal" }));
     expect(screen.queryByRole("list", { name: "Personal pages" })).toBeNull();
-    expect(JSON.parse(window.localStorage.getItem("valet:spaces-expanded") ?? "{}")).toEqual({ user: false });
+  });
+
+  it("opens only the active space on load, and drops manual opens on going to another space", async () => {
+    teams = [team("t1", "Platform"), team("t2", "People")];
+    const router = mount("/chat");
+    expect(await screen.findByRole("list", { name: "Personal pages" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Platform pages" })).toBeNull();
+    // A manual expand holds while the person stays in Personal.
+    await userEvent.click(screen.getByRole("button", { name: "Show Platform pages" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Workflows" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "t1" }));
+    // In Platform now: only Platform is open.
+    expect(await screen.findByRole("list", { name: "Platform pages" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Personal pages" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "People pages" })).toBeNull();
   });
 
   it("leaves the space unchanged when unsaved edits block leaving", async () => {
@@ -172,34 +185,37 @@ describe("SpacesNav", () => {
     expect(router.state.location.pathname).toBe("/chat");
   });
 
-  it("keeps a space's other pages behind its More row, closed until opened, and remembers it", async () => {
+  it("keeps a space's settings behind its Settings row, closed until opened, and remembers it", async () => {
     mount("/chat");
     await screen.findByRole("list", { name: "Personal pages" });
-    expect(screen.queryByRole("list", { name: "More Personal pages" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Show more Personal pages" }));
-    const more = screen.getByRole("list", { name: "More Personal pages" });
-    expect(within(more).getAllByRole("link").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
-      ["Overview", "/overview?workspace=user"], ["Memory", "/memory?workspace=user"], ["Skills", "/skills?workspace=user"],
-      ["Integrations", "/integrations?workspace=user"], ["Usage", "/usage?workspace=user"],
+    expect(screen.queryByRole("list", { name: "Personal settings" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show Personal settings" }));
+    const settings = screen.getByRole("list", { name: "Personal settings" });
+    expect(within(settings).getAllByRole("link").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
+      ["Integrations", "/integrations?workspace=user"], ["Skills", "/skills?workspace=user"],
+      ["Memory", "/memory?workspace=user"], ["Usage", "/usage?workspace=user"],
     ]);
-    expect(JSON.parse(window.localStorage.getItem("valet:spaces-more-expanded") ?? "{}")).toEqual({ user: true });
+    expect(JSON.parse(window.localStorage.getItem("valet:spaces-settings-expanded") ?? "{}")).toEqual({ user: true });
   });
 
-  it("opens More and selects the row on one of its pages", async () => {
+  it("opens Settings and selects the row on one of its pages", async () => {
     teams = [team("t1", "Platform")];
     mount("/memory?workspace=t1");
-    const more = await screen.findByRole("list", { name: "More Platform pages" });
-    const memory = within(more).getByRole("link", { name: "Memory" });
+    const settings = await screen.findByRole("list", { name: "Platform settings" });
+    const memory = within(settings).getByRole("link", { name: "Memory" });
     expect(memory.getAttribute("aria-current")).toBe("page");
     expect(memory.className.split(/\s+/)).toContain("bg-ink-wash-strong");
-    expect(screen.getByRole("button", { name: "Hide more Platform pages" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Hide Platform settings" }).getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("lists Security under More only with the plugin", async () => {
+  it("lists neither Security nor Overview in a space, even with the plugin", async () => {
     plugins = [{ name: "security", enabledForCaller: true }];
     mount("/security");
-    const more = await screen.findByRole("list", { name: "More Personal pages" });
-    expect(within(more).getByRole("link", { name: "Security" }).getAttribute("aria-current")).toBe("page");
+    await userEvent.click(await screen.findByRole("button", { name: "Show Personal settings" }));
+    const rows = [screen.getByRole("list", { name: "Personal pages" }), screen.getByRole("list", { name: "Personal settings" })]
+      .flatMap((list) => within(list).getAllByRole("link").map((link) => link.textContent));
+    expect(rows).not.toContain("Security");
+    expect(rows).not.toContain("Overview");
   });
 
   it("lists every page in a closed space's menu", async () => {
@@ -207,7 +223,7 @@ describe("SpacesNav", () => {
     mount("/chat");
     await userEvent.click(await screen.findByRole("button", { name: "Show Platform pages" }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
-    expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Overview", "Memory", "Skills", "Integrations", "Usage"]);
+    expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Integrations", "Skills", "Memory", "Usage"]);
   });
 
   it("maps paths to the space page they belong to", () => {
@@ -219,6 +235,8 @@ describe("SpacesNav", () => {
     expect(spacePageFor("/memory/graph")).toBe("/memory");
     expect(spacePageFor("/integrations")).toBe("/integrations");
     expect(spacePageFor("/changelog")).toBeUndefined();
+    expect(spacePageFor("/overview")).toBeUndefined();
+    expect(spacePageFor("/security")).toBeUndefined();
     expect(spacePageFor("/settings/model-comparison")).toBeUndefined();
   });
 });

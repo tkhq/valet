@@ -46,8 +46,9 @@ function useMembershipLoaded(): boolean {
 }
 
 vi.mock("~/api/settings", () => ({
+  pluginEnabledForCaller: () => false,
   useOrg: () => useMembershipLoaded()
-    ? { data: { callerRole: orgRole, features: { organizations: organizationsOn } }, isLoading: false, error: null }
+    ? { data: { callerRole: orgRole, features: { organizations: organizationsOn }, plugins: [] }, isLoading: false, error: null }
     : { data: undefined, isLoading: true, error: null },
   useTeams: () => useMembershipLoaded()
     ? { data: { teams }, isLoading: false, error: null }

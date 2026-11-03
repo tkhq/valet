@@ -24,10 +24,11 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 let pathname = "/settings/profile";
-let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined;
+let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }> } | undefined;
 let teams: Array<{ id: string; name: string; callerRole: "admin" | "member" | null }> = [];
 
-vi.mock("~/api/settings", () => ({
+vi.mock("~/api/settings", async (importOriginal) => ({
+  pluginEnabledForCaller: (await importOriginal<typeof import("~/api/settings")>()).pluginEnabledForCaller,
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
 }));
@@ -38,7 +39,7 @@ import { ORG_SECTIONS, SettingsRail, orgSectionFor } from "./settings-rail";
 beforeEach(() => {
   linkProps.length = 0;
   pathname = "/settings/profile";
-  orgData = { callerRole: "admin", features: { organizations: true } };
+  orgData = { callerRole: "admin", features: { organizations: true }, plugins: [] };
   teams = [
     { id: "t2", name: "platform", callerRole: "admin" },
     { id: "t1", name: "team-tvc", callerRole: "member" },
@@ -61,6 +62,16 @@ describe("SettingsRail", () => {
     const yourTeams = within(rail()).getByRole("group", { name: "Your teams" });
     expect(within(yourTeams).getAllByRole("link").map((a) => a.textContent)).toEqual(["platform", "team-tvc"]);
     expect(within(yourTeams).getByRole("link", { name: "team-tvc" }).getAttribute("href")).toBe("/settings/teams/t1");
+  });
+
+  it("links Valet Security under Plugins only for a caller with the plugin", () => {
+    const { unmount } = render(<SettingsRail />);
+    expect(groupLabels()).not.toContain("Plugins");
+    unmount();
+    orgData = { callerRole: "member", features: { organizations: true }, plugins: [{ name: "security", enabledForCaller: true }] };
+    render(<SettingsRail />);
+    const plugins = within(rail()).getByRole("group", { name: "Plugins" });
+    expect(within(plugins).getByRole("link", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
   });
 
   it("links each team through its typed route and params", () => {
@@ -93,7 +104,7 @@ describe("SettingsRail", () => {
   });
 
   it("offers Model comparison to a plain member with organizations on", () => {
-    orgData = { callerRole: "member", features: { organizations: true } };
+    orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(personal).getByRole("link", { name: "Model comparison" })).toBeTruthy();
@@ -125,7 +136,7 @@ describe("SettingsRail", () => {
   });
 
   it("shows a member only Teams and 1Password under Organization", () => {
-    orgData = { callerRole: "member", features: { organizations: true } };
+    orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
     const org = within(rail()).getByRole("group", { name: "Organization" });
     expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams", "1Password"]);
@@ -138,7 +149,7 @@ describe("SettingsRail", () => {
   });
 
   it("offers Models under Personal workspace only while organizations are off", () => {
-    orgData = { callerRole: "admin", features: { organizations: false } };
+    orgData = { callerRole: "admin", features: { organizations: false }, plugins: [] };
     render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(personal).getByRole("link", { name: "Models" })).toBeTruthy();
@@ -146,20 +157,20 @@ describe("SettingsRail", () => {
   });
 
   it("offers MCP servers under Personal workspace only to an admin while organizations are off", () => {
-    orgData = { callerRole: "admin", features: { organizations: false } };
+    orgData = { callerRole: "admin", features: { organizations: false }, plugins: [] };
     const gateOff = render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(personal).getByRole("link", { name: "MCP servers" }).getAttribute("href")).toBe("/settings/mcp-servers");
     gateOff.unmount();
 
     // `GET /api/org/mcp-servers` 403s a non-admin, so a member gets no link.
-    orgData = { callerRole: "member", features: { organizations: false } };
+    orgData = { callerRole: "member", features: { organizations: false }, plugins: [] };
     const memberGateOff = render(<SettingsRail />);
     const memberPersonal = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(memberPersonal).queryByRole("link", { name: "MCP servers" })).toBeNull();
     memberGateOff.unmount();
 
-    orgData = { callerRole: "admin", features: { organizations: true } };
+    orgData = { callerRole: "admin", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
     const personalOn = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(personalOn).queryByRole("link", { name: "MCP servers" })).toBeNull();
