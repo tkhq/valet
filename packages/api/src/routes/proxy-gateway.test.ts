@@ -1,6 +1,6 @@
 // packages/api/src/routes/proxy-gateway.test.ts
 import { describe, it, expect } from "vitest";
-import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage, proxySubpath } from "./proxy-gateway.js";
+import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage, proxySubpath, refusedUpstream } from "./proxy-gateway.js";
 
 describe("injectIncludeUsage", () => {
   const chat = "/v1/chat/completions";
@@ -98,5 +98,21 @@ describe("proxySubpath", () => {
     expect(proxySubpath("openai", "/proxy/openai/v1/responses")).toBe("/v1/responses");
     expect(proxySubpath("openai", "/proxy/openai/chat/completions")).toBe("/chat/completions");
     expect(proxySubpath("anthropic", "/proxy/anthropic")).toBe("/");
+  });
+});
+
+describe("refusedUpstream", () => {
+  it("calls the public defaults without a check", () => {
+    expect(refusedUpstream("anthropic", "https://api.anthropic.com")).toBeNull();
+    expect(refusedUpstream("openai", "https://api.openai.com")).toBeNull();
+  });
+
+  it("allows a public configured base URL", () => {
+    expect(refusedUpstream("openai", "https://llm-gateway.example.com")).toBeNull();
+  });
+
+  it("refuses a configured base URL that points inside the cluster, so the key is never sent", () => {
+    expect(refusedUpstream("anthropic", "http://169.254.169.254")).toMatch(/^The anthropic provider base URL is refused\. The URL points at 169\.254\.169\.254/);
+    expect(refusedUpstream("openai", "http://valet-api.valet.svc.cluster.local:8787")).toMatch(/internal or cluster service/);
   });
 });

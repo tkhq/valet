@@ -56,7 +56,7 @@ With only deployment env `ANTHROPIC_API_KEY`: everything behaves as today (env-f
 - **`orgPreferences` fall-through past inactive entries (removed 2026-09-03).** `EngineHost.orgPreferredModel` walked `orgs.modelPreferences` in order and returned the first entry whose provider was active, falling through to `defaultModelId`/the hardcoded default when every preference was inactive — satisfying decision 6/the exit criteria's "new sessions never resolve to inactive providers." The equivalent behavior for the current tier-map fallback is `resolveTier`'s own active-provider walk — see the Extension below.
 - **Known latents, left deliberately unfixed this pass:**
   - **Role-model override keeps the base-spec key.** `applyRoleForTurn` switches `agent.state.model` via the engine's internal `resolveRoleModel`, not the host resolver; `turnApiKey` stays whatever the base spec resolved to. A role that overrides to a different provider than the turn's base model runs under the wrong key.
-  - **Probe/test `baseUrl` is admin-trusted**, not validated against an allowlist (SSRF-shaped surface, mitigated only by the route being org-admin-gated) — flagged in a code comment at the call site, not hardened this pass.
+  - **Probe/test `baseUrl` was admin-trusted** at first. The 2026-11-03 extension "Outbound URL guard" below replaces that trust model.
 - **Web: model-preference reordering used up/down buttons**, not drag-and-drop — no dnd dependency exists in the repo, and the brief didn't require adding one. The pane itself (`ModelPreferencesSection`) is deleted as of 2026-09-03; `ModelTiersSection` reuses the same up/down/remove row pattern for tier targets.
 
 ## Extension: OpenRouter as a known kind (2026-07-28)
@@ -222,6 +222,18 @@ a tier's targets is inactive, the host raises a corrective error naming
 the fix (`no active provider for tier "s" — enable a provider for one of
 its targets in Settings → Organization → Models`) instead of falling
 through further — there is no fallback beyond the tier itself.
+
+## Extension: outbound URL guard (2026-11-03)
+
+On 2026-11-02 an admin account on a new instance created about 70 custom providers. Their base URLs pointed at cloud metadata (169.254.169.254), loopback ports, a private address, the Kubernetes API, and an internal registry proxy. The api called those URLs from inside the cluster. A custom base URL is now untrusted input. `packages/api/src/lib/outbound-url.ts` holds the guard.
+
+- **Refused targets.** Link-local, loopback, RFC 1918 and other special IPv4 ranges, IPv6 ULA, link-local, and IPv4-mapped forms, single-label names, `kubernetes.default*`, names under `.svc`, `.cluster.local`, `.internal`, `.local`, and `.localhost`, the instance's public host (`VALET_PUBLIC_URL`, `BETTER_AUTH_URL`), every Kubernetes `*_SERVICE_HOST` address, and `VALET_INTERNAL_HOSTS`. Only `http` and `https` are accepted.
+- **Save time.** Create and PATCH run the shape check and the host's current DNS answers. Any internal answer refuses the URL with 400 `baseUrl is refused. …`. A name that does not resolve yet passes, because request time checks it again.
+- **Request time.** `resolveModelSpec` re-runs the shape check for custom rows, so rows saved before the guard, or set by instance config, fail the turn with a corrective message. Every model request uses `guardedFetch` through the engine `modelFetch` session option (turn stream and compaction) and through the api's direct calls (probe, test button, workflow `llm` steps, tagging). `guardedFetch` checks each DNS answer at connect time, which defeats DNS rebinding. It follows redirects by hand, up to five hops. Each hop gets the same checks, and a cross-origin hop loses credential headers.
+- **Proxy gateway.** A non-default base URL on an `anthropic` or `openai` row gets the shape check before the proxy forwards a key to it.
+- **Operator override.** `VALET_OUTBOUND_URL_ALLOWLIST` lists hosts, `*.suffix` patterns, and CIDR ranges that skip the guard, for self-hosted endpoints. The chart sets it from `api.security.outboundUrlAllowlist`. A malformed range stops boot.
+- **Signals.** Each refusal increments `valet.security.outbound_url_refused{stage=save|request|redirect}` and logs a `[security]` warning. A burst of save-time refusals means an admin account probes internal targets.
+- **Limits.** The guard covers model traffic and the provider routes. MCP servers come from instance config only. An egress proxy and NetworkPolicy on the cluster side are still needed for sandbox and build traffic.
 
 ## Non-goals
 

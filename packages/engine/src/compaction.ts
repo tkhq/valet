@@ -863,6 +863,8 @@ export interface SummarizeOptions {
   instructions?: string;
   /** Optional API key override (forwarded to pi-ai). */
   apiKey?: string;
+  /** Optional fetch for the summarizer request (forwarded to pi-ai). */
+  fetch?: typeof fetch;
   /** Optional abort signal. */
   signal?: AbortSignal;
   /**
@@ -966,6 +968,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   }, {
     apiKey: opts.apiKey,
     signal: opts.signal,
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
     // Side calls fail fast (TKAI-319): one transport retry, short delay
     // cap. Nobody waits on a summarizer during a capacity event — the
     // compaction failure paths (breaker, overflow retry) own recovery.

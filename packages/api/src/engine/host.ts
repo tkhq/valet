@@ -1,4 +1,5 @@
 import { hostedToolUsageSink } from "../services/external-usage.js";
+import { guardedFetch } from "../lib/outbound-url.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
@@ -1455,6 +1456,7 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             resolveFallbackModel,
+            modelFetch: guardedFetch,
             sampling: { reasoning },
             compaction: await this.orgCompaction(meta.orgId),
             systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: personaCell != null }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
@@ -1496,6 +1498,7 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           resolveFallbackModel,
+          modelFetch: guardedFetch,
           sampling: { reasoning },
           compaction: await this.orgCompaction(meta.orgId),
           systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: personaCell != null }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
@@ -3371,6 +3374,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      modelFetch: guardedFetch,
       resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(meta.orgId),
@@ -4660,6 +4664,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      modelFetch: guardedFetch,
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
@@ -4892,6 +4897,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      modelFetch: guardedFetch,
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),

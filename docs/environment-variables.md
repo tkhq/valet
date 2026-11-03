@@ -41,6 +41,8 @@ stub applies. Provider variable pairs are all-or-none.
 | `AUTH_MCP_MAX_REDIRECT_URIS` | Redirect URIs one MCP app registration may hold. Default `5`; at least `1` |
 | `AUTH_MCP_APP_SCHEMES` | Native app schemes an MCP redirect URI may use, as a comma list. Default `claude,cursor`; empty allows none |
 | `VALET_IMAGE_SOURCE_APPROVAL` | `off` lets one org admin create or change image sources without a second admin. Any other value, or unset, keeps second-admin approval on. Use `off` only for an organization with one admin |
+| `VALET_OUTBOUND_URL_ALLOWLIST` | Comma-separated hosts, `*.suffix` patterns, and CIDR ranges that the outbound URL guard allows. Use it for a self-hosted LLM endpoint on a private address. Default: empty, so link-local, loopback, private, cluster, and instance hosts are refused. A malformed range stops the api at boot |
+| `VALET_INTERNAL_HOSTS` | Comma-separated extra hosts or addresses that the outbound URL guard refuses, in addition to the built-in rules, the instance's public host, and Kubernetes service addresses |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
 | `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |

@@ -107,6 +107,18 @@ api:
       # (default "claude,cursor").
       appSchemes: ""
 
+  # Outbound URL guard for admin-configured endpoints, such as custom LLM
+  # provider base URLs. The api refuses link-local, loopback, private,
+  # cluster, and instance-internal targets at save time and at request time.
+  security:
+    # Comma-separated hosts, *.suffix patterns, and CIDR ranges that skip
+    # the guard (VALET_OUTBOUND_URL_ALLOWLIST). Use it for a self-hosted
+    # endpoint, for example "vllm.corp.example,10.20.0.0/16".
+    outboundUrlAllowlist: ""
+    # Comma-separated extra hosts or addresses to refuse (VALET_INTERNAL_HOSTS),
+    # for example an internal registry proxy.
+    internalHosts: ""
+
   # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
   # env fallback). Set these three plus the api.secrets.githubApp* values
   # to make the deployment GitHub-capable without running the in-app

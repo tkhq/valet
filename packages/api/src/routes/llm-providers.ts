@@ -23,6 +23,7 @@ import { completeSimple, getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin } from "../services/org.js";
+import { checkOutboundUrl, guardedFetch, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -109,11 +110,19 @@ function defaultModelsFor(kind: LlmProviderKind): LlmProviderModel[] | undefined
 
 const MODELS_KINDS_ERROR = "models is only accepted for openai_compatible, openrouter, or amazon-bedrock providers";
 
-/** `baseUrl` is required for `openai_compatible` and refused for known kinds. */
-function validateBaseUrl(kind: LlmProviderKind, baseUrl: unknown): { error: string } | { value: string | undefined } {
+/** `baseUrl` is required for `openai_compatible` and refused for known kinds.
+ * A custom base URL must also pass the SSRF guard (`lib/outbound-url.ts`):
+ * no link-local, loopback, private, cluster, or instance-internal target. */
+async function validateBaseUrl(kind: LlmProviderKind, baseUrl: unknown): Promise<{ error: string } | { value: string | undefined }> {
   if (kind === "openai_compatible") {
     if (typeof baseUrl !== "string" || baseUrl.length === 0) {
       return { error: "baseUrl is required for openai_compatible providers" };
+    }
+    const check = await checkOutboundUrl(baseUrl);
+    if (!check.ok) {
+      recordOutboundRefusal("save");
+      console.warn(`[security] refused LLM provider baseUrl ${JSON.stringify(baseUrl)}: ${check.reason}`);
+      return { error: `baseUrl is refused. ${check.reason}` };
     }
     return { value: baseUrl };
   }
@@ -214,7 +223,7 @@ llmProvidersRouter.post("/", async (c) => {
   if (typeof body.name !== "string" || body.name.length === 0) {
     return c.json({ error: "name is required" }, 400);
   }
-  const baseUrlCheck = validateBaseUrl(body.kind, body.baseUrl);
+  const baseUrlCheck = await validateBaseUrl(body.kind, body.baseUrl);
   if ("error" in baseUrlCheck) {
     return c.json({ error: baseUrlCheck.error }, 400);
   }
@@ -275,7 +284,7 @@ llmProvidersRouter.patch("/:id", async (c) => {
     patch.name = body.name;
   }
   if (body.baseUrl !== undefined) {
-    const baseUrlCheck = validateBaseUrl(existing.kind, body.baseUrl);
+    const baseUrlCheck = await validateBaseUrl(existing.kind, body.baseUrl);
     if ("error" in baseUrlCheck) {
       return c.json({ error: baseUrlCheck.error }, 400);
     }
@@ -418,19 +427,22 @@ llmProvidersRouter.post("/:id/probe", async (c) => {
     return c.json({ error: "provider has no API key" }, 400);
   }
 
-  // `baseUrl` is admin-supplied and treated as trusted (same trust model as
-  // the turn-time resolution path in services/model-resolution.ts). Bearer
-  // stripping on cross-origin redirects is the fetch/undici runtime's
-  // spec-mandated behavior; we do not re-implement it here. Strip a trailing
-  // slash before joining so `https://x/v1` and `https://x/v1/` both probe
-  // `https://x/v1/models`, not `https://x/v1//models`.
+  // `baseUrl` is admin-supplied, so the probe goes through the SSRF guard:
+  // `guardedFetch` checks every hop's shape and DNS answers and strips the
+  // bearer on a cross-origin redirect. Strip a trailing slash before joining
+  // so `https://x.example/v1` and `https://x.example/v1/` both probe
+  // `https://x.example/v1/models`, not `https://x.example/v1//models`.
   const probeBaseUrl = existing.baseUrl.replace(/\/+$/, "");
   let upstream: Response;
   try {
-    upstream = await fetch(`${probeBaseUrl}/models`, {
+    upstream = await guardedFetch(`${probeBaseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
   } catch (err) {
+    if (err instanceof OutboundUrlError) {
+      console.warn(`[security] refused LLM provider probe for ${existing.id}: ${err.reason}`);
+      return c.json({ error: `baseUrl is refused. ${err.reason}` }, 400);
+    }
     const message = err instanceof Error ? err.message : String(err);
     return c.json({ error: redact(message, apiKey) }, 502);
   }
@@ -497,7 +509,7 @@ llmProvidersRouter.post("/:id/test", async (c) => {
       {
         messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
       },
-      { apiKey, maxTokens: 1 },
+      { apiKey, maxTokens: 1, fetch: guardedFetch },
     );
     if (result.stopReason === "error" || result.stopReason === "aborted") {
       const resp: TestLlmProviderResponse = {

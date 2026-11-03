@@ -26,7 +26,7 @@
  *   4. Non-admin members are 403'd off every settings route.
  *   5. No response body recorded anywhere in this test contains a stored key.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +43,16 @@ import type {
   ProbeLlmProviderResponse,
   PutLlmProviderKeyResponse,
 } from "../wire/types.js";
+
+// The upstream fixtures listen on loopback. The SSRF guard allows them only
+// through the operator allowlist, the same path a self-hosted endpoint uses.
+beforeAll(() => {
+  vi.stubEnv("VALET_OUTBOUND_URL_ALLOWLIST", "127.0.0.1");
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
+
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };

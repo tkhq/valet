@@ -12,6 +12,7 @@ import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
 import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
+import { checkOutboundUrlShape, recordOutboundRefusal } from "../lib/outbound-url.js";
 import { getProxySettings } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
@@ -41,6 +42,20 @@ const HOP_BY_HOP = new Set([
  * unenumerated provider beta headers (e.g. anthropic-beta, openai-beta)
  * without needing an explicit allowlist.
  */
+/**
+ * A provider row's base URL replaces the public default. The API refuses a
+ * base URL on these kinds, so only instance config sets one. Check its shape
+ * anyway, so a stored internal target never receives the proxied key.
+ * Returns the refusal message, or null when the upstream may be called.
+ */
+export function refusedUpstream(kind: ProviderKind, baseUrl: string): string | null {
+  if (baseUrl === DEFAULT_BASE[kind]) return null;
+  const check = checkOutboundUrlShape(baseUrl);
+  if (check.ok) return null;
+  recordOutboundRefusal("request");
+  return `The ${kind} provider base URL is refused. ${check.reason}`;
+}
+
 export function outboundHeaders(raw: Headers, kind: ProviderKind, apiKey: string): Headers {
   const out = new Headers();
   for (const [k, v] of raw.entries()) {
@@ -203,6 +218,8 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
       }
       upstream = resolved;
     }
+    const refusal = refusedUpstream(kind, upstream.baseUrl);
+    if (refusal) return wireError(kind, 502, refusal);
 
     const url = new URL(c.req.url);
     const subpath = proxySubpath(kind, url.pathname);
