@@ -321,6 +321,9 @@ id), and the server checks team membership as before.
   the name opens the space's Threads.
 - **Threads.** The open space's Projects and threads show below Spaces only
   on Home and Threads. A phone's drawer always shows them.
+- **A space that cannot open.** If the space's assistant session fails to
+  start, the sidebar still lists Spaces. The error and Retry show where the
+  threads would be, so the person can switch to another space.
 - **One divider.** The sidebar's only horizontal divider is under its top
   row, level with the thread header and the Tasks panel header. Rows below it
   (Home, Spaces) draw none, so no sidebar line can sit off a thread's tab row.
