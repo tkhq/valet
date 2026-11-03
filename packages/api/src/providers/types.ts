@@ -1,3 +1,4 @@
+import type { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import type {
   ActionPlugin,
   BlobStore,
@@ -107,6 +108,9 @@ export interface Providers {
   eventDispatcher: EventDispatcher;
   /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
   workflowScheduler: WorkflowScheduler;
+  /** Polls Slack online status for `slack.user_online` lines
+   * (`services/online-status-watch.ts`). `start()`/`stop()` from main.ts. */
+  onlineStatusWatcher: OnlineStatusWatcher;
   /** Repository content sync (`services/content-sync/service.ts`) —
    * `start()`/`stop()` from main.ts. `routes/skills.ts` calls the same
    * `syncOnce` for its create and "sync now" routes. */

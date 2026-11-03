@@ -3,6 +3,7 @@
  * rows, one transaction. Callers (generic webhook route, github-app
  * forwarder) handle org resolution and signature verification first.
  */
+import { oncePerHoursBlocks } from "./once-per.js";
 import { createEventReceipt, appendReceiptStage } from "./receipts.js";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
@@ -337,7 +338,10 @@ export async function ingestEvent(
     let authorizationDenied = false;
     phase = "the line filter and sender checks";
     for (const sub of subs) {
-      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
+      let outcome: Awaited<ReturnType<typeof subscriptionMatchOutcome>> | "rate_limited" =
+        await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
+      // "Only once every N hours" (`once-per.ts`): a line inside its window skips the event.
+      if (outcome === "matched" && await oncePerHoursBlocks(deps.db, sub, now)) outcome = "rate_limited";
       if (outcome === "matched") matched.push(sub);
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
@@ -353,7 +357,8 @@ export async function ingestEvent(
         target: receiptTargetKind(sub.target), outcome: "disabled" });
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
-      outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
+      outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered"
+        : decisions.some(d => d.outcome === "rate_limited") ? "rate_limited" : "no_subscription",
       detail: `${subs.length} enabled lines of presence checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 lines that name this key.`,
     }, { subscriptions: decisions });
     // Event waiters evaluate before the early return for an unmatched event,

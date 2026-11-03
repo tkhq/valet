@@ -21,7 +21,7 @@ export function receiptCleanupDue(orgId: string, now: number): boolean {
  * for every service but Slack; a Slack receipt keeps `channelId` and
  * `workspaceId`. Receipts written before ingest recorded `place` carry none. */
 export const RECEIPT_METADATA_KEYS: ReadonlySet<string> = new Set(["place", "channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
-const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch"]);
+const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch", "rate_limited"]);
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const bounded = (value: unknown, max = 256): string => typeof value === "string" ? value.slice(0, max) : "";
 export function sanitizeReceiptMetadata(value: unknown): Record<string, string | number | boolean> {

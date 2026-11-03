@@ -45,6 +45,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
@@ -641,6 +642,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    // Never started on its timer in tests; drive `tick()` directly.
+    onlineStatusWatcher: new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials }),
     webhookRateLimiter,
     eventDispatcher,
     contentSync,

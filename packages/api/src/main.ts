@@ -614,6 +614,7 @@ async function runBootChain(): Promise<void> {
   // freshly-ingested ones between nudges) get delivered.
   configureSlackIngress(providers);
   providers.eventDispatcher.start();
+  providers.onlineStatusWatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own
   // schedule, and imports any source added while this process was down.
@@ -715,6 +716,11 @@ async function close(): Promise<void> {
   // meanwhile (fix wave 4, concurrency M6). It is awaited below, before
   // evictAll.
   const wakeWatcherStopped = startStop("wakeWatcher", () => providers.wakeWatcher.stop());
+  try {
+    await providers.onlineStatusWatcher.stop();
+  } catch (err) {
+    console.error("onlineStatusWatcher.stop failed:", err);
+  }
   try {
     providers.workflowScheduler.stop();
   } catch (err) {

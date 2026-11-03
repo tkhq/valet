@@ -8,6 +8,8 @@
  * workflow trigger service (`workflows/trigger-service.ts`), and the template
  * installer (`workflows/templates.ts`).
  */
+import { USER_ONLINE_EVENT_KEY } from "@valet/plugin-slack/actions";
+import { validateOncePerHours } from "./once-per.js";
 import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -131,6 +133,15 @@ export function validateSubscription(
     }
   }
 
+  // The online-status watcher polls only the people a line names
+  // (`services/online-status-watch.ts`), so a line must name at least one.
+  if (patterns.includes(USER_ONLINE_EVENT_KEY) && !body.filters.some((raw) => {
+    const f = raw as Record<string, unknown>;
+    return f.field === "user" && (f.op === "eq" || f.op === "in");
+  })) {
+    return `${USER_ONLINE_EVENT_KEY} needs the person to watch. Add a condition: user is <their Slack user>.`;
+  }
+
   if (typeof body.target !== "object" || body.target === null) {
     return "target must be an object";
   }
@@ -146,6 +157,8 @@ export function validateSubscription(
     const error = validateAppearance(target.appearance);
     if (error) return error;
   }
+  const onceError = validateOncePerHours(target.oncePerHours);
+  if (onceError) return onceError;
   // The thread policy (spec 2026-10-16: delivery threads, Part A). Shape and
   // subject checks only; `existing` needs the owner, so the writer checks
   // it with `validateExistingThread` once the owner is known.
