@@ -36,8 +36,7 @@ export function diagramRenderScript(dir: string, stem: string): string {
     "set -e",
     `dir='${dir}'`,
     `out_dir='${OUTPUT_DIR}'`,
-    // A sandbox without the working directory keeps the PNG next to its source.
-    'mkdir -p "$out_dir" 2>/dev/null || out_dir="$dir"',
+    'mkdir -p "$out_dir"',
     `out="$out_dir/${stem}.png"`,
     'chrome="$(command -v valet-chromium || command -v chromium || command -v chromium-browser || command -v google-chrome || true)"',
     `if [ -z "$chrome" ]; then echo "no Chromium in this sandbox" >&2; exit ${NO_BROWSER_EXIT}; fi`,
@@ -70,7 +69,9 @@ export function buildDiagramRenderTool(configuredPublicUrl?: string): ToolDef {
     execute: async ({ source, alt, title }, ctx) => {
       if (!source.trim()) return { text: "The diagram source is empty. Send Mermaid source and retry.", ok: false };
       if (!ctx.threadFiles) return { text: "This run cannot save files to the thread, so it cannot show a rendered diagram. Send a ```mermaid code block instead.", ok: false };
-      const dir = `/tmp/valet-diagram-${randomUUID()}`;
+      // Sandbox file APIs accept only paths in the working directory, so the
+      // scratch files sit beside the output instead of in /tmp.
+      const dir = `${OUTPUT_DIR}/.render-${randomUUID()}`;
       const stem = diagramFileStem(title, source);
       try {
         await ctx.sandbox.mkdir(dir);

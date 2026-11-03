@@ -50,11 +50,11 @@ describe("render_diagram", () => {
     const rm = vi.spyOn(box, "rm");
     const result = await buildDiagramRenderTool().execute({ source: SOURCE, alt: "Web calls the api, which calls the sandbox", title: "Request flow" }, context(box, files));
     expect(result.ok).toBe(true);
-    expect(write).toHaveBeenCalledWith(expect.stringMatching(/^\/tmp\/valet-diagram-[\w-]+\/in\.mmd$/), SOURCE);
+    expect(write).toHaveBeenCalledWith(expect.stringMatching(/^\/workspace\/diagrams\/\.render-[\w-]+\/in\.mmd$/), SOURCE);
     expect(exec).toHaveBeenCalledWith(expect.stringContaining(MERMAID_CLI_PACKAGE), expect.objectContaining({ timeout: 180_000 }));
     expect(files.save).toHaveBeenCalledWith({ name: expect.stringMatching(/^request-flow-[0-9a-f]{8}\.png$/), mimeType: "image/png", data: PNG });
     expect(JSON.parse(result.text)).toMatchObject({ id: "file-1", mimeType: "image/png", path: "/workspace/diagrams/request-flow.png", alt: "Web calls the api, which calls the sandbox", title: "Request flow" });
-    expect(rm).toHaveBeenCalledWith(expect.stringMatching(/^\/tmp\/valet-diagram-/), { recursive: true });
+    expect(rm).toHaveBeenCalledWith(expect.stringMatching(/^\/workspace\/diagrams\/\.render-/), { recursive: true });
   });
 
   it("names the Slack upload in a Slack turn", async () => {
