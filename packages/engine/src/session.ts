@@ -824,7 +824,7 @@ export class Session {
     }
 
     const now = Date.now();
-    const entries = await store.getEntries(this.id, item.threadId);
+    const entries = await store.getEntries(this.id, item.threadId, { queueItemId: item.id });
     const hasTerminalAssistantEntry = entries.some(
       (e) =>
         e.type === "message" &&

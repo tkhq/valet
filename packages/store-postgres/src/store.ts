@@ -308,6 +308,21 @@ const STUB_SELECT = [...ENTRY_COLUMNS.map((column) => {
   return types.length === 0 ? column : `CASE WHEN entry_type IN (${types.map((type) => `'${type}'`).join(", ")}) THEN NULL ELSE ${column} END AS ${column}`;
 }), "seq"].join(", ");
 
+/** Rows above which a whole-thread read logs a warning. Hot paths read by
+ * queue item, tail, head or outline; a read this large is the shape that ran
+ * the api out of memory on 2026-10-28. */
+export const LARGE_THREAD_READ_ENTRIES = 2_000;
+const LARGE_READ_WARN_INTERVAL_MS = 60_000;
+let lastLargeReadWarnAt = 0;
+
+function noteWholeThreadRead(read: string, sessionId: string, threadId: string, rows: number): void {
+  if (rows <= LARGE_THREAD_READ_ENTRIES) return;
+  const now = Date.now();
+  if (now - lastLargeReadWarnAt < LARGE_READ_WARN_INTERVAL_MS) return;
+  lastLargeReadWarnAt = now;
+  console.warn(`store-postgres: ${read} loaded ${rows} entries with payloads for one thread. Scope the read by queue item, tail, head or outline.`, { sessionId, threadId });
+}
+
 const INSERT_ENTRY_SQL = `
   INSERT INTO engine_entries (${ENTRY_COLUMNS.join(", ")})
   VALUES (${ENTRY_COLUMNS.map((_, i) => `$${i + 1}`).join(", ")})
@@ -756,6 +771,7 @@ export class PgSessionStore implements SessionStore {
         "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC",
         [sessionId, threadId, USAGE_ENTRY_TYPE],
       );
+      noteWholeThreadRead("getThreadSnapshot", sessionId, threadId, entryResult.rows.length);
       return {
         thread: rowToThread(rawToThreadRow(rawThread)),
         entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
@@ -813,6 +829,28 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
+  async getThreadOutline(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return withSpan("store.thread_outline", { "valet.session.id": sessionId, "valet.thread.id": threadId }, (span) =>
+      this.db.transaction(async (tx) => {
+        const threadResult = await tx.query(
+          "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+          [sessionId, threadId],
+        );
+        const rawThread = threadResult.rows[0];
+        if (!rawThread) return null;
+        const stubResult = await tx.query(
+          `SELECT ${STUB_SELECT} FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE],
+        );
+        span.setAttribute("valet.entries.stubbed", stubResult.rows.length);
+        return { thread: rowToThread(rawToThreadRow(rawThread)), entries: stubResult.rows.map(rawToEntryRow).map(rowToEntry) };
+      }),
+    );
+  }
+
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
     const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2", [
       sessionId,
@@ -844,24 +882,32 @@ export class PgSessionStore implements SessionStore {
         // in any order, which surfaced as chat bubbles rendering out of sequence.
         const scoped = opts?.queueItemId !== undefined;
         const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
-        const newestFirst = scoped || limit !== undefined;
+        const headLimit = limit === undefined && opts?.headLimit && opts.headLimit > 0 ? opts.headLimit : undefined;
+        const newestFirst = (scoped && headLimit === undefined) || limit !== undefined;
         const conditions = ["session_id = $1", "thread_id = $2", "entry_type <> $3"];
         const params: unknown[] = [sessionId, threadId, USAGE_ENTRY_TYPE];
         if (scoped) {
           params.push(opts.queueItemId);
           conditions.push(`queue_item_id = $${params.length}`);
         }
+        if (opts?.entryIds !== undefined) {
+          params.push([...opts.entryIds]);
+          conditions.push(`id = ANY($${params.length}::text[])`);
+        }
         if (opts?.includeCompacted === false) conditions.push("entry_type != 'compaction'");
-        // Select the tail in SQL so attachment payloads outside the window never load.
+        // Select the tail (or head) in SQL so payloads outside the window never load.
         let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${newestFirst ? "DESC" : "ASC"}, seq ${newestFirst ? "DESC" : "ASC"}`;
-        if (limit !== undefined) {
-          params.push(limit);
+        if (limit !== undefined || headLimit !== undefined) {
+          params.push(limit ?? headLimit);
           query += ` LIMIT $${params.length}`;
         }
         const result = await this.db.query(query, params);
         const rows = result.rows.map(rawToEntryRow);
         if (newestFirst) rows.reverse();
         span.setAttribute("valet.entries.loaded", rows.length);
+        if (!scoped && limit === undefined && headLimit === undefined && opts?.entryIds === undefined) {
+          noteWholeThreadRead("getEntries", sessionId, threadId, rows.length);
+        }
         if (span.isRecording()) {
           span.setAttribute("valet.entries.parts_bytes", rows.reduce(
             (bytes, row) => bytes + (row.parts === null ? 0 : Buffer.byteLength(row.parts, "utf8")), 0,

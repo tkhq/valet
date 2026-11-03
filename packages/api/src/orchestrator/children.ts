@@ -50,6 +50,7 @@ import {
   type SpawnChildRequest,
   type SpawnChildResult,
   type SubmissionResult,
+  readThreadOutline,
   walkTranscriptDag,
   type AttachmentState,
 } from "@valet/engine";
@@ -423,7 +424,8 @@ async function privateInputThrough(
       if (other.mergedIntoItemId && turnItems.has(other.mergedIntoItemId)) turnItems.add(other.id);
     }
   }
-  const entries = await store.getEntries(childSessionId, item.threadId);
+  // Only order and queue items matter here, so read the outline, not payloads.
+  const entries = (await readThreadOutline(store, childSessionId, item.threadId))?.entries ?? [];
   let last = -1;
   for (let index = 0; index < entries.length; index++) {
     const id = entries[index]?.queueItemId;
@@ -1688,7 +1690,7 @@ export class ChildWatcher {
     const [row] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, watch.childSessionId));
     if (channelAudience && await privateInputThrough(store, watch.childSessionId, itemId,
       { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row?.originJson ?? null)?.threadKey })) return undefined;
-    const snapshot = await store.getThreadSnapshot(watch.childSessionId, item.threadId);
+    const snapshot = await readThreadOutline(store, watch.childSessionId, item.threadId);
     if (!snapshot) return undefined;
     // Storage order is execution order, not queue admission time. A later turn must never donate its checkpoint.
     const entries = snapshot.entries;
@@ -1700,7 +1702,10 @@ export class ChildWatcher {
     const activeEntries = walkTranscriptDag(entries, snapshot.thread.activeLeafEntryId);
     for (let index = activeEntries.length - 1; index >= 0; index--) {
       const entry = activeEntries[index];
-      if (entry.type === "compaction" && allowed.has(entry.id)) return entry;
+      if (entry.type !== "compaction" || !allowed.has(entry.id)) continue;
+      // The outline stubs compactions; read this one with its payload.
+      const [full] = await store.getEntries(watch.childSessionId, item.threadId, { entryIds: [entry.id] });
+      return full?.type === "compaction" ? full : undefined;
     }
     return undefined;
   }

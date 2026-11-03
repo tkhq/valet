@@ -164,7 +164,7 @@ export {
 export { errorLogFields, log, type LogFields, type LogLevel } from "./log.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
-export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, type ThreadEntryQuery } from "./thread.js";
+export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, FORK_SEED_PENDING_KEY, type ThreadEntryQuery } from "./thread.js";
 export {
   BRANCH_NOTE_KEY,
   THREAD_EDIT_KEY,
@@ -393,6 +393,7 @@ export {
   type SummaryWindowOptions,
   type Turn,
 } from "./compaction.js";
+export { readThreadOutline } from "./thread-outline.js";
 export {
   canDeliverMidTurn,
   entriesToAgentMessages,

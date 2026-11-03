@@ -23,6 +23,8 @@ export interface AutoTitleHostDeps {
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_RETRY_MS = 1_000;
+/** Entries the title reads from the start of a thread; it uses the first four messages. */
+const AUTO_TITLE_HEAD_ENTRIES = 24;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -48,7 +50,8 @@ export function createAutoTitleHost(deps: {
           ...(deps.namer ? { namer: deps.namer } : {}),
           loadMessages: async (sessionId, threadId) => {
             if (!threadId) return [];
-            const entries = await deps.engineStore.getEntries(sessionId, threadId);
+            // The title reads the opening exchange, so read only the head.
+            const entries = await deps.engineStore.getEntries(sessionId, threadId, { headLimit: AUTO_TITLE_HEAD_ENTRIES });
             const messages: { role: string; content: string }[] = [];
             for (const entry of entries) {
               if (entry.type !== "message") continue;

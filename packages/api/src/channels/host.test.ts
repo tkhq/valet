@@ -461,6 +461,7 @@ describe("ChannelHost.handleUpdate", () => {
       // Every per-event and per-turn read must name a submission or a tail. A
       // whole-thread read here parses the full transcript at tool-call rate.
       const reads = vi.spyOn(engineStore, "getEntries");
+      const snapshots = vi.spyOn(engineStore, "getThreadSnapshot");
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:read-2", conversationKey: key, text: "second question" }));
       await vi.waitFor(async () => {
         const entries = await engineStore.getEntries(session.id, thread.id, { limit: 50 });
@@ -468,9 +469,15 @@ describe("ChannelHost.handleUpdate", () => {
         expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
       });
       const wholeThread = reads.mock.calls.filter(([, threadId, opts]) =>
-        threadId === thread.id && opts?.queueItemId === undefined && opts?.limit === undefined);
+        threadId === thread.id && opts?.queueItemId === undefined && opts?.limit === undefined
+        && opts?.headLimit === undefined && opts?.entryIds === undefined);
+      // getThreadSnapshot loads every entry with its payload. The 2026-10-28
+      // outage came from one of these on every turn (applyForkSeed).
+      const snapshotReads = snapshots.mock.calls.filter(([, threadId]) => threadId === thread.id);
       reads.mockRestore();
+      snapshots.mockRestore();
       expect(wholeThread).toEqual([]);
+      expect(snapshotReads).toEqual([]);
     } finally {
       await slackHost.stop();
     }

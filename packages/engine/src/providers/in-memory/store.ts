@@ -259,11 +259,17 @@ export class InMemorySessionStore implements SessionStore {
   ): Promise<SessionEntry[]> {
     const all = this.row(sessionId).entriesByThread.get(threadId) ?? [];
     let result = opts?.queueItemId === undefined ? all : all.filter((e) => e.queueItemId === opts.queueItemId);
+    if (opts?.entryIds !== undefined) {
+      const ids = new Set(opts.entryIds);
+      result = result.filter((e) => ids.has(e.id));
+    }
     if (opts?.includeCompacted === false) {
       result = result.filter((e) => e.type !== "compaction");
     }
     if (opts?.limit && opts.limit > 0) {
       result = result.slice(-opts.limit);
+    } else if (opts?.headLimit && opts.headLimit > 0) {
+      result = result.slice(0, opts.headLimit);
     }
     return [...result];
   }
