@@ -57,7 +57,8 @@ import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-sessio
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button } from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogTitle } from "~/components/primitives";
+import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 import { flattenChildWork, useChildWork } from "~/api/child-work";
@@ -167,6 +168,7 @@ export function SessionView({
 }) {
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const summarySwipe = useSwipeDismiss("down", () => setSummaryOpen(false));
   const [composerModelTarget, setComposerModelTarget] = useState<HTMLDivElement | null>(null);
   const mobile = useMobileLayout();
   const mobileNavigation = mobile && !panel;
@@ -376,36 +378,54 @@ export function SessionView({
     );
   }
 
-  const summaryControl = effectiveThreadId ? (
+  const summaryPanel = effectiveThreadId ? (
+    <ThreadContextPanel
+      key={`${sessionId}:${effectiveThreadId}`}
+      owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
+      sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+      canCancelWork={canCancelWork}
+      pullRequests={helperThread?.pullRequests}
+      onCreate={() => {
+        const key = draftKey(sessionId, effectiveThreadId);
+        const store = useComposerDraftStore.getState();
+        const text = store.byKey[key]?.text ?? "";
+        store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
+        viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+      }}
+      onAttach={() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click()}
+      onReveal={(messageId) => {
+        const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
+        row?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }}
+    />
+  ) : null;
+  const summaryIcon = <ListTree className="h-4 w-4" aria-hidden />;
+  // A phone opens the summary as a bottom sheet: a popover anchored to the
+  // tab row covers the transcript without a clear way out. A swipe down
+  // closes it.
+  const summaryControl = !effectiveThreadId ? null : mobileConversation ? <>
+    <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" aria-expanded={chatActive && summaryOpen}
+      onClick={() => setSummaryOpen((open) => !open)} className="shrink-0 max-md:min-w-11">{summaryIcon}</Button>
+    <Dialog open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
+      <DialogContent hideClose aria-describedby={undefined} onOpenAutoFocus={(event) => event.preventDefault()} {...summarySwipe}
+        className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 gap-0 rounded-b-none rounded-t-2xl border-x-0 border-b-0 p-0 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom motion-reduce:animate-none [&>aside]:rounded-none [&>aside]:bg-transparent">
+        <DialogTitle className="sr-only">Thread summary</DialogTitle>
+        <div aria-hidden className="mx-auto mb-1 mt-2 h-1 w-9 shrink-0 rounded-full bg-line" />
+        {summaryPanel}
+      </DialogContent>
+    </Dialog>
+  </> : (
     <Popover key={`${sessionId}:${effectiveThreadId}`} open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
-          <ListTree className="h-4 w-4" aria-hidden />
+          {summaryIcon}
         </Button>
       </PopoverTrigger>
       <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
-                <ThreadContextPanel
-                  key={`${sessionId}:${effectiveThreadId}`}
-                  owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
-                  sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
-                  canCancelWork={canCancelWork}
-                  pullRequests={helperThread?.pullRequests}
-                  onCreate={() => {
-                    const key = draftKey(sessionId, effectiveThreadId);
-                    const store = useComposerDraftStore.getState();
-                    const text = store.byKey[key]?.text ?? "";
-                    store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
-                    viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
-                  }}
-                  onAttach={() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click()}
-                  onReveal={(messageId) => {
-                    const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
-                    row?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  }}
-                />
+        {summaryPanel}
       </PopoverContent>
     </Popover>
-  ) : null;
+  );
 
   const sessionHeader = (
     <SessionHeader

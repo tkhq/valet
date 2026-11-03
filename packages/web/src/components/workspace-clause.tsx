@@ -83,8 +83,9 @@ export function WorkspaceClause({ size = "title" }: { size?: "title" | "crumb" }
     ? `Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`
     : "Your personal space. Only you can see these.";
   const Icon = ws.kind === "team" ? Users : User;
-  return <span title={note} className={cn("inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted",
-    size === "title" ? "font-display text-2xl" : "text-xs")}>
+  // On a phone's one-line breadcrumb the space shrinks before the page title.
+  return <span title={note} className={cn("inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted max-md:[flex-shrink:4]",
+    size === "title" ? "font-display text-2xl max-md:text-xl" : "text-xs")}>
     <Icon className={size === "title" ? "h-5 w-5 shrink-0" : "h-3.5 w-3.5 shrink-0"} aria-hidden />
     <span className="truncate">{ws.kind === "team" ? ws.team.name : "Personal"}</span>
     <span aria-hidden>/</span>

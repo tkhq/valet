@@ -196,6 +196,22 @@ describe("SessionView header chrome", () => {
     expect(screen.getByTestId("composer")).toBeTruthy();
   });
 
+  it("opens the summary as a bottom sheet on a phone, and a swipe down closes it", async () => {
+    mobileLayout = true;
+    const { MobileConversationLayout } = await import("~/components/home/mobile-conversation-layout");
+    renderComponent(() => <MobileConversationLayout view="chat" onViewChange={() => {}}><SessionView sessionId="sess-1" activeThreadId="t1" panel hidePanelHeader chatOnly sharedConversationChrome /></MobileConversationLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));
+    const sheet = await screen.findByRole("dialog", { name: "Thread summary" });
+    expect(sheet.textContent).toContain("Thread summary contents");
+    expect(sheet.className).toContain("bottom-0");
+    // The dialog's scroll lock reads both touch lists, so each event carries both.
+    const start = [{ clientX: 100, clientY: 100 }];
+    const end = [{ clientX: 104, clientY: 220 }];
+    fireEvent.touchStart(sheet, { touches: start, changedTouches: start });
+    fireEvent.touchEnd(sheet, { touches: [], changedTouches: end });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread summary" })).toBeNull());
+  });
+
   it("keeps embedded panel close controls on a phone", async () => {
     mobileLayout = true;
     renderInRouter("sess-1", true, () => {});

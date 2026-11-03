@@ -10,16 +10,19 @@
  * One row at a time takes the neutral selected fill. Row chrome (chevrons,
  * "+", "…") shows on hover or focus where a pointer can hover, and always on
  * a touch screen.
+ *
+ * A phone (below 768px) keeps the tiers at touch size: 44px rows, 15px row
+ * text, and 12px labels.
  */
 
 /** A section label: Spaces, Projects, Pinned, Recents. */
-export const SIDEBAR_LABEL = "px-4 pb-1 pt-4 text-[11px] font-medium text-muted";
+export const SIDEBAR_LABEL = "px-4 pb-1 pt-4 text-[11px] font-medium text-muted max-md:pt-5 max-md:text-xs";
 
 /** The frame of a top-level row: 28px tall, inset 8px, rounded. Its own content pads `pl-2`. */
-export const TOP_ROW = "mx-2 flex h-7 items-center rounded-md text-[13px] text-ink max-md:h-auto max-md:min-h-11";
+export const TOP_ROW = "mx-2 flex h-7 items-center rounded-md text-[13px] text-ink max-md:h-auto max-md:min-h-11 max-md:text-[15px]";
 
 /** The frame of a nested row: 26px tall. Content pads `pl-8`, 24px past a top-level row's icon. */
-export const NESTED_ROW = "mx-2 flex h-[26px] items-center rounded-md text-[13px] max-md:h-auto max-md:min-h-11";
+export const NESTED_ROW = "mx-2 flex h-[26px] items-center rounded-md text-[13px] max-md:h-auto max-md:min-h-11 max-md:text-[15px]";
 
 /** A nested row that is neither selected nor current. */
 export const NESTED_IDLE = "text-ink/70 hover:bg-ink-wash hover:text-ink";
