@@ -12,7 +12,8 @@ const sessionView = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
-vi.mock("~/api/home", () => ({ useHomeConversation: () => home() }));
+let homeTasks: object | undefined = { needsYou: [], working: [], updates: [], finished: [] };
+vi.mock("~/api/home", () => ({ useHomeConversation: () => home(), useHomeTasks: () => ({ data: homeTasks }) }));
 vi.mock("~/components/home/tasks-panel", () => ({
   TasksPanel: () => <div data-testid="tasks" />,
   useNeedsYouCount: () => needsYou(),
@@ -34,6 +35,8 @@ const conversation = { data: { sessionId: "assistant:asst_1", threadId: "th-home
 
 describe("Home", () => {
   beforeEach(() => {
+    localStorage.clear();
+    homeTasks = { needsYou: [], working: [], updates: [], finished: [] };
     home.mockReturnValue(conversation);
     needsYou.mockReturnValue({ count: 0, partial: false });
     sessionView.mockReset();
@@ -99,20 +102,64 @@ describe("Home", () => {
     busy = false;
   });
 
-  it("opens and closes the desktop Tasks panel from the header", () => {
-    const onViewChange = vi.fn();
+  it("opens and closes the desktop Tasks panel from the header, and remembers the choice", () => {
     needsYou.mockReturnValue({ count: 2, partial: false });
-    const { rerender } = render(<HomeScreen view="chat" wide onViewChange={onViewChange} />);
+    localStorage.setItem("valet:home-tasks-panel", "closed");
+    const onViewChange = vi.fn();
+    render(<HomeScreen view="chat" wide onViewChange={onViewChange} />);
     expect(screen.queryByTestId("tasks")).toBeNull();
-    const toggle = screen.getByRole("button", { name: /Tasks/ });
-    expect(toggle.textContent).toContain("2");
+    const toggle = screen.getByRole("button", { name: "Tasks · 2" });
     fireEvent.click(toggle);
-    expect(onViewChange).toHaveBeenCalledWith("tasks");
-    rerender(<HomeScreen view="tasks" wide onViewChange={onViewChange} />);
     expect(screen.getByRole("complementary", { name: "Tasks" })).toBeTruthy();
-    expect(screen.getByTestId("tasks")).toBeTruthy();
+    expect(localStorage.getItem("valet:home-tasks-panel")).toBe("open");
+    // The count shows whether the panel is open or closed.
+    expect(screen.getByRole("button", { name: "Tasks · 2" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close tasks" }));
-    expect(onViewChange).toHaveBeenLastCalledWith("chat");
+    expect(screen.queryByTestId("tasks")).toBeNull();
+    expect(localStorage.getItem("valet:home-tasks-panel")).toBe("closed");
+  });
+
+  it("restores a stored open choice even when nothing needs the person", () => {
+    localStorage.setItem("valet:home-tasks-panel", "open");
+    render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
+    expect(screen.getByTestId("tasks")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it.each([
+    [2, 1440, true],
+    [2, 1280, true],
+    [2, 1279, false],
+    [0, 1440, false],
+  ])("on a first visit with %i needing the person at %ipx, opens the panel: %s", (count, width, open) => {
+    needsYou.mockReturnValue({ count, partial: false });
+    vi.stubGlobal("innerWidth", width);
+    render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
+    expect(screen.queryByTestId("tasks") !== null).toBe(open);
+    expect(localStorage.getItem("valet:home-tasks-panel")).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("waits for the task counts before deciding a first visit", () => {
+    needsYou.mockReturnValue({ count: 0, partial: false });
+    homeTasks = undefined;
+    vi.stubGlobal("innerWidth", 1440);
+    const { rerender } = render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
+    expect(screen.queryByTestId("tasks")).toBeNull();
+    homeTasks = { needsYou: [], working: [], updates: [], finished: [] };
+    needsYou.mockReturnValue({ count: 1, partial: false });
+    rerender(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
+    expect(screen.getByTestId("tasks")).toBeTruthy();
+    vi.unstubAllGlobals();
+  });
+
+  it("opens on ?view=tasks without storing a choice, and clears it on close", () => {
+    const onViewChange = vi.fn();
+    render(<HomeScreen view="tasks" wide onViewChange={onViewChange} />);
+    expect(screen.getByTestId("tasks")).toBeTruthy();
+    expect(localStorage.getItem("valet:home-tasks-panel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close tasks" }));
+    expect(onViewChange).toHaveBeenCalledWith("chat");
   });
 
   it("offers Retry when the conversation cannot open", () => {

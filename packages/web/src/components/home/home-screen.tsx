@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ListChecks, X } from "lucide-react";
-import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
-import { useHomeConversation } from "~/api/home";
+import { useHomeConversation, useHomeTasks } from "~/api/home";
 import { errorText } from "~/lib/error-text";
 import { queueBusy, useQueueStateForThread } from "~/stores/stream";
 import { Link } from "@tanstack/react-router";
@@ -10,6 +10,7 @@ import { HomeEmptyState, greeting } from "./home-empty-state";
 import { MobileConversationLayout, type MobileConversationView } from "./mobile-conversation-layout";
 import { NeedsYouDock } from "./needs-you-dock";
 import { TasksPanel, useNeedsYouCount } from "./tasks-panel";
+import { firstVisitTasksOpen, loadTasksPanelChoice, storeTasksPanelChoice } from "./tasks-panel-choice";
 export type HomeView = MobileConversationView;
 
 /**
@@ -32,7 +33,7 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
   const dock = <NeedsYouDock homeThreadId={home.data.threadId} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />;
   const empty = <HomeEmptyState sessionId={home.data.sessionId} threadId={home.data.threadId} />;
   if (wide) return <HomeDesktop sessionId={home.data.sessionId} threadId={home.data.threadId} dock={dock} empty={empty}
-    tasksOpen={view === "tasks"} onTasksOpenChange={(open) => onViewChange(open ? "tasks" : "chat")} />;
+    tasksRequested={view === "tasks"} onTasksClosed={() => { if (view === "tasks") onViewChange("chat"); }} />;
   return <MobileConversationLayout view={view} onViewChange={onViewChange}>
     <SessionView sessionId={home.data.sessionId} activeThreadId={home.data.threadId} panel hidePanelHeader chatOnly sharedConversationChrome enableReplies
       active={!showSide}
@@ -46,19 +47,34 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
  * Desktop Home, in the main pane of the Threads layout. While Home is idle it
  * shows the greeting and starters over the transcript; typing, a starter, or a running
  * turn gives way to the conversation. The header's Tasks button opens a
- * collapsible status panel beside it.
+ * collapsible status panel beside it. The panel keeps the person's last
+ * choice for this browser; with none, it opens on load only when something
+ * needs them and the window is wide (`firstVisitTasksOpen`). `?view=tasks`
+ * and the approvals dock open it without storing a choice.
  */
-function HomeDesktop({ sessionId, threadId, dock, empty, tasksOpen, onTasksOpenChange }: {
+function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasksClosed }: {
   sessionId: string; threadId: string; dock: ReactNode; empty: ReactNode;
-  tasksOpen: boolean; onTasksOpenChange: (open: boolean) => void;
+  tasksRequested: boolean; onTasksClosed: () => void;
 }) {
   const [landing, setLanding] = useState(true);
   const busy = queueBusy(useQueueStateForThread(sessionId, threadId));
   useEffect(() => { if (busy) setLanding(false); }, [busy]);
   const needsYou = useNeedsYouCount();
-  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen} onClick={() => onTasksOpenChange(!tasksOpen)}>
-    <ListChecks aria-hidden className="h-4 w-4" />Tasks
-    {needsYou.count > 0 && <Badge variant="warning" className="px-1.5 py-0 text-[11px]">{needsYou.count}{needsYou.partial ? "+" : ""}</Badge>}
+  const tasksLoaded = useHomeTasks().data !== undefined;
+  // `undefined` until a stored choice, a request, or the first-visit rule decides.
+  const [tasksOpen, setTasksOpen] = useState<boolean | undefined>(() => tasksRequested || loadTasksPanelChoice());
+  useEffect(() => {
+    if (tasksOpen === undefined && tasksLoaded) setTasksOpen(firstVisitTasksOpen(needsYou.count, window.innerWidth));
+  }, [tasksOpen, tasksLoaded, needsYou.count]);
+  useEffect(() => { if (tasksRequested) setTasksOpen(true); }, [tasksRequested]);
+  const chooseTasksOpen = (open: boolean) => {
+    setTasksOpen(open);
+    storeTasksPanelChoice(open);
+    if (!open) onTasksClosed();
+  };
+  const count = needsYou.count > 0 ? ` · ${needsYou.count}${needsYou.partial ? "+" : ""}` : "";
+  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen === true} onClick={() => chooseTasksOpen(!tasksOpen)}>
+    <ListChecks aria-hidden className="h-4 w-4" />{`Tasks${count}`}
   </Button>;
   return <div data-home-desktop className="flex min-h-0 min-w-0 flex-1" onInput={() => setLanding(false)}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -75,7 +91,7 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksOpen, onTasksOpenC
       {/* Same height, padding and title type as the thread header beside it, so the two bottom borders form one line. */}
       <div className="flex h-[--nav-height] shrink-0 items-center justify-between border-b border-line pl-4 pr-2">
         <h2 className="font-display text-sm font-semibold tracking-tight text-ink">Tasks</h2>
-        <Button size="sm" variant="ghost" aria-label="Close tasks" onClick={() => onTasksOpenChange(false)}><X aria-hidden className="h-4 w-4" /></Button>
+        <Button size="sm" variant="ghost" aria-label="Close tasks" onClick={() => chooseTasksOpen(false)}><X aria-hidden className="h-4 w-4" /></Button>
       </div>
       <TasksPanel className="min-h-0 flex-1 overflow-y-auto p-4" />
     </aside>}

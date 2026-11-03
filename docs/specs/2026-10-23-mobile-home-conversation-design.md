@@ -252,6 +252,11 @@ earlier rule that Home changes only below 768px.
   panel header, the thread header, and the sidebar's top row share one height,
   so their bottom borders form one line. The sidebar divider is a 1px hairline.
   `?view=tasks` opens the panel; closing it clears the parameter.
+- The panel keeps the person's last open or closed choice in browser storage.
+  With no stored choice, it opens on load only when something needs the
+  person and the window is at least 1280px wide. A link or the approvals dock
+  can open it without storing a choice. The Tasks button shows the count of
+  items that need the person ("Tasks · 3") whether the panel is open or not.
 - The New thread button keeps its one-click action. A menu beside it offers
   Thread, Task, Workflow, Artifact, Project, and Workspace overview. Task and
   Artifact open Home with a starter in the message box. Workflow opens the
