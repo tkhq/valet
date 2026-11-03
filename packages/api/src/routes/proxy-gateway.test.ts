@@ -1,6 +1,7 @@
 // packages/api/src/routes/proxy-gateway.test.ts
 import { describe, it, expect } from "vitest";
-import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage, proxySubpath, refusedUpstream } from "./proxy-gateway.js";
+import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage, proxySubpath, refusedUpstream, upstreamFetch } from "./proxy-gateway.js";
+import { guardedFetch } from "../lib/outbound-url.js";
 
 describe("injectIncludeUsage", () => {
   const chat = "/v1/chat/completions";
@@ -114,5 +115,17 @@ describe("refusedUpstream", () => {
   it("refuses a configured base URL that points inside the cluster, so the key is never sent", () => {
     expect(refusedUpstream("anthropic", "http://169.254.169.254")).toMatch(/^The anthropic provider base URL is refused\. The URL points at 169\.254\.169\.254/);
     expect(refusedUpstream("openai", "http://valet-api.valet.svc.cluster.local:8787")).toMatch(/internal or cluster service/);
+  });
+});
+
+describe("upstreamFetch", () => {
+  it("uses the guarded fetch for a configured base URL, so DNS rebinding and redirects are checked", () => {
+    expect(upstreamFetch("anthropic", "https://llm-gateway.example.com")).toBe(guardedFetch);
+    expect(upstreamFetch("openai", "https://llm-gateway.example.com")).toBe(guardedFetch);
+  });
+
+  it("uses the platform fetch for the fixed public defaults", () => {
+    expect(upstreamFetch("anthropic", "https://api.anthropic.com")).not.toBe(guardedFetch);
+    expect(upstreamFetch("openai", "https://api.openai.com")).not.toBe(guardedFetch);
   });
 });

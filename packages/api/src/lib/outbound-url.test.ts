@@ -151,14 +151,16 @@ describe("checkOutboundUrl (DNS answers)", () => {
 describe("createGuardedFetch", () => {
   let server: Server;
   let port: number;
-  const seen: Array<{ host: string | undefined; method: string | undefined; path: string | undefined; headers: IncomingHttpHeaders }> = [];
+  const seen: Array<{ host: string | undefined; method: string | undefined; path: string | undefined; headers: IncomingHttpHeaders; body: string }> = [];
 
   beforeAll(async () => {
-    server = createServer((req, res) => {
-      seen.push({ host: req.headers.host, method: req.method, path: req.url, headers: req.headers });
+    server = createServer(async (req, res) => {
+      let body = "";
+      for await (const chunk of req) body += String(chunk);
+      seen.push({ host: req.headers.host, method: req.method, path: req.url, headers: req.headers, body });
       const location = new URL(req.url ?? "/", "http://x.example").searchParams.get("to");
       if (req.url?.startsWith("/redirect") && location) {
-        res.writeHead(req.url.startsWith("/redirect303") ? 303 : 302, { location });
+        res.writeHead(req.url.startsWith("/redirect303") ? 303 : req.url.startsWith("/redirect307") ? 307 : 302, { location });
         res.end();
         return;
       }
@@ -232,6 +234,14 @@ describe("createGuardedFetch", () => {
     expect(res.status).toBe(200);
     expect(seen.map((r) => r.method)).toEqual(["POST", "GET"]);
     expect(seen[1]?.headers["content-type"]).toBeUndefined();
+  });
+
+  it("replays the method and body on a 307", async () => {
+    seen.length = 0;
+    const to = encodeURIComponent("/final");
+    const res = await guarded()(`http://a.test:${port}/redirect307?to=${to}`, { method: "POST", body: new TextEncoder().encode('{"model":"m"}') });
+    expect(res.status).toBe(200);
+    expect(seen.map((r) => [r.method, r.body])).toEqual([["POST", '{"model":"m"}'], ["POST", '{"model":"m"}']]);
   });
 
   it("stops after five redirects", async () => {

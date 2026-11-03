@@ -12,7 +12,7 @@ import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
 import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
-import { checkOutboundUrlShape, recordOutboundRefusal } from "../lib/outbound-url.js";
+import { checkOutboundUrlShape, guardedFetch, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
 import { getProxySettings } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
@@ -37,12 +37,6 @@ const HOP_BY_HOP = new Set([
 ]);
 
 /**
- * Strip-list, NOT allowlist: forward every incoming header except hop-by-hop
- * + the valet key headers, then set the real upstream auth. This preserves
- * unenumerated provider beta headers (e.g. anthropic-beta, openai-beta)
- * without needing an explicit allowlist.
- */
-/**
  * A provider row's base URL replaces the public default. The API refuses a
  * base URL on these kinds, so only instance config sets one. Check its shape
  * anyway, so a stored internal target never receives the proxied key.
@@ -56,6 +50,22 @@ export function refusedUpstream(kind: ProviderKind, baseUrl: string): string | n
   return `The ${kind} provider base URL is refused. ${check.reason}`;
 }
 
+/**
+ * The fetch for a proxied upstream. The public defaults are fixed origins. A
+ * configured base URL goes through `guardedFetch`, which checks DNS answers
+ * at connect time and every redirect hop, so a name that rebinds to an
+ * internal address never receives the proxied key.
+ */
+export function upstreamFetch(kind: ProviderKind, baseUrl: string): typeof fetch {
+  return baseUrl === DEFAULT_BASE[kind] ? (input, init) => fetch(input, init) : guardedFetch;
+}
+
+/**
+ * Strip-list, NOT allowlist: forward every incoming header except hop-by-hop
+ * + the valet key headers, then set the real upstream auth. This preserves
+ * unenumerated provider beta headers (e.g. anthropic-beta, openai-beta)
+ * without needing an explicit allowlist.
+ */
 export function outboundHeaders(raw: Headers, kind: ProviderKind, apiKey: string): Headers {
   const out = new Headers();
   for (const [k, v] of raw.entries()) {
@@ -259,12 +269,13 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
 
     let res: Response;
     try {
-      res = await fetch(`${upstream.baseUrl}${subpath}${url.search}`, {
+      res = await upstreamFetch(kind, upstream.baseUrl)(`${upstream.baseUrl}${subpath}${url.search}`, {
         method: c.req.method,
         headers: outboundHeaders(c.req.raw.headers, kind, upstream.apiKey),
         body: hasBody ? reqText : undefined,
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof OutboundUrlError) return wireError(kind, 502, `The ${kind} provider base URL is refused. ${err.reason}`);
       return wireError(kind, 502, "Upstream provider unreachable.");
     }
 

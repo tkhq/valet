@@ -299,6 +299,20 @@ export function guardedLookup(policy: OutboundPolicy, resolve: Resolver = system
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"];
 
+/**
+ * Buffers a request body so a 307 or 308 redirect can send it again. A body
+ * type that implies a content type (form data, URL params, a typed blob)
+ * keeps it. Model requests are small JSON strings, so buffering costs little.
+ */
+async function bufferedBody(body: RequestInit["body"] | ArrayBuffer, headers: Headers): Promise<string | Uint8Array | undefined> {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string") return body;
+  const wrapped = new Response(body);
+  const implied = wrapped.headers.get("content-type");
+  if (implied && !headers.has("content-type")) headers.set("content-type", implied);
+  return new Uint8Array(await wrapped.arrayBuffer());
+}
+
 function urlOf(input: Parameters<typeof fetch>[0]): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.href;
@@ -328,7 +342,7 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
     let url = urlOf(input);
     let method = (init?.method ?? request?.method ?? "GET").toUpperCase();
     const headers = new Headers(init?.headers ?? request?.headers);
-    let body = init?.body ?? (request ? await request.arrayBuffer() : undefined);
+    let body = await bufferedBody(init?.body ?? (request ? await request.arrayBuffer() : undefined), headers);
     const signal = init?.signal ?? request?.signal;
     const origin = new URL(url).origin;
 
@@ -342,7 +356,9 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
       try {
         response = await undiciFetch(url, {
           method,
-          headers,
+          // A plain record: the undici package and Node's fetch declare
+          // separate Headers types.
+          headers: Object.fromEntries(headers),
           body,
           signal: signal ?? undefined,
           redirect: "manual",
@@ -375,8 +391,6 @@ export function createGuardedFetch(policy?: OutboundPolicy, resolve: Resolver = 
         body = undefined;
         headers.delete("content-type");
         headers.delete("content-length");
-      } else if (body instanceof ReadableStream) {
-        throw new OutboundUrlError(`The endpoint at ${origin} redirected a streamed request. Use the final endpoint URL.`);
       }
     }
   };
