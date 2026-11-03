@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { Type } from "typebox";
-import type { BlobStore, ThreadFile, ThreadFileStore, ToolDef } from "@valet/engine";
+import { sniffImageMediaType, type BlobStore, type ThreadFile, type ThreadFileStore, type ToolDef } from "@valet/engine";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 
 import { and, count, eq, sum } from "drizzle-orm";
@@ -18,7 +18,41 @@ const MIME_TYPES: Record<string, string> = {
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
 };
+
+/** Image types the web chat shows inline. The download route serves them with a sandbox CSP. */
+export const INLINE_IMAGE_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
+
+/** The stored type: image bytes win over the extension, so a mislabeled chart still shows. */
+export function generatedFileMimeType(name: string, data: Uint8Array): string {
+  return sniffImageMediaType(data) ?? MIME_TYPES[posix.extname(name).toLowerCase()] ?? "application/octet-stream";
+}
+
+/**
+ * The file_attach result for a saved file. An image carries its alt text and
+ * title for the chat preview. In a Slack turn the chat preview is not seen
+ * there, so the result names the action that posts the image to the thread.
+ */
+export function attachResultText(file: ThreadFile, opts: { path?: string; alt?: string; title?: string; origin?: { channelType?: string }; publicOrigin?: string }): string {
+  const image = INLINE_IMAGE_TYPES.has(file.mimeType);
+  return JSON.stringify({
+    ...file,
+    ...(opts.path ? { path: opts.path } : {}),
+    ...(image && opts.alt ? { alt: opts.alt } : {}),
+    ...(image && opts.title ? { title: opts.title } : {}),
+    ...(image && opts.origin?.channelType !== "slack" ? { shown: "The image shows inline in the chat. Don't link it again." } : {}),
+    ...(image && opts.origin?.channelType === "slack"
+      ? { slack: `This chat preview does not reach Slack. Post the image with call_tool slack.reply_file_to_origin { file_id: "${file.id}", alt_text, title }.` }
+      : {}),
+    ...(!opts.publicOrigin ? { deliveryNote: "This relative URL works in the Valet web app. For channel delivery, configure VALET_PUBLIC_URL and attach the file again." } : {}),
+  });
+}
 
 export function generatedFileKey(orgId: string, sessionId: string, threadId: string, fileId: string): string {
   const scope = [orgId, sessionId, threadId].map(value => Buffer.from(value).toString("hex")).join("/");
@@ -82,12 +116,16 @@ async function saveGeneratedFile(db: AppDb, blobs: BlobStore, scope: FileScope, 
 
 export function buildFileAttachTool(db: AppDb, blobs: BlobStore, configuredPublicUrl?: string, limits = GENERATED_FILE_LIMITS): ToolDef {
   const origin = generatedFileOrigin(configuredPublicUrl);
-  const parameters = Type.Object({ path: Type.String({ description: "Absolute path of the completed file in the sandbox." }) });
+  const parameters = Type.Object({
+    path: Type.String({ description: "Absolute path of the completed file in the sandbox." }),
+    alt: Type.Optional(Type.String({ maxLength: 1000, description: "For an image: what it shows, for screen readers." })),
+    title: Type.Optional(Type.String({ maxLength: 255, description: "For an image: a short caption shown under it." })),
+  });
   const tool: ToolDef<typeof parameters> = {
     name: "file_attach",
-    description: "Attach a completed sandbox file to this chat as a durable, private download. Return the download URL verbatim in a Markdown link. This does not publish a page or share with the organization.",
+    description: "Attach a completed sandbox file to this chat as a durable, private download. A PNG, JPEG, GIF, WebP, or SVG image (a chart, a diagram, a screenshot) shows inline in the chat with a download; pass alt and title for it. For other files, return the download URL verbatim in a Markdown link. This does not publish a page or share with the organization.",
     parameters,
-    execute: async ({ path }, ctx) => {
+    execute: async ({ path, alt, title }, ctx) => {
       if (!posix.isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) {
         return { text: "Invalid file path. Supply an absolute sandbox file path.", ok: false };
       }
@@ -99,10 +137,10 @@ export function buildFileAttachTool(db: AppDb, blobs: BlobStore, configuredPubli
         if (stat.size > DEFAULT_MAX_UPLOAD_BYTES) return { text: "The file exceeds the attachment size limit. Reduce its size and retry.", ok: false };
         const bytes = await ctx.sandbox.readBinary(path);
         if (bytes.byteLength > DEFAULT_MAX_UPLOAD_BYTES) return { text: "The file exceeds the attachment size limit. Reduce its size and retry.", ok: false };
-        const mimeType = MIME_TYPES[posix.extname(name).toLowerCase()] ?? "application/octet-stream";
+        const mimeType = generatedFileMimeType(name, bytes);
         const saved = await saveGeneratedFile(db, blobs, ctx, { name, mimeType, data: bytes }, origin, limits);
         if (!saved.ok) return { text: saved.error, ok: false };
-        return { text: JSON.stringify({ ...saved.file, ...(!origin ? { deliveryNote: "This relative URL works in the Valet web app. For channel delivery, configure VALET_PUBLIC_URL and attach the file again." } : {}) }), ok: true };
+        return { text: attachResultText(saved.file, { alt, title, origin: ctx.origin, publicOrigin: origin }), ok: true };
       } catch {
         return { text: "Could not attach the file. Verify the file exists and retry file_attach.", ok: false };
       }

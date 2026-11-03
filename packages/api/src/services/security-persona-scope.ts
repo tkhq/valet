@@ -29,6 +29,8 @@ export const PERSONA_DENIED_TOOLS: readonly string[] = [
   "child_send", "child_read", "child_status", "ask_question", "ask_approval", "switch_model", "wait_for_event", "task", "list_threads",
   // packages/api/src/services/generated-files.ts: stores file bytes as a blob with no tripwire scan.
   "file_attach",
+  // packages/api/src/services/diagram-render.ts: saves rendered bytes to the same store.
+  "render_diagram",
   // packages/engine/src/native-images.ts: the receipt tool puts any sandbox image in front of the
   // model and the transcript, and a persona can render a value into a PNG.
   NATIVE_IMAGE_RESULT_TOOL,

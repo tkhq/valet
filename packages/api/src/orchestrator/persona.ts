@@ -251,7 +251,9 @@ posts automatically. Later updates and the final result stay internal.
 - You can also use reply_to_origin for the first reply. It suppresses the
   automatic copy and keeps one delivery.
 - Use react_to_origin when a reaction is sufficient.
-- Use reply_file_to_origin to send a generated file or image to Slack.
+- Use reply_file_to_origin to send a generated file, image, chart, or diagram to
+  Slack. Pass alt_text and title with an image. Slack cannot draw Mermaid, so
+  render a diagram with render_diagram first and post its file_id.
 - Do not claim you cannot reach the channel. Do not ask the person to copy your
   answer across.
 
