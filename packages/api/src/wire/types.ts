@@ -5407,6 +5407,40 @@ export interface PatchSourceResponse {
   source: SourceSummary;
 }
 
+/** An image-source create or content change that waits for a second org
+ * admin (`bakes/source-change-requests.ts`). `payload` is the row to create
+ * or the field patch to apply. */
+export interface SourceChangeSummary {
+  id: string;
+  action: "create" | "update";
+  sourceId: string | null;
+  sourceName: string;
+  payload: Record<string, unknown>;
+  requestedBy: string;
+  requestedAt: number;
+  expiresAt: number;
+  status: "pending" | "approved" | "rejected" | "withdrawn";
+  decidedBy: string | null;
+  decidedAt: number | null;
+}
+
+/** 202 from `POST /api/org/sources` or `PATCH /api/org/sources/:id` when the
+ * change waits for approval. Nothing changed yet. */
+export interface PendingSourceChangeResponse {
+  pendingChange: SourceChangeSummary;
+}
+
+export interface ListSourceChangesResponse {
+  changes: SourceChangeSummary[];
+  /** `off` when the operator turned the gate off with VALET_IMAGE_SOURCE_APPROVAL. */
+  approval: "required" | "off";
+}
+
+export interface ResolveSourceChangeResponse {
+  change: SourceChangeSummary;
+  source?: SourceSummary;
+}
+
 export interface ListBakesResponse {
   bakes: BakeSummary[];
 }

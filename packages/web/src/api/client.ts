@@ -41,6 +41,9 @@ import type {
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
+  ListSourceChangesResponse,
+  PendingSourceChangeResponse,
+  ResolveSourceChangeResponse,
   ListBakesResponse,
   ListSourcesResponse,
   ListBakeQueueResponse,
@@ -1559,11 +1562,18 @@ export const api = {
   listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
   reorderBakeQueue: (bakeIds: string[]) => request<{ ok: true }>("PATCH", "/org/sources/queue", { bakeIds }),
   listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
-  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
+  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse | PendingSourceChangeResponse>("POST", "/org/sources", body),
   patchSource: (id: string, body: Record<string, unknown>) =>
-    request<PatchSourceResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
+    request<PatchSourceResponse | PendingSourceChangeResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
   deleteSource: (id: string) => request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
   bakeSource: (id: string) => request<TriggerBakeResponse>("POST", `/org/sources/${encodeURIComponent(id)}/bake`),
+  listSourceChanges: () => request<ListSourceChangesResponse>("GET", "/org/sources/changes"),
+  approveSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/approve`),
+  rejectSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/reject`, {}),
+  withdrawSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("DELETE", `/org/sources/changes/${encodeURIComponent(id)}`),
   listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated

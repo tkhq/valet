@@ -33,6 +33,8 @@ vi.mock("~/api/sources", () => ({
   usePatchSource: () => ({ mutate: patchMutate, isPending: false }),
   useDeleteSource: () => ({ mutate: deleteMutate, isPending: false }),
   useBakeSource: () => ({ mutate: bakeMutate, isPending: false }),
+  useSourceChanges: () => ({ data: { changes: [], approval: "required" }, isLoading: false, error: null }),
+  useResolveSourceChange: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 import { SourcesSection } from "./sources-section";

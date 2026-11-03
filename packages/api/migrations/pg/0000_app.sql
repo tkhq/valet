@@ -1708,6 +1708,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_dele
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
 
 --> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "image_source_change_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "target_key" text NOT NULL,
+  "source_id" text, "source_name" text NOT NULL, "action" text NOT NULL, "payload" jsonb NOT NULL,
+  "base_updated_at" bigint, "requested_by" text NOT NULL, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "image_source_change_requests_pending" ON "image_source_change_requests" ("org_id", "target_key") WHERE "status" = 'pending';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "image_source_change_requests_org_status" ON "image_source_change_requests" ("org_id", "status", "requested_at");
+
+--> statement-breakpoint
 -- usage analytics projection v1
 DO $migration$
 BEGIN

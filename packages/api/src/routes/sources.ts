@@ -15,7 +15,7 @@
  * returns (Dockerfile structural-injection guard, Task 15 spec review).
  */
 import { RegistryCapacityError } from "../bakes/registry-health.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -26,7 +26,18 @@ import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { AnonymousImageBakesDisabledError, GitHubApiError, PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
-import type { ApiError } from "../wire/types.js";
+import type { ApiError, ListSourceChangesResponse, PendingSourceChangeResponse, SourceChangeSummary } from "../wire/types.js";
+import {
+  approveSourceChange,
+  imageSourceApprovalMode,
+  listSourceChanges,
+  patchTouchesContent,
+  rejectSourceChange,
+  requestSourceChange,
+  SourceChangeRefusal,
+  withdrawSourceChange,
+  type SourceChangeRequestRow,
+} from "../bakes/source-change-requests.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -71,6 +82,31 @@ function validateSetupCommands(cmds: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function changeSummary(row: SourceChangeRequestRow): SourceChangeSummary {
+  return {
+    id: row.id,
+    action: row.action,
+    sourceId: row.sourceId,
+    sourceName: row.sourceName,
+    payload: row.payload,
+    requestedBy: row.requestedBy,
+    requestedAt: row.requestedAt,
+    expiresAt: row.expiresAt,
+    status: row.status,
+    decidedBy: row.decidedBy,
+    decidedAt: row.decidedAt,
+  };
+}
+
+/** Maps a refused change request to its HTTP status; rethrows anything else. */
+function refusalResponse(c: Context<AppEnv>, err: unknown) {
+  if (err instanceof SourceChangeRefusal) {
+    const body: ApiError = { error: err.message };
+    return c.json(body, err.status);
+  }
+  throw err;
 }
 
 // ── Admin router (/api/org/sources) ──────────────────────────────────────────
@@ -187,6 +223,15 @@ sourcesRouter.post("/", async (c) => {
       createdAt: now,
       updatedAt: now,
     };
+    if (imageSourceApprovalMode() === "required") {
+      try {
+        const pending = await requestSourceChange(db, { orgId: row.orgId, requestedBy: c.var.user.id, action: "create", sourceName: row.name, payload: row });
+        const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
+        return c.json(resp, 202);
+      } catch (err) {
+        return refusalResponse(c, err);
+      }
+    }
     await db.insert(imageSources).values(row);
     return c.json({ source: row }, 201);
   }
@@ -230,6 +275,15 @@ sourcesRouter.post("/", async (c) => {
       createdAt: now,
       updatedAt: now,
     };
+    if (imageSourceApprovalMode() === "required") {
+      try {
+        const pending = await requestSourceChange(db, { orgId: row.orgId, requestedBy: c.var.user.id, action: "create", sourceName: row.name, payload: row });
+        const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
+        return c.json(resp, 202);
+      } catch (err) {
+        return refusalResponse(c, err);
+      }
+    }
     try {
       await db.insert(imageSources).values(row);
     } catch (err) {
@@ -242,6 +296,69 @@ sourcesRouter.post("/", async (c) => {
   }
 
   return c.json({ error: "kind must be 'external' or 'base'" }, 400);
+});
+
+// GET /changes — image-source changes that wait for a second admin
+sourcesRouter.get("/changes", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const rows = await listSourceChanges(c.var.providers.db, c.var.user.orgId);
+  const resp: ListSourceChangesResponse = {
+    changes: rows.map(changeSummary),
+    approval: imageSourceApprovalMode(),
+  };
+  return c.json(resp);
+});
+
+// POST /changes/:changeId/approve — a different org admin applies the change
+sourcesRouter.post("/changes/:changeId/approve", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  try {
+    const { request, source } = await approveSourceChange(c.var.providers.db, {
+      orgId: c.var.user.orgId,
+      approverId: c.var.user.id,
+      id: c.req.param("changeId"),
+    });
+    return c.json({ change: changeSummary(request), source });
+  } catch (err) {
+    return refusalResponse(c, err);
+  }
+});
+
+// POST /changes/:changeId/reject — another org admin declines the change
+sourcesRouter.post("/changes/:changeId/reject", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const body: unknown = await c.req.json().catch(() => ({}));
+  const note = isRecord(body) && typeof body.note === "string" ? body.note : undefined;
+  try {
+    const row = await rejectSourceChange(c.var.providers.db, {
+      orgId: c.var.user.orgId,
+      userId: c.var.user.id,
+      id: c.req.param("changeId"),
+      note,
+    });
+    return c.json({ change: changeSummary(row) });
+  } catch (err) {
+    return refusalResponse(c, err);
+  }
+});
+
+// DELETE /changes/:changeId — the requester withdraws a pending change
+sourcesRouter.delete("/changes/:changeId", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  try {
+    const row = await withdrawSourceChange(c.var.providers.db, {
+      orgId: c.var.user.orgId,
+      userId: c.var.user.id,
+      id: c.req.param("changeId"),
+    });
+    return c.json({ change: changeSummary(row) });
+  } catch (err) {
+    return refusalResponse(c, err);
+  }
 });
 
 // PATCH /:id — kind-scoped field updates
@@ -356,6 +473,26 @@ sourcesRouter.patch("/:id", async (c) => {
       }
     }
     patch.parentId = body.parentId as string | null;
+  }
+
+  // A patch that changes what the image runs or builds FROM waits for a
+  // second org admin (`bakes/source-change-requests.ts`).
+  if (imageSourceApprovalMode() === "required" && patchTouchesContent(patch)) {
+    const { updatedAt: _requestedAt, ...payload } = patch;
+    try {
+      const pending = await requestSourceChange(db, {
+        orgId: c.var.user.orgId,
+        requestedBy: c.var.user.id,
+        action: "update",
+        source: existing,
+        sourceName: existing.name,
+        payload,
+      });
+      const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
+      return c.json(resp, 202);
+    } catch (err) {
+      return refusalResponse(c, err);
+    }
   }
 
   await db.update(imageSources).set(patch).where(eq(imageSources.id, id));

@@ -7,7 +7,7 @@
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
 import { RegistryCapacityError } from "../bakes/registry-health.js";
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi, afterAll, beforeAll } from "vitest";
 import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -16,6 +16,16 @@ import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/build
 import { MAX_SANDBOX_CPU } from "@valet/shared";
 import { bakes } from "../schema/index.js";
 import type { ListBakeQueueResponse, ListSourcesResponse } from "../wire/types.js";
+
+// These suites pin source CRUD itself. The second-admin gate has its own
+// suite (`sources.approval.test.ts`), so it is off here.
+beforeAll(() => {
+  vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
+
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };

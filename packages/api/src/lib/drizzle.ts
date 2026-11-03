@@ -825,6 +825,15 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
 );` },
   { describe: "team_deletion_requests_pending", probe: { kind: "index", index: "team_deletion_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';` },
   { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
+  { describe: "image source change requests", probe: { kind: "table", table: "image_source_change_requests" }, sql: `CREATE TABLE IF NOT EXISTS "image_source_change_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "target_key" text NOT NULL,
+  "source_id" text, "source_name" text NOT NULL, "action" text NOT NULL, "payload" jsonb NOT NULL,
+  "base_updated_at" bigint, "requested_by" text NOT NULL, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text
+);` },
+  { describe: "image_source_change_requests_pending", probe: { kind: "index", index: "image_source_change_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "image_source_change_requests_pending" ON "image_source_change_requests" ("org_id", "target_key") WHERE "status" = 'pending';` },
+  { describe: "image_source_change_requests_org_status", probe: { kind: "index", index: "image_source_change_requests_org_status" }, sql: `CREATE INDEX IF NOT EXISTS "image_source_change_requests_org_status" ON "image_source_change_requests" ("org_id", "status", "requested_at");` },
   { describe: "cli_device_requests table", probe: { kind: "table", table: "cli_device_requests" }, sql: `CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
