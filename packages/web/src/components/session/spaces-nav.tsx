@@ -11,13 +11,15 @@ type SpacePage = {
   label: string;
   to: "/chat" | "/workflows" | "/presence" | "/artifacts" | "/integrations" | "/skills" | "/memory" | "/usage";
   icon: LucideIcon;
+  /** The tour step that points at this page's row (`components/tour`). */
+  tour?: string;
 };
 
 /** The pages every space lists, in sidebar order. */
 export const SPACE_PAGES: readonly SpacePage[] = [
   { label: "Threads", to: "/chat", icon: MessageSquare },
-  { label: "Workflows", to: "/workflows", icon: Workflow },
-  { label: "Presence", to: "/presence", icon: Radio },
+  { label: "Workflows", to: "/workflows", icon: Workflow, tour: "workflows" },
+  { label: "Presence", to: "/presence", icon: Radio, tour: "presence" },
   { label: "Artifacts", to: "/artifacts", icon: FileText },
 ];
 
@@ -156,7 +158,7 @@ export function SpacesNav() {
   // keeps your place (Eng / Integrations to Sales / Integrations). From
   // Home, a thread, or a page no space owns, it opens the space's Threads.
   const nameTarget = page ?? "/chat";
-  return <section aria-label="Spaces">
+  return <section aria-label="Spaces" data-tour="spaces">
     <p className={SIDEBAR_LABEL}>Spaces</p>
     <ul className="space-y-0.5">
       {options.map((option) => <SpaceRow key={option.key} option={option} teamLabels={teamLabels} nameTarget={nameTarget}
@@ -180,7 +182,7 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
     // row at a time.
     const filled = current && page.to !== "/chat";
     return <li key={page.to}>
-      <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined}
+      <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined} data-tour={page.tour}
         className={cn(NESTED_ROW, "gap-2 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none", inSettings ? "pl-12" : "pl-8",
           filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
         <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
@@ -206,7 +208,7 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
     {open && <ul aria-label={`${option.label} pages`} className="mt-0.5 space-y-0.5">
       {SPACE_PAGES.map((page) => pageRow(page))}
       <li>
-        <button type="button" aria-expanded={settingsOpen} aria-label={`${settingsOpen ? "Hide" : "Show"} ${option.label} settings`} onClick={() => onSettingsOpenChange(!settingsOpen)}
+        <button type="button" data-tour="space-settings" aria-expanded={settingsOpen} aria-label={`${settingsOpen ? "Hide" : "Show"} ${option.label} settings`} onClick={() => onSettingsOpenChange(!settingsOpen)}
           className={cn(NESTED_ROW, "group w-[calc(100%-1rem)] gap-2 pl-8 pr-1 text-left focus-visible:bg-ink-wash focus-visible:outline-none", NESTED_IDLE)}>
           <Settings aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
           <span className="flex-1">Settings</span>

@@ -898,7 +898,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           <SpacesNav />
           {/* A space's Projects and threads show while its Threads or Home is open; a phone's drawer always shows them. */}
           {(mobile || onThreadsPage) && <>
-          <div className="group flex items-center gap-1 pb-1 pl-4 pr-3 pt-4">
+          <div data-tour="projects" className="group flex items-center gap-1 pb-1 pl-4 pr-3 pt-4">
             <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-[11px] font-medium text-muted hover:text-ink focus-visible:outline-none">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown aria-hidden className={cn("h-3 w-3", HOVER_CHROME, projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               {/* The one list-wide menu (sort, filter, mark all read) stays on a
@@ -1076,6 +1076,7 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
       <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
         <Link
           to="/"
+          data-tour="home"
           className={cn(TOP_ROW, "gap-2 px-2 transition-colors focus-visible:bg-ink-wash focus-visible:outline-none", active ? SELECTED_ROW : "hover:bg-ink-wash")}
         >
           <House aria-hidden className="h-4 w-4 shrink-0 text-muted" />

@@ -86,6 +86,9 @@ export const orgs = pgTable("orgs", {
   /** Tier token (xs|s|m|l|xl) for new sessions that no personal or team
    * default covers. Null = the engine's "s" fallback. */
   defaultTier: text("default_tier"),
+  /** Raised by an org admin's "Show the tour to everyone again". A member
+   * whose stored org version is lower sees the tour on next load. */
+  tutorialVersion: integer("tutorial_version").notNull().default(0),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -3214,17 +3217,20 @@ export const legacyArtifactPublications = pgTable("legacy_artifact_publications"
   sourceSessionId: text("source_session_id").notNull(),
 });
 
-// Release activation is seeded once; acknowledgements belong to the signed-in user.
-export const productAnnouncements = pgTable("product_announcements", {
-  id: text("id").primaryKey(),
-  activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+/**
+ * One row per user who started, finished, or skipped the in-app tour. The
+ * tour shows again when `seen_version` is below the instance version or
+ * `seen_org_version` is below `orgs.tutorial_version`. `outcome` null means
+ * the tour is in progress at `step`.
+ */
+export const userTutorial = pgTable("user_tutorial", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  seenVersion: integer("seen_version").notNull().default(0),
+  seenOrgVersion: integer("seen_org_version").notNull().default(0),
+  outcome: text("outcome", { enum: ["completed", "skipped"] }),
+  step: text("step"),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
-export const productAnnouncementAcknowledgements = pgTable("product_announcement_acknowledgements", {
-  announcementId: text("announcement_id").notNull(),
-  userId: text("user_id").notNull(),
-  acknowledgedAt: bigint("acknowledged_at", { mode: "number" }).notNull(),
-}, (t) => [primaryKey({ columns: [t.announcementId, t.userId] })]);
-
 
 /** Charged before BlobStore writes; pending rows also consume retention capacity. */
 export const generatedFiles = pgTable("generated_files", {

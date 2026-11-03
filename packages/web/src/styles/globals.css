@@ -90,3 +90,10 @@
     @apply border-[--border];
   }
 }
+
+/* The element the current tour step points at (components/tour). */
+@layer components {
+  [data-tour-active] {
+    @apply rounded-md ring-2 ring-moss ring-offset-1 ring-offset-[--bg];
+  }
+}

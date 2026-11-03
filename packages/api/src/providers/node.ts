@@ -113,7 +113,7 @@ import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.j
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
-import { InstanceConfigError } from "../config/instance-config.js";
+import { InstanceConfigError, resolveTutorialVersion } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 import { valetBuildSha } from "../version.js";
 import { reportError } from "@valet/engine";
@@ -443,6 +443,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     })],
     templates: diagnosticsTemplates,
   };
+
+  // Same both-set guard as the plugin filter below: env and file together fail boot.
+  const tutorialVersion = resolveTutorialVersion(opts.instanceConfig ?? null, process.env);
 
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
@@ -1000,6 +1003,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     contentSync,
     plugins,
     configMcpServers: opts.instanceConfig?.mcpServers ?? [],
+    tutorialVersion,
     actionPluginByService,
     serviceProbes,
     prebuildService,

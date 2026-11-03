@@ -29,7 +29,6 @@ import type {
   OnePasswordSettingsResponse,
   OrgDirectoryResponse,
   OrgResponse,
-  ProductAnnouncementsResponse,
   TeamOnePasswordStatusResponse,
   ThreadPlanResponse,
   SessionOutcomeUsage,
@@ -88,9 +87,6 @@ function seedShell(client: QueryClient): void {
   // The drawer's Home row counts what needs the person.
   client.setQueryData<HomeConversationResponse>(qkHome.conversation, stressHomeConversation);
   client.setQueryData<HomeTasksResponse>(qkHome.tasks, stressHomeTasks);
-  // Inline key in `components/product-announcement.tsx`. Empty: the notice
-  // is fixed over the page, and its dismissal cannot save here.
-  client.setQueryData<ProductAnnouncementsResponse>(["product-announcements", stressMe.id], { announcements: [] });
 }
 
 /** The bell: updates, workflow approvals, and two decision pages. */

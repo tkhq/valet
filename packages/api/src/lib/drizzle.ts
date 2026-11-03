@@ -579,15 +579,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
   "created_at" bigint NOT NULL
 )` },
   { describe: "generated file deduplication", probe: { kind: "index", index: "generated_files_scope_digest" }, sql: "CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest)" },
-  { describe: "product announcements", probe: { kind: "table", table: "product_announcements" }, sql: `CREATE TABLE "product_announcements" (
-  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
-);
-INSERT INTO "product_announcements" ("id", "activated_at")
-VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);` },
-  { describe: "product announcement acknowledgements", probe: { kind: "table", table: "product_announcement_acknowledgements" }, sql: `CREATE TABLE "product_announcement_acknowledgements" (
-  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
-  PRIMARY KEY ("announcement_id", "user_id")
-);` },
+  { describe: "user_tutorial table", probe: { kind: "table", table: "user_tutorial" }, sql: `CREATE TABLE IF NOT EXISTS "user_tutorial" (
+  "user_id" text PRIMARY KEY REFERENCES "user"("id") ON DELETE CASCADE,
+  "seen_version" integer NOT NULL DEFAULT 0, "seen_org_version" integer NOT NULL DEFAULT 0,
+  "outcome" text, "step" text, "updated_at" bigint NOT NULL
+)` },
   { describe: "quarantine unscoped legacy workflow approvals", probe: { kind: "column", table: "action_policy_overrides", column: "legacy_unscoped" }, sql: `DO $$ BEGIN
     ALTER TABLE action_policy_overrides ADD COLUMN legacy_unscoped boolean NOT NULL DEFAULT true;
     ALTER TABLE action_policy_overrides ALTER COLUMN legacy_unscoped SET DEFAULT false; END $$` },
@@ -949,6 +945,12 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "session_threads.archived_by column",
     probe: { kind: "column", table: "session_threads", column: "archived_by" },
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "archived_by" text',
+  },
+  {
+    // Org-wide tour reset counter ("Show the tour to everyone again").
+    describe: "orgs.tutorial_version column",
+    probe: { kind: "column", table: "orgs", column: "tutorial_version" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "tutorial_version" integer NOT NULL DEFAULT 0',
   },
   {
     describe: "image_sources.sandbox_resources column",

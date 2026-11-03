@@ -95,7 +95,6 @@ vi.mock("~/components/session/assistant-rail", async (importOriginal) => ({
   AssistantRail: () => null,
 }));
 vi.mock("~/components/home/tasks-panel", () => ({ useNeedsYouCount: () => ({ count: 0, partial: false }) }));
-vi.mock("~/components/product-announcement", () => ({ ProductAnnouncement: () => null }));
 vi.mock("~/lib/use-attention-ping", () => ({ useAttentionPing: () => {} }));
 
 import { routeTree } from "../routeTree.gen";

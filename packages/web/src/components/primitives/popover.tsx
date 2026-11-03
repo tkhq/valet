@@ -4,6 +4,8 @@ import { cn } from "~/lib/cn";
 
 export const Popover = RPopover.Root;
 export const PopoverTrigger = RPopover.Trigger;
+/** Positions the panel against an element other than the trigger; `virtualRef` takes any element. */
+export const PopoverAnchor = RPopover.Anchor;
 
 /**
  * Portalled popover panel. Radix handles what a hand-rolled

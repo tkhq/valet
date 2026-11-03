@@ -126,6 +126,9 @@ export interface Providers {
   /** The instance config's `mcpServers` entries as declared, disabled ones
    * included. `GET /api/org/mcp-servers` lists them read-only. */
   configMcpServers: readonly McpServerDecl[];
+  /** The in-app tour version from `org.tutorialVersion` or
+   * `VALET_TUTORIAL_VERSION` (`resolveTutorialVersion`). Absent → 1. */
+  tutorialVersion?: number;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
   /** TTL-cached tool listings for connected dynamic services: the
