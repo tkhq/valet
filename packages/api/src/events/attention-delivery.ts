@@ -1,4 +1,4 @@
-import { ChannelDeliveryRejectedError } from "@valet/engine";
+import { ChannelDeliveryRejectedError, reportError } from "@valet/engine";
 import { mapBounded } from "../lib/bounded-map.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { recordAttentionDeliveryFailure, recordAttentionDeliveryRejected, registerAttentionQueueMetrics } from "../observability/delivery-metrics.js";
@@ -129,7 +129,7 @@ async function drainTier(deps: AttentionDeps, tier: AttentionChannelDeliverer, n
       const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
       if (!event) {
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", lastError: null }).where(fence);
-        console.error(`[attention] dropped job ${job.id}: its event is JSON null`);
+        reportError({ area: "events", reason: "attention_null_event" }, `[attention] dropped job ${job.id}: its event is JSON null`);
         return;
       }
       let handled = tier.enabled?.() === false;
@@ -163,7 +163,7 @@ async function drainTier(deps: AttentionDeps, tier: AttentionChannelDeliverer, n
       let refs;
       if (job.status === "sending" && tier.reconcile) {
         try { refs = await tier.reconcile(job.userId, event, attempt); }
-        catch (err) { signal.throwIfAborted(); console.error(`attention reconciliation ${job.id} failed; resending:`, err); }
+        catch (err) { signal.throwIfAborted(); reportError({ area: "events", reason: "attention_reconcile" }, `attention reconciliation ${job.id} failed; resending`, err); }
       }
       signal.throwIfAborted();
       if (!refs) {

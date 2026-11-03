@@ -141,7 +141,9 @@ describe("EngineHost + plugin extras", () => {
     const toolNames = (child.options.tools ?? []).map((t) => t.name);
     // `skill` joins the catalog tools whenever the plugin set ships a skill
     // (see `plugins/skill-tool.ts`).
-    expect(toolNames.sort()).toEqual(["call_tool", "file_attach", "focus_tools", "list_tools", "skill", "skill_script"]);
+    // Plus the read-only memory tools every child gets (brain spec,
+    // "Principles in child sessions and workflow steps").
+    expect(toolNames.sort()).toEqual(["call_tool", "file_attach", "focus_tools", "list_tools", "mem_read", "mem_search", "skill", "skill_script"]);
     expect(child.options.skills?.map((s) => s.name)).toEqual(["demo-skill"]);
     expect(child.options.roles?.map((r) => r.name)).toEqual(["demo-role"]);
   });
@@ -159,7 +161,7 @@ describe("EngineHost + plugin extras", () => {
     expect(session.options.tools?.map((tool) => tool.name)).toContain("list_tools");
   });
 
-  it("workflow sessions can publish a page from a sandbox file, but get no memory tools", async () => {
+  it("workflow sessions can publish a page from a sandbox file, and get only the read-only memory tools", async () => {
     api = await bootTestApi({ plugins: [] });
     const session = await api.providers.engineHost.workflowSessionFor("wf:pulse:build", {
       actorUserId: "local-user",
@@ -170,7 +172,7 @@ describe("EngineHost + plugin extras", () => {
 
     const names = session.options.tools?.map((tool) => tool.name) ?? [];
     expect(names).toContain("artifact_publish");
-    expect(names.filter((name) => name.startsWith("mem_"))).toEqual([]);
+    expect(names.filter((name) => name.startsWith("mem_")).sort()).toEqual(["mem_read", "mem_search"]);
     expect(session.options.toolConfig).toMatchObject({ workflowStep: true });
   });
 

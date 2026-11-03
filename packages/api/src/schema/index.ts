@@ -1002,6 +1002,37 @@ export const memoryFiles = pgTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
 
+// How agents use each memory file (brain spec, "Usage"). Keyed like
+// `memory_files`, but a separate table: an update there recomputes the
+// generated `search_vector`. `services/memory-usage.ts` writes it in
+// batches. Times are ms epoch, null until the first use of that kind.
+export const memoryFileUsage = pgTable(
+  "memory_file_usage",
+  {
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
+    path: text("path").notNull(),
+    /** Reads the agent chose: `mem_read`, an MCP or CLI read. */
+    readCount: integer("read_count").notNull().default(0),
+    lastReadAt: bigint("last_read_at", { mode: "number" }),
+    /** Times the memory snapshot put the file, or its principle index line, in a prompt. */
+    injectCount: integer("inject_count").notNull().default(0),
+    lastInjectedAt: bigint("last_injected_at", { mode: "number" }),
+    /** Turns whose answer or plan named the principle. */
+    citeCount: integer("cite_count").notNull().default(0),
+    lastCitedAt: bigint("last_cited_at", { mode: "number" }),
+  },
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
+);
+
+// When memory usage tracking started: one row, set when the table is
+// created. The memory page calls no file stale before 30 days of tracking.
+export const memoryUsageTracking = pgTable("memory_usage_tracking", {
+  id: boolean("id").primaryKey().default(true),
+  startedAt: bigint("started_at", { mode: "number" }).notNull(),
+});
+
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
 // Published pages (2026-08-22 artifacts design; extended by the 2026-09-02
@@ -2351,6 +2382,7 @@ export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type MemoryFileUsageRow = typeof memoryFileUsage.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 /** One tracked repository. Not the engine's `SkillSource`. */
 export type ContentSourceRow = typeof contentSources.$inferSelect;

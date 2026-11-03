@@ -39,7 +39,7 @@ function run(createdAt: number, extra: Partial<NonNullable<WorkflowDefinitionSum
   return { runId: `r${createdAt}`, workflowId: "w", status: "settled", outcome: "completed", createdAt, updatedAt: createdAt, ...extra };
 }
 function note(path: string, updatedAt: number, extra: Partial<MemoryTreeEntry> = {}): MemoryTreeEntry {
-  return { path, title: path, type: "note", pinned: false, updatedAt, dir: false, sizeBytes: 10, ...extra };
+  return { path, title: path, type: "note", pinned: false, updatedAt, dir: false, sizeBytes: 10, lastUsedAt: null, useCount: 0, lastLoadedAt: null, ...extra };
 }
 
 describe("MakePanel", () => {

@@ -8,7 +8,6 @@ import { isDeepStrictEqual } from "node:util";
 import type { Principal } from "@valet/engine";
 import { readThreadPolicy, validateThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { WorkflowDefinition } from "@valet/workflow";
-import { CronExpressionParser } from "cron-parser";
 import { and, eq } from "drizzle-orm";
 import { proposalId } from "../events/proposals.js";
 import { existingThreadError, NO_SUBJECT_ERROR } from "../events/thread-policy-write.js";
@@ -27,6 +26,7 @@ import {
   type WorkflowOwnerRef,
 } from "./service.js";
 import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
+import { nextFireAt } from "./next-fire.js";
 import { readScheduleTargetKind } from "../events/target-names.js";
 
 export interface WorkflowScheduleSummary {
@@ -49,37 +49,6 @@ export interface WorkflowScheduleSummary {
    * schedule, the workspace whose assistant receives the prompts. */
   ownerType: "user" | "team" | "org";
   ownerId: string;
-}
-
-/**
- * Validates a 5-field cron expression + IANA timezone and returns the next
- * fire time strictly after `from`. Returns an error string instead of
- * throwing so tool callers surface it as lint-style feedback.
- */
-export function nextFireAt(
-  cron: string,
-  timezone: string,
-  from: number,
-): { ok: true; at: number } | { ok: false; error: string } {
-  if (cron.trim().split(/\s+/).length !== 5) {
-    return {
-      ok: false,
-      error: `cron must be a 5-field expression (minute hour day-of-month month day-of-week), got ${JSON.stringify(cron)}`,
-    };
-  }
-  try {
-    // Timezone validity check — cron-parser silently falls back on some
-    // invalid tz strings; Intl throws, which is the behavior we want.
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-  } catch {
-    return { ok: false, error: `Unknown timezone ${JSON.stringify(timezone)}. Use an IANA name like "America/Denver".` };
-  }
-  try {
-    const interval = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: timezone });
-    return { ok: true, at: interval.next().getTime() };
-  } catch (err) {
-    return { ok: false, error: `invalid cron ${JSON.stringify(cron)}: ${err instanceof Error ? err.message : String(err)}` };
-  }
 }
 
 function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowScheduleSummary {

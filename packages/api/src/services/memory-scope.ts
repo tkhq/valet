@@ -1,12 +1,91 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
+import { parsePrincipal, type Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, assistantExecutions, assistants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { isLegacyAssistantRuntime, legacyWorkflowRuntime } from "./legacy-runtime.js";
+import type { MemoryScope } from "./memory.js";
 import { runEventChannel } from "./thread-access.js";
+
+/**
+ * The memory scope an agent session reads: its owner, and for a team the
+ * namespace `routes/memory.ts` resolves for the same session id. A child's
+ * or workflow step's snapshot is built from this scope, and its memory
+ * tools read the same corpus, so the prompt never lists a file the tools
+ * cannot open. Throws `NotFoundError` when a team audience cannot be
+ * resolved; callers must then leave memory out, never widen to the team.
+ */
+export async function delegatedMemoryScope(
+  db: AppDb,
+  input: { sessionId: string; owner: Principal; actorUserId: string; orgId: string },
+): Promise<MemoryScope> {
+  const base = { owner: input.owner, actorUserId: input.actorUserId };
+  if (input.owner.type !== "team") return base;
+  const namespace = input.sessionId.startsWith("wf:")
+    ? await workflowMemoryNamespace(db, parseWorkflowSessionId(input.sessionId).runId, input.owner.id, input.orgId)
+    : await assistantMemoryNamespace(db, input.sessionId, input.owner.id, input.orgId);
+  return { ...base, namespace };
+}
+
+/** The memory scope of a session that already ran, from its app row or,
+ * for a workflow step, its run. Null when the session has no live owner. */
+export async function memoryScopeForSession(db: AppDb, sessionId: string): Promise<MemoryScope | null> {
+  const [session] = await db.select({
+    userId: agentSessions.userId, orgId: agentSessions.orgId, status: agentSessions.status,
+    ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId,
+  }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  if (session) {
+    if (session.status === "deleted") return null;
+    const owner = parsePrincipal(`${session.ownerType}:${session.ownerId || (session.ownerType === "user" ? session.userId : "")}`);
+    if (!owner) return null;
+    return delegatedMemoryScope(db, { sessionId, owner, actorUserId: session.userId, orgId: session.orgId });
+  }
+  if (!sessionId.startsWith("wf:")) return null;
+  let runId: string;
+  try {
+    runId = parseWorkflowSessionId(sessionId).runId;
+  } catch {
+    return null;
+  }
+  const [run] = await db.select({ orgId: workflowDefinitions.orgId, actorUserId: workflowRuns.actorUserId })
+    .from(workflowRuns).innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .where(eq(workflowRuns.id, runId)).limit(1);
+  if (!run) return null;
+  const owner = await workflowSessionOwner(db, sessionId, run.orgId);
+  if (!owner) return null;
+  return delegatedMemoryScope(db, { sessionId, owner, actorUserId: run.actorUserId ?? "", orgId: run.orgId });
+}
 
 /** Shared web conversations retain the team's established corpus. Private and
  * external conversations keep their execution storage, regardless of who wakes them. */
+/**
+ * The session whose memory a session reads. A child session (`task`) has no
+ * app session row or execution row of its own, so it reads with the session
+ * that spawned it, up the parent chain to a top-level session.
+ */
+export async function memorySessionId(db: AppDb, sessionId: string): Promise<string> {
+  let current = sessionId;
+  for (let depth = 0; depth < 8; depth++) {
+    // A session with its own memory audience keeps it. A team execution and
+    // a workflow step have a parent, but their memory is their own.
+    if (current.startsWith("wf:")) return current;
+    const [own] = await db.select({ id: agentSessions.id }).from(agentSessions).where(eq(agentSessions.id, current)).limit(1);
+    if (own) return current;
+    const [execution] = await db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, current)).limit(1);
+    if (execution) return current;
+    // db.execute returns untyped rows; the column is text or null.
+    const result = await db.execute(
+      sql`SELECT parent_session_id FROM engine_sessions WHERE id = ${current} LIMIT 1`) as { rows: Array<{ parent_session_id: string | null }> };
+    const parent = result.rows[0]?.parent_session_id;
+    if (!parent || parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
 export async function assistantMemoryNamespace(db: AppDb, sessionId: string, teamId: string, orgId: string, depth = 0): Promise<string> {
   if (depth > 8) throw new NotFoundError("memory origin ancestry");
   const [legacyOwner] = await db.select({ id: assistants.id }).from(assistants)

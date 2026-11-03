@@ -61,6 +61,7 @@ import type { WorkflowEngineDeps } from './engine-deps.js';
 import { isLegacyAccountConsentLoop, matchesGateOccurrence } from './gate-signals.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
 import { WorkflowFenceError, type NodeCheckpoint, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
+import { reportError } from "@valet/engine";
 
 /** A run that a drive parked after opening at least one approval gate. */
 export interface ApprovalParkedInfo {
@@ -405,7 +406,7 @@ export class LocalRunHost implements RunHost {
       // abandon the lease exactly as before and never count it toward the
       // poisoned-run cap.
       if (err instanceof WorkflowFenceError) {
-        console.error(`workflow drive failed for ${runId} (lease abandoned; will be reclaimed):`, err);
+        reportError({ area: "workflows", reason: "run_drive" }, `workflow drive failed for ${runId} (lease abandoned; will be reclaimed)`, err);
         return;
       }
       // Any other failure — a genuine executor error, or (decision 20) the
@@ -423,16 +424,10 @@ export class LocalRunHost implements RunHost {
       const strikes = (this.driveFailures.get(runId) ?? 0) + 1;
       if (strikes < this.maxConsecutiveDriveFailures) {
         this.driveFailures.set(runId, strikes);
-        console.error(
-          `workflow drive failed for ${runId} (lease abandoned; will be reclaimed; consecutive failure ${strikes}/${this.maxConsecutiveDriveFailures}):`,
-          err,
-        );
+        reportError({ area: "workflows", reason: "run_drive" }, `workflow drive failed for ${runId} (lease abandoned; will be reclaimed; consecutive failure ${strikes}/${this.maxConsecutiveDriveFailures})`, err);
         return;
       }
-      console.error(
-        `workflow drive failed for ${runId} ${strikes} consecutive times — settling the run as failed (poisoned run):`,
-        err,
-      );
+      reportError({ area: "workflows", reason: "run_poisoned" }, `workflow drive failed for ${runId} ${strikes} consecutive times — settling the run as failed (poisoned run)`, err);
       try {
         // The failed drives may have left work running that no saved wait names.
         await abortPoisonedRun({ store: this.store, engine: this.engine, clock: this.clock }, runId);
@@ -443,7 +438,7 @@ export class LocalRunHost implements RunHost {
         // Keep the strike count: if the settle write itself failed, the
         // next reclaim lands here again and retries the settle.
         this.driveFailures.set(runId, strikes);
-        console.error(`settling poisoned run ${runId} failed (lease abandoned; will retry on reclaim):`, settleErr);
+        reportError({ area: "workflows", reason: "poisoned_settle" }, `settling poisoned run ${runId} failed (lease abandoned; will retry on reclaim)`, settleErr);
       }
     } finally {
       clearInterval(heartbeat);
@@ -473,7 +468,7 @@ export class LocalRunHost implements RunHost {
     try {
       await this.onApprovalParked?.({ runId, attempt });
     } catch (err) {
-      console.error(`workflow approval park report failed for ${runId}:`, err);
+      reportError({ area: "workflows", reason: "approval_park_report" }, `workflow approval park report failed for ${runId}`, err);
     }
   }
 

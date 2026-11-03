@@ -1,0 +1,18 @@
+valet: workflow-template/v1
+id: digest
+name: Digest
+description: Sends a digest every night.
+category: Daily digest
+apps: []
+steps:
+  - Reads the day
+definition:
+  version: dag/v1
+  nodes:
+    - id: trigger
+      type: trigger
+    - id: stop
+      type: stop
+  edges:
+    - from: trigger
+      to: stop

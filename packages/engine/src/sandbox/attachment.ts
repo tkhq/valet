@@ -32,6 +32,7 @@ import {
   writeAppliedState,
 } from "./applied-state.js";
 import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
+import { reportError } from "../error-report.js";
 
 /**
  * Max age of a cached observation before `reconcile` re-reads the applied-state
@@ -677,7 +678,7 @@ export class SandboxAttachment {
       this.observation = this.observationFromApplied(landed, epoch);
     } catch (err) {
       // reconcile never throws — the existing failure paths own degradation.
-      console.error("SandboxAttachment.reconcile failed", formatSandboxErrorLog(err));
+      reportError({ area: "sandbox", reason: "reconcile" }, "SandboxAttachment.reconcile failed", formatSandboxErrorLog(err));
     }
   }
 
@@ -946,7 +947,7 @@ export class SandboxAttachment {
       } catch (err) {
         // A failed pre-check must not strand the wake — fall through to the
         // normal resume path, which has its own error handling.
-        console.error("SandboxAttachment: wake-folding pre-check failed", err);
+        reportError({ area: "sandbox", reason: "wake_fold_check" }, "SandboxAttachment: wake-folding pre-check failed", err);
         staleWake = false;
       }
       if (this.destroyed) {
@@ -1340,7 +1341,7 @@ export class SandboxAttachment {
       return;
     }
     await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
-      console.error(`SandboxAttachment: updateCreds after ${context} failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "update_creds" }, `SandboxAttachment: updateCreds after ${context} failed (non-fatal)`, err);
     });
   }
 
@@ -1366,7 +1367,7 @@ export class SandboxAttachment {
       try {
         cb(status);
       } catch (err) {
-        console.error("SandboxAttachment: onStatus listener threw", err);
+        reportError({ area: "sandbox", reason: "status_listener" }, "SandboxAttachment: onStatus listener threw", err);
       }
     }
   }

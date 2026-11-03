@@ -197,6 +197,7 @@ import type {
 } from "./types.js";
 import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
+import { reportError } from "./error-report.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -593,7 +594,7 @@ export class Thread {
       durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
     };
     try { this.session.options.recordToolUsage?.(fact); }
-    catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+    catch { reportError({ area: "engine", reason: "tool_usage_telemetry", level: "warn" }, "Tool usage telemetry failed. Check the host telemetry sink."); }
   }
 
   private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
@@ -2867,7 +2868,7 @@ export class Thread {
   /** Once per turn. A failed snapshot never blocks the tool: the turn just has no checkpoint. */
   private beginTurnCheckpoint(): Promise<PendingCheckpoint | undefined> {
     this.turnCheckpoint ??= this.takeBeforeSnapshots().catch((err: unknown) => {
-      console.error(`[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}`, err);
       return undefined;
     });
     return this.turnCheckpoint;
@@ -2887,7 +2888,7 @@ export class Thread {
         repos.push({ repo, before: snapshot.commit, partial: snapshot.partial });
       } catch (err) {
         unavailable.push({ repo, reason: "The before snapshot failed or exceeded the file size limit." });
-        console.error(`[engine] file checkpoint skipped repo=${repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+        reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped repo=${repo} thread=${this.id}`, err);
       }
     }
     return { entryId, repos, unavailable, discovered: found };
@@ -2925,7 +2926,7 @@ export class Thread {
           });
         } catch (err) {
           unavailable.push({ repo: repo.repo, reason: "The after snapshot failed or exceeded the file size limit." });
-          console.error(`[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}`, err);
         }
       }
       for (const repo of await findRepos(sandbox, workspace)) {
@@ -2940,7 +2941,7 @@ export class Thread {
           });
         } catch (err) {
           unavailable.push({ repo, reason: "The new repository snapshot failed." });
-          console.error(`[engine] new repository checkpoint not recorded repo=${repo}: ${err instanceof Error ? err.message : String(err)}`);
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] new repository checkpoint not recorded repo=${repo}`, err);
         }
       }
       if (repos.length === 0 && unavailable.length === 0) return;
@@ -2952,7 +2953,7 @@ export class Thread {
       const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [FILE_CHECKPOINT_KEY]: checkpoint } };
       await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
     } catch (err) {
-      console.error(`[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}`, err);
     } finally {
       this.turnFileWrites.clear();
       this.turnFileWriteBytes = 0;
@@ -3818,7 +3819,7 @@ export class Thread {
       // place convergence may act. Idle = no other thread mid-run and no pending
       // exec jobs. Errors degrade to running stale — never fail the turn.
       if (!this.session.hasOtherActiveRuns(this.id) && this.session.pendingJobCount() === 0) {
-        try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
+        try { await this.session.attachment.reconcile(); } catch (err) { reportError({ area: "sandbox", reason: "reconcile_pre_turn" }, "[thread] reconcile failed, continuing", err); }
       }
 
       // First load of repo AGENTS.md instructions (agents-md spec, decision 1):
@@ -3830,7 +3831,7 @@ export class Thread {
       try {
         await this.session.ensureRepoInstructions();
       } catch (err) {
-        console.error("[thread] repo-instructions load failed, continuing:", err);
+        reportError({ area: "engine", reason: "repo_instructions_load" }, "[thread] repo-instructions load failed, continuing", err);
       }
 
       let turnFailed = false;
@@ -5101,7 +5102,7 @@ export class Thread {
     try {
       await this.session.refreshSkills();
     } catch (err) {
-      console.error(`skill refresh failed for session ${this.session.id}; the previous skills stay:`, err);
+      reportError({ area: "engine", reason: "skill_refresh" }, `skill refresh failed for session ${this.session.id}; the previous skills stay`, err);
     }
 
     // Build the AgentTool list with closures over this turn's ToolContext.
@@ -7810,7 +7811,7 @@ export class Thread {
     // Event delivery is best-effort (a dead WS drops it silently), so also
     // log to stderr — otherwise a failing turn (bad key, exhausted credits,
     // provider outage) leaves zero trace in the host process output.
-    console.error(`[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
+    reportError({ area: "engine", reason: "thread_error" }, `[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
     void this.session.emit({
       type: "error",
       threadId: this.id,

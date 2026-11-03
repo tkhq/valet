@@ -3,7 +3,8 @@ import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js"
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
 import { buildWidgetTools } from "../widgets/tools.js";
 import type { ToolScope } from "@valet/shared";
-import { assistantMemoryNamespace } from "../services/memory-scope.js";
+import { assistantMemoryNamespace, delegatedMemoryScope, memorySessionId } from "../services/memory-scope.js";
+import { NotFoundError } from "@valet/shared";
 import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
@@ -50,6 +51,7 @@ import {
   type WakeupsSeam,
   DEFAULT_WAKEUP_LIMITS,
   type ProviderBundle,
+  reportError,
 } from "@valet/engine";
 import type { CompactionConfig, CredentialUse, ToolDef, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
@@ -166,7 +168,7 @@ import { codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool, generatedFileStore } from "../services/generated-files.js";
-import { artifactPublishTool, buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { artifactPublishTool, buildMemoryTools, buildReadOnlyMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
 import {
@@ -183,7 +185,7 @@ import {
 } from "./security-provisioning.js";
 import { egressHostInScope } from "@valet/plugin-security";
 import { isValidTimezone } from "../lib/timezone.js";
-import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
+import { assembleMemorySnapshot, DELEGATED_SNAPSHOT_BUDGET_CHARS } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
@@ -277,7 +279,8 @@ export function securityRolesForCell(
       return [{ ...role, name: persona }];
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      console.warn(
+      reportError(
+        { area: "engine", reason: "security_persona_load", level: "warn" },
         `security: repo persona "${persona}" role markdown failed to load (${detail}); ` +
           "attaching the code-review role. Fix the persona markdown in the repo.",
       );
@@ -967,7 +970,7 @@ export class EngineHost {
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
       this.sweepInterval = setInterval(() => {
-        this.runIdleSweep().catch((err) => console.error("EngineHost: idle sweep failed:", err));
+        this.runIdleSweep().catch((err) => reportError({ area: "engine", reason: "idle_sweep" }, "EngineHost: idle sweep failed", err));
       }, 60_000);
       this.sweepInterval.unref?.();
     }
@@ -1085,7 +1088,7 @@ export class EngineHost {
 
     if (this.opts.onHibernate) {
       Promise.resolve(this.opts.onHibernate(sessionId, session.attachment.sandboxId)).catch((err) =>
-        console.error(`EngineHost: onHibernate failed for session ${sessionId}:`, err),
+        reportError({ area: "engine", reason: "on_hibernate" }, `EngineHost: onHibernate failed for session ${sessionId}`, err),
       );
     }
   }
@@ -1111,7 +1114,7 @@ export class EngineHost {
           wasSuspended = false;
           if (this.opts.onWake) {
             Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
-              console.error(`EngineHost: onWake failed for session ${sessionId}:`, err),
+              reportError({ area: "engine", reason: "on_wake" }, `EngineHost: onWake failed for session ${sessionId}`, err),
             );
           }
         }
@@ -1120,7 +1123,7 @@ export class EngineHost {
         // separately from `onWake` above.
         if (this.opts.onSessionReady) {
           Promise.resolve(this.opts.onSessionReady(sessionId)).catch((err) =>
-            console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
+            reportError({ area: "engine", reason: "on_session_ready" }, `EngineHost: onSessionReady failed for session ${sessionId}`, err),
           );
         }
         // Prep-completion seam for slash commands (Task 10): repo templates
@@ -1130,7 +1133,7 @@ export class EngineHost {
         // no-op when the session has no `workspaceSkillsProvider`. Best-effort — a
         // refresh failure never breaks the ready transition.
         Promise.resolve(session.refreshCommandRegistry()).catch((err) =>
-          console.error(`EngineHost: refreshCommandRegistry failed for session ${sessionId}:`, err),
+          reportError({ area: "engine", reason: "command_registry_refresh" }, `EngineHost: refreshCommandRegistry failed for session ${sessionId}`, err),
         );
         // Repo AGENTS.md instructions (agents-md spec, decision 1): re-read on
         // every ready transition — cold boot, wake, and warm rebuild — so
@@ -1138,7 +1141,7 @@ export class EngineHost {
         // session has no `repoInstructionsProvider`. Best-effort, same as the
         // registry refresh above; a failure leaves the previous value serving.
         Promise.resolve(session.refreshRepoInstructions()).catch((err) =>
-          console.error(`EngineHost: refreshRepoInstructions failed for session ${sessionId}:`, err),
+          reportError({ area: "engine", reason: "repo_instructions_refresh" }, `EngineHost: refreshRepoInstructions failed for session ${sessionId}`, err),
         );
       }
     });
@@ -1318,10 +1321,7 @@ export class EngineHost {
       }
       if (target.options.startRef) return;
       await target.setStartRef(ref).catch((err: unknown) => {
-        console.error(
-          `EngineHost: recording start-ref for session ${sessionId} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        reportError({ area: "engine", reason: "start_ref_record" }, `EngineHost: recording start-ref for session ${sessionId} failed`, err);
       });
     };
     const specProvider = await this.buildSpecProvider(
@@ -1649,10 +1649,7 @@ export class EngineHost {
       try {
         if (await orgAllowsPluginForUser(db, orgId, owner.id, plugin.name)) kept.push(plugin);
       } catch (err) {
-        console.error(
-          `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        reportError({ area: "engine", reason: "plugin_entitlement" }, `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin`, err);
         kept.push(plugin);
       }
     }
@@ -2004,7 +2001,7 @@ export class EngineHost {
         .returning({ id: agentSessions.id });
       return rows.length > 0;
     } catch (err) {
-      console.error(`EngineHost: recording image_fallback for session ${sessionId} failed:`, err);
+      reportError({ area: "engine", reason: "image_fallback_record" }, `EngineHost: recording image_fallback for session ${sessionId} failed`, err);
       return false;
     }
   }
@@ -2480,7 +2477,7 @@ export class EngineHost {
         ref,
       );
     } catch (err) {
-      console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
+      reportError({ area: "engine", reason: "credentials_yaml_read" }, "EngineHost: reading .valet/credentials.yaml failed", err);
       return [];
     }
   }
@@ -2881,7 +2878,7 @@ export class EngineHost {
         createdAt: Date.now(),
       });
     } catch (err) {
-      console.error(`EngineHost: session ${session.id}: showing a startup warning failed:`, err);
+      reportError({ area: "engine", reason: "startup_warning" }, `EngineHost: session ${session.id}: showing a startup warning failed`, err);
     }
   }
 
@@ -3080,7 +3077,7 @@ export class EngineHost {
         const ids = settled.map((i) => i.id);
         if (ids.length > 0) await this.opts.eventStream.prune(sessionId, ids);
       } catch (err) {
-        console.error(`event retention prune failed for session ${sessionId}:`, err);
+        reportError({ area: "engine", reason: "event_retention_prune" }, `event retention prune failed for session ${sessionId}`, err);
       }
     })();
   }
@@ -3514,7 +3511,7 @@ export class EngineHost {
         try {
           await revokeSessionGrants(this.opts.db, sessionId);
         } catch (err) {
-          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+          reportError({ area: "engine", reason: "grant_revoke" }, `EngineHost: revoking session grants for ${sessionId} failed`, err);
         }
       }
       return;
@@ -3538,7 +3535,7 @@ export class EngineHost {
         try {
           await revokeSessionGrants(this.opts.db, sessionId);
         } catch (err) {
-          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+          reportError({ area: "engine", reason: "grant_revoke" }, `EngineHost: revoking session grants for ${sessionId} failed`, err);
         }
       }
     }
@@ -3719,7 +3716,7 @@ export class EngineHost {
     try {
       await this.opts.onWake(sessionId);
     } catch (err) {
-      console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
+      reportError({ area: "engine", reason: "mark_session_used" }, `EngineHost: markSessionUsed failed for session ${sessionId}`, err);
     }
   }
 
@@ -4478,6 +4475,14 @@ export class EngineHost {
       ? [...provisionedExtras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
       : provisionedExtras.roles;
 
+    // A security persona child reads no memory (its tool scope grants none,
+    // and the memory routes refuse its writes). Every other child reads its
+    // owner's memory like the assistant that spawned it.
+    // A child reads its parent's memory namespace: it has no execution row of
+    // its own, so resolving its own id would select an empty namespace.
+    const childMemory = personaCell ? undefined : await this.delegatedMemory(childSessionId, opts.owner, opts.actorUserId, opts.orgId, (this.opts.db ? await memorySessionId(this.opts.db, opts.parentSessionId) : opts.parentSessionId));
+    const childToolsWithMemory = [...(childMemory?.tools ?? []), ...childTools];
+
     const existing = await this.opts.engineStore.getSession(childSessionId);
     // Team- and org-owned builds are shared: omit `userId` so the acting
     // member's personal default cannot freeze onto the shared session.
@@ -4656,11 +4661,14 @@ export class EngineHost {
       sampling: { reasoning },
       compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), child: true }) + (personaCell ? "\n\n" + BLOCKING_ITEMS_RULE : "") + scratchWarningPrompt(repoFlags.scratchWarning) + imageFallbackPrompt(fallbackRepo),
-      tools: childTools.length ? childTools : undefined,
+      tools: childToolsWithMemory.length ? childToolsWithMemory : undefined,
+      ...(childMemory ? { systemContext: childMemory.systemContext } : {}),
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
       // The persona tools' HTTP seam only — still NO childSpawner (the
-      // depth-limit contract) and no child seams.
+      // depth-limit contract) and no child seams. A plain child gets the
+      // same seam for its read-only memory tools.
+      ...(childMemory ? { toolConfig: childMemory.toolConfig } : {}),
       ...(personaCell
         ? {
             toolConfig: {
@@ -4691,6 +4699,39 @@ export class EngineHost {
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
+  }
+
+  /**
+   * The memory a child session or a workflow step reads (brain spec,
+   * "Principles everywhere", TKAI-578): the snapshot an assistant gets, with
+   * a smaller budget, and the read-only memory tools. The scope is the one
+   * the memory routes resolve for this session id, so the prompt lists only
+   * files the tools can open. When a team audience cannot be resolved, the
+   * session gets no memory: it must never widen to the whole team.
+   */
+  private async delegatedMemory(
+    sessionId: string,
+    owner: Principal,
+    actorUserId: string,
+    orgId: string,
+    namespaceSessionId: string = sessionId,
+  ): Promise<{ systemContext: Array<{ name: string; content: string; order: number }>; tools: ToolDef[]; toolConfig: { apiBaseUrl: string; internalToken: string } } | undefined> {
+    const db = this.opts.db;
+    const apiBaseUrl = this.opts.apiBaseUrl;
+    if (!db || !apiBaseUrl) return undefined;
+    let scope: MemoryScope;
+    try {
+      scope = await delegatedMemoryScope(db, { sessionId: namespaceSessionId, owner, actorUserId, orgId });
+    } catch (err) {
+      if (err instanceof NotFoundError) return undefined;
+      throw err;
+    }
+    const content = await assembleMemorySnapshot(db, scope, { budgetChars: DELEGATED_SNAPSHOT_BUDGET_CHARS, readOnly: true });
+    return {
+      systemContext: [{ name: "memory-snapshot", content, order: 10 }],
+      tools: buildReadOnlyMemoryTools(),
+      toolConfig: { apiBaseUrl, internalToken: internalToken() },
+    };
   }
 
   /**
@@ -4751,6 +4792,8 @@ export class EngineHost {
     // skills, not those of whoever last edited the workflow.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
+
+    const stepMemory = await this.delegatedMemory(sessionId, opts.owner, opts.actorUserId, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const workspace = existing?.workspace ?? opts.workspace;
@@ -4851,10 +4894,12 @@ export class EngineHost {
       compaction: await this.orgCompaction(opts.orgId),
       systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}) }) + imageFallbackPrompt(fallbackRepo),
       // A step publishes a page from a file in its own sandbox, so a large page
-      // never has to travel between steps as model output. A step gets this one
-      // tool, not the memory tools. Its pages belong to the run owner and name
-      // no source session: a step session has no `agent_sessions` row.
-      tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...extras.tools] : extras.tools.length ? extras.tools : undefined,
+      // never has to travel between steps as model output. Its pages belong to
+      // the run owner and name no source session: a step session has no
+      // `agent_sessions` row. Of the memory tools it gets only the read-only
+      // pair, so it can open a principle its snapshot lists.
+      tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...(stepMemory?.tools ?? []), ...extras.tools] : extras.tools.length ? extras.tools : undefined,
+      ...(stepMemory ? { systemContext: stepMemory.systemContext } : {}),
       ...(this.opts.apiBaseUrl ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken(), workflowStep: true } } : {}),
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

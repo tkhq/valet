@@ -11,6 +11,7 @@
 import type { PluginHttpRequest } from "@valet/engine";
 import type { GithubAppCapability, GithubAppConfigInput, GithubEndpoints, GithubSetupCapability } from "./capabilities.js";
 import { isRecord, json, noContent, queryParam, readJson, redirect } from "./respond.js";
+import { reportError } from "@valet/engine";
 
 /** Legacy URLs that existing Apps store. */
 export const GITHUB_APP_SETUP_PATH = "/api/org/github-app/setup";
@@ -193,7 +194,7 @@ export async function appSetup(
       headers: { Accept: "application/vnd.github+json" },
     });
   } catch (err) {
-    console.error("github-app setup: manifest conversion request failed:", err);
+    reportError({ area: "plugins", reason: "github_manifest_conversion", provider: "github" }, "github-app setup: manifest conversion request failed", err);
     return json({ error: "failed to reach GitHub" }, 502);
   }
   if (!res.ok) {

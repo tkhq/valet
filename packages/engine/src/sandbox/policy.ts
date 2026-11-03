@@ -14,6 +14,7 @@ import { SandboxConnectionError, SandboxEvictedError, SandboxSupersededError, Sa
 import { attrTruncate, withSpan } from "../tracing.js";
 import { recordSandboxExec, recordSandboxWorkspaceGrow } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
+import { reportError } from "../error-report.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
 export const SANDBOX_READY_TIMEOUT_MS = 60_000;
@@ -443,7 +444,7 @@ export class PolicySandbox implements Sandbox {
     } catch (err) {
       // ensureReady/dispatch-level failure (sandbox died mid-check) — the
       // original command result must still flow back untouched.
-      console.error(`sandbox ${this.id}: in-run workspace-full check failed:`, err);
+      reportError({ area: "sandbox", reason: "workspace_full_check" }, `sandbox ${this.id}: in-run workspace-full check failed`, err);
       return null;
     }
   }

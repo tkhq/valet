@@ -1926,6 +1926,17 @@ export type ModelStateEvent =
       model: null;
     };
 
+/** One principle a turn named. The host finds these after the submission
+ * settles (brain spec, "Usage"); the engine only carries them. */
+export interface PrincipleCitation {
+  /** The principle as its index line names it: `principles/x.md`,
+   * `team:{id}/principles/x.md`, or a built-in principle's name. */
+  path: string;
+  /** `path`: the answer or plan named the path. `title`: a heuristic match
+   * on the principle's title, which can be wrong. */
+  match: "path" | "title";
+}
+
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
@@ -2045,6 +2056,16 @@ export type EngineEvent =
       /** For a `merged` outcome: the item whose turn answers this one, as
        * the settle wrote it to the queue item (`QueueItem.mergedIntoItemId`). */
       mergedIntoItemId?: string;
+    }
+  | {
+      /**
+       * A settled turn's answer or plan named one or more principles. The
+       * host appends it once per submission (`principle_cited:{queueItemId}`)
+       * and counts a cite on each principle's memory file.
+       */
+      type: "principle_cited";
+      threadId: string;
+      citations: PrincipleCitation[];
     }
   | {
       /** Live cache-invalidation hint emitted after automatic title writes. */

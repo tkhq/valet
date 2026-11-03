@@ -11,6 +11,7 @@ import {
   playbookSeedNote,
   readPlaybookSteps,
   readThreadPlan,
+  scanPlaybookSteps,
   VirtualSandboxProvider,
   type CreateSessionOptions,
   type SkillSource,
@@ -63,6 +64,14 @@ describe("readPlaybookSteps", () => {
     const result = readPlaybookSteps(body);
     expect(result.kind).toBe("invalid");
     expect(result.kind === "invalid" && result.reason).toMatch(reason);
+  });
+
+  it("reports the line of the Steps heading and of each step", () => {
+    expect(scanPlaybookSteps("Intro\n\n## Steps\n\n1. One\n```\n- not a step\n```\n2. Two\n## Notes\n- x\n")).toEqual({
+      headingLine: 3,
+      steps: [{ text: "One", line: 5 }, { text: "Two", line: 9 }],
+    });
+    expect(scanPlaybookSteps("1. Orphan step\n")).toEqual({ headingLine: null, steps: [] });
   });
 
   it("marks a playbook through the spec metadata map only", () => {

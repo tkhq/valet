@@ -42,7 +42,7 @@ import {
 } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import { bundledPlugins } from "../plugins/registry.gen.js";
-import { nextFireAt } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { orgManagedPinCaveats, templateRequirements } from "./templates.js";
 import { toolNodesOf } from "./tool-nodes.js";

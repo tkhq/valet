@@ -30,7 +30,8 @@
  */
 import { and, eq, like } from "drizzle-orm";
 import { memoryFiles, type ContentSourceRow } from "../../schema/index.js";
-import { assertWritablePath, normalizePath, parseConcept } from "../../lib/okf.js";
+import { parseConcept } from "../../lib/okf.js";
+import { isMemoryFilePath, MEMORY_ROOT, MOUNT_PREFIX, mountPath } from "./memory-mount.js";
 import type {
   CollectorDiscoverContext,
   CollectorNoticeContext,
@@ -41,12 +42,6 @@ import type {
   ContentManifestEntry,
 } from "./collector.js";
 
-const MEMORY_ROOT = ".valet/memory";
-
-/** Where a mirrored file lands. `lib/` is reserved for mounted libraries, so
- * putting mirrored content there is what makes it read-only. */
-const MOUNT_PREFIX = "lib/";
-
 export class MemoryCollector implements ContentCollector {
   readonly kind = "memories" as const;
 
@@ -54,42 +49,11 @@ export class MemoryCollector implements ContentCollector {
     const candidates: ContentManifestEntry[] = [];
     for (const entry of entries) {
       if (entry.type !== "blob" || entry.mode === "120000") continue;
-      if (!entry.path.startsWith(`${MEMORY_ROOT}/`)) continue;
-      if (!entry.path.endsWith(".md")) continue;
-      const relative = entry.path.slice(MEMORY_ROOT.length + 1);
-      if (relative.length === 0) continue;
-      candidates.push({ name: relative, path: entry.path, blobSha: entry.sha });
+      if (!isMemoryFilePath(entry.path)) continue;
+      candidates.push({ name: entry.path.slice(MEMORY_ROOT.length + 1), path: entry.path, blobSha: entry.sha });
     }
     candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     return new MemoryPass(candidates, source);
-  }
-}
-
-/**
- * The memory path one repository path mounts at, or the reason it has none.
- *
- * `normalizePath` and `assertWritablePath` both THROW, and a repository path
- * is not ours to choose: a colon is legal in a git tree and ordinary in a
- * filename ("2026-08-24: retro.md"), and so is a basename the store reserves.
- * Throwing out of the reconcile loop would abort the pass and take every
- * OTHER memory file in the repository with it, on every poll, forever. One
- * file's name costs that file only.
- *
- * `assertWritablePath` is applied deliberately, with `lib/` allowed: it is
- * the rule a WRITTEN path obeys, and mirroring a path the product could never
- * hold would create a row no other code can address.
- */
-function mountPath(repoPath: string): { ok: true; path: string } | { ok: false; reason: string } {
-  const path = `${MOUNT_PREFIX}${repoPath.slice(MEMORY_ROOT.length + 1)}`;
-  try {
-    const normalized = normalizePath(path);
-    // Strip the mount prefix for the reserved-name check, then put it back:
-    // `lib/` is exactly what this collector is allowed to write and
-    // `assertWritablePath` exists to refuse.
-    assertWritablePath(normalized.slice(MOUNT_PREFIX.length));
-    return { ok: true, path: normalized };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }
 

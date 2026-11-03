@@ -53,7 +53,7 @@ it.each([false, true])("keeps team automation running when its telemetry sink th
     expect((await session.thread(receipt.threadId).awaitResult(receipt.queueItemId)).outcome).toBe("completed");
     expect(facts).toHaveLength(1);
     expect(facts[0]).toMatchObject({ userId: null, ownerType: "team", ownerId: "t1", outcome: "ok" });
-    if (throws) expect(console.warn).toHaveBeenCalledWith("Tool usage telemetry failed. Check the host telemetry sink.");
+    if (throws) expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("Tool usage telemetry failed. Check the host telemetry sink."));
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain("private failure text");
   } finally { await session.destroy(); faux.unregister(); }
 });

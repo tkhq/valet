@@ -1,6 +1,6 @@
 import type { AppDb } from "../lib/drizzle.js";
 import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
-import { recordWakeupEnded } from "@valet/engine";
+import { recordWakeupEnded, reportError } from "@valet/engine";
 import type {
   ArmEventRequest,
   ArmEventResult,
@@ -176,7 +176,7 @@ export function buildWakeupsSeam(
       const target = await rawSandbox(sandboxId);
       await target?.cancelJob?.(execId);
     } catch (err) {
-      console.warn(`wakeup_cancel: kill of ${wakeupId} (exec ${execId}) failed; the row is already ended:`, err);
+      reportError({ area: "engine", reason: "wakeup_cancel_kill", level: "warn" }, `wakeup_cancel: kill of ${wakeupId} (exec ${execId}) failed; the row is already ended`, err);
     }
   }
 
@@ -251,7 +251,7 @@ export function buildWakeupsSeam(
         await engineStore
           .transitionWakeupAndReleaseLease(wakeupId, ["pending"], "lost", { cause: "pid_missing", endedAt }, endedAt, "owner_ended")
           .catch((storeErr: unknown) => {
-            console.error(`wakeups: ending ${wakeupId} after a refused start failed; the WakeWatcher ends it:`, storeErr);
+            reportError({ area: "engine", reason: "wakeup_refused_end" }, `wakeups: ending ${wakeupId} after a refused start failed; the WakeWatcher ends it`, storeErr);
           });
         throw new Error(BASH_BACKGROUND_UNAVAILABLE);
       }
@@ -276,7 +276,7 @@ export function buildWakeupsSeam(
       // The job runs and the pending row names its exec id. The WakeWatcher
       // probes the row past its start grace and adopts the job, so the
       // agent must not run the command again (fix wave 3, concurrency L6).
-      console.error(`wakeups: marking ${wakeupId} running failed; the WakeWatcher adopts it after its start grace:`, err);
+      reportError({ area: "engine", reason: "wakeup_mark_running" }, `wakeups: marking ${wakeupId} running failed; the WakeWatcher adopts it after its start grace`, err);
       return { wakeup: { ...pending, execId: handle.execId }, lease };
     }
     if (!running) {
@@ -301,7 +301,7 @@ export function buildWakeupsSeam(
       try {
         if (await engineStore.setLeaseSandboxId(lease.id, startedOn)) lease.sandboxId = startedOn;
       } catch (err) {
-        console.warn(`wakeups: recording sandbox ${startedOn} on lease ${lease.id} failed; the WakeWatcher records it:`, err);
+        reportError({ area: "engine", reason: "lease_sandbox_record", level: "warn" }, `wakeups: recording sandbox ${startedOn} on lease ${lease.id} failed; the WakeWatcher records it`, err);
       }
     }
     return { wakeup: running, lease };

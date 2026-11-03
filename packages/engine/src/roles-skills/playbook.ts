@@ -25,25 +25,43 @@ const STEPS_HEADING = /^#{2,3}\s+steps\s*$/i;
 const ANY_HEADING = /^#{1,6}\s/;
 const LIST_ITEM = /^\s{0,3}(?:\d+[.)]|[-*])\s+(.+?)\s*$/;
 
+/** One step and the 1-based line of `content` that holds it. */
+export interface PlaybookStepLine {
+  text: string;
+  line: number;
+}
+
+/**
+ * Where a playbook body keeps its steps: the line of the first `## Steps`
+ * (or `### Steps`) heading, or null, and the list items under it up to the
+ * next heading. Fenced code is skipped. `readPlaybookSteps` judges these
+ * steps; a validator reads the lines to point at the step it reports.
+ */
+export function scanPlaybookSteps(content: string): { headingLine: number | null; steps: PlaybookStepLine[] } {
+  const steps: PlaybookStepLine[] = [];
+  let headingLine: number | null = null;
+  let inFence = false;
+  const lines = content.split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (headingLine === null) {
+      if (STEPS_HEADING.test(line)) headingLine = index + 1;
+      continue;
+    }
+    if (ANY_HEADING.test(line)) break;
+    const match = LIST_ITEM.exec(line);
+    if (match) steps.push({ text: match[1]!, line: index + 1 });
+  }
+  return { headingLine, steps };
+}
+
 /**
  * The steps of a playbook body: the list items under the first `## Steps`
  * (or `### Steps`) heading, up to the next heading. Fenced code is skipped.
  */
 export function readPlaybookSteps(content: string): PlaybookSteps {
-  const steps: string[] = [];
-  let inSteps = false;
-  let inFence = false;
-  for (const line of content.split("\n")) {
-    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
-    if (inFence) continue;
-    if (!inSteps) {
-      if (STEPS_HEADING.test(line)) inSteps = true;
-      continue;
-    }
-    if (ANY_HEADING.test(line)) break;
-    const match = LIST_ITEM.exec(line);
-    if (match) steps.push(match[1]!);
-  }
+  const steps = scanPlaybookSteps(content).steps.map((step) => step.text);
   if (steps.length === 0) {
     return { kind: "invalid", reason: "It has no list items under a \"## Steps\" heading." };
   }

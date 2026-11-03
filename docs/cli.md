@@ -27,6 +27,7 @@ Commands:
   chat        Interactive chat with a session
   mcp         MCP client operations
   reset       Reset local state
+  validate    Check a brain repository's skills, playbooks, memory, and workflows
 
 Global options:
   --json          Machine-readable JSON output (where supported)
@@ -297,6 +298,27 @@ valet tools call linear.create_issue --params-file issue.json --idempotency-key 
 
 `--workspace <team-id>` uses a team's credentials and policies. `--params-file -` reads the params from stdin. A repeated `--idempotency-key` returns the first result instead of running the tool again. `call` exits `0` when the tool completes, `3` when a policy requires approval (the tool did not run) or an earlier call with the same key is still running, and `4` when it fails. A failed call is not stored, so a retry with the same key runs again. MCP clients get the same tools as `search_tools`, `describe_tool`, and `call_tool`.
 
+### `valet validate [path] [--subpath <dir>] [--json]`
+
+Check a brain repository before it merges. Valet sync skips a file it cannot read and records a warning on the source, or it loads the file in a weaker form. For example, a playbook with more than 20 steps loads as a plain skill and does not set the thread plan. `validate` runs the same rules on a local checkout. It needs no instance and no sign-in.
+
+```bash
+valet validate .                   # the repository in the current directory
+valet validate ../tk-brain --json  # the report as JSON
+valet validate . --subpath skills  # only the skills under skills/
+```
+
+The command checks these files, in this order:
+
+1. `SKILL.md` files and `prompts/*.md`: the skill spec, frontmatter that does not parse or that sync drops, duplicate names, and directories sync does not scan.
+2. Playbooks (`metadata.kind: playbook`): a `## Steps` list of 1 to 20 steps, each 200 characters or fewer. A top-level `kind: playbook` is an error, because sync reads it only under `metadata`.
+3. Files under `.valet/memory/`: paths that memory refuses, and OKF frontmatter. A principle under `.valet/memory/principles/` needs a `title` and a one-line `description`.
+4. Workflows under `.valet/workflows/` and `workflows/`: the file format, the DAG rules, and the cron and timezone of a `schedule`.
+
+Each finding is one line, `path:line: severity: message`, and the message says what to fix. An error is a file that sync skips or loads in a weaker form. A warning is a file that sync loads, minus the part the warning names. The command exits `1` when it finds an error, so a CI job can block the merge.
+
+`--subpath` narrows only the skill scan, as the subdirectory of a source does. Files under `.valet/` are read from the root. Some checks need a running instance, so `validate` does not do them: the event keys and filters of a workflow, the models and tool services that a workflow names, and a skill name that already exists in a workspace.
+
 ### `valet reset [--yes]`
 
 Wipe the local runtime state under the data dir: PGlite, blobs, and the
@@ -309,6 +331,7 @@ requires confirmation (interactive `y/N`, or `--yes` non-interactively).
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
+| 1 | `validate` found an error, or a tool outside Valet failed |
 | 2 | Usage error (bad arguments, refused operation) |
 | 3 | Turn stopped on a pending decision gate (`send`) |
 | 4 | Turn errored |

@@ -40,6 +40,7 @@ import {
   type TransportContext,
   credentialSecret,
   sniffImageMediaType,
+  reportError,
 } from "@valet/engine";
 import {
   buildContentBlocks,
@@ -1092,19 +1093,19 @@ export class SlackTransport implements ChannelTransport {
     if (text === undefined) return;
     const answer = this.gateCallbackAnswers.get(callbackId);
     if (!answer) {
-      console.warn(`[slack] no recorded answer address for callback ${callbackId}`);
+      reportError({ area: "channels", reason: "approval_answer_address", provider: "slack", level: "warn" }, `[slack] no recorded answer address for callback ${callbackId}`);
       return;
     }
     let responseUrl: string | undefined;
     if (answer.responseUrl !== undefined) {
       if (this.isSlackResponseUrl(answer.responseUrl)) responseUrl = answer.responseUrl;
-      else console.warn(`[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
+      else reportError({ area: "channels", reason: "approval_answer_refused", provider: "slack", level: "warn" }, `[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
     }
     if (responseUrl !== undefined && (await this.postToResponseUrl(responseUrl, text))) return;
     try {
       await this.api.postEphemeral({ channel: answer.channelId, user: answer.userId, text });
     } catch (err) {
-      console.error("[slack] could not answer an approval click", err);
+      reportError({ area: "channels", reason: "approval_answer", provider: "slack" }, "[slack] could not answer an approval click", err);
     }
   }
 
@@ -1135,9 +1136,9 @@ export class SlackTransport implements ChannelTransport {
         body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
       });
       if (res.ok) return true;
-      console.warn(`[slack] response_url rejected an approval answer: http ${res.status}`);
+      reportError({ area: "channels", reason: "approval_answer_rejected", provider: "slack", level: "warn" }, `[slack] response_url rejected an approval answer: http ${res.status}`);
     } catch (err) {
-      console.error("[slack] response_url answer failed", err);
+      reportError({ area: "channels", reason: "approval_answer_send", provider: "slack" }, "[slack] response_url answer failed", err);
     }
     return false;
   }

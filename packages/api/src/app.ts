@@ -5,6 +5,7 @@
  * test app with stub providers, no node-server). It also keeps boot-time
  * I/O (open sqlite, build providers) out of the hot test path.
  */
+import { reportError } from "@valet/engine";
 import { cliUsage } from "./middleware/cli-usage.js";
 import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
@@ -477,7 +478,6 @@ export function createApp(
   // would hide a server-side failure from alerting.
   app.onError(async (err, c) => {
     if (err instanceof TeamAdminRequiredError) return c.json(await teamAdminRefusal(c.var.providers.db, c.var.user.orgId, err), 403);
-    console.error(`route error ${c.req.method} ${c.req.path}:`, err);
     const duck = err as { statusCode?: unknown; code?: unknown };
     const declared =
       err instanceof ValetError
@@ -487,6 +487,9 @@ export function createApp(
           : undefined;
     const status =
       typeof declared === "number" && declared >= 400 && declared <= 599 ? declared : 500;
+    // A declared 4xx is a refusal the client caused: log it, do not count it.
+    if (status >= 500) reportError({ area: "api", reason: "route_error" }, `route error ${c.req.method} ${c.req.routePath ?? c.req.path}`, err);
+    else console.error(`route error ${c.req.method} ${c.req.path}:`, err);
     return c.json(
       {
         error: err.message ?? "internal error",

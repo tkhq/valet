@@ -79,6 +79,7 @@ import type {
   WorkflowRunSummary,
 } from "../wire/types.js";
 import { definitionVersionId, sameWorkflowSteps } from "./definition-version.js";
+import { reportError } from "@valet/engine";
 
 export interface WorkflowServiceDeps {
   db: AppDb;
@@ -1925,7 +1926,7 @@ export async function cancelWorkflowRun(
       }
     }
   } catch (err) {
-    console.error(`cancel gate stamp failed for run ${runId}:`, err);
+    reportError({ area: "workflows", reason: "cancel_gate_stamp" }, `cancel gate stamp failed for run ${runId}`, err);
   }
 
   return "ok";
