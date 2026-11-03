@@ -96,6 +96,12 @@ const WEBHOOK_TIMEOUT_MS = 5_000;
 const SECRET_KEY = /(api[_-]?key|apikey|token|secret|password|passwd|private[_-]?key|authorization|cookie|credential_value)/i;
 const SECRET_ASSIGNMENT = /\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*|[A-Za-z0-9_]*_PAT)=("[^"]*"|'[^']*'|\S+)/gi;
 const BEARER = /\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+// Credentials passed as command-line options or headers in setup commands.
+// The patterns cover common forms; the alert carries no values at all.
+const USER_PASS_OPTION = /(\s(?:-u|-U|--user|--proxy-user|--basic-auth))(\s+|=)(["']?)([^\s:"']*):([^\s"']+)\3/g;
+const SECRET_OPTION = /(\s--?(?:password|passwd|pass|token|api-key|apikey|secret|auth-token|access-key|secret-key|private-key|client-secret|registry-password)[A-Za-z0-9-]*)(\s+|=)("[^"]*"|'[^']*'|[^\s"']+)/gi;
+const SECRET_HEADER = /((?:authorization|proxy-authorization|x-api-key|api-key|private-token|x-auth-token|cookie)\s*:\s*)[^"'\n]+/gi;
+const SHORT_PASSWORD = /(\b(?:sshpass|mysql|mysqldump|mariadb)\b[^|;&\n]*?\s-p)(\s*)(?=[^\s-])([^\s"']+)/g;
 const URL_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const MAX_STRING = 500;
 const MAX_ARRAY = 50;
@@ -115,7 +121,12 @@ function sanitizeString(value: string): string {
   const masked = value
     .replace(URL_TEXT, (match) => displayUrl(match))
     .replace(SECRET_ASSIGNMENT, (_m, name: string) => `${name}=[redacted]`)
-    .replace(BEARER, (_m, scheme: string) => `${scheme} [redacted]`);
+    .replace(BEARER, (_m, scheme: string) => `${scheme} [redacted]`)
+    .replace(USER_PASS_OPTION, (_m, flag: string, sep: string, quote: string, user: string) => `${flag}${sep}${quote}${user}:[redacted]${quote}`)
+    // `--password-stdin` and `--password-file` take no secret value.
+    .replace(SECRET_OPTION, (m, flag: string, sep: string) => (/-(stdin|file)$/i.test(flag) ? m : `${flag}${sep}[redacted]`))
+    .replace(SECRET_HEADER, (_m, name: string) => `${name}[redacted]`)
+    .replace(SHORT_PASSWORD, (_m, prefix: string, gap: string) => `${prefix}${gap}[redacted]`);
   return masked.length > MAX_STRING ? `${masked.slice(0, MAX_STRING)}…` : masked;
 }
 
@@ -236,7 +247,9 @@ function emitSecurityAlert(entry: AdminAuditEntry, kind: SecurityAlertKind, chan
     actorUserId: entry.actor.userId,
     actorEmail: entry.actor.email,
     ip: entry.actor.ip ?? null,
-    changes,
+    // Field names only. Values, such as setup commands, stay in the audit
+    // row, so no command text or credential leaves the instance in an alert.
+    changedFields: changes ? Object.keys(changes) : [],
     at: new Date(at).toISOString(),
   };
   countAlert(kind);

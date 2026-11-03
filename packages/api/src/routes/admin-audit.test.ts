@@ -386,6 +386,8 @@ describe("security alert delivery", () => {
     expect(hook.bodies).toHaveLength(1);
     expect(hook.bodies[0]).toMatchObject({ event: SECURITY_ALERT_EVENT, kind: "llm_provider_created", action: "llm_provider.create", orgId: "local-org", actorEmail: "local@dev", targetName: "internal" });
     expect(JSON.stringify(hook.bodies)).not.toContain("leak");
+    expect(hook.bodies[0]).toMatchObject({ changedFields: expect.arrayContaining(["baseUrl"]) });
+    expect(hook.bodies[0]).not.toHaveProperty("changes");
   });
 
   it("sends no webhook for a low-risk change", async () => {
@@ -423,9 +425,24 @@ describe("sanitizeChanges", () => {
     })).toEqual({
       nested: { ok: 1 },
       cmd: "TOKEN=[redacted] run && GITHUB_PAT=[redacted] go",
-      header: "Authorization: Bearer [redacted]",
+      header: "Authorization: [redacted]",
       url: "https://h.example/p",
     });
     expect(sanitizeChanges({})).toBeNull();
+  });
+
+  it.each([
+    ["curl -u admin:plain-text-password https://registry.example/v2/", "curl -u admin:[redacted] https://registry.example/v2/"],
+    ["curl --user=deploy:s3cr3t https://x.example", "curl --user=deploy:[redacted] https://x.example"],
+    ["curl -H 'Authorization: token ghp_abcdef123456' https://api.github.com", "curl -H 'Authorization: [redacted]' https://api.github.com"],
+    ['curl -H "X-API-Key: k-123" https://x.example', 'curl -H "X-API-Key: [redacted]" https://x.example'],
+    ["docker login --password hunter2 -u me registry.example", "docker login --password [redacted] -u me registry.example"],
+    ["npm config set --auth-token=npm_abc", "npm config set --auth-token=[redacted]"],
+    ["echo $P | docker login --password-stdin -u me registry.example", "echo $P | docker login --password-stdin -u me registry.example"],
+    ["sshpass -p hunter2 ssh host", "sshpass -p [redacted] ssh host"],
+    ["mysql -uroot -phunter2 db", "mysql -uroot -p[redacted] db"],
+    ["mkdir -p /opt/tools && apt-get install -y jq", "mkdir -p /opt/tools && apt-get install -y jq"],
+  ])("masks credentials passed as options or headers in %j", (command, masked) => {
+    expect(sanitizeChanges({ setupCommands: [command] })).toEqual({ setupCommands: [masked] });
   });
 });
