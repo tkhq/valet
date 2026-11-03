@@ -47,6 +47,28 @@ describe('browser lifecycle persistence', () => {
     expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(0);
   });
 
+  it('settles a sandbox-less turn from the session inventory, never a fleet listing', async () => {
+    const f = await fixture();
+    const list = vi.fn(f.provider.list);
+    f.provider.list = list;
+    f.provider.listBrowserForSession = async (sessionId) => sessionId === 'session' ? [{ id: f.sandbox.id, sessionId, browserEnabled: true, createdAtMs: null }] : [];
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
+    expect(list).not.toHaveBeenCalled();
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
+  });
+
+  it('keeps the cleanup record and settles when the inventory read fails', async () => {
+    const f = await fixture();
+    f.provider.listBrowserForSession = async () => { throw new Error('apiserver timeout'); };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
+  });
+
   it('exports crashed retained audit through the provider before permitting deletion', async () => {
     const f = await fixture();
     const read = vi.fn(async () => ({ entries: [], total: 0 }));

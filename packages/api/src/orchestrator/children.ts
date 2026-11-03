@@ -55,6 +55,7 @@ import {
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { sandboxReclaimBackoff } from "../lib/retry-backoff.js";
 import { agentSessions, childEventOutbox, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -793,6 +794,8 @@ export class ChildWatcher {
   private retentionTimer: SweepTimer | undefined;
   /** Children the retention sweep already logged as kept by background work. */
   private readonly keptForWork = new Set<string>();
+  /** Spaces retention retries for a child whose reclaim keeps failing. */
+  private readonly retentionBackoff = sandboxReclaimBackoff();
   private readonly pendingTerminalAdmissions = new Map<string, { child: string; id: string; kind: WakeupKind | "hold"; at: number; dispatchId: string }>();
 
   constructor(private readonly deps: ChildrenDeps) {
@@ -1908,6 +1911,7 @@ export class ChildWatcher {
         ),
       );
     for (const row of rows) {
+      if (!this.retentionBackoff.ready(row.childSessionId, now)) continue;
       try {
         const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
         if (waiter?.status === "running") await this.closeSubscription(waiter, now);
@@ -1932,8 +1936,10 @@ export class ChildWatcher {
           `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
         );
         await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention", row, now);
+        this.retentionBackoff.succeeded(row.childSessionId);
       } catch (err) {
-        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
+        const waitMs = this.retentionBackoff.failed(row.childSessionId, now);
+        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}; next attempt in ${Math.round(waitMs / 60_000)} min:`, err);
       }
     }
     for (const [key, gap] of this.pendingTerminalAdmissions) {

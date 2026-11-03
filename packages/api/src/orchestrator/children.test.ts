@@ -4691,7 +4691,10 @@ describe("child sandbox retention", () => {
         expect((await watchRow(api, child.id))?.sandboxReclaimedAt).toBeNull();
         expect((await store.getSession(child.id))?.sandboxId).toBe(sandboxId);
         expect((await provider.status(sandboxId)).state).toBe("ready");
+        // An immediate pass waits out the retry backoff; a pass after it retries.
         await watcher.sweepRetention();
+        expect(retry).toHaveBeenCalledTimes(1);
+        await watcher.sweepRetention(Date.now() + 6 * 60_000);
         expect(retry).toHaveBeenCalledTimes(2);
         expect((await provider.status(sandboxId)).state).toBe("released");
         expect((await watchRow(api, child.id))?.sandboxReclaimedAt).not.toBeNull();
@@ -5240,7 +5243,8 @@ describe("child sandbox retention", () => {
       const [token] = await api!.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, child.id));
       expect(token?.revokedAt).toBeNull();
       revoke.mockImplementation(original);
-      await watcher.sweepRetention(Date.now() + RETENTION_MS + 60_000);
+      // A failed reclaim waits out the retry backoff (5 minutes) before the next attempt.
+      await watcher.sweepRetention(Date.now() + RETENTION_MS + 6 * 60_000);
       expect((await watchRow(api!, child.id))?.sandboxReclaimedAt).not.toBeNull();
       const [retried] = await api!.providers.db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, child.id));
       expect(retried?.revokedAt).not.toBeNull();
