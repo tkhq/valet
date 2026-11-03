@@ -27,6 +27,9 @@ import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches } from "../schema/index.js";
+import { PLUGIN_CHILD_SESSION_PREFIX, pluginThreadKey } from "./plugin-thread-key.js";
+
+export { pluginThreadKey };
 
 export interface PluginThreadsDeps {
   db: AppDb;
@@ -55,11 +58,6 @@ const DEFAULT_CHILD_TIMEOUT_MS = 30 * 60_000;
 /** A merge follows the submission it joined; bound the chain like `Thread.awaitResult`. */
 const MAX_MERGE_HOPS = 8;
 
-/** The thread key a plugin key maps to: namespaced so plugins cannot collide with each other or with core keys. */
-export function pluginThreadKey(plugin: string, key: string): string {
-  return `plugin:${plugin}:${key}`;
-}
-
 /**
  * A child session id fixed by (plugin, owner, thread, dispatch): a retry of
  * the same dispatch finds the child the first call started instead of
@@ -71,7 +69,7 @@ export function pluginChildSessionId(plugin: string, owner: Principal, threadKey
     .update(`${plugin}\n${owner.type}:${owner.id}\n${threadKey}\n${dispatchId}`)
     .digest("hex")
     .slice(0, 32);
-  return `child_plg_${digest}`;
+  return `${PLUGIN_CHILD_SESSION_PREFIX}${digest}`;
 }
 
 export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreadsScope): PluginThreads {

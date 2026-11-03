@@ -12,12 +12,13 @@ export function isAppAssistantThread(thread: Pick<ThreadSummary, "key">): boolea
   return Boolean(thread.key?.startsWith("app-assistant:") || thread.key?.startsWith("workflow:") || isHomeThread(thread));
 }
 
-/** Threads that are not rows in the thread list: workflow threads, and the
- * home conversation, which the web sidebar pins above the list instead.
+/** Threads that are not rows in the thread list: workflow threads, plugin
+ * threads (the server leaves them out too), and the home conversation, which
+ * the web sidebar pins above the list instead.
  * Earlier helper conversations from the side panel are rows, so they stay
  * reachable. */
 export function isHiddenFromThreadList(thread: Pick<ThreadSummary, "key">): boolean {
-  return Boolean(thread.key?.startsWith("workflow:") || isHomeThread(thread));
+  return Boolean(thread.key?.startsWith("workflow:") || thread.key?.startsWith("plugin:") || isHomeThread(thread));
 }
 
 /** The implicit thread is always the newest created thread, regardless of sidebar sort. */
