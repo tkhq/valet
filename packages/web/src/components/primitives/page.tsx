@@ -11,9 +11,9 @@ import { cn } from "~/lib/cn";
 export const pageClass = "mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-10";
 
 /**
- * The top of a page: an optional back link, the title with an optional
- * clause beside it (such as `WorkspaceClause`), the page actions on the
- * right, and an optional description below.
+ * The top of a page: an optional back link, the title after an optional
+ * breadcrumb step (such as `WorkspaceClause`, "Space /"), the page actions on
+ * the right, and an optional description below.
  */
 export function PageHeader({ title, clause, description, actions, back, className }: {
   title: ReactNode;
@@ -33,9 +33,10 @@ export function PageHeader({ title, clause, description, actions, back, classNam
           actions on the title row: a `sm` control is as tall as its line. */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-            <h1 className="min-w-0 break-words font-display text-2xl text-ink">{title}</h1>
+          {/* `clause` is the breadcrumb step before the title: "Space / Page". */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             {clause}
+            <h1 className="min-w-0 break-words font-display text-2xl text-ink">{title}</h1>
           </div>
           {description && <p className="mt-1 text-sm text-muted">{description}</p>}
         </div>

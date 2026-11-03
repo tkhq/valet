@@ -6,6 +6,10 @@ let data: { sessionId: string } | undefined;
 let error: Error | null = null;
 const retry = vi.fn();
 vi.mock("~/hooks/use-workspace-conversation", () => ({ useWorkspaceConversation: () => ({ data, error, refetch: retry }), useCurrentWorkspace: () => "user" }));
+vi.mock("@tanstack/react-router", () => ({
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/chat" } }),
+  Link: () => null,
+}));
 vi.mock("./thread-tree", () => ({
   ThreadTree: ({ sessionId }: { sessionId: string }) => <div data-testid="threads">{sessionId}</div>,
   ThreadTreeWaiting: () => <div>Opening threads</div>,

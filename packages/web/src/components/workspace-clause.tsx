@@ -2,21 +2,18 @@
  * The workspace clause — one grammar for "where am I".
  *
  * The active space scopes every list on a page. These components name it
- * where the reader's eyes are: a space control beside a page title
+ * where the reader's eyes are: the space step of a page's breadcrumb
  * (`WorkspaceClause`), and a scope line inside a create dialog
  * (`CreateScopeLine`). Same icons as the Spaces sidebar rows.
  *
  * All of it disappears for a caller with no teams: workspace furniture on a
- * solo account would name a choice that does not exist — the same rule that
- * hides the switcher itself (`WorkspaceSwitcher` renders nothing below two
- * options).
+ * solo account would name a choice that does not exist.
  */
 import { User, Users } from "lucide-react";
 import type { TeamSummary } from "@valet/api/wire";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
-import { WorkspaceSwitcher, useWorkspaceOptions } from "~/components/layout/workspace-switcher";
-import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 export type ActiveWorkspace =
@@ -68,35 +65,30 @@ export function workspaceName(ws: ActiveWorkspace): string {
 }
 
 /**
- * The space control beside a page title: the active space's icon and name,
- * and a menu to switch space. It is how a page with no thread sidebar
- * (Presence, Workflows, Artifacts, Memory, and the other scoped pages)
- * shows and changes its scope.
+ * The space step of a page's breadcrumb ("XORS Eng Team / Workflows"):
+ * plain text naming the active space. The sidebar switches space; this only
+ * says where the page is. `crumb` is the small size for a detail page's
+ * breadcrumb line.
  *
  * Renders nothing for a caller with no teams, and nothing while a
  * team-scoped clause cannot be named yet — a beat of absence beats a wrong
  * name (`resolveActiveWorkspace`).
  */
-export function WorkspaceClause() {
+export function WorkspaceClause({ size = "title" }: { size?: "title" | "crumb" }) {
   const ws = useActiveWorkspace();
-  const options = useWorkspaceOptions();
-  const scope = useWorkspaceScope();
-  // A phone switches space in its drawer; there the clause only names it.
-  const mobile = useMobileLayout();
   if (ws === undefined) return null;
   if (ws.kind === "personal" && !ws.hasTeams) return null;
   const count = ws.kind === "team" ? ws.team.memberCount : 0;
   const note = ws.kind === "team"
     ? `Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`
     : "Your personal space. Only you can see these.";
-  if (mobile) {
-    const Icon = ws.kind === "team" ? Users : User;
-    return <span title={note} className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
-      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="truncate">{ws.kind === "team" ? ws.team.name : "Personal"}</span>
-    </span>;
-  }
-  return <WorkspaceSwitcher variant="clause" options={options} activeKey={scope.key} note={note} />;
+  const Icon = ws.kind === "team" ? Users : User;
+  return <span title={note} className={cn("inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted",
+    size === "title" ? "font-display text-2xl" : "text-xs")}>
+    <Icon className={size === "title" ? "h-5 w-5 shrink-0" : "h-3.5 w-3.5 shrink-0"} aria-hidden />
+    <span className="truncate">{ws.kind === "team" ? ws.team.name : "Personal"}</span>
+    <span aria-hidden>/</span>
+  </span>;
 }
 
 /**
@@ -115,7 +107,7 @@ export function CreateScopeLine({ what }: { what: string }) {
       <p className="flex items-center gap-2 rounded border border-line bg-ink-wash/40 px-3 py-2 text-xs text-muted">
         <User className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span>
-          This {what} stays in your personal space. Switch space beside the page title to
+          This {what} stays in your personal space. Open a team space in the sidebar to
           create it in a team.
         </span>
       </p>

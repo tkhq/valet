@@ -2,6 +2,7 @@ import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
 import { SpacesNav } from "./spaces-nav";
+import { useSidebarControls } from "~/components/layout/app-shell";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useHomeConversation } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
@@ -25,6 +26,7 @@ import {
   Folder,
   FolderOpen,
   PanelLeft,
+  PanelLeftClose,
   Bell,
   Check,
   CheckCheck,
@@ -394,6 +396,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const homeId = !mobile ? home.data?.threadId : undefined;
   const homeInList = homeId !== undefined && home.data?.sessionId === sessionId;
   const onHome = useRouterState({ select: (state) => state.location.pathname === "/" });
+  const onThreadsPage = useRouterState({ select: (state) => state.location.pathname === "/" || state.location.pathname === "/chat" });
+  const sidebarControls = useSidebarControls();
   // Who is in which thread now: faces on the rows.
   const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
@@ -840,6 +844,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           </DropdownMenuContent>
         </DropdownMenu>}
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
+        {!mobile && sidebarControls?.present && <button type="button" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={sidebarControls.toggleCollapsed}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><PanelLeftClose className="h-4 w-4" /></button>}
       </div>
       {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
       {actionError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{actionError}</p>}
@@ -898,10 +904,12 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           content in a `display: table` div that sizes to intrinsic content
           width, which defeats row truncation within the fixed-width sidebar. */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
-        <nav className="pb-3">
+        <nav aria-label="Sidebar" className="pb-3">
           {homeId && home.data && <HomeRow sessionId={home.data.sessionId} threadId={homeId} thread={homeInList ? threadsQ.data?.threads.find((t) => t.id === homeId) : undefined}
             active={onHome} hasPendingGate={homeInList && gatedThreadIds.has(homeId)} />}
-          <SpacesNav bare={mobile}>
+          <SpacesNav />
+          {/* A space's Projects and threads show while its Threads or Home is open; a phone's drawer always shows them. */}
+          {(mobile || onThreadsPage) && <>
           <div className="group flex items-center gap-1 py-2 pl-4 pr-3">
             <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
@@ -1003,12 +1011,12 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           {listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
           </section>
           {threadsQ.hasNextPage && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
-          </SpacesNav>
+          </>}
         </nav>
         {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
         {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}
         {showChildren && !childrenQ.error && childrenQ.hasNextPage && <button className="px-4 py-2 text-xs text-moss" disabled={childrenQ.isFetchingNextPage} onClick={() => void childrenQ.fetchNextPage()}>{childrenQ.isFetchingNextPage ? "Loading…" : "Load more work"}</button>}
-        <div className="border-t border-line/60 px-2 py-1.5">
+        {(mobile || onThreadsPage) && <div className="border-t border-line/60 px-2 py-1.5">
           <button
             type="button"
             onClick={() => setShowArchived((v) => !v)}
@@ -1049,7 +1057,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               ))}
             </ul>
           )}
-        </div>
+        </div>}
       </div>
     </>
   );

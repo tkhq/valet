@@ -235,8 +235,8 @@ earlier rule that Home changes only below 768px.
 
 - `/` shows the thread sidebar (New thread, Home, Projects, Recents) with
   Home selected, and the Home conversation in the main pane. Every thread is
-  one click away. The top navigation has no separate Home link; Threads is
-  active on `/` and on `/chat`. The logo also opens `/`.
+  one click away. The logo also opens `/`. The sidebar is app-wide; see the
+  [team workspace design](2026-08-17-team-workspace-ui-design.md).
 - The sidebar pins the Home row in every workspace. The row links to `/`.
   Home starts fresh: no tasks nest under it. Tasks that Home started stay in
   the Tasks panel and in their own workspace's thread list.
