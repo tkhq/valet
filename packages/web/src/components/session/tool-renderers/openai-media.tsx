@@ -11,6 +11,7 @@
  */
 import { Sparkles } from "lucide-react";
 import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
+import { ImagePreview } from "./image-preview";
 import { ToolBody, TruncatedText } from "./tool-shell";
 
 const OPENAI_TOOL_PREFIX = "openai.";
@@ -107,10 +108,10 @@ function Preview({ args, result, status, error, toolName }: ToolRendererProps) {
   const prompt = openaiParams(args, toolName).prompt;
   return (
     <figure className="space-y-2">
-      {imageUrl ? <img
+      {imageUrl ? <ImagePreview
         src={imageUrl}
         alt={typeof prompt === "string" ? prompt : "generated image"}
-        className="max-h-96 max-w-full rounded border border-line object-contain"
+        download={typeof data.path === "string" ? { href: imageUrl, name: data.path.split("/").pop() ?? "image.png" } : undefined}
       /> : null}
       {typeof data.warning === "string" ? <p className="text-xs text-muted">{data.warning}</p> : null}
       {typeof data.stream_warning === "string" ? <p className="text-xs text-muted">{data.stream_warning}</p> : null}
