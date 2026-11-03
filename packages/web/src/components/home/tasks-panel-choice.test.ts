@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { firstVisitTasksOpen, loadTasksPanelChoice, storeTasksPanelChoice } from "./tasks-panel-choice";
+import { loadTasksPanelChoice, storeTasksPanelChoice } from "./tasks-panel-choice";
 
 describe("Tasks panel choice", () => {
   afterEach(() => {
@@ -21,11 +21,5 @@ describe("Tasks panel choice", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
     expect(() => storeTasksPanelChoice(true)).not.toThrow();
     expect(loadTasksPanelChoice()).toBeUndefined();
-  });
-
-  it("opens on a first visit only when something needs the person on a wide window", () => {
-    expect(firstVisitTasksOpen(1, 1280)).toBe(true);
-    expect(firstVisitTasksOpen(1, 1279)).toBe(false);
-    expect(firstVisitTasksOpen(0, 1920)).toBe(false);
   });
 });

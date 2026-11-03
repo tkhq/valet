@@ -3,7 +3,7 @@ import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
 import { SpacesNav } from "./spaces-nav";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
-import { useHomeConversation, useHomeTasks } from "~/api/home";
+import { useHomeConversation } from "~/api/home";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -52,8 +52,6 @@ import type {
   ActiveViewer,
   ArtifactListItem,
   DecisionGate,
-  HomeTaskItem,
-  HomeTasksResponse,
   ChildWorkSummary,
   ThreadPullRequest,
   ThreadSummary,
@@ -1075,69 +1073,29 @@ function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
   const queueState = useQueueStateForThread(sessionId, threadId);
   const question = thread ? pendingAgentQuestion(thread) : undefined;
   const unread = !active && thread !== undefined && isThreadUnread(thread);
-  // Tasks Home started nest under it, like a thread's children.
-  const tasks = homeTaskRows(useHomeTasks().data);
-  const [collapsed, setCollapsed] = useState(false);
   return (
     <section aria-label="Home" className="pt-1">
-      <div className="flex items-center">
-        <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
-          <Link
-            to="/"
-            className={cn(
-              "flex flex-1 min-w-0 items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
-              active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
-            )}
-          >
-            <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
-            <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
-            {question
-              ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
-              : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
-            <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
-          </Link>
-        </Tooltip>
-        {tasks.length > 0 && <button type="button" aria-label={`${collapsed ? "Expand" : "Collapse"} tasks for Home`} aria-expanded={!collapsed}
-          onClick={() => setCollapsed(!collapsed)} className="mr-2 inline-flex shrink-0 items-center justify-center rounded p-1 text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:bg-ink-wash">
-          <ChevronDown aria-hidden className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")} />
-        </button>}
-      </div>
-      {tasks.length > 0 && !collapsed && (
-        <ul aria-label="Tasks from Home" className={NESTED_LIST_CLASS}>
-          {tasks.map((task) => (
-            <li key={task.id} className="flex items-center gap-1">
-              <Link to="/threads/$threadId" params={{ threadId: task.threadId }} className={nestedRowClass(task.state === "done", false)}>
-                <MessageSquare className="h-3 w-3 shrink-0" />
-                <span className="flex-1 truncate" title={`${task.title} · ${task.workspace.name}`}>{task.title}</span>
-                <HomeTaskMark state={task.state} />
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
+      <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
+        <Link
+          to="/"
+          className={cn(
+            "flex items-center gap-2 border-l-2 py-2 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:bg-ink-wash",
+            active ? "border-moss bg-moss-wash-strong pl-[calc(1rem-2px)] font-medium text-ink" : "border-transparent pl-4 text-ink/85 hover:bg-ink-wash/60",
+          )}
+        >
+          <House aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
+          <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
+          {question
+            ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+            : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+          <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
+        </Link>
+      </Tooltip>
     </section>
   );
 }
 
-/** Done tasks the Home row keeps nested; Tasks lists the rest. */
-const HOME_ROW_DONE = 3;
-
-/** Pure: the tasks nested under Home, in Tasks order: what needs the person,
- * what is running, unread replies, then the newest few finished. */
-export function homeTaskRows(data: HomeTasksResponse | undefined): HomeTaskItem[] {
-  if (!data) return [];
-  return [...data.needsYou, ...data.working, ...data.updates, ...data.finished.slice(0, HOME_ROW_DONE)];
-}
-
-function HomeTaskMark({ state }: { state: HomeTaskItem["state"] }) {
-  if (state === "needs_you") return <StatusDot tone="warning" label="Needs you" className="shrink-0" />;
-  if (state === "failed") return <StatusDot tone="danger" label="Failed" className="shrink-0" />;
-  if (state === "working") return <span role="img" aria-label="running" className={cn("h-1.5 w-1.5 shrink-0 rounded-full", childStatusDotClassName("running"))} />;
-  if (state === "waiting") return <StatusDot tone="info" label="Unread reply" className="shrink-0" />;
-  return <span role="img" aria-label="done" className="shrink-0 text-muted">✓</span>;
-}
-
-/** The indented list of a row's children, and of Home's tasks. */
+/** The indented list of a row's children. */
 const NESTED_LIST_CLASS = "ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5";
 
 /** Pure: one nested row. Settled work recedes: its run is over. */

@@ -12,8 +12,7 @@ const sessionView = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
-let homeTasks: object | undefined = { needsYou: [], working: [], updates: [], finished: [] };
-vi.mock("~/api/home", () => ({ useHomeConversation: () => home(), useHomeTasks: () => ({ data: homeTasks }) }));
+vi.mock("~/api/home", () => ({ useHomeConversation: () => home() }));
 vi.mock("~/components/home/tasks-panel", () => ({
   TasksPanel: () => <div data-testid="tasks" />,
   useNeedsYouCount: () => needsYou(),
@@ -36,7 +35,6 @@ const conversation = { data: { sessionId: "assistant:asst_1", threadId: "th-home
 describe("Home", () => {
   beforeEach(() => {
     localStorage.clear();
-    homeTasks = { needsYou: [], working: [], updates: [], finished: [] };
     home.mockReturnValue(conversation);
     needsYou.mockReturnValue({ count: 0, partial: false });
     sessionView.mockReset();
@@ -82,7 +80,7 @@ describe("Home", () => {
     expect(sessionView.mock.lastCall?.[0]).not.toHaveProperty("panel");
     expect(screen.getByRole("button", { name: "Show conversation" })).toBeTruthy();
     // Only the greeting and starters: Tasks already lists what waits on the person.
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toMatch(/^(Good (morning|afternoon|evening)|Working late\?)$/);
+    expect(within(screen.getByTestId("chat")).getByRole("heading", { level: 2 }).textContent).toMatch(/^(Good (morning|afternoon|evening)|Working late\?)$/);
     expect(screen.queryByText("Waiting on you")).toBeNull();
     expect(screen.queryByText("Recent work")).toBeNull();
     expect(screen.getByTestId("dock")).toBeTruthy();
@@ -126,38 +124,27 @@ describe("Home", () => {
     expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
   });
 
-  it.each([
-    [2, 1440, true],
-    [2, 1280, true],
-    [2, 1279, false],
-    [0, 1440, false],
-  ])("on a first visit with %i needing the person at %ipx, opens the panel: %s", (count, width, open) => {
-    needsYou.mockReturnValue({ count, partial: false });
-    vi.stubGlobal("innerWidth", width);
+  it("opens the panel by default when no choice is stored", () => {
+    needsYou.mockReturnValue({ count: 0, partial: false });
     render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
-    expect(screen.queryByTestId("tasks") !== null).toBe(open);
+    expect(screen.getByTestId("tasks")).toBeTruthy();
     expect(localStorage.getItem("valet:home-tasks-panel")).toBeNull();
-    vi.unstubAllGlobals();
   });
 
-  it("waits for the task counts before deciding a first visit", () => {
-    needsYou.mockReturnValue({ count: 0, partial: false });
-    homeTasks = undefined;
-    vi.stubGlobal("innerWidth", 1440);
-    const { rerender } = render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
+  it("keeps a stored closed choice over the default", () => {
+    needsYou.mockReturnValue({ count: 3, partial: false });
+    localStorage.setItem("valet:home-tasks-panel", "closed");
+    render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
     expect(screen.queryByTestId("tasks")).toBeNull();
-    homeTasks = { needsYou: [], working: [], updates: [], finished: [] };
-    needsYou.mockReturnValue({ count: 1, partial: false });
-    rerender(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
-    expect(screen.getByTestId("tasks")).toBeTruthy();
-    vi.unstubAllGlobals();
+    expect(screen.getByRole("button", { name: "Tasks · 3" })).toBeTruthy();
   });
 
   it("opens on ?view=tasks without storing a choice, and clears it on close", () => {
+    localStorage.setItem("valet:home-tasks-panel", "closed");
     const onViewChange = vi.fn();
     render(<HomeScreen view="tasks" wide onViewChange={onViewChange} />);
     expect(screen.getByTestId("tasks")).toBeTruthy();
-    expect(localStorage.getItem("valet:home-tasks-panel")).toBeNull();
+    expect(localStorage.getItem("valet:home-tasks-panel")).toBe("closed");
     fireEvent.click(screen.getByRole("button", { name: "Close tasks" }));
     expect(onViewChange).toHaveBeenCalledWith("chat");
   });

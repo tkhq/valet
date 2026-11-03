@@ -16,8 +16,6 @@ import { TooltipProvider } from "~/components/primitives";
 import { ApiError } from "~/api/client";
 import type {
   ArtifactListItem,
-  HomeTaskItem,
-  HomeTasksResponse,
   BackgroundWorkConflict,
   ListTeamsResponse,
   DecisionGate,
@@ -142,11 +140,9 @@ vi.mock("~/api/workspace-runtime", () => ({
 
 // The person's home conversation, which the web sidebar pins above the list.
 let homeConversation: { sessionId: string; threadId: string } | undefined;
-let homeTasks: HomeTasksResponse | undefined;
 vi.mock("~/api/home", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/home")>(),
   useHomeConversation: () => ({ data: homeConversation, isError: false, error: null, refetch: vi.fn() }),
-  useHomeTasks: () => ({ data: homeTasks }),
 }));
 
 // Applies the component's real selectors against a minimal store shape:
@@ -296,21 +292,12 @@ describe("ThreadTree — Home row", () => {
     expect(within(section).queryByLabelText("Unread")).toBeNull();
   });
 
-  it("nests the tasks Home started under the Home row, with their state", () => {
+  it("starts Home fresh: no tasks nest under the Home row", () => {
     homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
     threads = [home(), thread()];
-    const task = (id: string, state: HomeTaskItem["state"]): HomeTaskItem =>
-      ({ id, threadId: `th-${id}`, sessionId: "s", title: `Task ${id}`, workspace: { key: "user", name: "Personal" }, state, updatedAt: 1 });
-    homeTasks = { needsYou: [task("a", "needs_you")], working: [task("b", "working")], updates: [], finished: [task("c", "done"), task("d", "done"), task("e", "done"), task("f", "done")] };
     renderTree();
-    const list = screen.getByRole("list", { name: "Tasks from Home" });
-    // The router Link mock renders a bare anchor, so query it by tag.
-    expect([...list.querySelectorAll("a")].map(link => link.querySelector("span")?.textContent)).toEqual(["Task a", "Task b", "Task c", "Task d", "Task e"]);
-    expect(within(list).getByLabelText("Needs you")).toBeTruthy();
-    expect(within(list).getByLabelText("running")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Collapse tasks for Home" }));
     expect(screen.queryByRole("list", { name: "Tasks from Home" })).toBeNull();
-    homeTasks = undefined;
+    expect(screen.queryByRole("button", { name: /tasks for Home/ })).toBeNull();
   });
 
   it("finds Home in search when its content matches", async () => {

@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ListChecks, X } from "lucide-react";
 import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
-import { useHomeConversation, useHomeTasks } from "~/api/home";
+import { useHomeConversation } from "~/api/home";
 import { errorText } from "~/lib/error-text";
 import { queueBusy, useQueueStateForThread } from "~/stores/stream";
 import { Link } from "@tanstack/react-router";
@@ -10,7 +10,7 @@ import { HomeEmptyState, greeting } from "./home-empty-state";
 import { MobileConversationLayout, type MobileConversationView } from "./mobile-conversation-layout";
 import { NeedsYouDock } from "./needs-you-dock";
 import { TasksPanel, useNeedsYouCount } from "./tasks-panel";
-import { firstVisitTasksOpen, loadTasksPanelChoice, storeTasksPanelChoice } from "./tasks-panel-choice";
+import { loadTasksPanelChoice, storeTasksPanelChoice } from "./tasks-panel-choice";
 export type HomeView = MobileConversationView;
 
 /**
@@ -47,10 +47,9 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
  * Desktop Home, in the main pane of the Threads layout. While Home is idle it
  * shows the greeting and starters over the transcript; typing, a starter, or a running
  * turn gives way to the conversation. The header's Tasks button opens a
- * collapsible status panel beside it. The panel keeps the person's last
- * choice for this browser; with none, it opens on load only when something
- * needs them and the window is wide (`firstVisitTasksOpen`). `?view=tasks`
- * and the approvals dock open it without storing a choice.
+ * collapsible status panel beside it. The panel is open by default; the
+ * person's last choice for this browser wins once they toggle it.
+ * `?view=tasks` and the approvals dock open it without storing a choice.
  */
 function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasksClosed }: {
   sessionId: string; threadId: string; dock: ReactNode; empty: ReactNode;
@@ -60,12 +59,7 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasks
   const busy = queueBusy(useQueueStateForThread(sessionId, threadId));
   useEffect(() => { if (busy) setLanding(false); }, [busy]);
   const needsYou = useNeedsYouCount();
-  const tasksLoaded = useHomeTasks().data !== undefined;
-  // `undefined` until a stored choice, a request, or the first-visit rule decides.
-  const [tasksOpen, setTasksOpen] = useState<boolean | undefined>(() => tasksRequested || loadTasksPanelChoice());
-  useEffect(() => {
-    if (tasksOpen === undefined && tasksLoaded) setTasksOpen(firstVisitTasksOpen(needsYou.count, window.innerWidth));
-  }, [tasksOpen, tasksLoaded, needsYou.count]);
+  const [tasksOpen, setTasksOpen] = useState(() => tasksRequested || (loadTasksPanelChoice() ?? true));
   useEffect(() => { if (tasksRequested) setTasksOpen(true); }, [tasksRequested]);
   const chooseTasksOpen = (open: boolean) => {
     setTasksOpen(open);
@@ -73,7 +67,7 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasks
     if (!open) onTasksClosed();
   };
   const count = needsYou.count > 0 ? ` · ${needsYou.count}${needsYou.partial ? "+" : ""}` : "";
-  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen === true} onClick={() => chooseTasksOpen(!tasksOpen)}>
+  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen} onClick={() => chooseTasksOpen(!tasksOpen)}>
     <ListChecks aria-hidden className="h-4 w-4" />{`Tasks${count}`}
   </Button>;
   return <div data-home-desktop className="flex min-h-0 min-w-0 flex-1" onInput={() => setLanding(false)}>

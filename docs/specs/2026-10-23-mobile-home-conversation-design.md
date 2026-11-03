@@ -238,11 +238,8 @@ earlier rule that Home changes only below 768px.
   one click away. The top navigation has no separate Home link; Threads is
   active on `/` and on `/chat`. The logo also opens `/`.
 - The sidebar pins the Home row in every workspace. The row links to `/`.
-  Tasks that Home started nest under it, the way a thread's children nest:
-  first what needs the person, then running tasks, unread replies, and the
-  newest three finished tasks. Each nested row shows its state. The tasks
-  remain top-level threads in their own workspace; only the sidebar nests
-  them.
+  Home starts fresh: no tasks nest under it. Tasks that Home started stay in
+  the Tasks panel and in their own workspace's thread list.
 - While Home is idle, an idle view covers the transcript. It shows a
   greeting with the starters, Show conversation, and a link to the workspace
   overview. What waits on the person is in the Tasks panel, not here. Typing, a starter, Show conversation, or a running turn removes
@@ -252,10 +249,9 @@ earlier rule that Home changes only below 768px.
   panel header, the thread header, and the sidebar's top row share one height,
   so their bottom borders form one line. The sidebar divider is a 1px hairline.
   `?view=tasks` opens the panel; closing it clears the parameter.
-- The panel keeps the person's last open or closed choice in browser storage.
-  With no stored choice, it opens on load only when something needs the
-  person and the window is at least 1280px wide. A link or the approvals dock
-  can open it without storing a choice. The Tasks button shows the count of
+- The panel is open by default on Home. Once the person opens or closes it,
+  browser storage keeps that choice, and the choice wins on later visits. A
+  link or the approvals dock can open it without storing a choice. The Tasks button shows the count of
   items that need the person ("Tasks · 3") whether the panel is open or not.
 - The New thread button keeps its one-click action. A menu beside it offers
   Thread, Task, Workflow, Artifact, Project, and Workspace overview. Task and
