@@ -101,6 +101,7 @@ import { eventReceiptsRouter } from "./routes/event-receipts.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
+import { lifecycleGate, type Lifecycle } from "./lib/lifecycle.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -135,6 +136,12 @@ export interface CreateAppOpts {
    * embedded callers have no boot chain).
    */
   isReady?: () => boolean;
+  /**
+   * Boot/drain gate (`lib/lifecycle.ts`): API, MCP, webhook and proxy routes
+   * answer 503 + `Retry-After` until the boot chain is done and again during
+   * the SIGTERM drain. Absent → no gate (test harnesses, embedded callers).
+   */
+  lifecycle?: Lifecycle;
 }
 
 /**
@@ -175,6 +182,8 @@ export function createApp(
       credentials: true,
     }),
   );
+  // After CORS, so a 503 from the gate still reaches a cross-origin caller.
+  if (opts.lifecycle) app.use("*", lifecycleGate(opts.lifecycle));
   app.use("*", providersMiddleware(providers));
   app.use("/api/*", cliUsage());
 

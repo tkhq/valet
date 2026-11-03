@@ -53,6 +53,7 @@ import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
 import { initSandboxMetrics, reportError } from "@valet/engine";
 import { startProcessHealthSampler } from "./observability/process-health.js";
+import { Lifecycle, startBootListener } from "./lib/lifecycle.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
@@ -316,6 +317,13 @@ initSandboxMetrics();
 const stopProcessHealthSampler = startProcessHealthSampler();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
+// Booting → ready → draining (`lib/lifecycle.ts`). The boot listener holds
+// the port through database upgrades and provider setup, so callers get 503 +
+// Retry-After instead of a refused connection; it hands the port to the real
+// app below. Port 0 (tests) has nothing to hold.
+const lifecycle = new Lifecycle();
+const bootListener = port === 0 ? null : await startBootListener(port);
+
 // `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
 // both-set guard). Fail boot with the corrective-action message only — no
 // stack spam for a config mistake. Rethrow anything else.
@@ -415,7 +423,6 @@ getAttachmentRefStore().startSweep();
 // chain checks it between steps: a shutdown during boot must stop the chain
 // from starting more services.
 let closed = false;
-let bootReady = false;
 let installationSweep: InstallationSweepHandle | undefined;
 let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
 let threadAutoArchiveSweep: ReturnType<typeof startThreadAutoArchiveSweep> | undefined;
@@ -428,7 +435,7 @@ let threadAutoArchiveSweep: ReturnType<typeof startThreadAutoArchiveSweep> | und
 const { startServer: startListening, webServed } = createApp(
   providers,
   authWiring,
-  { webDistDir, isReady: () => bootReady && !closed },
+  { webDistDir, isReady: () => lifecycle.isReady() && !closed, lifecycle },
   adapter,
 );
 // A set-but-unmounted dist means the bundled image shipped without a valid
@@ -441,6 +448,7 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
+await bootListener?.close();
 const server = startListening({
   port,
   onListen: (boundPort) => {
@@ -469,7 +477,7 @@ const server = startListening({
 // the port's critical path for exactly this reason; the whole chain now
 // follows it.
 //
-// The chain has two halves around the `bootReady` flip:
+// The chain has two halves around the `lifecycle.markReady()` flip:
 //   1. Traffic-protecting steps — session restore, the
 //      config reconcile (fail-fast `process.exit(1)`: a bad config dies
 //      while still NotReady and never takes traffic), team-sync report.
@@ -593,7 +601,7 @@ async function runBootChain(): Promise<void> {
   // readiness on them bought no guarantee — but a HANGING one (a webhook
   // registration against a slow provider) would stall every rolling pod's
   // readiness for work the pod serves fine without.
-  bootReady = true;
+  lifecycle.markReady();
   console.log("boot chain: traffic-critical steps complete — /api/ready now reports ready");
 
   // Channel ingress (Task 8): resolves credentials into transports, then
@@ -733,6 +741,9 @@ async function close(): Promise<void> {
   // after this point stay unstarted, so the stops below can meet a service
   // that never ran — each one tolerates that.
   closed = true;
+  // Readiness goes 503 and new external API requests get 503 + Retry-After
+  // from here on; the stops below end the claim loops and schedulers.
+  lifecycle.beginDrain();
   stopProcessHealthSampler();
   // The WakeWatcher's stop flag goes up first: the awaited stops below can
   // take most of the hard-exit budget, and a pass must not start new rows
@@ -837,6 +848,11 @@ async function close(): Promise<void> {
     providers.autoTitleHost.stop();
   } catch (err) {
     console.error("autoTitleHost.stop failed:", err);
+  }
+  // Requests already in flight finish before their sessions are evicted,
+  // bounded by the drain window that started at beginDrain().
+  if (!(await lifecycle.waitForIdle())) {
+    console.warn(`shutdown: drain window ended with ${lifecycle.requestsInFlight} request(s) still in flight`);
   }
   try {
     // Evict, never destroy: Session.destroy() deletes the session's durable
