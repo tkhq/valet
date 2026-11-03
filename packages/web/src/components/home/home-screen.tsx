@@ -5,8 +5,8 @@ import { SessionView } from "~/components/session/session-view";
 import { useHomeConversation } from "~/api/home";
 import { errorText } from "~/lib/error-text";
 import { queueBusy, useQueueStateForThread } from "~/stores/stream";
-import { HomeEmptyState } from "./home-empty-state";
-import { HomeLanding } from "./home-landing";
+import { Link } from "@tanstack/react-router";
+import { HomeEmptyState, greeting } from "./home-empty-state";
 import { MobileConversationLayout, type MobileConversationView } from "./mobile-conversation-layout";
 import { NeedsYouDock } from "./needs-you-dock";
 import { TasksPanel, useNeedsYouCount } from "./tasks-panel";
@@ -44,7 +44,7 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
 
 /**
  * Desktop Home, in the main pane of the Threads layout. While Home is idle it
- * shows `HomeLanding` over the transcript; typing, a starter, or a running
+ * shows the greeting and starters over the transcript; typing, a starter, or a running
  * turn gives way to the conversation. The header's Tasks button opens a
  * collapsible status panel beside it.
  */
@@ -64,11 +64,17 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksOpen, onTasksOpenC
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <SessionView sessionId={sessionId} activeThreadId={threadId} chatOnly enableReplies composerAccessory={dock} emptyState={empty}
         headerActions={tasksButton}
-        cover={landing ? <HomeLanding sessionId={sessionId} threadId={threadId} onShowConversation={() => setLanding(false)} /> : undefined} />
+        cover={landing ? <HomeEmptyState sessionId={sessionId} threadId={threadId} title={greeting(new Date())} onPick={() => setLanding(false)}>
+          <p className="flex gap-4 text-sm text-muted">
+            <button type="button" className="hover:text-ink hover:underline" onClick={() => setLanding(false)}>Show conversation</button>
+            <Link to="/overview" className="hover:text-ink hover:underline">Workspace overview</Link>
+          </p>
+        </HomeEmptyState> : undefined} />
     </div>
     {tasksOpen && <aside aria-label="Tasks" className="flex min-h-0 w-[clamp(18rem,30vw,24rem)] shrink-0 flex-col border-l border-line">
-      <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-2">
-        <h2 className="text-sm font-medium text-ink">Tasks</h2>
+      {/* Same height, padding and title type as the thread header beside it, so the two bottom borders form one line. */}
+      <div className="flex h-[--nav-height] shrink-0 items-center justify-between border-b border-line pl-4 pr-2">
+        <h2 className="font-display text-sm font-semibold tracking-tight text-ink">Tasks</h2>
         <Button size="sm" variant="ghost" aria-label="Close tasks" onClick={() => onTasksOpenChange(false)}><X aria-hidden className="h-4 w-4" /></Button>
       </div>
       <TasksPanel className="min-h-0 flex-1 overflow-y-auto p-4" />

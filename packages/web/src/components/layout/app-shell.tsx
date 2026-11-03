@@ -168,7 +168,8 @@ export function AppShell({
               {!collapsed && <div
                 {...sidebarPane.handleProps}
                 title="Drag to resize; use arrow keys when focused"
-                className="hidden md:block relative z-10 w-1 shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1"
+                // A 1px hairline like every other divider; the wider ::after strip keeps it easy to grab.
+                className="hidden md:block relative z-10 w-px shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1.5"
               />}
               <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
                 <DialogContent

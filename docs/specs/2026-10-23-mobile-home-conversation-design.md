@@ -244,12 +244,13 @@ earlier rule that Home changes only below 768px.
   remain top-level threads in their own workspace; only the sidebar nests
   them.
 - While Home is idle, an idle view covers the transcript. It shows a
-  greeting with the starters, a one-line status, the tasks waiting on the
-  person, recent work, Show conversation, and a link to the workspace
-  overview. Typing, a starter, Show conversation, or a running turn removes
+  greeting with the starters, Show conversation, and a link to the workspace
+  overview. What waits on the person is in the Tasks panel, not here. Typing, a starter, Show conversation, or a running turn removes
   the idle view until the person leaves Home.
 - The thread header has a Tasks button with the count of items that need the
-  person. It opens a collapsible Tasks panel beside the conversation.
+  person. It opens a collapsible Tasks panel beside the conversation. The
+  panel header, the thread header, and the sidebar's top row share one height,
+  so their bottom borders form one line. The sidebar divider is a 1px hairline.
   `?view=tasks` opens the panel; closing it clears the parameter.
 - The New thread button keeps its one-click action. A menu beside it offers
   Thread, Task, Workflow, Artifact, Project, and Workspace overview. Task and

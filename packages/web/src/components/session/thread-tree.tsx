@@ -816,7 +816,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           longer floats over the sidebar — it now sits in the top nav
           (see `SidebarControls` in `app-shell.tsx`), so there is nothing
           left to reserve room for at the aside's top-right corner. */}
-      <div className="flex items-center gap-1 px-2 pt-2">
+      {/* On a wider screen this row matches the thread header's height, so its bottom border continues that line. */}
+      <div className={cn("flex items-center gap-1 px-2", mobile ? "pt-2" : "h-[--nav-height] shrink-0 border-b border-line")}>
         <button
           type="button"
           onClick={() => void createAndNavigate()}

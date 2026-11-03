@@ -9,6 +9,9 @@ const home = vi.fn();
 const needsYou = vi.fn(() => ({ count: 0, partial: false }));
 const sessionView = vi.fn();
 
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+}));
 vi.mock("~/api/home", () => ({ useHomeConversation: () => home() }));
 vi.mock("~/components/home/tasks-panel", () => ({
   TasksPanel: () => <div data-testid="tasks" />,
@@ -16,9 +19,6 @@ vi.mock("~/components/home/tasks-panel", () => ({
 }));
 vi.mock("~/components/home/make-panel", () => ({ MakePanel: () => <div data-testid="make" /> }));
 vi.mock("~/components/home/needs-you-dock", () => ({ NeedsYouDock: () => <div data-testid="dock" /> }));
-vi.mock("~/components/home/home-landing", () => ({
-  HomeLanding: ({ onShowConversation }: { onShowConversation: () => void }) => <button type="button" data-testid="landing" onClick={onShowConversation}>Show conversation</button>,
-}));
 let busy = false;
 vi.mock("~/stores/stream", () => ({ useQueueStateForThread: () => undefined, queueBusy: () => busy }));
 vi.mock("~/components/session/session-view", () => ({
@@ -77,21 +77,25 @@ describe("Home", () => {
   it("shows the idle Home view over the desktop transcript until the person types", () => {
     render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
     expect(sessionView.mock.lastCall?.[0]).not.toHaveProperty("panel");
-    expect(screen.getByTestId("landing")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show conversation" })).toBeTruthy();
+    // Only the greeting and starters: Tasks already lists what waits on the person.
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toMatch(/^(Good (morning|afternoon|evening)|Working late\?)$/);
+    expect(screen.queryByText("Waiting on you")).toBeNull();
+    expect(screen.queryByText("Recent work")).toBeNull();
     expect(screen.getByTestId("dock")).toBeTruthy();
     expect(screen.queryByRole("tab")).toBeNull();
     fireEvent.input(screen.getByRole("textbox", { name: "Message" }), { target: { value: "h" } });
-    expect(screen.queryByTestId("landing")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show conversation" })).toBeNull();
   });
 
   it("gives way to the conversation on Show conversation or a running turn", () => {
     const { unmount } = render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
-    fireEvent.click(screen.getByTestId("landing"));
-    expect(screen.queryByTestId("landing")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show conversation" }));
+    expect(screen.queryByRole("button", { name: "Show conversation" })).toBeNull();
     unmount();
     busy = true;
     render(<HomeScreen view="chat" wide onViewChange={vi.fn()} />);
-    expect(screen.queryByTestId("landing")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show conversation" })).toBeNull();
     busy = false;
   });
 
