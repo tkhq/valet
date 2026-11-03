@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createRequire } from "node:module";
+import PackageAgent from "undici/lib/dispatcher/agent.js";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -256,8 +256,7 @@ describe("global fetch isolation", () => {
     // package root, every fetch in the api would run through its Agent.
     await createGuardedFetch(outboundPolicyFromEnv({}))("http://169.254.169.254/").catch(() => undefined);
     await fetch("http://127.0.0.1:1/").catch(() => undefined);
-    const PackageAgent: unknown = createRequire(import.meta.url)("undici/lib/dispatcher/agent.js");
     const installed: unknown = Reflect.get(globalThis, Symbol.for("undici.globalDispatcher.1"));
-    expect(typeof PackageAgent === "function" && installed instanceof PackageAgent).toBe(false);
+    expect(installed instanceof PackageAgent).toBe(false);
   });
 });

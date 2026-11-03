@@ -23,18 +23,15 @@
 import { BlockList, isIP } from "node:net";
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { metrics } from "@opentelemetry/api";
-import { createRequire } from "node:module";
 import { Readable } from "node:stream";
-import type { Agent as UndiciAgent, Dispatcher } from "undici";
-
-// Load only undici's Agent. The package root (and its fetch) register an
+import type { Dispatcher } from "undici";
+// Import only undici's Agent and its request API (types in
+// `types/undici-parts.d.ts`). The package root, and its fetch, register an
 // Agent as the process-wide dispatcher on load, and Node's built-in fetch
 // then sends every request in the api through it. This module must not
 // change global fetch.
-const requireUndici = createRequire(import.meta.url);
-const Agent: typeof UndiciAgent = requireUndici("undici/lib/dispatcher/agent.js");
-// The package root adds `request` to every dispatcher; call it directly.
-const undiciRequest: Dispatcher["request"] = requireUndici("undici/lib/api/index.js").request;
+import Agent from "undici/lib/dispatcher/agent.js";
+import { request as undiciRequest } from "undici/lib/api/index.js";
 
 const BLOCKED_V4: ReadonlyArray<readonly [string, number]> = [
   ["0.0.0.0", 8],
