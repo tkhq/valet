@@ -263,8 +263,13 @@ export class SlackApi {
 
   // ─── v2 external file upload flow ─────────────────────────────────────
 
-  async getUploadUrlExternal(filename: string, length: number): Promise<{ uploadUrl: string; fileId: string }> {
-    const res = await this.callForm("files.getUploadURLExternal", { filename, length });
+  /** `altText` is the screen-reader description Slack keeps on an image file. */
+  async getUploadUrlExternal(filename: string, length: number, altText?: string): Promise<{ uploadUrl: string; fileId: string }> {
+    const res = await this.callForm("files.getUploadURLExternal", {
+      filename,
+      length,
+      ...(altText !== undefined ? { alt_txt: altText } : {}),
+    });
     const uploadUrl = str(res.upload_url);
     const fileId = str(res.file_id);
     if (!uploadUrl || !fileId) throw new SlackApiError("files.getUploadURLExternal", "response missing upload_url/file_id");
@@ -281,13 +286,15 @@ export class SlackApi {
 
   async completeUploadExternal(opts: {
     fileId: string;
+    /** Shown above the file in Slack. Slack uses the filename when it is absent. */
+    title?: string;
     channelId: string;
     threadTs?: string;
     initialComment?: string;
     preserveSlackNativeSpans?: boolean;
   }): Promise<void> {
     const body: Record<string, unknown> = {
-      files: [{ id: opts.fileId }],
+      files: [opts.title !== undefined ? { id: opts.fileId, title: opts.title } : { id: opts.fileId }],
       channel_id: opts.channelId,
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
