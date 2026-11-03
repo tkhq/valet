@@ -647,6 +647,8 @@ export interface MessageQuery {
   limit?: number;
   /** The oldest N entries instead of the newest. Ignored when `limit` is set. */
   headLimit?: number;
+  /** Only these entry types. Applied before `limit` or `headLimit`. */
+  entryTypes?: readonly SessionEntry["type"][];
   cursor?: string;
   afterEntryId?: string;
   beforeEntryId?: string;

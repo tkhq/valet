@@ -263,6 +263,10 @@ export class InMemorySessionStore implements SessionStore {
       const ids = new Set(opts.entryIds);
       result = result.filter((e) => ids.has(e.id));
     }
+    if (opts?.entryTypes !== undefined) {
+      const types = new Set<string>(opts.entryTypes);
+      result = result.filter((e) => types.has(e.type));
+    }
     if (opts?.includeCompacted === false) {
       result = result.filter((e) => e.type !== "compaction");
     }

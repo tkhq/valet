@@ -894,6 +894,10 @@ export class PgSessionStore implements SessionStore {
           params.push([...opts.entryIds]);
           conditions.push(`id = ANY($${params.length}::text[])`);
         }
+        if (opts?.entryTypes !== undefined) {
+          params.push([...opts.entryTypes]);
+          conditions.push(`entry_type = ANY($${params.length}::text[])`);
+        }
         if (opts?.includeCompacted === false) conditions.push("entry_type != 'compaction'");
         // Select the tail (or head) in SQL so payloads outside the window never load.
         let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${newestFirst ? "DESC" : "ASC"}, seq ${newestFirst ? "DESC" : "ASC"}`;

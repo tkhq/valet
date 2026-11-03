@@ -23,7 +23,7 @@ export interface AutoTitleHostDeps {
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_RETRY_MS = 1_000;
-/** Entries the title reads from the start of a thread; it uses the first four messages. */
+/** Messages the title reads from the start of a thread; it uses the first four user or assistant messages. */
 const AUTO_TITLE_HEAD_ENTRIES = 24;
 
 function sleep(ms: number): Promise<void> {
@@ -48,24 +48,33 @@ export function createAutoTitleHost(deps: {
         {
           db: deps.db,
           ...(deps.namer ? { namer: deps.namer } : {}),
-          loadMessages: async (sessionId, threadId) => {
-            if (!threadId) return [];
-            // The title reads the opening exchange, so read only the head.
-            const entries = await deps.engineStore.getEntries(sessionId, threadId, { headLimit: AUTO_TITLE_HEAD_ENTRIES });
-            const messages: { role: string; content: string }[] = [];
-            for (const entry of entries) {
-              if (entry.type !== "message") continue;
-              if (entry.role !== "user" && entry.role !== "assistant") continue;
-              messages.push({ role: entry.role, content: entry.content ?? "" });
-              if (messages.length === 4) break;
-            }
-            return messages;
-          },
+          loadMessages: async (sessionId, threadId) => threadId ? loadOpeningMessages(deps.engineStore, sessionId, threadId) : [],
         },
         input,
       );
     },
   });
+}
+
+/**
+ * The first four user or assistant messages of a thread, for naming. It reads
+ * only the first messages, so a long thread is never loaded whole. Command
+ * results and other entries do not count toward the read.
+ */
+export async function loadOpeningMessages(
+  store: Pick<SessionStore, "getEntries">,
+  sessionId: string,
+  threadId: string,
+): Promise<{ role: string; content: string }[]> {
+  const entries = await store.getEntries(sessionId, threadId, { entryTypes: ["message"], headLimit: AUTO_TITLE_HEAD_ENTRIES });
+  const messages: { role: string; content: string }[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    if (entry.role !== "user" && entry.role !== "assistant") continue;
+    messages.push({ role: entry.role, content: entry.content ?? "" });
+    if (messages.length === 4) break;
+  }
+  return messages;
 }
 
 /**
