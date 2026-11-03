@@ -69,7 +69,9 @@ export const SLACK_REQUIRED_BOT_SCOPES: readonly string[] = [
  */
 export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   // Sender display names, and the workspace-member list the account-link
-  // flow searches.
+  // flow searches. Also `users.getPresence` and `users.info` for
+  // `slack.get_user_status` and the polled slack.user_online trigger
+  // (online-status.ts): Slack has no separate presence scope.
   "users:read",
   // `conversations.open`, which turns a Slack user id into the DM channel to
   // answer on. Valet needs it to start a conversation the person did not

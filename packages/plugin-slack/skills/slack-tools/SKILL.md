@@ -71,6 +71,8 @@ Messages include `user_display` (e.g., `@handle <Display Name> (U123)`) and `bot
 
 Use `slack.get_reactions` when you need to know **who specifically** agreed or acknowledged something, not just the count.
 
+Use `slack.get_user_status` to check whether someone is online now. It returns `presence` (`active` or `away`), `online`, the status text and emoji, and with `include_local_time: true` their local time. It works only for members of the connected workspace. Do not call it in a loop to wait for someone. For "when they are back online", create a workflow trigger on `slack.user_online` (see the workflows skill).
+
 ## Posting, Editing, and Deleting
 
 Pick the send tool by where the message goes:

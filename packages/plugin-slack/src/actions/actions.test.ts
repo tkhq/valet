@@ -233,6 +233,69 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
 
+  it('get_user_status reports presence, status, and local time for a workspace member', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        user: {
+          id: 'U123', name: 'ada', team_id: 'T1', tz: 'UTC',
+          profile: { real_name: 'Ada L', status_text: 'Heads down', status_emoji: ':headphones:', status_expiration: 0 },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'active' }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U123', include_local_time: true },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).toEqual(['https://slack.com/api/users.info?user=U123', 'https://slack.com/api/users.getPresence?user=U123']);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toMatchObject({
+      user: 'U123', name: 'ada', real_name: 'Ada L', presence: 'active', online: true,
+      status_text: 'Heads down', status_emoji: ':headphones:', timezone: 'UTC',
+    });
+    expect((result.data as { local_time?: string }).local_time).toMatch(/^[A-Z][a-z]{2},? \d{2}:\d{2}$/);
+  });
+
+  it('get_user_status reports away as not online', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U123', name: 'ada', team_id: 'T1', profile: {} } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'away' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({ success: true, data: { user: 'U123', name: 'ada', presence: 'away', online: false } });
+  });
+
+  it('get_user_status names the reinstall fix for a missing users:read scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Reading online status needs the users:read bot scope. Ask a Slack admin to reinstall the Slack app from Settings → Organization → Slack to grant it.',
+    });
+  });
+
+  it('get_user_status refuses a user from another workspace and never reads their presence', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U9', name: 'guest', team_id: 'T2', profile: {} } }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U9' },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack user U9 is not a member of the connected workspace. Online status is shown only for members of this workspace.',
+    });
+  });
+
   it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {

@@ -7,11 +7,13 @@ import { slackNaturalSubject, slackSubjects } from "./subjects.js";
 import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
+import { slackOnlineTriggerDef } from "./online-status.js";
 import { slackConversationalTwin } from "./twins.js";
 
 // Re-exported so the api's Slack app manifest can pin its bot-event
 // subscriptions against the event types these triggers actually match.
 export { slackTriggerEventTypes } from "./triggers.js";
+export { USER_ONLINE_EVENT_KEY, onlineEvent, readOnlineStatus, type OnlineStatusResult, type SlackOnlineStatus } from "./online-status.js";
 
 const skillMd = readFileSync(fileURLToPath(new URL("../skills/slack-tools/SKILL.md", import.meta.url)), "utf8");
 
@@ -24,7 +26,8 @@ const plugin: ValetPlugin = {
   native: true,
   appCredentialService: "slack",
   actions: [slackPlugin],
-  triggers: slackTriggerDefs,
+  // The online trigger is polled, not delivered by Slack (online-status.ts).
+  triggers: [...slackTriggerDefs, slackOnlineTriggerDef],
   eventSubjects: slackSubjects,
   naturalSubject: slackNaturalSubject,
   conversationalTwin: slackConversationalTwin,
