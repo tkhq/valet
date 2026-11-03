@@ -501,10 +501,15 @@ export function isInteractiveSlackSignal(content: PromptContent): content is Sig
 /** Whole-message stop phrases. Every other reply waits for the turn and never cancels it. */
 const STOP_PHRASES = new Set(["stop", "cancel", "wait", "hold on", "nevermind", "never mind"]);
 
-/** An addressed Slack message whose whole text is a stop phrase, ignoring case and punctuation. */
-export function isSlackStopRequest(content: PromptContent): boolean {
+/**
+ * An addressed Slack message whose whole text is a stop phrase, ignoring case
+ * and punctuation. An emoji or other symbol makes it an ordinary reply. `text`
+ * is the sender's own words when the body carries added context, as a group
+ * message does.
+ */
+export function isSlackStopRequest(content: PromptContent, text?: string): boolean {
   if (!isInteractiveSlackSignal(content) || content.attachments?.length) return false;
-  return STOP_PHRASES.has(content.body.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).join(" "));
+  return STOP_PHRASES.has((text ?? content.body).toLowerCase().replace(/\p{P}/gu, " ").trim().split(/\s+/).join(" "));
 }
 
 /** Only the person who sent an input can interrupt it or have it carried. */

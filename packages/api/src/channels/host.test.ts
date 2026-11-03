@@ -581,6 +581,15 @@ describe("ChannelHost.handleUpdate", () => {
       expect(second).toContain("New messages in this thread since your last reply:\n[Grace] it did, thanks");
       expect(second).toContain("[Valet (answering someone else)] The deploy finished at 3pm.");
       expect(fetchThreadWindow).toHaveBeenCalledTimes(2);
+
+      // A group body leads with the safety note, but a sender's own "stop" still asks to interrupt.
+      const admission = vi.spyOn(engineStore, "admitSubmission");
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:group-stop", conversationKey: key, text: "stop", threadTs: "111.1",
+        group: { channelId: "C0GROUP", messageTs: "112.0" },
+      }));
+      expect(admission.mock.calls.at(-1)?.[3]).toMatchObject({ steer: true, steerScope: "active-origin" });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
     } finally {
       await slackHost.stop();
     }

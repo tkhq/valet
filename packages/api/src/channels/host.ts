@@ -1928,7 +1928,8 @@ export class ChannelHost {
           // person who moves on does not leave the turn stuck on an approval.
           // The store interrupts only a turn from the same sender.
           ...(channelType === "slack"
-            ? isSlackStopRequest(content) || thread.pendingDecisionGates().length > 0
+            // A group body leads with its safety note and transcript: check the sender's own words.
+            ? isSlackStopRequest(content, text) || thread.pendingDecisionGates().length > 0
               ? { queueMode: "steer" as const, steerScope: "active-origin" as const }
               : { queueMode: "inject" as const }
             : {}),

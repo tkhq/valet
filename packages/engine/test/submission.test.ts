@@ -311,8 +311,15 @@ describe("isSlackStopRequest", () => {
     expect(isSlackStopRequest(reply(body))).toBe(true);
   });
 
-  it.each(["thanks", "how's it going?", "stop the deploy", "wait, also check logs", ""])("lets %j wait for the turn", (body) => {
+  it.each(["thanks", "how's it going?", "stop the deploy", "wait, also check logs", "", "stop 🚫", "stop ❤️", "stop™", "🛑"])("lets %j wait for the turn", (body) => {
     expect(isSlackStopRequest(reply(body))).toBe(false);
+  });
+
+  it("reads the sender's own words when the body carries added context", () => {
+    const body = "This message is from a group conversation. Everyone in it reads your reply.\n\nstop";
+    expect(isSlackStopRequest(reply(body))).toBe(false);
+    expect(isSlackStopRequest(reply(body), "stop")).toBe(true);
+    expect(isSlackStopRequest(reply(body), "stop the deploy")).toBe(false);
   });
 
   it("ignores a stop phrase that is not an addressed human reply", () => {
