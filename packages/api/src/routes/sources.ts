@@ -48,6 +48,32 @@ function isBuiltInSource(row: Pick<ImageSourceRow, "kind" | "name">): boolean {
   return row.kind === "base" && row.name === BUILTIN_BASE_NAME;
 }
 
+/** The audit summary of a pending change: what the requester asked for.
+ * `externalRef` is shown as a display URL; `sanitizeChanges` masks secrets
+ * in setup commands. */
+function changeAuditView(row: SourceChangeRequestRow): Record<string, unknown> {
+  const p = row.payload;
+  const view: Record<string, unknown> = { changeId: row.id, change: row.action, requestedBy: row.requestedBy };
+  for (const field of ["name", "setupCommands", "parentId", "pullSecretName", "enabled", "schedule"]) {
+    if (p[field] !== undefined) view[field] = p[field];
+  }
+  if (typeof p.externalRef === "string") view.externalRef = displayUrl(p.externalRef);
+  return view;
+}
+
+/** Audits a stored change request. A request is a high-risk signal on its
+ * own: another admin should look at it before anyone approves. */
+async function auditChangeRequested(c: Context<AppEnv>, row: SourceChangeRequestRow): Promise<void> {
+  await auditRequest(c, {
+    action: "image_source.change_requested",
+    targetType: "image_source",
+    targetId: row.sourceId ?? row.id,
+    targetName: row.sourceName,
+    changes: changeAuditView(row),
+    alert: row.action === "create" ? "image_source_created" : "image_source_changed",
+  });
+}
+
 /** The audited fields of an image source. `externalRef` can embed registry credentials, so it is shown as a display URL. */
 function auditView(row: ImageSourceRow) {
   return {
@@ -248,6 +274,7 @@ sourcesRouter.post("/", async (c) => {
     if (imageSourceApprovalMode() === "required") {
       try {
         const pending = await requestSourceChange(db, { orgId: row.orgId, requestedBy: c.var.user.id, action: "create", sourceName: row.name, payload: row });
+        await auditChangeRequested(c, pending);
         const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
         return c.json(resp, 202);
       } catch (err) {
@@ -308,6 +335,7 @@ sourcesRouter.post("/", async (c) => {
     if (imageSourceApprovalMode() === "required") {
       try {
         const pending = await requestSourceChange(db, { orgId: row.orgId, requestedBy: c.var.user.id, action: "create", sourceName: row.name, payload: row });
+        await auditChangeRequested(c, pending);
         const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
         return c.json(resp, 202);
       } catch (err) {
@@ -358,6 +386,14 @@ sourcesRouter.post("/changes/:changeId/approve", async (c) => {
       approverId: c.var.user.id,
       id: c.req.param("changeId"),
     });
+    await auditRequest(c, {
+      action: request.action === "create" ? "image_source.create" : "image_source.update",
+      targetType: "image_source",
+      targetId: source.id,
+      targetName: source.name,
+      changes: { ...changeAuditView(request), approvedBy: c.var.user.id },
+      alert: request.action === "create" ? "image_source_created" : isBuiltInSource(source) ? "builtin_image_changed" : "image_source_changed",
+    });
     return c.json({ change: changeSummary(request), source });
   } catch (err) {
     return refusalResponse(c, err);
@@ -377,6 +413,13 @@ sourcesRouter.post("/changes/:changeId/reject", async (c) => {
       id: c.req.param("changeId"),
       note,
     });
+    await auditRequest(c, {
+      action: "image_source.change_rejected",
+      targetType: "image_source",
+      targetId: row.sourceId ?? row.id,
+      targetName: row.sourceName,
+      changes: { changeId: row.id, requestedBy: row.requestedBy, note: row.decisionNote },
+    });
     return c.json({ change: changeSummary(row) });
   } catch (err) {
     return refusalResponse(c, err);
@@ -392,6 +435,13 @@ sourcesRouter.delete("/changes/:changeId", async (c) => {
       orgId: c.var.user.orgId,
       userId: c.var.user.id,
       id: c.req.param("changeId"),
+    });
+    await auditRequest(c, {
+      action: "image_source.change_withdrawn",
+      targetType: "image_source",
+      targetId: row.sourceId ?? row.id,
+      targetName: row.sourceName,
+      changes: { changeId: row.id },
     });
     return c.json({ change: changeSummary(row) });
   } catch (err) {
@@ -526,6 +576,7 @@ sourcesRouter.patch("/:id", async (c) => {
         sourceName: existing.name,
         payload,
       });
+      await auditChangeRequested(c, pending);
       const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
       return c.json(resp, 202);
     } catch (err) {

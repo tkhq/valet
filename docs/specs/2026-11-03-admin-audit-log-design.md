@@ -66,7 +66,7 @@ Callers pass field names and safe values only. An LLM provider key records `key_
 | Org (`PATCH /api/org`) | `org.update`; SSO team sync and SSO team groups record as `auth_policy.update` |
 | Org settings (`routes/org-settings.ts`) | `org_settings.update` |
 | LLM providers (`routes/llm-providers.ts`) | `llm_provider.create`, `.update`, `.delete`, `.key_set`, `.key_clear` |
-| Image sources (`routes/sources.ts`) | `image_source.create`, `.update`, `.delete`; `bake.start` for a manual bake |
+| Image sources (`routes/sources.ts`) | `image_source.create`, `.update`, `.delete`; `bake.start` for a manual bake; `image_source.change_requested`, `.change_rejected`, `.change_withdrawn` for second-admin approval. An approval writes `image_source.create` or `.update` with the approver as actor and `requestedBy` and `approvedBy` in the changes |
 | Shared credentials (`routes/credentials.ts`) | `credential.set`, `credential.delete` at org or team scope; `credential_share.create`, `credential_share.revoke` |
 | Plugins (`PATCH /api/org/plugins/:name`) | `plugin.entitlement_update` |
 | Policies (`routes/policies.ts`, `routes/team-policies.ts`) | `org_policy.create`, `.update`, `.revoke`; `team_policy.create`, `.update`, `.revoke`, `.override_set`, `.grant_revoke` |
@@ -86,8 +86,8 @@ Sign-in methods (`AUTH_METHODS`, OIDC settings) come from the environment at boo
 | `new_user` | A new user joins as a member |
 | `llm_provider_created` | Any new LLM provider |
 | `llm_provider_base_url_changed` | The stored base URL changes |
-| `image_source_created` | Any new image source |
-| `image_source_changed` | `externalRef`, `setupCommands`, or `parentId` changes |
+| `image_source_created` | Any new image source, and a request to create one |
+| `image_source_changed` | `externalRef`, `setupCommands`, or `parentId` changes, and a request to change them |
 | `builtin_image_changed` | Any change to, or delete of, the `default-full` base |
 | `sign_in_policy_changed` | SSO team sync or SSO team groups change |
 

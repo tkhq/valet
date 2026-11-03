@@ -206,6 +206,44 @@ describe("admin audit rows", () => {
     expect(removed.row).toMatchObject({ action: "image_source.delete", targetId: source.id });
   });
 
+  it("records image-source change requests and each decision", async () => {
+    vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "");
+    api = await bootTestApi();
+    const APPROVER = { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" };
+    const decide = async (method: string, path: string, headers: Record<string, string>) => {
+      let res: Response | undefined;
+      const added = await rowsFrom(api!, async () => {
+        res = await send(api!, method, path, method === "POST" ? {} : undefined, headers);
+      });
+      expect(res?.ok, `${method} ${path} -> ${res?.status}`).toBe(true);
+      expect(added).toHaveLength(1);
+      return added[0]!;
+    };
+
+    const requested = await one(api, "POST", "/api/org/sources", { kind: "external", name: "probe", externalRef: `https://user:${SECRET_KEY}@registry.example/img:1` });
+    expect(requested.res.status).toBe(202);
+    const changeId = ((await requested.res.json()) as { pendingChange: { id: string } }).pendingChange.id;
+    expect(requested.row).toMatchObject({ action: "image_source.change_requested", targetName: "probe" });
+    expect(requested.row.changes).toMatchObject({ changeId, change: "create", requestedBy: "local-user", externalRef: "https://registry.example/img:1" });
+    expect(JSON.stringify(requested.row)).not.toContain(SECRET_KEY);
+    expect(alertKinds()).toEqual(["image_source_created"]);
+
+    const approved = await decide("POST", `/api/org/sources/changes/${changeId}/approve`, APPROVER);
+    expect(approved).toMatchObject({ action: "image_source.create", actorUserId: "test-admin", targetName: "probe" });
+    expect(approved.changes).toMatchObject({ changeId, requestedBy: "local-user", approvedBy: "test-admin" });
+    expect(alertKinds()).toEqual(["image_source_created", "image_source_created"]);
+
+    const second = await one(api, "POST", "/api/org/sources", { kind: "external", name: "probe-2", externalRef: "registry.example/img:2" });
+    const secondId = ((await second.res.json()) as { pendingChange: { id: string } }).pendingChange.id;
+    const rejected = await decide("POST", `/api/org/sources/changes/${secondId}/reject`, APPROVER);
+    expect(rejected).toMatchObject({ action: "image_source.change_rejected", actorUserId: "test-admin" });
+
+    const third = await one(api, "POST", "/api/org/sources", { kind: "external", name: "probe-3", externalRef: "registry.example/img:3" });
+    const thirdId = ((await third.res.json()) as { pendingChange: { id: string } }).pendingChange.id;
+    const withdrawn = await decide("DELETE", `/api/org/sources/changes/${thirdId}`, ADMIN);
+    expect(withdrawn).toMatchObject({ action: "image_source.change_withdrawn", actorUserId: "local-user" });
+  });
+
   it("records org settings, policies, model policy, and shared credentials", async () => {
     api = await bootTestApi();
 
