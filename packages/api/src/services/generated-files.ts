@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { Type } from "typebox";
-import { sniffImageMediaType, type BlobStore, type ThreadFile, type ThreadFileStore, type ToolDef } from "@valet/engine";
+import { validatedImageMediaType, type BlobStore, type ThreadFile, type ThreadFileStore, type ToolDef } from "@valet/engine";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 
 import { and, count, eq, sum } from "drizzle-orm";
@@ -18,20 +18,18 @@ const MIME_TYPES: Record<string, string> = {
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ".pdf": "application/pdf",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
 };
 
 /** Image types the web chat shows inline. The download route serves them with a sandbox CSP. */
 export const INLINE_IMAGE_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
 
-/** The stored type: image bytes win over the extension, so a mislabeled chart still shows. */
+/**
+ * The stored type. Only bytes make a file an image: a raster signature, or a
+ * safe SVG. A file whose name says image but whose bytes do not is a plain
+ * download, never an inline image.
+ */
 export function generatedFileMimeType(name: string, data: Uint8Array): string {
-  return sniffImageMediaType(data) ?? MIME_TYPES[posix.extname(name).toLowerCase()] ?? "application/octet-stream";
+  return validatedImageMediaType(data, name) ?? MIME_TYPES[posix.extname(name).toLowerCase()] ?? "application/octet-stream";
 }
 
 /**

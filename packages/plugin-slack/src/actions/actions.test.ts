@@ -623,6 +623,24 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['HTML named and declared as a PNG', '/workspace/report.png', '<html>not an image</html>', 'image/png'],
+    ['an SVG with a script', '/workspace/chart.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', undefined],
+  ])('reply_file_to_origin uploads %s as a plain file, not an image', async (_label, path, text, declared) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F5' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const bytes = new TextEncoder().encode(text);
+    const sandbox = makeSandbox({ stat: async () => ({ isFile: true, isDirectory: false, size: bytes.byteLength }), readBinary: async () => bytes });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path, alt_text: 'A chart', ...(declared ? { mime_type: declared } : {}) },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as Blob).type).toBe('application/octet-stream');
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F5', mime_type: 'application/octet-stream' } });
+  });
+
   it('reply_file_to_origin notes that Slack shows no preview for SVG', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F4' }))

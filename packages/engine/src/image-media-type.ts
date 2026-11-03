@@ -15,6 +15,40 @@ export function sniffImageMediaType(b: Uint8Array): ImageMediaType | undefined {
 }
 
 /**
+ * Whether bytes are an SVG image that is safe to label `image/svg+xml`: UTF-8
+ * text whose root element is `<svg>`, closed or self-closed, with no DOCTYPE (no
+ * entity expansion), no script element, no event-handler attribute, and no
+ * `javascript:` URL. SVG has no byte signature, so this check stands in for
+ * one. It is a structural check, not a full XML parse.
+ */
+export function isSafeSvg(bytes: Uint8Array): boolean {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  // Skip a BOM, an XML declaration, and leading comments to reach the root element.
+  const body = text.replace(/^\uFEFF/, "").replace(/^\s*<\?xml[^>]*\?>/i, "").replace(/^(\s*<!--[\s\S]*?-->)*\s*/, "");
+  const selfClosed = /^<svg(\s[^<>]*)?\/>\s*$/i.test(body);
+  if (!selfClosed && (!/^<svg[\s>]/i.test(body) || !/<\/svg>\s*$/i.test(body))) return false;
+  if (/<!DOCTYPE|<!ENTITY/i.test(text)) return false;
+  if (/<script[\s>/]/i.test(text)) return false;
+  if (/\son[a-z]+\s*=/i.test(text)) return false;
+  if (/javascript:/i.test(text)) return false;
+  return true;
+}
+
+/**
+ * The image type that bytes prove: a raster signature, or a safe SVG when the
+ * name ends in `.svg`. Undefined when the bytes are not an image, whatever the
+ * extension says, so callers store the file as a download.
+ */
+export function validatedImageMediaType(bytes: Uint8Array, name: string): ImageMediaType | "image/svg+xml" | undefined {
+  return sniffImageMediaType(bytes) ?? (/\.svg$/i.test(name) && isSafeSvg(bytes) ? "image/svg+xml" : undefined);
+}
+
+/**
  * Fix the media type of every image block in provider messages. The bytes win
  * over the declared type. A block with unsupported bytes becomes a text
  * placeholder, so one bad image does not fail every later turn.

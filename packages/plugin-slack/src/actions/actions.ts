@@ -13,7 +13,7 @@ import {
   readResponseBytes,
   readPdfCandidateResponse,
   readResponseText,
-  sniffImageMediaType,
+  validatedImageMediaType,
   type ActionPlugin,
   type Credential,
   type PluginAction,
@@ -1400,15 +1400,15 @@ const replyToOrigin = action(Type.Object({
 const SLACK_ALT_TEXT_LIMIT = 1000;
 
 /**
- * The upload's MIME type. Image bytes win over the declared type, so a chart
- * saved with a wrong extension still previews inline. SVG has no signature,
- * so its name decides; Slack stores it but shows no inline preview.
+ * The upload's MIME type. Only bytes make a file an image: a raster signature,
+ * or a safe SVG. A declared or stored image type without image bytes uploads
+ * as a plain file, so Slack never gets a broken image.
  */
 export function uploadMimeType(data: Uint8Array, name: string, declared?: string): string {
-  const sniffed = sniffImageMediaType(data);
-  if (sniffed) return sniffed;
-  if (declared) return declared;
-  return /\.svg$/i.test(name) ? 'image/svg+xml' : 'application/octet-stream';
+  const image = validatedImageMediaType(data, name);
+  if (image) return image;
+  if (declared && !declared.toLowerCase().startsWith('image/')) return declared;
+  return 'application/octet-stream';
 }
 
 const replyFileToOrigin = action(Type.Object({

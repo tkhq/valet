@@ -119,6 +119,28 @@ describe("file_attach", () => {
     expect(slack.shown).toBeUndefined();
   });
 
+  it.each([
+    ["HTML named like a PNG", "/workspace/report.png", "<html>not an image</html>"],
+    ["an SVG with a script", "/workspace/chart.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+  ])("stores %s as a plain download, not an inline image", async (_label, path, text) => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile(path, text);
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path, alt: "A chart" }, context(sandbox));
+    const output = JSON.parse(result.text);
+    expect(output.mimeType).toBe("application/octet-stream");
+    expect(output.alt).toBeUndefined();
+    expect(output.shown).toBeUndefined();
+  });
+
+  it("stores a well-formed SVG as an inline image", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile("/workspace/flow.svg", '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>');
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/flow.svg", alt: "Flow" }, context(sandbox));
+    expect(JSON.parse(result.text)).toMatchObject({ mimeType: "image/svg+xml", alt: "Flow" });
+  });
+
   it("keeps the alt text off a file that is not an image", async () => {
     directory = await mkdtemp(join(tmpdir(), "generated-files-"));
     const sandbox = await testSandbox();

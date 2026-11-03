@@ -16,7 +16,7 @@ The assistant can send images to people: charts, diagrams, screenshots, and othe
 
 ### Web chat
 
-`file_attach` stores PNG, JPEG, GIF, WebP, and SVG files with an image MIME type. Image bytes decide the type over the extension. The tool takes optional `alt` and `title` and returns them for an image. The download route already serves the bytes with `content-security-policy: sandbox`, so an SVG cannot run script.
+`file_attach` stores PNG, JPEG, GIF, WebP, and SVG files with an image MIME type only when the bytes prove it: a raster signature, or an SVG that passes `isSafeSvg` (UTF-8, `<svg>` root, no DOCTYPE, script, event handler, or `javascript:` URL). A file named like an image whose bytes are not one is stored as a plain download. The tool takes optional `alt` and `title` and returns them for an image. The download route already serves the bytes with `content-security-policy: sandbox`, so an SVG cannot run script.
 
 The web renderer for `file_attach` and `render_diagram` shows an image result as `ImagePreview`: a thumbnail at most the column width and 384px high, a lightbox at full size, and a download link. The OpenAI image preview uses the same component. The thread's Outputs panel lists every file the assistant saved this way.
 
@@ -26,7 +26,7 @@ The web renderer for `file_attach` and `render_diagram` shows an image result as
 
 ### Slack
 
-`slack.reply_file_to_origin` takes `path` or `file_id` (a file saved in this thread), plus `alt_text` and `title`. `alt_text` goes to Slack as `alt_txt` on `files.getUploadURLExternal`. `title` goes on the file in `files.completeUploadExternal`. Image bytes decide the MIME type. SVG uploads succeed, but the result says that Slack shows no preview for them.
+`slack.reply_file_to_origin` takes `path` or `file_id` (a file saved in this thread), plus `alt_text` and `title`. `alt_text` goes to Slack as `alt_txt` on `files.getUploadURLExternal`. `title` goes on the file in `files.completeUploadExternal`. The same byte check decides the MIME type, so a declared image type without image bytes uploads as `application/octet-stream`. SVG uploads succeed, but the result says that Slack shows no preview for them.
 
 In a Slack turn, `file_attach` and `render_diagram` results name the `reply_file_to_origin` call that posts the image, the same way `show_widget` names the chart path.
 
