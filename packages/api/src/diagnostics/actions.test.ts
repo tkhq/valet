@@ -135,6 +135,31 @@ describe("diagnosticsActionPlugin", () => {
     expect(data(await run({}, context("admin"))).errorPaths).toEqual([expect.objectContaining({ area: "workflows", reason: "schedule_fire" })]);
   });
 
+  it("gives an operator no deployment-wide numbers in a conversation other people read", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError({ area: "plugins", reason: "credential_refresh", provider: "github" }, "credential refresh failed for github", new Error("x"));
+    errors.mockRestore();
+    const api: PodHealthApi = {
+      listPods: async () => [{ name: "sandbox-1", node: "node-a", containers: [{ name: "sandbox", ready: true, restarts: 1, state: "running" }] }],
+      listPodWarnings: async () => [],
+    };
+    const errorsRun = plugin()("diagnostics.list_server_errors");
+    const podsRun = plugin({ sandboxBackend: "kubernetes", podHealth: () => ({ api, apiNamespace: "valet", sandboxNamespace: "valet-sandboxes" }) })("diagnostics.list_pod_restarts");
+    const sharedContexts: Array<Partial<PluginActionContext>> = [
+      { origin: { channelType: "slack", threadKey: "slack:C1:1.2" } },
+      { sharedTranscript: true },
+      { owner: { type: "team", id: "team-1" } },
+    ];
+    for (const shared of sharedContexts) {
+      const errorBody = data(await errorsRun({}, context("admin", shared)));
+      expect(errorBody.errorPaths).toBeUndefined();
+      expect(errorBody.errorPathsOmitted).toContain("private conversation");
+      const podBody = data(await podsRun({}, context("admin", shared)));
+      expect(podBody.sandboxes).toEqual({ namespace: "valet-sandboxes", omitted: expect.stringContaining("private conversation") });
+    }
+    expect(data(await errorsRun({}, context("admin"))).errorPaths).toEqual([expect.objectContaining({ reason: "credential_refresh" })]);
+  });
+
   it("reads this process's memory and event loop for admins only", async () => {
     const run = plugin({ sandboxBackend: "docker" })("diagnostics.process_health");
     expect((await run({}, context("member"))).error).toContain("organization admins");

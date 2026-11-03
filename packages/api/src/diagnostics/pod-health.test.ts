@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type * as k8s from "@kubernetes/client-node";
 import {
-  SANDBOX_COUNTS_OPERATOR_ONLY, apiNamespaceRbac, podHealthApiAdapter, podRead, readPodHealth, summarizeApiNamespace, summarizeSandboxNamespace, type PodRead,
+  apiNamespaceRbac, podHealthApiAdapter, podRead, readPodHealth, summarizeApiNamespace, summarizeSandboxNamespace, type PodRead,
 } from "./pod-health.js";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
@@ -91,13 +91,13 @@ describe("readPodHealth", () => {
       },
       apiNamespace: "valet",
       sandboxNamespace: "valet-sandboxes",
-    }, { includeSandboxes: true, now: NOW });
+    }, { now: NOW });
     expect(result.api).toEqual({ namespace: "valet", error: "forbidden", requiredRbac: apiNamespaceRbac("valet") });
     expect(result.sandboxes).toEqual({ namespace: "valet-sandboxes", error: "unavailable", detail: "connect ECONNREFUSED 10.0.0.1:443" });
   });
 
   it("says there is no API pod out of cluster", async () => {
-    const result = await readPodHealth({ api: { listPods: async () => [], listPodWarnings: async () => [] }, sandboxNamespace: "valet-sandboxes" }, { includeSandboxes: true, now: NOW });
+    const result = await readPodHealth({ api: { listPods: async () => [], listPodWarnings: async () => [] }, sandboxNamespace: "valet-sandboxes" }, { now: NOW });
     expect(result.api).toMatchObject({ error: "out_of_cluster" });
   });
 
@@ -107,8 +107,8 @@ describe("readPodHealth", () => {
       api: { listPods: async (namespace) => { read.push(namespace); return []; }, listPodWarnings: async () => [] },
       apiNamespace: "valet",
       sandboxNamespace: "valet-sandboxes",
-    }, { includeSandboxes: false, now: NOW });
+    }, { omitSandboxes: "Ask an operator.", now: NOW });
     expect(read).toEqual(["valet"]);
-    expect(result.sandboxes).toEqual({ namespace: "valet-sandboxes", omitted: SANDBOX_COUNTS_OPERATOR_ONLY });
+    expect(result.sandboxes).toEqual({ namespace: "valet-sandboxes", omitted: "Ask an operator." });
   });
 });

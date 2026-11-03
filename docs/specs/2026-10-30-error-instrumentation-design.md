@@ -102,7 +102,9 @@ failures and slow routes, but not a 5xx, a restart, or an OOM kill.
    tally, which has no organization because most failing paths run in
    sweeps that serve all of them, and the sandbox pod counts. Only a
    deployment operator (`users.role = 'admin'`, not `org_members.role`)
-   gets them. An organization admin gets an `errorPathsOmitted` note or a
+   gets them, and only in a private conversation: a channel origin, a team
+   owner, or a shared transcript withholds them, as `list_tool_failures`
+   withholds error text. Other callers get an `errorPathsOmitted` note or a
    `sandboxes.omitted` note instead.
 
 6. **RBAC is reported, not worked around.** The chart's Role

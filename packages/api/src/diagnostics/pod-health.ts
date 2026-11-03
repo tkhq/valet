@@ -196,15 +196,12 @@ export interface PodHealthTarget {
   sandboxNamespace: string;
 }
 
-/** Why a caller without the deployment operator role gets no sandbox counts. */
-export const SANDBOX_COUNTS_OPERATOR_ONLY =
-  "Sandbox pods belong to every organization on this deployment, so only a deployment operator can read their counts. Ask an operator to run this check.";
-
-/** Pod health for the API namespace, and for the sandbox namespace when the
- * caller may read numbers that cover every organization. */
-export async function readPodHealth(target: PodHealthTarget, opts: { includeSandboxes: boolean; now?: number }) {
+/** Pod health for the API namespace, and for the sandbox namespace unless
+ * `omitSandboxes` gives the reason the caller may not read numbers that
+ * cover every organization. */
+export async function readPodHealth(target: PodHealthTarget, opts: { omitSandboxes?: string; now?: number }) {
   const now = opts.now ?? Date.now();
-  const sandbox = !opts.includeSandboxes ? { namespace: target.sandboxNamespace, omitted: SANDBOX_COUNTS_OPERATOR_ONLY } : await readNamespace(target.sandboxNamespace, async () => {
+  const sandbox = opts.omitSandboxes !== undefined ? { namespace: target.sandboxNamespace, omitted: opts.omitSandboxes } : await readNamespace(target.sandboxNamespace, async () => {
     const [pods, warnings] = await Promise.all([target.api.listPods(target.sandboxNamespace), target.api.listPodWarnings(target.sandboxNamespace)]);
     return summarizeSandboxNamespace(pods, warnings, now);
   }, `Role in namespace ${target.sandboxNamespace} with pods ["get", "list"] and events ["list"] (deploy/chart/valet/templates/rbac.yaml grants these).`);
