@@ -16,6 +16,7 @@ import type { TeamSummary } from "@valet/api/wire";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { WorkspaceSwitcher, useWorkspaceOptions } from "~/components/layout/workspace-switcher";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 export type ActiveWorkspace =
@@ -80,12 +81,21 @@ export function WorkspaceClause() {
   const ws = useActiveWorkspace();
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
+  // A phone switches space in its drawer; there the clause only names it.
+  const mobile = useMobileLayout();
   if (ws === undefined) return null;
   if (ws.kind === "personal" && !ws.hasTeams) return null;
   const count = ws.kind === "team" ? ws.team.memberCount : 0;
   const note = ws.kind === "team"
     ? `Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`
     : "Your personal space. Only you can see these.";
+  if (mobile) {
+    const Icon = ws.kind === "team" ? Users : User;
+    return <span title={note} className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
+      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="truncate">{ws.kind === "team" ? ws.team.name : "Personal"}</span>
+    </span>;
+  }
   return <WorkspaceSwitcher variant="clause" options={options} activeKey={scope.key} note={note} />;
 }
 

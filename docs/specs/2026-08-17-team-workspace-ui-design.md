@@ -305,18 +305,19 @@ id), and the server checks team membership as before.
 
 - **No top-bar switcher.** The top bar has Threads, Artifacts, Presence, and
   Workflows, plus a More menu (Skills, Integrations, Usage, Changelog).
-- **Thread pages.** On `/` and `/chat` the sidebar lists Spaces under Home.
-  The active space is open and holds its Projects and threads. Each other
-  space is one row; selecting it switches to that space. A caller with one
-  space sees the thread list alone.
+- **Thread pages.** On `/` and `/chat` the sidebar lists Spaces under Home as
+  one short list, so every space stays near the top. The active space is
+  marked, and its Projects and threads follow the list. Selecting another row
+  switches to that space. A caller with one space sees the thread list alone.
 - **Other scoped pages.** The clause beside the page title (`WorkspaceClause`)
   is the space control: it names the active space and opens a menu to switch.
   Artifacts, Presence (overview and detail pages), Workflows, Memory, Skills,
   Usage, Integrations, Security, and `/overview` show it. Workflow editor and
   run pages show one resource; their space follows that resource, and a switch
   happens on the Workflows list.
-- **Phones.** The drawer keeps its "Threads in" space dropdown. The phone
-  Chat, Tasks, and Make tabs do not change.
+- **Phones.** The drawer keeps its "Threads in" space dropdown, and a page's
+  clause only names the space. The phone Chat, Tasks, and Make tabs do not
+  change.
 - **One source of truth.** The scope provider reads `?workspace=` from the
   URL first, then the tab's stored choice. Every switch (`useSelectWorkspace`)
   only navigates: it writes `?workspace=` into the URL, and the provider stores
