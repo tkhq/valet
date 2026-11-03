@@ -133,26 +133,59 @@ describe("SourcesSection", () => {
 
   // ── Base image card ───────────────────────────────────────────────────────
 
-  it("base card: Save with no base source fires createSource (POST) with commands split on newline", async () => {
+  it("base card: shows a startup note and no editor before the server seeds the base", () => {
     sourcesData = { sources: [], builderAvailable: true };
     render(<SourcesSection />);
+    expect(screen.getByText("No base image yet. The server creates it at startup.")).toBeTruthy();
+    expect(screen.queryByLabelText("Setup commands")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  });
 
-    const user = userEvent.setup();
-    const textarea = screen.getByLabelText("Setup commands");
-    await user.type(textarea, "apt-get update\napt-get install -y git");
+  it("base card: a built-in base is read-only, has no Save, and keeps Bake now", () => {
+    const base = makeSource({
+      id: "base_1",
+      kind: "base",
+      repoFullName: null,
+      repoHost: null,
+      name: "default-full",
+      setupCommands: [],
+      builtIn: true,
+    });
+    sourcesData = { sources: [base], builderAvailable: true };
+    render(<SourcesSection />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((screen.getByLabelText("Setup commands") as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.getByText("Built-in. Managed in code.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Bake now" }));
+    expect(bakeMutate).toHaveBeenCalledWith("base_1", expect.anything());
+    expect(patchMutate).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() =>
-      expect(createMutate).toHaveBeenCalledWith(
-        {
-          kind: "base",
-          name: "Base",
-          setupCommands: ["apt-get update", "apt-get install -y git"],
-        },
-        expect.anything(),
-      ),
-    );
+  it("external row: a built-in image has no delete control and shows the managed-in-code note", () => {
+    const stock = makeSource({
+      id: "img_stock",
+      kind: "external",
+      repoFullName: null,
+      repoHost: null,
+      name: "stock-full",
+      externalRef: "ghcr.io/tkhq/valet-sandbox:sha-1",
+      builtIn: true,
+    });
+    const custom = makeSource({
+      id: "img_custom",
+      kind: "external",
+      repoFullName: null,
+      repoHost: null,
+      name: "Node 22",
+      externalRef: "registry.example.com/node:22",
+    });
+    sourcesData = { sources: [stock, custom], builderAvailable: true };
+    render(<SourcesSection />);
+
+    expect(screen.queryByRole("button", { name: "Delete stock-full" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Delete Node 22" })).toBeTruthy();
+    expect(screen.getAllByText("Built-in. Managed in code.")).toHaveLength(1);
   });
 
   it("base card: Save with an existing base source fires patchSource (PATCH)", async () => {
