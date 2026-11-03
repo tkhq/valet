@@ -31,7 +31,6 @@ export function MakePanel({ className }: { className?: string }) {
     <MemorySection />
     <section aria-label="Setup">
       <WorkList>
-        <WorkRow title={<Link to="/overview">Workspace overview</Link>} detail="Recent work, memory, and usage in the selected workspace." />
         <WorkRow title={<Link to="/presence">Presence</Link>} detail="Routines, and the places Valet listens." />
         <WorkRow title={<Link to="/integrations">Connected apps</Link>} detail="The apps and accounts Valet can use." />
       </WorkList>

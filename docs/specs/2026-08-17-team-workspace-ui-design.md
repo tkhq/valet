@@ -317,11 +317,14 @@ id), and the server checks team membership as before.
   starts closed, opens by itself when one of its pages is current, and the
   browser remembers it per space. A closed space shows all its pages in a
   menu on hover or from its chevron.
-- **Security and the overview.** Security is an admin setting, so the
-  Settings page lists Valet Security under Plugins for a caller with the
-  plugin. The top bar's Plugins menu also opens it. The workspace overview
-  opens from the New thread menu and from the phone's Make tab. Home is the
-  landing page.
+- **Security.** Security is an admin setting, so the Settings page lists
+  Valet Security under Plugins for a caller with the plugin. The top bar's
+  Plugins menu also opens it.
+- **No workspace overview.** Home is the landing page. The `/overview`
+  dashboard is deleted, and `/overview` redirects to `/`.
+- **New thread** is one button that starts a thread. It has no create menu:
+  Workflows and Artifacts have their own space rows, Projects has its "+"
+  button, and tasks start from a message to Home.
 - **Same-page switching.** On a space page, a space's name opens the same
   page in that space: Engineering / Integrations goes to Sales /
   Integrations. A detail page goes to its list page. From Home or a thread,

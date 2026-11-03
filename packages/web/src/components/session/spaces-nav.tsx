@@ -23,8 +23,7 @@ export const SPACE_PAGES: readonly SpacePage[] = [
 
 /**
  * A space's settings pages, behind its Settings row. Security is an admin
- * setting: the Settings page links it. The workspace overview opens from the
- * New thread menu, since Home is the landing page.
+ * setting: the Settings page links it.
  */
 export const SPACE_SETTINGS_PAGES: readonly SpacePage[] = [
   { label: "Integrations", to: "/integrations", icon: Plug },

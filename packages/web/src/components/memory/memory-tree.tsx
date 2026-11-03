@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { MemoryTreeEntry } from "@valet/api/wire";
-import { todayJournalPath } from "~/components/assistant/memory-card";
+import { todayJournalPath } from "~/lib/journal-path";
 import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
 

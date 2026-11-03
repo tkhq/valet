@@ -456,17 +456,6 @@ export function useCancelRun(runId: string) {
   });
 }
 
-/** Takes a failed run out of the viewer's Needs attention list. */
-export function useDismissRun() {
-  const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, string>({
-    mutationFn: (runId) => api.dismissWorkflowRun(runId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkWorkflows.list() });
-    },
-  });
-}
-
 // ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
 /** The workflow's webhook, or `null` when it has none yet. The server answers

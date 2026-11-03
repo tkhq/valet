@@ -34,8 +34,6 @@ import {
   ChevronDown,
   FileText,
   GitMerge,
-  LayoutDashboard,
-  ListChecks,
   GitPullRequest,
   GitPullRequestClosed,
   MessageSquare,
@@ -78,7 +76,6 @@ import {
 } from "~/api/queries";
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { prefillComposerDraft } from "~/stores/composer-drafts";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
 import { backgroundWorkConflict } from "~/api/client";
@@ -539,12 +536,6 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const searchItems = [...threadItems, ...workflowItems, ...fileItems];
   const searchIndex = Math.max(0, searchItems.findIndex((item) => item.key === searchSelectedId));
   function openNewProject() { setEditingProjectId(undefined); setProjectError(undefined); setProjectName(""); setProjectDialog(true); }
-  /** Task and Artifact start in Home: open it with a starter in the message box. */
-  function askHome(starter: string) {
-    if (!home.data) return;
-    prefillComposerDraft(home.data.sessionId, home.data.threadId, starter);
-    void navigate({ to: "/" });
-  }
   function openSearch() { setSearchQuery(""); setSearchSelectedId(undefined); setSearchScope("all"); setSearchOpen(true); }
   function selectSearchItem(item: SearchItem) {
     setSearchOpen(false);
@@ -839,20 +830,6 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
-        {!mobile && <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" aria-label="More to create" title="More to create" className="flex h-8 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><ChevronDown className="h-3.5 w-3.5" /></button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-52">
-            <DropdownMenuItem onSelect={() => void createAndNavigate()}><MessageSquare className="h-4 w-4" aria-hidden />Thread</DropdownMenuItem>
-            <DropdownMenuItem disabled={!home.data} onSelect={() => askHome("Start a task: ")}><ListChecks className="h-4 w-4" aria-hidden />Task</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void navigate({ to: "/workflows", search: { create: true } })}><Workflow className="h-4 w-4" aria-hidden />Workflow</DropdownMenuItem>
-            <DropdownMenuItem disabled={!home.data} onSelect={() => askHome("Make a document: ")}><FileText className="h-4 w-4" aria-hidden />Artifact</DropdownMenuItem>
-            <DropdownMenuItem disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onSelect={openNewProject}><Folder className="h-4 w-4" aria-hidden />Project</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void navigate({ to: "/overview" })}><LayoutDashboard className="h-4 w-4" aria-hidden />Workspace overview</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>}
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
         {!mobile && sidebarControls?.present && <button type="button" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={sidebarControls.toggleCollapsed}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><PanelLeftClose className="h-4 w-4" /></button>}
