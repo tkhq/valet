@@ -67,7 +67,7 @@ function HomeDesktop({ sessionId, threadId, dock, empty, tasksRequested, onTasks
     if (!open) onTasksClosed();
   };
   const count = needsYou.count > 0 ? ` · ${needsYou.count}${needsYou.partial ? "+" : ""}` : "";
-  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen} onClick={() => chooseTasksOpen(!tasksOpen)}>
+  const tasksButton = <Button size="sm" variant={tasksOpen ? "secondary" : "ghost"} aria-pressed={tasksOpen} data-perf-flow="tasks.open" onClick={() => chooseTasksOpen(!tasksOpen)}>
     <ListChecks aria-hidden className="h-4 w-4" />{`Tasks${count}`}
   </Button>;
   return <div data-home-desktop className="flex min-h-0 min-w-0 flex-1" onInput={() => setLanding(false)}>

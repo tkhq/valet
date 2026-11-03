@@ -267,3 +267,26 @@ Valet has no browser telemetry in production today, so a regression that only
 appears on a real user's device will not report itself. That makes the local
 profiling habit the only defense — the numbers you take before and after a
 change are the evidence.
+
+## Latency budgets and the CI check
+
+`src/lib/perf` measures presses and navigations in the running app. It is off
+by default and loads as its own chunk only when on.
+
+- Open any page with `?perf=1` to turn on measurement and an overlay that lists
+  the last measurements against their budgets. `?perf=0` turns it off.
+- A press is timed from the event to the next paint. A navigation is timed to
+  the paint of its page (`route`) and to the paint after its first data loads
+  settle (`data`).
+- Add `data-perf-flow="<name>"` to a control to name its press and time the
+  data it loads. Name a new key flow in `budgets.ts`.
+
+The budgets live in `src/lib/perf/budgets.ts`: 100 ms for press feedback,
+200 ms for a page or its loading state, and a data budget per key flow.
+
+`pnpm --filter @valet/web perf` runs the check that CI runs (the `web-perf`
+job). It needs a build first (`pnpm --filter @valet/web build`). It serves
+`dist/`, answers the api from `perf/mock-api.mjs`, and drives the key flows at
+desktop and 375px width under calibrated 4x CPU slowdown. A flow fails when
+its median over the runs is over budget. If a page calls an endpoint that has
+no fixture, the check lists it: add a fixture to `mock-api.mjs`.
