@@ -20,6 +20,8 @@ import { signState } from "../lib/oauth-state.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
 import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
+import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { ensureMcpOAuthClient, getMcpOAuthClient } from "../services/integration-oauth.js";
 import {
   identityForExternal,
   identityForUser,
@@ -387,6 +389,35 @@ describe("GET /api/credentials/oauth/callback", () => {
     });
     expect(cb.headers.get("location")).toBe("/integrations?error=oauth_client_changed");
     expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("mcp mode: a connection keeps refreshing with its own client after a scope change re-registers", async () => {
+    const plugins = [mcpPlugin(fake.url, ["agent:query"])];
+    api = await bootTestApi({ plugins });
+    const state = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    const owner = { type: "user" as const, id: "local-user" };
+    const connected = await api.providers.engineCredentials.get(owner, "linear");
+    if (!connected) throw new Error("connect saved no credential");
+    expect(connected.metadata).toEqual({
+      connectedVia: "oauth", oauthClientId: "client-1", oauthTokenEndpoint: `${fake.url}/token`,
+    });
+
+    // The declared scopes change: the next connect registers client-2 and
+    // stores it in place of client-1. The fake server bound rt-1 to client-1.
+    await ensureMcpOAuthClient({ db: api.providers.db }, "linear", fake.url, "http://localhost/cb", ["agent:query", "agent:write"]);
+    expect((await getMcpOAuthClient({ db: api.providers.db }, "linear")).clientId).toBe("client-2");
+    // The access token expires.
+    await api.providers.engineCredentials.save(owner, "linear", { ...connected, expiresAt: Date.now() });
+    fake.tokenResponse = { access_token: "at-2", refresh_token: "rt-2", expires_in: 3600 };
+
+    // The test API's store has no refresh layer; production wraps it the same way.
+    const refreshing = new OAuthRefreshingCredentialStore(api.providers.engineCredentials, { db: api.providers.db, plugins, env: {} });
+    const refreshed = await refreshing.get(owner, "linear");
+    expect(fake.tokenRequests.at(-1)).toMatchObject({ grant_type: "refresh_token", refresh_token: "rt-1", client_id: "client-1" });
+    expect(refreshed?.accessToken).toBe("at-2");
+    expect(refreshed?.metadata).not.toHaveProperty("refreshRefused");
+    expect(refreshed?.metadata).not.toHaveProperty("refreshFailedAt");
   });
 
   it("mcp mode: a state minted before client binding still completes", async () => {
