@@ -86,7 +86,7 @@ describe("FeatureTourProvider", () => {
     renderTour();
     await stepTitle("Home");
     expect(screen.getByText("1 of 7")).toBeTruthy();
-    await waitFor(() => expect(updateTutorial).toHaveBeenCalledWith({ step: "home" }));
+    await waitFor(() => expect(updateTutorial).toHaveBeenCalledWith({ step: "home", version: 2, orgVersion: 1 }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     // No Tasks button on this page: the tour goes on to Spaces.
     await stepTitle("Spaces");
@@ -137,7 +137,7 @@ describe("FeatureTourProvider", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     tutorial.mockResolvedValue({ ...DUE, step: "workflows" });
     renderTour(<Page without={["workflows"]} />);
-    await waitFor(() => expect(updateTutorial).toHaveBeenCalledWith({ step: "workflows" }));
+    await waitFor(() => expect(updateTutorial).toHaveBeenCalledWith({ step: "workflows", version: 2, orgVersion: 1 }));
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     await stepTitle("Presence");
   });

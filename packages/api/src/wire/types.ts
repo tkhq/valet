@@ -6771,9 +6771,10 @@ export interface TutorialStateResponse {
 }
 
 /**
- * `PUT /api/tutorial`. Send `step` to save progress, or `outcome` with the
- * `version` and `orgVersion` the person saw to finish or skip. Versions above
- * the current ones are capped.
+ * `PUT /api/tutorial`. Send `step` to save progress, or `outcome` to finish
+ * or skip, each with the `version` and `orgVersion` of the tour shown. A step
+ * for other than the current versions is ignored. Outcome versions above the
+ * current ones are capped.
  */
 export interface UpdateTutorialRequest {
   step?: string | null;

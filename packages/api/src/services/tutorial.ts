@@ -64,8 +64,9 @@ function versionField(value: unknown, field: string, cap: number): number {
 /**
  * Save progress (`step`) or record an outcome. An outcome stamps the versions
  * the person saw, capped at the current ones, and clears the resume point.
- * A step is saved only while the tour is due, so a late progress write
- * cannot undo an outcome for the current versions.
+ * A step is saved only while the tour is due and only for the current
+ * versions, so a late progress write cannot undo an outcome or carry a
+ * resume point into a newer tour.
  */
 export async function updateTutorial(
   db: AppDb,
@@ -104,7 +105,13 @@ export async function updateTutorial(
     if (step !== null && (typeof step !== "string" || step.length === 0 || step.length > MAX_STEP_LENGTH)) {
       throw new TutorialInputError(`step must be a step id of 1 to ${MAX_STEP_LENGTH} characters, or null.`);
     }
+    if (body.version === undefined || body.orgVersion === undefined) {
+      throw new TutorialInputError("Send version and orgVersion with step: the versions of the tour you show.");
+    }
     const orgVersion = await orgTutorialVersion(db, user.orgId);
+    // A step from a tour loaded before a version bump or an org reset is
+    // stale: the new tour must start at its first step.
+    if (body.version !== current || body.orgVersion !== orgVersion) return getTutorialState(db, version, user);
     await db.insert(userTutorial).values({ userId: user.id, outcome: null, step, updatedAt: now }).onConflictDoUpdate({
       target: userTutorial.userId,
       set: { outcome: null, step, updatedAt: now },

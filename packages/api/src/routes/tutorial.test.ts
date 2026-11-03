@@ -26,6 +26,13 @@ async function put(body: unknown, headers: Record<string, string> = ADMIN): Prom
   return fetch(`${api!.baseUrl}/api/tutorial`, { method: "PUT", headers, body: JSON.stringify(body) });
 }
 
+/** A progress save for the tour shown at `seen`'s versions. */
+async function step(id: string, seen: { version: number; orgVersion: number }, headers = ADMIN) {
+  const res = await put({ step: id, version: seen.version, orgVersion: seen.orgVersion }, headers);
+  expect(res.status).toBe(200);
+  return (await res.json()) as TutorialStateResponse;
+}
+
 async function finish(seen: TutorialStateResponse, outcome: "completed" | "skipped", headers = ADMIN) {
   const res = await put({ outcome, version: seen.version, orgVersion: seen.orgVersion }, headers);
   expect(res.status).toBe(200);
@@ -72,7 +79,7 @@ describe("/api/tutorial", () => {
 
   it("resumes at the saved step and clears it on finish", async () => {
     api = await bootTestApi();
-    expect((await put({ step: "workflows" })).status).toBe(200);
+    await step("workflows", await state());
     expect(await state()).toMatchObject({ step: "workflows", due: true, outcome: null });
     const done = await finish(await state(), "skipped");
     expect(done).toMatchObject({ step: null, due: false });
@@ -80,13 +87,26 @@ describe("/api/tutorial", () => {
 
   it("ignores a progress write that arrives after the tour is finished", async () => {
     api = await bootTestApi();
-    await finish(await state(), "completed");
-    expect((await put({ step: "home" })).status).toBe(200);
+    const v1 = await state();
+    await finish(v1, "completed");
+    await step("home", v1);
     expect(await state()).toMatchObject({ outcome: "completed", step: null, due: false });
-    // After a version bump the tour is due again, so progress saves.
+    // After a version bump, a late step from the version 1 tour is stale.
     api.providers.tutorialVersion = 2;
-    expect((await put({ step: "spaces" })).status).toBe(200);
+    await step("workflows", v1);
+    expect(await state()).toMatchObject({ outcome: "completed", step: null, due: true });
+    // A step from the version 2 tour saves.
+    await step("spaces", await state());
     expect(await state()).toMatchObject({ outcome: null, step: "spaces", due: true });
+  });
+
+  it("ignores a step from before an org reset", async () => {
+    api = await bootTestApi();
+    const before = await state();
+    await finish(before, "completed");
+    expect((await fetch(`${api.baseUrl}/api/tutorial/reset`, { method: "POST", headers: ADMIN })).status).toBe(200);
+    await step("presence", before);
+    expect(await state()).toMatchObject({ orgVersion: 1, step: null, due: true });
   });
 
   it("an admin reset shows the tour to every member again", async () => {
@@ -116,7 +136,7 @@ describe("/api/tutorial", () => {
 
   it("rejects bad input with the fix", async () => {
     api = await bootTestApi();
-    for (const body of [{}, { outcome: "done" }, { step: "" }, { step: "x".repeat(65) }, { outcome: "completed", version: -1 }, []]) {
+    for (const body of [{}, { outcome: "done" }, { step: "", version: 1, orgVersion: 0 }, { step: "x".repeat(65), version: 1, orgVersion: 0 }, { step: "home" }, { outcome: "completed", version: -1 }, []]) {
       const res = await put(body);
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toMatch(/\./);

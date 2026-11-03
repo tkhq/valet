@@ -83,7 +83,7 @@ export function FeatureTourProvider({ children, enabled = true }: { children: Re
 
   const step = index === null ? undefined : TOUR_STEPS[index];
   useEffect(() => {
-    if (step) save.mutate({ step: step.id });
+    if (step) save.mutate({ step: step.id, version: stateQ.data?.version, orgVersion: stateQ.data?.orgVersion });
     // Save once per step shown; the mutation object changes every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step?.id]);
