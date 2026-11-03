@@ -496,11 +496,6 @@ export function SessionView({
           {chatActive && mobileBrowser && browserWatch.hasActivity && (
             <MobileBrowser key={JSON.stringify([sessionId, effectiveThreadId])} sessionId={sessionId} threadId={effectiveThreadId} working={browserWatch.working} />
           )}
-          {compacting && (
-            <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
-              Compacting context…
-            </div>
-          )}
           {branchError && (
             <div role="alert" className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
               {branchError}
@@ -526,7 +521,7 @@ export function SessionView({
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />
           <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
-            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} />
+            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} compacting={compacting} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

@@ -54,10 +54,11 @@ export function retryLabel(retry: ThreadRetry, now: number): string {
 
 /**
  * One line under the plan, as Claude Code shows its activity: the step Valet
- * is on (or that it is thinking) and how long the turn has run. The queue
+ * is on (or that it is thinking or compacting context) and how long the turn
+ * has run. The queue
  * also covers work submitted outside this browser and reconnects.
  */
-export function ProcessingStatus({ status, queue, needsResponse = false, activity, startedAt, retry }: {
+export function ProcessingStatus({ status, queue, needsResponse = false, activity, startedAt, retry, compacting = false }: {
   status: AgentStatus;
   queue?: WireQueueState;
   needsResponse?: boolean;
@@ -67,6 +68,8 @@ export function ProcessingStatus({ status, queue, needsResponse = false, activit
   startedAt?: number;
   /** A failed model call the turn retries. It replaces the label. */
   retry?: ThreadRetry;
+  /** The thread is compacting its context, during a turn or between turns. */
+  compacting?: boolean;
 }) {
   const waiting = needsResponse || status === "blocked_on_decision_gate" || queue?.status === "blocked_on_decision_gate";
   const running = status === "thinking" || status === "tool_calling" || status === "streaming"
@@ -76,8 +79,14 @@ export function ProcessingStatus({ status, queue, needsResponse = false, activit
     || Boolean(queue?.pendingIds.length || queue?.collectingIds.length);
   const working = running && !waiting;
   const retrying = working && retry !== undefined;
-  const now = useNow((working && startedAt !== undefined) || retrying);
+  // Compaction between turns has no turn clock: time it from when it began.
+  const [compactingSince, setCompactingSince] = useState<number>();
+  useEffect(() => setCompactingSince(compacting ? Date.now() : undefined), [compacting]);
+  const busy = working || (compacting && !waiting);
+  const clockFrom = working ? startedAt : compacting && !waiting ? startedAt ?? compactingSince : undefined;
+  const now = useNow(clockFrom !== undefined || retrying);
   const label = waiting ? "Valet is waiting for a response"
+    : compacting ? "Valet is compacting context…"
     : retrying ? retryLabel(retry, now)
     : running ? activity ?? (status === "thinking" ? "Valet is thinking…" : "Valet is working…")
     : paused ? "Valet is paused"
@@ -89,9 +98,9 @@ export function ProcessingStatus({ status, queue, needsResponse = false, activit
     <div className="mx-auto w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
       {/* One quiet line, not a card: the plan above it is the only box. */}
       <div className={cn("flex min-w-0 items-center gap-2 px-1 text-xs text-muted md:text-[13px]", label && "my-3 md:my-2")}>
-        {label && <img src="/icons/valet-mascot.webp" alt="" width={20} height={20} className={cn("h-5 w-5 shrink-0 object-contain", working && "motion-safe:animate-pulse")} />}
+        {label && <img src="/icons/valet-mascot.webp" alt="" width={20} height={20} className={cn("h-5 w-5 shrink-0 object-contain", busy && "motion-safe:animate-pulse")} />}
         <span role="status" aria-live="polite" aria-atomic="true" className="min-w-0 truncate">{label}</span>
-        {label && working && startedAt !== undefined && <span aria-hidden className="shrink-0 tabular-nums">{formatElapsed(now - startedAt)}</span>}
+        {label && busy && clockFrom !== undefined && <span aria-hidden className="shrink-0 tabular-nums">{formatElapsed(now - clockFrom)}</span>}
       </div>
     </div>
   );

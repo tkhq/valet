@@ -112,7 +112,10 @@ metadata. Adjacent reasoning intervals combine into one timing line.
 Historical messages without timing metadata do not receive invented times.
 A thought line opens to the provider's reasoning summary. The model's own reasoning text is not stored, and the summary is never sent back to the model.
 
-Processing feedback covers the gap before text or tools stream. Slack work
+Processing feedback covers the gap before text or tools stream. While a thread compacts its context, during a turn or between turns, the
+same status line reads "Valet is compacting context…" with the pulse and the
+elapsed time. A pending response still takes priority. It replaces the
+separate compaction strip. Slack work
 status is tracked separately from response streaming and cleared when work
 settles, fails, or stops.
 On phones the composer status is a muted text line with a small Valet mascot,
