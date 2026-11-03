@@ -15,6 +15,11 @@ export interface FakeOAuthServer {
   /** Number of hits on the discovery well-known endpoint. */
   discoveryRequests: { count: number };
   tokenRequests: Array<Record<string, string>>;
+  /** The client each refresh token was issued to. A refresh that names a
+   * different client_id gets 400 invalid_grant, as a real server answers.
+   * The token endpoint fills it; a test that seeds a credential directly
+   * adds its refresh token here. */
+  refreshTokenClients: Map<string, string>;
   /** Next token response body (default below). */
   tokenResponse: Record<string, unknown>;
   /** When set, the token endpoint returns this HTTP status with an error body. */
@@ -45,6 +50,7 @@ export function startFakeOAuthServer(opts?: {
 }): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
+  const refreshTokenClients: FakeOAuthServer["refreshTokenClients"] = new Map();
   const state: {
     tokenResponse: Record<string, unknown>;
     tokenFailure?: number;
@@ -91,6 +97,12 @@ export function startFakeOAuthServer(opts?: {
     if (state.tokenFailure) {
       return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
     }
+    if (entries.grant_type === "refresh_token") {
+      const issuedTo = refreshTokenClients.get(entries.refresh_token ?? "");
+      if (issuedTo !== undefined && issuedTo !== entries.client_id) return c.json({ error: "invalid_grant" }, 400);
+    }
+    const issued = state.tokenResponse.refresh_token;
+    if (typeof issued === "string" && entries.client_id) refreshTokenClients.set(issued, entries.client_id);
     return c.json(state.tokenResponse);
   });
 
@@ -103,6 +115,7 @@ export function startFakeOAuthServer(opts?: {
     registrations,
     discoveryRequests,
     tokenRequests,
+    refreshTokenClients,
     get tokenResponse() {
       return state.tokenResponse;
     },
