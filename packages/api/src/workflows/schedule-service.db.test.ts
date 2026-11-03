@@ -13,9 +13,9 @@ import {
   createWorkflowSchedule,
   EMPTY_PROMPT_REASON,
   updateWorkflowSchedule,
-  nextFireAt,
   WORKFLOW_DELETED_REASON,
 } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import type { AppDb } from "../lib/drizzle.js";
 
 /** Arm-gate deps for the create calls. Every workflow in this file is

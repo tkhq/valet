@@ -1,0 +1,4 @@
+# Not a Valet workflow: a top-level workflows/ folder may hold other files.
+jobs:
+  build:
+    runs-on: ubuntu-latest

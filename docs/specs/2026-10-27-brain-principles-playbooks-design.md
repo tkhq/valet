@@ -118,6 +118,14 @@ Valet does not replace an open plan. If the thread has a plan with an item that 
 
 The `skill` tool description marks each playbook with `(playbook)`, so the model knows that reading one sets the plan.
 
+## Checking a brain repository
+
+Sync does not fail a repository for one bad file. It skips the file with a warning on the source, or it loads the file in a weaker form: a playbook that breaks the step limits loads as a plain skill. `valet validate [path]` runs the same rules on a local checkout and exits `1` on an error, so a brain repository can check its files in CI. See [the CLI reference](../cli.md#valet-validate-path---subpath-dir---json).
+
+The command reuses the sync code: skill discovery, `parseSkillFile` and `parsePromptFile`, `readPlaybookSteps`, the memory mount rule, `parseConcept`, `readWorkflowFile`, and `nextFireAt`. It adds only the file line of each finding. For a principle under `.valet/memory/principles/`, it requires the `title` and the one-line `description` that the index line shows.
+
+Sync mounts `.valet/memory/` under `lib/`, and the principle index reads only `principles/`. So a principle that a repository holds is checked here, but the assistant does not list it yet.
+
 ## Deferred
 
 These come from the concept note. This pilot does not build them:

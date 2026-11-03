@@ -34,8 +34,9 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import {
-  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, nextFireAt, WORKFLOW_DELETED_REASON,
+  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON,
 } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 
 /** Reasons the poll loop records when it turns a schedule off. Each one
  * names the fix, because the routine page shows it as written. A manual
