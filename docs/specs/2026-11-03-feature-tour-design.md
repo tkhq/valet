@@ -41,7 +41,8 @@ An org admin can choose **Show the tour to everyone again** in Settings, Organiz
 
 Table `user_tutorial`, one row per user (cascade delete with the user): `seen_version`, `seen_org_version`, `outcome` (`completed`, `skipped`, or null), `step` (the resume point), `updated_at`. `SCHEMA_REPAIRS` creates the table and the `orgs.tutorial_version` column on deployed databases.
 
-- Each step shown saves `step` (`PUT /api/tutorial`) and sets `outcome` to null, but only while the tour is due. A reload resumes at that step. A late progress write after Done or Skip changes nothing.
+- Each step shown saves `step` (`PUT /api/tutorial`) with the versions of the tour shown, and sets `outcome` to null. While a pass is in progress, `seen_version` and `seen_org_version` name the tour that step belongs to.
+- The API ignores a step save for other than the current versions, or one that arrives after Done or Skip. A reload resumes at the saved step only if it belongs to the current versions.
 - Done saves `completed`; Skip tour or Escape saves `skipped`. Both send the versions the person saw. The server caps them at the current versions and never lowers a stored version, so a stale tab cannot re-show the tour.
 - A version bump does not delete or change rows. It only makes `due` true again, and the tour starts at the first step.
 

@@ -47,8 +47,9 @@ export async function getTutorialState(
     seenOrgVersion,
     outcome,
     // A finished tour has no resume point. A due one resumes where the
-    // person left it, unless a version bump made the tour new again.
-    step: due && outcome === null ? row?.step ?? null : null,
+    // person left it, but only if that step was saved for the current
+    // versions: after a bump or a reset the tour starts at its first step.
+    step: due && outcome === null && seenVersion === current && seenOrgVersion === orgVersion ? row?.step ?? null : null,
     due,
   };
 }
@@ -112,9 +113,18 @@ export async function updateTutorial(
     // A step from a tour loaded before a version bump or an org reset is
     // stale: the new tour must start at its first step.
     if (body.version !== current || body.orgVersion !== orgVersion) return getTutorialState(db, version, user);
-    await db.insert(userTutorial).values({ userId: user.id, outcome: null, step, updatedAt: now }).onConflictDoUpdate({
+    // While a pass is in progress, the seen versions record the tour the
+    // step belongs to. A reset that lands after this write raises the org
+    // version past it, so the step no longer resumes (getTutorialState).
+    await db.insert(userTutorial).values({
+      userId: user.id, seenVersion: current, seenOrgVersion: orgVersion, outcome: null, step, updatedAt: now,
+    }).onConflictDoUpdate({
       target: userTutorial.userId,
-      set: { outcome: null, step, updatedAt: now },
+      set: {
+        seenVersion: sql`GREATEST(${userTutorial.seenVersion}, ${current})`,
+        seenOrgVersion: sql`GREATEST(${userTutorial.seenOrgVersion}, ${orgVersion})`,
+        outcome: null, step, updatedAt: now,
+      },
       // Only while the tour is due: a progress write that arrives after Done
       // or Skip for the current versions must not reopen the tour.
       setWhere: or(

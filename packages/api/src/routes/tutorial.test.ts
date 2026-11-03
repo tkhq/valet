@@ -100,6 +100,13 @@ describe("/api/tutorial", () => {
     expect(await state()).toMatchObject({ outcome: null, step: "spaces", due: true });
   });
 
+  it("does not resume a step saved just before an org reset", async () => {
+    api = await bootTestApi();
+    await step("workflows", await state());
+    expect((await fetch(`${api.baseUrl}/api/tutorial/reset`, { method: "POST", headers: ADMIN })).status).toBe(200);
+    expect(await state()).toMatchObject({ orgVersion: 1, outcome: null, step: null, due: true });
+  });
+
   it("ignores a step from before an org reset", async () => {
     api = await bootTestApi();
     const before = await state();

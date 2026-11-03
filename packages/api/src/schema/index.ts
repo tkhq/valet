@@ -3221,7 +3221,8 @@ export const legacyArtifactPublications = pgTable("legacy_artifact_publications"
  * One row per user who started, finished, or skipped the in-app tour. The
  * tour shows again when `seen_version` is below the instance version or
  * `seen_org_version` is below `orgs.tutorial_version`. `outcome` null means
- * the tour is in progress at `step`.
+ * the tour is in progress at `step`, and the seen versions then name the tour
+ * that step belongs to.
  */
 export const userTutorial = pgTable("user_tutorial", {
   userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
