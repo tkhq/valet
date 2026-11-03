@@ -161,6 +161,19 @@ describe("SpacesNav", () => {
     expect(spaceTint("t1")).toBe(spaceTint("t1"));
   });
 
+  it("does not bring back a manual open on Browser Back to the space it was set in", async () => {
+    teams = [team("t1", "Platform"), team("t2", "People")];
+    const router = mount("/chat?workspace=user");
+    await screen.findByRole("list", { name: "Personal pages" });
+    // The space name opens Platform by hand, set while the scope is still Personal.
+    await userEvent.click(screen.getByRole("link", { name: "Platform" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "t1" }));
+    router.history.back();
+    await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "user" }));
+    expect(await screen.findByRole("list", { name: "Personal pages" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Platform pages" })).toBeNull();
+  });
+
   it("keeps the page when switching space from a space page", async () => {
     teams = [team("t1", "Engineering"), team("t2", "Sales")];
     const router = mount("/integrations?workspace=t1");

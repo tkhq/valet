@@ -124,12 +124,17 @@ export function SpacesNav() {
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
   const page = spacePageFor(useRouterState({ select: (state) => state.location.pathname }));
-  // Manual open states belong to the space they were set in: going to
-  // another space drops them, so only the new active space is open.
-  const [manual, setManual] = useState<{ scope: string; open: Record<string, boolean> }>({ scope: scope.key, open: {} });
-  const manualOpen = manual.scope === scope.key ? manual.open : {};
-  const isOpen = (key: string) => manualOpen[key] ?? key === scope.key;
-  const setOpen = (key: string, open: boolean) => setManual({ scope: scope.key, open: { ...manualOpen, [key]: open } });
+  // Manual open states belong to the space they were set in. Every change of
+  // space clears them, Browser Back included, so only the new active space
+  // is open. The reset runs during render, before the stale state can show.
+  const [manualOpen, setManualOpen] = useState<Record<string, boolean>>({});
+  const [manualScope, setManualScope] = useState(scope.key);
+  if (manualScope !== scope.key) {
+    setManualScope(scope.key);
+    setManualOpen({});
+  }
+  const isOpen = (key: string) => (manualScope === scope.key ? manualOpen[key] : undefined) ?? key === scope.key;
+  const setOpen = (key: string, open: boolean) => setManualOpen((current) => ({ ...current, [key]: open }));
   const [settingsStored, setSettingsStored] = useState(() => loadExpanded());
   const setSettingsOpen = (key: string, open: boolean) => {
     setSettingsStored((current) => {
