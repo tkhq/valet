@@ -1300,6 +1300,9 @@ It checks the sandbox status before any fleet listing, so the delete costs one o
 The Kubernetes provider has no retained-state reader today.
 Until it does, a stopped browser sandbox on Kubernetes loses its audit journal at final deletion.
 This replaced a fail-closed rule on 2026-10-29: every stopped browser sandbox failed deletion forever, the retention sweeps retried that backlog nonstop, and the api event loop stalled.
+Turn settlement and session teardown never list the fleet. They call `SandboxProvider.listBrowserForSession`, which reads the session's runtime-state claim by name on Kubernetes. The stop check reads one sandbox with `describe`. Only the reconcile sweep calls `list()`.
+If the inventory read fails at turn end, the cleanup record stays and the settle continues.
+The hibernation reaper and the child retention sweep space retries per row: 5 minutes, doubling to 6 hours. The backoff is in memory and bounded to 10,000 rows, so a restart retries each row once.
 
 ### Browser dogfood corrections (2026-09-24)
 

@@ -60,7 +60,7 @@ import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing, withSharerName } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
-import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
+import { createBrowserPolicy, browserSandboxesForSession, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import {
   loadRoleFromMarkdown,
@@ -3491,8 +3491,8 @@ export class EngineHost {
     const session = this.liveSession(sessionId);
     // Existing browser state keeps its audit obligation after allocation is disabled.
     if (session && !session.options.sandboxLifecycle) {
-      const rows = await this.opts.sandboxProvider.list?.() ?? [];
-      for (const row of rows.filter((value) => value.sessionId === sessionId && value.browserEnabled)) {
+      const rows = await browserSandboxesForSession(this.opts.sandboxProvider, sessionId);
+      for (const row of rows.filter((value) => value.browserEnabled)) {
         await this.stopBrowserBefore(row.id, 'destroy');
       }
     }
@@ -3542,8 +3542,7 @@ export class EngineHost {
   }
 
   private async destroyRetainedBrowserSandboxes(sessionId: string): Promise<void> {
-    const rows = await this.opts.sandboxProvider.list?.() ?? [];
-    for (const row of rows.filter((value) => value.sessionId === sessionId && (value.browserEnabled ?? this.opts.sandboxProvider.capabilities().browserAutomation))) {
+    for (const row of await browserSandboxesForSession(this.opts.sandboxProvider, sessionId)) {
       await this.destroySandbox(row.id);
     }
   }

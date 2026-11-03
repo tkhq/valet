@@ -1855,6 +1855,14 @@ export interface SandboxProvider {
    */
   list?(): Promise<SandboxListing[]>;
   /**
+   * Optional: the sandboxes that hold this session's retained browser state,
+   * read without listing the fleet. Turn settlement and session teardown call
+   * it; `list()` stays for the reconcile sweep. Absent: callers filter `list()`.
+   */
+  listBrowserForSession?(sessionId: string): Promise<SandboxListing[]>;
+  /** Optional: one sandbox's listing row by id, or null. Absent: callers search `list()`. */
+  describe?(id: string): Promise<SandboxListing | null>;
+  /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
    * wakes it under the same id. When both are implemented (and capability true),

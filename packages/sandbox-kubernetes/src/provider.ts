@@ -144,7 +144,7 @@ import {
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig, SandboxCRRead } from "./types.js";
-import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
+import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, readRuntimeStateOwner, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
   parseStorageQuantity,
@@ -963,6 +963,39 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
     }
     return rows;
+  }
+
+  /** The session's runtime-state claim names its browser sandbox, so one
+   * claim read replaces a fleet listing. The claim exists for every sandbox
+   * that holds browser state (`ensureRuntimeState` runs before the CR). */
+  async listBrowserForSession(sessionId: string): Promise<SandboxListing[]> {
+    if (!this.deps.runtimeStateApi) return [];
+    const owner = await readRuntimeStateOwner(this.deps.runtimeStateApi, this.cfg.namespace, sessionId);
+    if (!owner) return [];
+    const row = await this.describe(owner.sandboxId);
+    return [row ?? { id: owner.sandboxId, sessionId, browserEnabled: true, createdAtMs: null }];
+  }
+
+  /** One CR and its runtime-state claim, with the same ownership rules as `list()`. */
+  async describe(id: string): Promise<SandboxListing | null> {
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    const owners = this.deps.runtimeStateApi ? await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace, id) : [];
+    if (!cr && owners.length === 0) return null;
+    const annotations = cr?.metadata.annotations;
+    let sessionId = annotations?.[SESSION_ANNOTATION_KEY] ?? null;
+    for (const owner of owners) {
+      if (sessionId !== null && sessionId !== owner.sessionId) {
+        throw new Error("The browser volume and sandbox have different session owners. Restore matching ownership before changing this session.");
+      }
+      sessionId = owner.sessionId;
+    }
+    const createdAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    return {
+      id,
+      sessionId,
+      browserEnabled: owners.length > 0 || Boolean(annotations?.[RUNTIME_STATE_ANNOTATION]),
+      createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+    };
   }
 
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an

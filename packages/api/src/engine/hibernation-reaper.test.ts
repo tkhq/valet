@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -121,6 +121,29 @@ describe("HibernationReaper", () => {
     await reaper.sweep(NOW + 1);
 
     expect(destroyedSandboxes).toHaveLength(1);
+  });
+
+  it("spaces retries of a failing reclaim instead of retrying it every pass", async () => {
+    await seed();
+    const { deps } = fakeDeps();
+    let attempts = 0;
+    deps.engineHost.destroySandbox = async () => {
+      attempts++;
+      throw new Error("apiserver timeout");
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reaper = new HibernationReaper(deps);
+
+    await reaper.sweep(NOW);
+    await reaper.sweep(NOW + 60_000);
+    expect(attempts).toBe(1);
+    await reaper.sweep(NOW + 5 * 60_000);
+    expect(attempts).toBe(2);
+    // The second failure doubles the wait to 10 minutes.
+    await reaper.sweep(NOW + 10 * 60_000);
+    expect(attempts).toBe(2);
+    await reaper.sweep(NOW + 15 * 60_000);
+    expect(attempts).toBe(3);
   });
 
   it("skips rows still inside the retention window", async () => {
