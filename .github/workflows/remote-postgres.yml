@@ -77,6 +77,9 @@ jobs:
       - name: Usage repair on concurrent boots against real Postgres
         run: pnpm --filter @valet/api test usage-step-attribution.postgres.test.ts
 
+      - name: MCP registration limits across replicas against real Postgres
+        run: pnpm --filter @valet/api test mcp-registration.postgres.test.ts
+
       # Web SPA: run vite directly (its plugin generates routeTree.gen.ts and it
       # bundles without a full typecheck) so the binary has a real web asset.
       - name: Build web SPA

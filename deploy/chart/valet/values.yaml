@@ -90,6 +90,22 @@ api:
     # email. With SSO on, the api refuses to boot until an admin exists or one
     # is listed here.
     adminEmails: ""
+    # MCP dynamic client registration (AUTH_MCP_*). Each value renders only
+    # when set; empty keeps the api default shown here.
+    mcp:
+      # "open" (default) or "off". Off refuses new registrations; apps that
+      # already connected keep working.
+      registration: ""
+      # Registrations each address may make in an hour (default 10; 0 = no limit).
+      registrationRatePerHour: ""
+      # Refuse registration while this many clients from the last day have no
+      # consent and no token (default 200; 0 = no cap).
+      unconsentedClientCap: ""
+      # Redirect URIs one registration may hold (default 5; at least 1).
+      maxRedirectUris: ""
+      # Native app schemes a redirect URI may use, as a comma list
+      # (default "claude,cursor").
+      appSchemes: ""
 
   # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
   # env fallback). Set these three plus the api.secrets.githubApp* values

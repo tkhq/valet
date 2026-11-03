@@ -670,4 +670,18 @@ grep -q 'AUTH_METHODS: "oidc,password"' <<<"$EXPLICIT" || fail "explicit methods
 grep -q 'AUTH_PRIMARY_METHOD: "oidc"' <<<"$EXPLICIT" || fail "primaryMethod must render AUTH_PRIMARY_METHOD"
 pass "sign-in methods render only when listed"
 
+echo "== MCP registration settings =="
+if grep -q 'AUTH_MCP_' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave every AUTH_MCP_ setting to the api default"
+fi
+MCP=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.mcp.registration=off \
+  --set api.auth.mcp.registrationRatePerHour=0 --set api.auth.mcp.unconsentedClientCap=50 \
+  --set api.auth.mcp.maxRedirectUris=2 --set 'api.auth.mcp.appSchemes=claude')
+grep -q 'AUTH_MCP_REGISTRATION: "off"' <<<"$MCP" || fail "mcp.registration must render AUTH_MCP_REGISTRATION"
+grep -q 'AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "0"' <<<"$MCP" || fail "a 0 rate must still render"
+grep -q 'AUTH_MCP_UNCONSENTED_CLIENT_CAP: "50"' <<<"$MCP" || fail "mcp.unconsentedClientCap must render"
+grep -q 'AUTH_MCP_MAX_REDIRECT_URIS: "2"' <<<"$MCP" || fail "mcp.maxRedirectUris must render"
+grep -q 'AUTH_MCP_APP_SCHEMES: "claude"' <<<"$MCP" || fail "mcp.appSchemes must render"
+pass "MCP registration settings render only when set"
+
 echo "All golden assertions passed."

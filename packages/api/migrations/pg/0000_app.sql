@@ -186,6 +186,15 @@ CREATE INDEX "oauthConsent_clientId_idx" ON "oauth_consent" ("client_id");
 --> statement-breakpoint
 CREATE INDEX "oauthConsent_userId_idx" ON "oauth_consent" ("user_id");
 --> statement-breakpoint
+CREATE TABLE "mcp_registrations" (
+	"id" text PRIMARY KEY NOT NULL,
+	"address" text NOT NULL,
+	"pending" boolean NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at");
+--> statement-breakpoint
 CREATE TABLE "invites" (
 	"id" text PRIMARY KEY NOT NULL,
 	"code_hash" text NOT NULL,

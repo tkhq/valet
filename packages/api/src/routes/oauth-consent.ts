@@ -25,6 +25,7 @@ import { and, eq, gt } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { publicUrlFromEnv } from "../channels/host.js";
 import type { ValetAuth } from "../auth/index.js";
+import { redirectUriProblem } from "../auth/mcp-registration.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
@@ -58,13 +59,16 @@ const MCP_ACCESS = [
 /** What an MCP token cannot do, shown below the access list. */
 const MCP_LIMITS = ["It cannot approve requests, change policies, or administer your organization or teams."];
 
-function isLoopback(uri: string): boolean {
-  try {
-    const host = new URL(uri).hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
-  } catch {
-    return false;
-  }
+/**
+ * True when the code stays on this computer: a loopback address, or a
+ * native app's own scheme (`claude://`). `mcpAuthorizeGate` has already
+ * refused any other scheme.
+ */
+function isLocalRedirect(redirect: URL): boolean {
+  if (redirect.protocol === "https:") return false;
+  if (redirect.protocol !== "http:") return true;
+  const host = redirect.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
 }
 
 function parsePending(value: string): PendingCode | undefined {
@@ -136,8 +140,10 @@ oauthConsentRouter.get("/", async (c) => {
   const redirect = new URL(pending.redirectURI);
   const body: OAuthConsentInfo = {
     client_name: client?.name?.trim() || "An unnamed app",
-    redirect_origin: redirect.origin,
-    redirect_is_local: isLoopback(pending.redirectURI),
+    // Scheme and full host, port included. `URL.origin` is "null" for an
+    // app scheme such as claude://, which would hide where the code goes.
+    redirect_origin: `${redirect.protocol}//${redirect.host}`,
+    redirect_is_local: isLocalRedirect(redirect),
     account: c.var.user.email,
     access: MCP_ACCESS,
     limits: MCP_LIMITS,
@@ -186,7 +192,7 @@ oauthConsentRouter.post("/", async (c) => {
  *   the authorization from a sign-in hook instead, and the login form's
  *   background sign-in request swallows that redirect.
  */
-export function mcpAuthorizeGate(auth: Pick<ValetAuth, "api">) {
+export function mcpAuthorizeGate(auth: Pick<ValetAuth, "api">, appSchemes: readonly string[]) {
   return async (c: Context<AppEnv>, next: () => Promise<void>): Promise<void | Response> => {
     const url = new URL(c.req.url);
     // Exactly one prompt=consent. better-call reads a repeated key as an
@@ -204,6 +210,11 @@ export function mcpAuthorizeGate(auth: Pick<ValetAuth, "api">) {
     } catch {
       session = null;
     }
+    // Clients registered before redirect validation may hold a wildcard or
+    // userinfo URI. Refuse to send a code to one.
+    const redirects = url.searchParams.getAll("redirect_uri");
+    const problem = redirects.length === 1 && redirects[0] ? redirectUriProblem(redirects[0], appSchemes) : "send exactly one redirect_uri.";
+    if (problem) return c.json({ error: "invalid_request", error_description: `This app's redirect URI is not allowed: ${problem} Remove the app and connect it again.` }, 400);
     if (!session) return c.redirect(`/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
     return next();
   };

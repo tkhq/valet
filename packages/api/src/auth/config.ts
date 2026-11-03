@@ -12,6 +12,74 @@ export type LoginMethod = "password" | "oidc" | "google" | "github";
 
 export const LOGIN_METHODS: readonly LoginMethod[] = ["password", "oidc", "google", "github"];
 
+/**
+ * MCP dynamic client registration settings (`auth/mcp-registration.ts`).
+ * Each comes from an `AUTH_MCP_*` variable; unset means the default below.
+ */
+export interface McpRegistrationConfig {
+  /** `AUTH_MCP_REGISTRATION`: `open` (default) or `off`. Off refuses new
+   * registrations; clients that already exist keep working. */
+  open: boolean;
+  /** `AUTH_MCP_REGISTRATION_RATE_PER_HOUR`: registrations each address may
+   * make in an hour. 0 turns the limit off. */
+  ratePerHour: number;
+  /** `AUTH_MCP_UNCONSENTED_CLIENT_CAP`: clients from the last day with no
+   * consent and no token, above which registration is refused. 0 turns the cap off. */
+  unconsentedCap: number;
+  /** `AUTH_MCP_MAX_REDIRECT_URIS`: redirect URIs one registration may hold. At least 1. */
+  maxRedirectUris: number;
+  /** `AUTH_MCP_APP_SCHEMES`: native app schemes a redirect URI may use. */
+  appSchemes: string[];
+}
+
+/** The Claude desktop app and Cursor call back on their own schemes. */
+export const DEFAULT_MCP_APP_SCHEMES: readonly string[] = ["claude", "cursor"];
+
+export const DEFAULT_MCP_REGISTRATION: Readonly<McpRegistrationConfig> = {
+  open: true, ratePerHour: 10, unconsentedCap: 200, maxRedirectUris: 5, appSchemes: [...DEFAULT_MCP_APP_SCHEMES],
+};
+
+// Schemes that run content, read files, or leave the computer are never app schemes.
+const UNSAFE_APP_SCHEMES = new Set(["http", "https", "javascript", "data", "vbscript", "file", "blob", "about", "ftp", "ws", "wss", "mailto", "tel"]);
+
+/** Reads `AUTH_MCP_APP_SCHEMES`, a comma list. Unset means `claude,cursor`; empty allows none. */
+export function parseMcpAppSchemes(raw: string | undefined): string[] {
+  if (raw === undefined) return [...DEFAULT_MCP_APP_SCHEMES];
+  const schemes = [...new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))];
+  for (const scheme of schemes) {
+    if (!/^[a-z][a-z0-9+.-]*$/.test(scheme) || UNSAFE_APP_SCHEMES.has(scheme)) {
+      throw new Error(`AUTH_MCP_APP_SCHEMES has "${scheme}", which cannot be an app scheme. List native app schemes without "://", such as claude,cursor.`);
+    }
+  }
+  return schemes;
+}
+
+/** A whole number from `name`, at least `min`. Unset or blank means `fallback`. */
+function parseCount(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  if (!/^\d+$/.test(raw) || Number(raw) < min || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`${name} is "${env[name]}". Set a whole number of ${min} or more${min === 0 ? " (0 turns it off)" : ""}, or remove it to use ${fallback}.`);
+  }
+  return Number(raw);
+}
+
+/** Reads the `AUTH_MCP_*` variables. An invalid value throws at boot, naming the variable. */
+export function parseMcpRegistration(env: NodeJS.ProcessEnv): McpRegistrationConfig {
+  const mode = (env.AUTH_MCP_REGISTRATION ?? "").trim().toLowerCase();
+  if (mode !== "" && mode !== "open" && mode !== "off") {
+    throw new Error(`AUTH_MCP_REGISTRATION is "${env.AUTH_MCP_REGISTRATION}". Use open or off.`);
+  }
+  const d = DEFAULT_MCP_REGISTRATION;
+  return {
+    open: mode !== "off",
+    ratePerHour: parseCount(env, "AUTH_MCP_REGISTRATION_RATE_PER_HOUR", d.ratePerHour, 0),
+    unconsentedCap: parseCount(env, "AUTH_MCP_UNCONSENTED_CLIENT_CAP", d.unconsentedCap, 0),
+    maxRedirectUris: parseCount(env, "AUTH_MCP_MAX_REDIRECT_URIS", d.maxRedirectUris, 1),
+    appSchemes: parseMcpAppSchemes(env.AUTH_MCP_APP_SCHEMES),
+  };
+}
+
 export interface AuthConfig {
   /** The sign-in methods this deployment offers, from `AUTH_METHODS`. Empty
    * means nobody can sign in: login is off until a deployment lists a method. */
@@ -33,6 +101,8 @@ export interface AuthConfig {
   adminEmails?: string[];
   /** Explicit deployment opt-in: admit new users without invitations. */
   allowSignup?: boolean;
+  /** MCP dynamic client registration settings, from the `AUTH_MCP_*` variables. */
+  mcp: McpRegistrationConfig;
   oidc?: {
     issuer: string;
     clientId: string;
@@ -277,6 +347,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     allowedEmailDomains,
     ...(adminEmails.length ? { adminEmails } : {}),
     ...(env.AUTH_ALLOW_SIGNUP === "1" ? { allowSignup: true } : {}),
+    mcp: parseMcpRegistration(env),
     // A provider with credentials but no place in AUTH_METHODS stays off.
     ...(methods.includes("oidc") ? { oidc } : {}),
     social: {

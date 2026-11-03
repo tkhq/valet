@@ -2445,6 +2445,10 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "agent_sessions", column: "image_fallback" },
     sql: `ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS image_fallback jsonb`,
   },
+  { describe: "mcp_registrations", probe: { kind: "table", table: "mcp_registrations" }, sql: `CREATE TABLE IF NOT EXISTS "mcp_registrations" (
+ "id" text PRIMARY KEY NOT NULL, "address" text NOT NULL, "pending" boolean NOT NULL, "created_at" bigint NOT NULL
+)` },
+  { describe: "mcp_registrations_address_idx", probe: { kind: "index", index: "mcp_registrations_address_idx" }, sql: `CREATE INDEX IF NOT EXISTS "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at")` },
 ];
 
 /**
