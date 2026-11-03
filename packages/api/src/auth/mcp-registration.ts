@@ -14,26 +14,34 @@
  *    wildcards, user names, fragments, or commas (the plugin stores the list
  *    comma-joined). At most `maxRedirectUris`. `mcpAuthorizeGate` applies
  *    the same check, so a client stored before this gate gets no code.
- * 2. Limits: each address may register `ratePerHour` clients an hour (in
- *    memory, for each api process). Clients from the last day that nobody
- *    approved (no consent and no token) count toward `unconsentedCap`. 0
- *    turns either limit off. Over a limit, the gate returns 429. Nothing
- *    deletes unapproved clients: the `valet.mcp.client_registration` counter
- *    and a log line make refusals visible, and the auth spec ("MCP client
- *    registration") has a query that lists unapproved clients.
+ * 2. Limits: each address may register `ratePerHour` clients an hour.
+ *    Clients from the last day that nobody approved (no consent and no
+ *    token) count toward `unconsentedCap`. 0 turns either limit off. Over a
+ *    limit, the gate returns 429. Admission runs in Postgres under one
+ *    advisory lock and records a row in `mcp_registrations`, so every api
+ *    replica shares both limits. Nothing deletes unapproved clients: the
+ *    `valet.mcp.client_registration` counter and a log line make refusals
+ *    visible, and the auth spec ("MCP client registration") has a query that
+ *    lists unapproved clients.
  */
-import { and, eq, gt, notExists, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, gt, lt, notExists, sql } from "drizzle-orm";
 import { metrics } from "@opentelemetry/api";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { clientKey, peerAddress } from "../routes/cli-device.js";
-import { oauthAccessToken, oauthApplication, oauthConsent } from "../schema/index.js";
+import { mcpRegistrations, oauthAccessToken, oauthApplication, oauthConsent } from "../schema/index.js";
 import type { McpRegistrationConfig } from "./config.js";
 
 const MAX_REDIRECT_URI_LENGTH = 2048;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+// A pending admission counts toward the cap for this long. The gate clears
+// `pending` when better-auth returns, so only a process that dies in that
+// window leaves one behind.
+const PENDING_MS = 5 * 60 * 1000;
+const ADMISSION_LOCK = "mcp-client-registration";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // Lowercase DNS labels with at least one dot. `new URL` already lowercases
@@ -101,27 +109,8 @@ function recordRegistration(outcome: Outcome): void {
   registrationCounter.add(1, { outcome });
 }
 
-const addressWindows = new Map<string, { windowStart: number; count: number }>();
-
-function allowAddress(key: string, now: number, perHour: number): boolean {
-  const entry = addressWindows.get(key);
-  if (!entry || now - entry.windowStart >= HOUR_MS) {
-    // Drop finished windows now and then, so the map stays small.
-    if (addressWindows.size > 10_000) for (const [k, v] of addressWindows) if (now - v.windowStart >= HOUR_MS) addressWindows.delete(k);
-    addressWindows.set(key, { windowStart: now, count: 1 });
-    return true;
-  }
-  entry.count += 1;
-  return entry.count <= perHour;
-}
-
-/** Test seam: forget the per-address windows. */
-export function clearMcpRegistrationLimits(): void {
-  addressWindows.clear();
-}
-
 /** Clients registered in the last day that have no consent and no token. */
-async function countRecentUnapproved(db: AppDb): Promise<number> {
+async function countRecentUnapproved(db: Pick<AppDb, "select">): Promise<number> {
   const since = new Date(Date.now() - DAY_MS);
   const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(oauthApplication).where(and(
     gt(oauthApplication.createdAt, since),
@@ -129,6 +118,37 @@ async function countRecentUnapproved(db: AppDb): Promise<number> {
     notExists(db.select({ one: sql`1` }).from(oauthAccessToken).where(eq(oauthAccessToken.clientId, oauthApplication.clientId))),
   ));
   return Number(row?.n ?? 0);
+}
+
+type Admission = { ok: true; id: string } | { ok: false; outcome: "rate_limited" | "unapproved_limit" };
+
+/**
+ * Checks both limits and records the admission in one transaction. The
+ * advisory lock makes the check and the insert one step for every replica.
+ * The row stays `pending` until better-auth has inserted the client, so a
+ * registration in flight counts toward the cap.
+ */
+async function admit(db: AppDb, cfg: McpRegistrationConfig, address: string): Promise<Admission> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMISSION_LOCK}))`);
+    const now = Date.now();
+    // Rows older than an hour serve neither limit. Deleting them here keeps
+    // the table at one hour of registrations.
+    await tx.delete(mcpRegistrations).where(lt(mcpRegistrations.createdAt, now - HOUR_MS));
+    if (cfg.ratePerHour > 0) {
+      const [row] = await tx.select({ n: sql<number>`count(*)::int` }).from(mcpRegistrations)
+        .where(eq(mcpRegistrations.address, address));
+      if (Number(row?.n ?? 0) >= cfg.ratePerHour) return { ok: false, outcome: "rate_limited" };
+    }
+    if (cfg.unconsentedCap > 0) {
+      const [row] = await tx.select({ n: sql<number>`count(*)::int` }).from(mcpRegistrations)
+        .where(and(eq(mcpRegistrations.pending, true), gt(mcpRegistrations.createdAt, now - PENDING_MS)));
+      if (await countRecentUnapproved(tx) + Number(row?.n ?? 0) >= cfg.unconsentedCap) return { ok: false, outcome: "unapproved_limit" };
+    }
+    const id = randomUUID();
+    await tx.insert(mcpRegistrations).values({ id, address, pending: cfg.unconsentedCap > 0, createdAt: now });
+    return { ok: true, id };
+  });
 }
 
 function refuse(c: Context<AppEnv>, status: 400 | 403 | 429, error: string, description: string) {
@@ -163,36 +183,28 @@ export function mcpRegisterGate(db: AppDb, cfg: McpRegistrationConfig) {
       recordRegistration("redirect_rejected");
       return refuse(c, 400, "invalid_redirect_uri", check.error);
     }
-    if (cfg.ratePerHour > 0 && !allowAddress(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), Date.now(), cfg.ratePerHour)) {
-      recordRegistration("rate_limited");
-      return refuse(c, 429, "slow_down", "Too many MCP apps registered from this address. Wait an hour, then connect again.");
-    }
-    if (cfg.unconsentedCap === 0) {
+    if (cfg.ratePerHour === 0 && cfg.unconsentedCap === 0) {
       recordRegistration("registered");
       return next();
     }
-    // Count and insert one registration at a time, or a burst could pass the
-    // count together and overshoot the cap. This holds for one api process;
-    // with N replicas a burst can exceed the cap by at most N - 1.
-    return oneAtATime(async () => {
-      if (await countRecentUnapproved(db) >= cfg.unconsentedCap) {
-        recordRegistration("unapproved_limit");
-        console.warn(`[mcp-register] refused: ${cfg.unconsentedCap} MCP clients registered in the last day have no consent or token`);
-        return refuse(c, 429, "slow_down", "Valet has too many new MCP apps that were never approved. Try again later. If this continues, ask your Valet administrator to check MCP registrations.");
-      }
-      recordRegistration("registered");
+    const admission = await admit(db, cfg, clientKey(peerAddress(c), c.req.header("x-forwarded-for")));
+    if (!admission.ok && admission.outcome === "rate_limited") {
+      recordRegistration("rate_limited");
+      return refuse(c, 429, "slow_down", "Too many MCP apps registered from this address. Wait an hour, then connect again.");
+    }
+    if (!admission.ok) {
+      recordRegistration("unapproved_limit");
+      console.warn(`[mcp-register] refused: ${cfg.unconsentedCap} MCP clients registered in the last day have no consent or token`);
+      return refuse(c, 429, "slow_down", "Valet has too many new MCP apps that were never approved. Try again later. If this continues, ask your Valet administrator to check MCP registrations.");
+    }
+    recordRegistration("registered");
+    try {
       // `next` runs better-auth's handler, which inserts the client.
       await next();
-      return undefined;
-    });
+    } finally {
+      // From here the client row (or its absence) counts, not the admission.
+      if (cfg.unconsentedCap > 0) await db.update(mcpRegistrations).set({ pending: false }).where(eq(mcpRegistrations.id, admission.id));
+    }
+    return undefined;
   };
-}
-
-let registrationTail: Promise<unknown> = Promise.resolve();
-
-/** Runs `fn` after every earlier call has settled. */
-function oneAtATime<T>(fn: () => Promise<T>): Promise<T> {
-  const run = registrationTail.then(fn, fn);
-  registrationTail = run.catch(() => undefined);
-  return run;
 }

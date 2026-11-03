@@ -13,14 +13,13 @@ import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { oauthApplication } from "../schema/index.js";
 import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import { DEFAULT_MCP_REGISTRATION } from "./config.js";
-import { clearMcpRegistrationLimits, mcpRegisterGate } from "./mcp-registration.js";
+import { mcpRegisterGate } from "./mcp-registration.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
   vi.unstubAllEnvs();
-  clearMcpRegistrationLimits();
 });
 
 const LOOPBACK = "http://localhost:33418/callback";
@@ -204,7 +203,8 @@ describe("MCP client registration", () => {
   it("holds the unapproved cap under a concurrent burst", async () => {
     // In process, so the requests truly overlap: the test server above
     // handles one HTTP request at a time. The slow insert stands in for
-    // better-auth's handler.
+    // better-auth's handler, so admissions still in flight must count.
+    // mcp-registration.postgres.test.ts covers two replicas.
     const { appDb: db } = await freshTestPgDb();
     const now = new Date();
     const insert = async () => {

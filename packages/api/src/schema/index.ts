@@ -310,6 +310,23 @@ export const oauthConsent = pgTable(
   ],
 );
 
+/**
+ * MCP client registrations the gate admitted (`auth/mcp-registration.ts`).
+ * Every api replica reads and writes these rows under one advisory lock, so
+ * the per-address hourly limit and the unapproved cap hold across replicas.
+ * `pending` marks an admission whose better-auth insert has not finished.
+ */
+export const mcpRegistrations = pgTable(
+  "mcp_registrations",
+  {
+    id: text("id").primaryKey(),
+    address: text("address").notNull(),
+    pending: boolean("pending").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("mcp_registrations_address_idx").on(t.address, t.createdAt)],
+);
+
 // ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
 //
 // `invites` and `sandbox_tokens` are Valet-owned (not part of the CLI-
