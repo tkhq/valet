@@ -299,12 +299,17 @@ try {
     results.push({ viewport, flow, kind, p50, p95, budget, ok, samples: values });
     console.log(`${viewport.padEnd(9)} ${flow.padEnd(18)} ${kind.padEnd(11)} ${String(Math.round(p50)).padStart(6)} ${String(Math.round(p95)).padStart(6)} ${String(budget).padStart(7)}  ${ok ? "ok" : "OVER"}`);
   }
-  if (unhandled.size) console.log(`\nRequests with no fixture (answered 404):\n  ${[...unhandled].sort().join("\n  ")}`);
+  // A request with no fixture gets a 404, and a flow can then time its error
+  // view instead of the real page. Fail the run so the fixture gets added.
+  if (unhandled.size) {
+    failed = true;
+    console.error(`\nRequests with no fixture (answered 404). Add a route in perf/mock-api.mjs:\n  ${[...unhandled].sort().join("\n  ")}`);
+  }
   if (args.json) writeFileSync(args.json, JSON.stringify({ runs: RUNS, cpuSlowdown: CPU_SLOWDOWN, throttleRate: rate, results }, null, 2));
 } finally {
   preview.kill();
 }
 if (failed) {
-  console.error("\nA flow is over budget or failed. Budgets: packages/web/src/lib/perf/budgets.ts");
+  console.error("\nA flow is over budget, failed, or made a request with no fixture. Budgets: packages/web/src/lib/perf/budgets.ts");
   process.exit(1);
 }

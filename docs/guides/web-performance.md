@@ -289,4 +289,5 @@ job). It needs a build first (`pnpm --filter @valet/web build`). It serves
 `dist/`, answers the api from `perf/mock-api.mjs`, and drives the key flows at
 desktop and 375px width under calibrated 4x CPU slowdown. A flow fails when
 its median over the runs is over budget. If a page calls an endpoint that has
-no fixture, the check lists it: add a fixture to `mock-api.mjs`.
+no fixture, the check fails and lists it: add a fixture to `mock-api.mjs`.
+The check fails so that a flow cannot pass on the time of its error view.
