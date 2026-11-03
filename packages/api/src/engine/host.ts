@@ -168,6 +168,7 @@ import { codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool, generatedFileStore } from "../services/generated-files.js";
+import { buildDiagramRenderTool } from "../services/diagram-render.js";
 import { artifactPublishTool, buildMemoryTools, buildReadOnlyMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
@@ -1721,7 +1722,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach", "render_diagram"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -1735,7 +1736,10 @@ export class EngineHost {
       catalogOptions,
     );
     extras.tools.push(buildToolFocusTool());
-    if (this.opts.blobs && this.opts.db) extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
+    if (this.opts.blobs && this.opts.db) {
+      extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
+      extras.tools.push(buildDiagramRenderTool(publicUrlFromEnv(process.env)));
+    }
     return extras;
   }
 

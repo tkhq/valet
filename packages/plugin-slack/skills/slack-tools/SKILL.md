@@ -76,7 +76,7 @@ Use `slack.get_reactions` when you need to know **who specifically** agreed or a
 Pick the send tool by where the message goes:
 
 - **`slack.reply_to_origin`** -- reply in the thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically. An explicit first reply suppresses that automatic copy. It needs no approval and cannot reach the wrong channel.
-- **`slack.reply_file_to_origin`**: upload a sandbox file to the origin thread. Use it for generated images, documents, and other file results.
+- **`slack.reply_file_to_origin`**: upload a file to the origin thread. Pass a sandbox `path`, or the `file_id` that `file_attach` or `render_diagram` returned. Use it for generated images, charts, diagrams, documents, and other file results. PNG, JPEG, GIF, and WebP images show inline. Send `alt_text` (what the image shows) and `title` with every image. Slack cannot draw Mermaid or SVG inline: render a diagram with `render_diagram`, then post its `file_id`. For a simple pie, bar, line, or area chart, prefer `charts` on `reply_to_origin`, which Slack draws natively.
 - **`slack.send_message`** -- post to any other channel or thread by ID. This can ping a channel outside the current conversation, such as a customer channel, so Valet asks for approval when the organization's policy requires it. Do not call `ask_approval` first. Prefer `reply_to_origin` when you are staying in the same thread.
 
 `send_message`, `reply_to_origin`, `dm_owner`, and `dm_user` return the message `ts` and `channel`. Save both. You need them to edit or delete the message later.

@@ -120,3 +120,20 @@ it("hides the background work section when the thread has none", async () => {
   await waitFor(() => expect(list).toHaveBeenCalled());
   expect(screen.queryByRole("region", { name: "Background work" })).toBeNull();
 });
+
+it("lists images and files the assistant saved to the thread in Outputs", () => {
+  const saved = (callId: string, toolName: string, value: Record<string, unknown>) => ({
+    kind: "tool_call" as const, callId, toolName, args: {}, status: "completed" as const,
+    result: { content: [{ type: "text", text: JSON.stringify(value) }] },
+  });
+  const message: Message = { id: "m1", sessionId: "s1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [
+    saved("c1", "render_diagram", { name: "flow.png", mimeType: "image/png", url: "/api/sessions/s1/threads/t1/files/f-1", alt: "Request flow", title: "Request flow" }),
+    saved("c2", "file_attach", { name: "report.pdf", mimeType: "application/pdf", url: "/api/sessions/s1/threads/t1/files/f-2" }),
+  ] };
+  renderPanel([message]);
+  const outputs = within(screen.getByRole("region", { name: "Outputs" }));
+  const diagram = outputs.getByRole("link", { name: "Request flow" });
+  expect([diagram.getAttribute("href"), diagram.getAttribute("download")]).toEqual(["/api/sessions/s1/threads/t1/files/f-1", "flow.png"]);
+  expect(outputs.getByRole("link", { name: "report.pdf" }).getAttribute("href")).toBe("/api/sessions/s1/threads/t1/files/f-2");
+  expect(outputs.queryByRole("button", { name: "Create a file or site" })).toBeNull();
+});

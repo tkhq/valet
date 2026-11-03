@@ -13,6 +13,7 @@ import {
   readResponseBytes,
   readPdfCandidateResponse,
   readResponseText,
+  validatedImageMediaType,
   type ActionPlugin,
   type Credential,
   type PluginAction,
@@ -1395,29 +1396,81 @@ const replyToOrigin = action(Type.Object({
   },
 });
 
+/** Slack's limit on an image's alt text. */
+const SLACK_ALT_TEXT_LIMIT = 1000;
+
+/**
+ * The upload's MIME type. Only bytes make a file an image: a raster signature,
+ * or a safe SVG. A declared or stored image type without image bytes uploads
+ * as a plain file, so Slack never gets a broken image.
+ */
+export function uploadMimeType(data: Uint8Array, name: string, declared?: string): string {
+  const image = validatedImageMediaType(data, name);
+  if (image) return image;
+  if (declared && !declared.toLowerCase().startsWith('image/')) return declared;
+  return 'application/octet-stream';
+}
+
 const replyFileToOrigin = action(Type.Object({
-    path: Type.String({ minLength: 1, description: 'Sandbox path of the file to upload.' }),
+    path: Type.Optional(Type.String({ minLength: 1, description: 'Sandbox path of the file to upload. Pass path or file_id.' })),
+    file_id: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'id of a file this thread already saved, from file_attach or render_diagram. Pass path or file_id.',
+    })),
     name: Type.Optional(Type.String({
       minLength: 1,
-      description: 'Displayed filename. Defaults to the path basename.',
+      description: 'Displayed filename. Defaults to the path basename or the saved file name.',
+    })),
+    title: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: 255,
+      description: 'Title Slack shows above the file, such as "Weekly signups". Defaults to the filename.',
+    })),
+    alt_text: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: SLACK_ALT_TEXT_LIMIT,
+      description: 'What the image shows, for screen readers. Send it for every image, chart, and diagram.',
     })),
     mime_type: Type.Optional(Type.String({
       minLength: 1,
-      description: 'File MIME type. Defaults to application/octet-stream.',
+      description: 'File MIME type. Image bytes decide it for PNG, JPEG, GIF, and WebP. Defaults to application/octet-stream.',
     })),
     caption: Type.Optional(Type.String({ description: 'Optional message posted with the file.' })),
   }))({
   id: 'slack.reply_file_to_origin',
   name: 'Reply with File to Origin',
   description:
-    'Upload a sandbox file to the Slack thread this turn came from. Use it for generated images, documents, and other file results. No channel or thread id is needed.',
+    'Upload a file to the Slack thread this turn came from: a generated image, chart, or diagram, a rendered document, or any other file result. Pass a sandbox path, or the file_id that file_attach or render_diagram returned. PNG, JPEG, GIF, and WebP images show inline; send alt_text and title with them. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    if ((args.path === undefined) === (args.file_id === undefined)) {
+      return { success: false, error: 'Pass exactly one of path or file_id, then retry.' };
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const stat = await ctx.sandbox.stat(args.path);
-    if (!stat.isFile) {
-      return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+    let data: Uint8Array;
+    let defaultName: string;
+    let storedMime: string | undefined;
+    if (args.file_id !== undefined) {
+      if (!ctx.threadFiles) {
+        return { success: false, error: 'This run has no saved thread files. Pass the sandbox path instead.' };
+      }
+      // The store is bound to this thread, so an id from another thread reads as missing.
+      const saved = await ctx.threadFiles.read(args.file_id);
+      if (!saved) {
+        return { success: false, error: 'No file with that file_id is saved in this thread. Pass the id file_attach returned in this thread, or a sandbox path.' };
+      }
+      data = saved.data;
+      defaultName = saved.name;
+      storedMime = saved.mimeType;
+    } else {
+      const path = args.path ?? '';
+      const stat = await ctx.sandbox.stat(path);
+      if (!stat.isFile) {
+        return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+      }
+      data = await ctx.sandbox.readBinary(path);
+      defaultName = path.split('/').filter(Boolean).at(-1) ?? 'file';
     }
     // completeUploadExternal posts this same conversion of the caption. The
     // check runs before the upload, so a refused caption leaves no file behind.
@@ -1426,19 +1479,30 @@ const replyFileToOrigin = action(Type.Object({
       : markdownToSlackMrkdwn(args.caption, { preserveSlackNativeSpans: true });
     const mentionError = await unknownMentionError(o.token, [caption]);
     if (mentionError) return mentionError;
-    const data = await ctx.sandbox.readBinary(args.path);
-    const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
+    const name = args.name ?? defaultName;
+    const mimeType = uploadMimeType(data, name, args.mime_type ?? storedMime);
     const api = new SlackApi(o.token);
-    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength);
-    await api.uploadToUrl(uploadUrl, data, args.mime_type ?? 'application/octet-stream');
+    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength, args.alt_text);
+    await api.uploadToUrl(uploadUrl, data, mimeType);
     await api.completeUploadExternal({
       fileId,
+      title: args.title,
       channelId: o.channelId,
       threadTs: o.threadTs,
       initialComment: args.caption,
       preserveSlackNativeSpans: true,
     });
-    return { success: true, data: { channel: o.channelId, fileId } };
+    const inline = mimeType.startsWith('image/') && mimeType !== 'image/svg+xml';
+    return {
+      success: true,
+      data: {
+        channel: o.channelId,
+        fileId,
+        mime_type: mimeType,
+        ...(mimeType === 'image/svg+xml' ? { note: 'Slack shows no inline preview for SVG. Upload a PNG copy for an inline image.' } : {}),
+        ...(inline && !args.alt_text ? { note: 'Send alt_text with the next image so screen readers can describe it.' } : {}),
+      },
+    };
   },
 });
 
