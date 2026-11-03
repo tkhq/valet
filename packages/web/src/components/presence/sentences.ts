@@ -169,6 +169,7 @@ const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; on
   "slack.channel_archive": { when: ["a channel", "is archived"], one: "Archived channel" },
   "slack.channel_unarchive": { when: ["a channel", "is unarchived"], one: "Unarchived channel" },
   "slack.file_shared": { when: ["someone", "shares a file"], one: "Shared file" },
+  "slack.user_online": { when: ["someone", "comes back online"], one: "Came online" },
 
   "github.ping": { when: ["GitHub", "pings"], one: "GitHub ping" },
   "github.push": { when: ["a push", "lands"], one: "Push" },
