@@ -92,6 +92,13 @@ describe("SpacesNav", () => {
     expect(screen.getByRole("list", { name: "Platform pages" })).toBeTruthy();
   });
 
+  it("draws no divider of its own, so the sidebar's only divider is its top row's", async () => {
+    teams = [team("t1", "Platform")];
+    mount("/chat");
+    const spaces = await screen.findByRole("region", { name: "Spaces" });
+    for (const node of [spaces, ...spaces.querySelectorAll("*")]) expect(node.className.toString()).not.toMatch(/\bborder-(t|b)\b/);
+  });
+
   it("maps paths to the space page they belong to", () => {
     expect(spacePageFor("/")).toBe("/chat");
     expect(spacePageFor("/chat")).toBe("/chat");

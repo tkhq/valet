@@ -314,6 +314,9 @@ id), and the server checks team membership as before.
   its name opens the space and its Threads.
 - **Threads.** The open space's Projects and threads show below Spaces only
   on Home and Threads. A phone's drawer always shows them.
+- **One divider.** The sidebar's only horizontal divider is under its top
+  row, level with the thread header and the Tasks panel header. Rows below it
+  (Home, Spaces) draw none, so no sidebar line can sit off a thread's tab row.
 - **Headers.** A page's header is a breadcrumb: "Space / Page". A Presence
   detail page puts the space above its breadcrumb, and the workflow editor
   reads "Space / Workflows / name". A caller with one space sees no space
