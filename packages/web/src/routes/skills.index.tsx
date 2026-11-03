@@ -12,6 +12,7 @@ import {
 } from "~/components/skills/skill-grid";
 import { RepoSourcesPanel } from "~/components/skills/repo-sources-panel";
 import { WorkspaceClause } from "~/components/workspace-clause";
+import { MemoryPrinciplesPanel } from "~/components/memory/memory-principles";
 import {
   currentCursor,
   formatCursorStack,
@@ -133,13 +134,14 @@ export function SkillsIndexPage() {
                 // so the answer starts at its first page.
                 onFiltersChange={(next) =>
                   go({
-                    filter: next.filter === "all" ? undefined : next.filter,
+                    filter: next.filter === "skills" ? undefined : next.filter,
                     scope: next.scope === "all" ? undefined : next.scope,
                     q: next.query.trim().length === 0 ? undefined : next.query,
                     page: undefined,
                   })
                 }
                 emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+                principles={<MemoryPrinciplesPanel onSelect={(path) => void navigate({ to: "/memory/$", params: { _splat: path } })} />}
                 // Through the grid, not in its place: a failed SEARCH must
                 // keep the box that can change or clear it.
                 errorLabel={
@@ -148,7 +150,7 @@ export function SkillsIndexPage() {
                     : undefined
                 }
               />
-              {!error && (
+              {!error && filters.filter === "skills" && (
                 <Pager
                   label="skills"
                   page={pageNumber(skillCursors)}

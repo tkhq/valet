@@ -1,6 +1,6 @@
 # Brain: principles and playbooks
 
-Design. 2026-10-27. Status: pilot.
+Design. 2026-10-27. Status: pilot. Updated 2026-11-02: memory usage, principle citations, principles in child sessions and workflow steps, batched patch sets, built-in principles, and synced principles.
 
 ## Summary
 
@@ -41,6 +41,37 @@ The section holds the index, not the bodies. The model reads a body with `mem_re
 
 The snapshot budget never drops the section, so the index has a cap: 40 lines or 4,000 characters, whichever it reaches first. Past the cap, one line gives the number of principles not listed and tells the model to read the directory with `mem_read principles/` or `mem_read team:<id>/principles/`.
 
+### Saving a principle
+
+The `save_principle` tool saves a principle (amended 2026-11-02). It takes a file name, the rule in a few words, when the rule applies, and the details: the rule, the reason, and one example. It writes `principles/<name>.md` through the same route as `mem_write`, with type `principle`, so every check below applies. The base principle names this tool, because a model follows a named tool more reliably than a file layout it must compose.
+
+### The Principles view
+
+The memory page has a Principles view beside Files, Graph and Usage. It lists the built-in principle first, then each saved principle with its rule, a Team badge for a team principle, how often agents used it, and when it was last edited. A row opens the file.
+
+### Built-in principles
+
+Valet ships a set of principles that every brain starts with (`BUILTIN_PRINCIPLES` in `packages/shared/src/builtin-principles.ts`). A built-in principle has no memory file:
+
+- The index lists each built-in principle as `principles/<name>.md`, marked "(built in)", after the saved principles. The built-in lines are a fixed set outside the index cap.
+- A read of that path in the own scope returns the shipped text while the scope has no file there. The read result has version 0, and it records no usage.
+- An edit writes the file. `save_principle` with the same name, `mem_write`, and `mem_patch` all work; `mem_patch` patches the shipped text. The file then replaces the built-in for that scope only, and the index stops listing the built-in line.
+- The Principles view lists each built-in principle that no saved file replaces, with a Built in badge.
+
+So the defaults reach everyone, and each brain changes them as it learns. A change to the shipped text reaches every scope that has not replaced the principle.
+
+### Changing principles over time
+
+The base principle tells the agent to update a principle when it turns out wrong or incomplete in use, or when a person corrects how the agent applied it. The agent updates it with `save_principle` under the same name, or patches it with `mem_patch`.
+
+### Synced principles
+
+Content sync mounts a repository's `.valet/memory/**` at `lib/**`, so `.valet/memory/principles/<name>.md` lands at `lib/principles/<name>.md` in the source owner's memory. The index and the Principles view treat `lib/principles/` as a principle directory. A synced principle shows with a Synced badge. It is read-only, because `lib/` refuses product writes. The base principle tells the agent to send changes to the repository, or to save a personal principle that refines it. The source must collect the `memories` kind.
+
+An org source mirrors into org memory. Every org member's read-union, and every team's in that org, reads org memory under the `org:{orgId}/` prefix, so a company brain's principles reach everyone. No write path accepts an `org:` path, so org memory stays read-only. Before this change, an org source could collect memories that no scope read.
+
+The Principles view lists `GET /api/memory/principles`: every principle file the read-union holds (own, team, and org). The memory tree is own-scope only, so usage counts and edit times show only for own files.
+
 ### Who can write a principle
 
 A team principle reaches the assistant of every team member at its next wake. So a team principle takes more than a team note:
@@ -73,11 +104,60 @@ The exact text is `BASE_PRINCIPLE` in `packages/api/src/orchestrator/principles.
 
 ### Limits
 
-- Only assistant sessions get the section, because only they get the memory snapshot. Child sessions and workflow steps do not get it. This is a known gap. See Deferred.
 - The agent does not infer a principle from repeated choices. It writes one only when a person corrects it or states a rule.
 - The index cap hides principles past the 40th line or the 4,000th character. The model sees them only when it reads the directory.
-- The snapshot is built when the assistant session wakes. A principle written during a session appears in the index after the next wake. The model that wrote it already has it in context.
+- The snapshot is built when a session is built: an assistant at wake, a child or a workflow step when it starts. A principle written during a session appears in the index after the next build. The model that wrote it already has it in context.
 - There is no org-wide memory scope. An org principle lives in the memory of a team that everyone belongs to.
+
+### Principles in child sessions and workflow steps
+
+A child session and a workflow step get the memory snapshot an assistant gets, Principles section included (TKAI-578). They also get the two read-only memory tools, `mem_read` and `mem_search`, so they can open a principle that the index lists. They get no write tool. Their assistant curates memory. So they get a read-only base principle (`READ_ONLY_BASE_PRINCIPLE`). It tells the agent to read and follow principles. When a person states a rule, the agent puts it in its result, so an assistant can save it.
+
+The scope is the one the memory routes resolve for the session id (`delegatedMemoryScope` in `services/memory-scope.ts`):
+
+- A child or a step of a personal owner reads that person's memory and the principles of their teams.
+- A child or a step of a team reads the team's memory in the namespace the routes give that session. It also reads the team's shared memory under `team:{id}/`. It does not read the acting member's personal memory.
+- A workflow step's read names its session, so the route resolves the run's memory audience. A step whose team audience cannot be resolved gets no snapshot and no memory tools. It never widens to the whole team.
+- A security persona child gets neither.
+
+Children and steps run often and in parallel, so their snapshot budget is 16,000 characters instead of 48,000. The budget drops journals first, then the oldest pinned files. It never drops the Principles section or the root index.
+
+## Usage
+
+Valet records how agents use each memory file, so a person can see which files are used and trim the rest. Three kinds of use stay apart:
+
+| Kind | Recorded when | Counts as a use |
+|---|---|---|
+| Read | An agent opens a file: `mem_read`, an MCP or CLI read, a sandbox read | Yes |
+| Cite | A turn's answer or plan names a principle | Yes |
+| Inject | The memory snapshot loads a pinned file or a journal, or lists a principle in the index | No |
+
+A search hit counts only when the agent then opens the file. A directory read opens no file, so it records nothing. A person who opens a file on the memory page records nothing. A file the snapshot loads is shown as "loaded at wake", not as used, because the agent did not choose it.
+
+### Storage
+
+The `memory_file_usage` table holds one row per file, keyed like `memory_files`, with a count and a last time for each kind. It is a separate table: an update to `memory_files` recomputes the file's search vector. A row moves with `mem_move` and goes away with `mem_rm`. A file that a repository sync removes keeps its row. A file that comes back at that path inherits it.
+
+### Writes stay off the hot path
+
+A read never waits on a usage write. `MemoryUsageRecorder` (`services/memory-usage.ts`) buffers hits in process and writes one batched upsert every 10 seconds. The upsert joins `memory_files`, so it adds no row for a file that was deleted or moved meanwhile. The buffer holds at most 1,000 files. When it is full and a flush is still running, the recorder drops the hit and counts it in `dropped`. A failed write drops its batch and is not retried, so a database outage cannot grow the buffer. Shutdown flushes the buffer. A crash loses at most one interval of hits. Usage is a signal for trimming, not an audit log.
+
+### Citations
+
+When a submission settles, a subscriber (`orchestrator/principle-citations.ts`) reads that turn's assistant entries, up to 50 entries and 64 KB of text. It also reads the items of any plan the turn wrote with `update_plan`. It finds the principles they name:
+
+- **Explicit** (`match: "path"`): the principle's path as the index names it, with or without `.md` or a leading `/`, or the built-in principle's name. An own path never matches inside a `team:{id}/` path.
+- **Heuristic** (`match: "title"`): the principle's title, as a whole phrase. Only titles of two words or more and 8 characters or more match. A title match can be wrong.
+
+The subscriber appends one `principle_cited` thread event per submission, with the citations, and records a cite on each principle file. The event key is `principle_cited:{queueItemId}`, so a repeated settle appends nothing and counts nothing. A turn records at most 10 citations. The event stays in the durable thread log. No client shows it yet.
+
+### The memory page
+
+The memory page has a Usage view beside Files and Graph. It lists every file of the workspace with its last use, its use count, its last load at wake, and its last edit. It filters to never-used or stale files and sorts by least recent use, most uses, or path. A file is stale when no agent used it and nobody edited it for 30 days. So a new file that no agent used yet is not stale. Tracking starts when the `memory_usage_tracking` table is created, and the tree reports that time as `usageSince`. Before it, "never used" only means "not seen". So no file is stale until tracking has run for 30 days, and the view says how long it has run. A person selects files and deletes them after one confirm. A file under `lib/` mirrors a repository, so the view offers no delete for it.
+
+## Batched patch sets
+
+`mem_patch` takes `patches`, a list of up to 20 exact-replace patches, in place of `path`, `oldString`, and `newString`. The memory service applies them in one transaction (`patchFiles`): every patch applies, or none does. Patches apply in order, so a later patch to the same file sees the earlier edit. Each patch takes the path rules, the team-principle authority check, and the provenance of a single patch. If a patch fails, the error names it, for example "Patch 2 of 3 (principles/x.md) failed", and says that no patch was applied. `POST /api/memory/patch` takes the same `patches` body. This is the batched patch set that `brain.put` needs.
 
 ## Playbooks
 
@@ -131,15 +211,18 @@ Sync mounts `.valet/memory/` under `lib/`, and the principle index reads only `p
 These come from the concept note. This pilot does not build them:
 
 - The brain repository, its manifest (`.valet/brain.yaml`), and write-back to git.
-- `brain.get`, `brain.search`, `brain.put`, and `brain.rm`. `brain.put` needs a batched patch set, which is not designed yet.
+- `brain.get`, `brain.search`, `brain.put`, and `brain.rm`. `brain.put` can build on the batched patch set in `mem_patch`.
 - Automatic playbook matching from a `when` field. The model chooses a playbook from the skill list.
-- Skip tracking with a reason, and principle citation as a thread event.
+- Skip tracking with a reason.
 - `extends` for project playbooks.
-- Principles for child sessions and workflow steps.
+- A client view of `principle_cited` events in the thread.
+- Batched patch sets in the MCP `patch_memory` tool.
+- Usage by member: the table counts uses per file, not per person or per session.
+- Agent-led trimming: the agent proposes stale files to remove. Today a person trims from the memory page.
 
 ## Open questions
 
-1. Should an org principle have its own org memory scope, or is a team that holds everyone enough?
+1. Should an org principle have its own org memory scope, or is a team that holds everyone enough? Answered in part: org content sources mirror into a read-only org memory that every member reads. Agents still cannot write org principles.
 2. Should a playbook replace an open plan when a person invokes it with a slash command? This pilot keeps the open plan on both paths.
 3. Should a team principle go through review, as the concept note requires for brain changes? This pilot requires a request in the conversation and team-admin authority, but no review step.
 4. Is a playbook anything more than a skill whose steps seed the plan? This pilot says no.

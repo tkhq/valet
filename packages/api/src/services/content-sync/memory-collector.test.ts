@@ -20,7 +20,8 @@ import {
 import { contentSources, memoryFiles, orgMembers, orgs, users } from "../../schema/index.js";
 import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
-import { writeFile } from "../memory.js";
+import { listPrincipleFiles, writeFile } from "../memory.js";
+import { renderPrinciplesSection } from "../../orchestrator/principles.js";
 import { ContentSyncService } from "./service.js";
 import { MemoryCollector } from "./memory-collector.js";
 
@@ -128,6 +129,20 @@ describe("memory collector", () => {
     // The document's own frontmatter survives the mount.
     expect(rows.find((r) => r.path === "lib/glossary.md")?.title).toBe("Glossary");
     expect(rows.find((r) => r.path === "lib/glossary.md")?.type).toBe("note");
+  });
+
+  it("syncs a repository principle into the principle index, read-only", async () => {
+    const principle = ["---", "type: principle", "title: The canonical source wins", "description: When two sources disagree.", "---", "", "# The canonical source wins", "", "Use the canonical source.", ""].join("\n");
+    const f = serve({ sha: "c1", files: { ".valet/memory/principles/canonical-source-wins.md": principle } });
+    const id = await userSource("tkhq/tk-brain");
+    expect((await serviceFor(f).syncOnce(id))?.status).toBe("ok");
+
+    const scope = { owner: { type: "user" as const, id: "u1" }, actorUserId: "u1" };
+    const listed = await listPrincipleFiles(db, scope);
+    expect(listed.map((entry) => [entry.path, entry.title, entry.description]))
+      .toEqual([["lib/principles/canonical-source-wins.md", "The canonical source wins", "When two sources disagree."]]);
+    expect(renderPrinciplesSection(listed)).toContain("- lib/principles/canonical-source-wins.md — The canonical source wins: When two sources disagree.");
+    await expect(writeFile(db, scope, { path: "lib/principles/canonical-source-wins.md", content: "# Changed\n" })).rejects.toThrow(/lib\/ is reserved/);
   });
 
   it("updates on a content change and removes on a delete", async () => {

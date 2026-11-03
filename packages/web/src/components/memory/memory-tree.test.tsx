@@ -23,6 +23,9 @@ function entry(overrides: Partial<MemoryTreeEntry> = {}): MemoryTreeEntry {
     updatedAt: Date.now(),
     dir: false,
     sizeBytes: 100,
+    lastUsedAt: null,
+    useCount: 0,
+    lastLoadedAt: null,
     ...overrides,
   };
 }

@@ -62,12 +62,22 @@ function resolveOwner(ctx: ToolContext): Principal {
   return ctx.owner ?? { type: "user", id: ctx.userId };
 }
 
-function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext, json: boolean): Record<string, string> {
+/** Which agent session a request comes from. A workflow step has no
+ * `agent_sessions` row, so a write names no source. A read still names the
+ * step's session: the route resolves a team step's memory audience from
+ * it, and without it a channel-scoped run would read the whole team's
+ * memory. */
+function sourceHeaders(cfg: MemoryToolConfig, ctx: ToolContext, read: boolean): Record<string, string> {
+  if (!cfg.workflowStep) return { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId };
+  return read ? { "x-valet-session-id": ctx.sessionId } : { "x-valet-source": "none" };
+}
+
+function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext, json: boolean, read = false): Record<string, string> {
   const headers: Record<string, string> = {
     "x-valet-internal": cfg.internalToken,
     "x-valet-owner": serializePrincipal(owner),
     "x-valet-actor": ctx.userId,
-    ...(cfg.workflowStep ? { "x-valet-source": "none" } : { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId }),
+    ...sourceHeaders(cfg, ctx, read),
     "x-valet-org-id": ctx.orgId,
   };
   if (json) headers["Content-Type"] = "application/json";
@@ -240,15 +250,45 @@ export const memWriteTool = defineTool({
 
 // ─── mem_patch ─────────────────────────────────────────────────────────
 
+const patchSchema = Type.Object({
+  path: Type.String(),
+  oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
+  newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
+});
+
+interface PatchSetBody {
+  files: { path: string; version?: number }[];
+  warnings?: unknown;
+}
+
+/** Names each file in the scope the server wrote, as `relayWriteResult` does. */
+function asPatchSetBody(body: unknown): PatchSetBody | null {
+  if (!isRecord(body) || !Array.isArray(body.files)) return null;
+  const files = body.files.flatMap((f) => {
+    if (!isRecord(f) || typeof f.path !== "string") return [];
+    const scoped = f.ownerType === "team" && typeof f.ownerId === "string" && f.ownerId ? `team:${f.ownerId}/${f.path}` : f.path;
+    return [{ path: scoped, version: typeof f.version === "number" ? f.version : undefined }];
+  });
+  return { files, warnings: body.warnings };
+}
+
 export const memPatchTool = defineTool({
   name: "mem_patch",
   ownerOnly: true,
   description:
-    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal).",
+    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal). To change several files together, send `patches` instead of `path`/`oldString`/`newString`: up to 20 patches, applied in order, all or none.",
   parameters: Type.Object({
-    path: Type.String(),
-    oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
-    newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
+    path: Type.Optional(Type.String()),
+    oldString: Type.Optional(Type.String({ description: "Exact text to find, or '' to create a new file at `path`." })),
+    newString: Type.Optional(Type.String({ description: "Replacement text (or full body, when creating)." })),
+    patches: Type.Optional(
+      Type.Array(patchSchema, {
+        minItems: 1,
+        maxItems: 20,
+        description:
+          "A batched patch set, in place of path/oldString/newString. Patches apply in order, so a later patch to the same file sees the earlier edit. If any patch fails, none is applied and the error names the failed patch.",
+      }),
+    ),
     teamId: Type.Optional(
       Type.String({
         description:
@@ -264,6 +304,22 @@ export const memPatchTool = defineTool({
     // Same rule as mem_write: the header keeps this session's scope and the
     // model-named team rides as a parameter the route authorizes.
     if (args.teamId !== undefined) url.searchParams.set("teamId", args.teamId);
+    const single = args.path !== undefined || args.oldString !== undefined || args.newString !== undefined;
+    if (args.patches !== undefined) {
+      if (single) return { text: "[memory_error] Send either path, oldString and newString, or patches, not both." };
+      return memoryRequest(
+        url,
+        { method: "POST", headers: memoryHeaders(cfg, owner, ctx, true), body: JSON.stringify({ patches: args.patches }) },
+        async (res) => {
+          const body = asPatchSetBody(await parseJsonBody(res));
+          const files = (body?.files ?? []).map((f) => `${f.path}${f.version !== undefined ? ` (v${f.version})` : ""}`);
+          return { text: `patched ${files.length} ${files.length === 1 ? "file" : "files"}: ${files.join(", ")}${formatWarnings(body?.warnings)}` };
+        },
+      );
+    }
+    if (args.path === undefined || args.oldString === undefined || args.newString === undefined) {
+      return { text: "[memory_error] Send path, oldString and newString, or a patches list." };
+    }
     return memoryRequest(
       url,
       {
@@ -305,7 +361,7 @@ export const memReadTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false, true) }, async (res) => {
       const body = asReadResultBody(await parseJsonBody(res));
       return { text: body?.rendered ?? "" };
     });
@@ -363,7 +419,7 @@ export const memSearchTool = defineTool({
     const url = new URL("/api/memory/search", cfg.apiBaseUrl);
     url.searchParams.set("q", args.query);
     if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false, true) }, async (res) => {
       const body = asSearchResultBody(await parseJsonBody(res));
       const results = body?.results ?? [];
       if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
@@ -844,12 +900,48 @@ export const memRmTool = defineTool({
   },
 });
 
+/** The tools a child session or a workflow step gets: it reads its
+ * owner's memory, such as a principle its snapshot lists, and writes none.
+ * Its assistant curates memory. */
+// ─── save_principle ────────────────────────────────────────────────────
+
+/** Save a principle: a rule for how the work is done, kept at
+ * `principles/<name>.md` and listed in every snapshot's Principles index
+ * (brain spec). A thin wrapper over mem_write, so a model that would not
+ * compose the file shape itself still writes a well-formed principle. */
+export const savePrincipleTool = defineTool({
+  name: "save_principle",
+  ownerOnly: true,
+  description:
+    "Save a rule a person gave you for how to do the work, so you follow it in every later conversation. Use it when a person corrects you or states a standing rule. Search principles/ with mem_search first, and pass the same name to update a principle that covers the same rule. Also update a principle when it turns out wrong or incomplete in use. A built-in principle (built in, in the index) is updated the same way, and your version then replaces it. Pass teamId only when the person asks you to add the rule to that team; only a team admin can save a team principle.",
+  parameters: Type.Object({
+    name: Type.String({ pattern: "^[a-z0-9][a-z0-9-]{1,62}$", description: "Short file name in kebab case, e.g. 'prove-it-works'. Use an existing principle's name to update it. The principle is saved at principles/<name>.md." }),
+    rule: Type.String({ minLength: 3, maxLength: 120, description: "The rule in a few words, e.g. 'Prove a fix works before saying it is done'." }),
+    when: Type.String({ minLength: 3, maxLength: 200, description: "When the rule applies, in one line." }),
+    details: Type.String({ minLength: 3, maxLength: 4000, description: "The rule, the reason for it, and one example." }),
+    teamId: Type.Optional(Type.String({ description: "Save it to this team's shared principles instead of your own. Only when the person asked for a team rule." })),
+  }),
+  execute: async (args, ctx) => memWriteTool.execute({
+    path: `principles/${args.name}.md`,
+    content: `# ${args.rule}\n\n${args.details}\n`,
+    type: "principle",
+    description: args.when,
+    origin: "user-stated",
+    ...(args.teamId !== undefined ? { teamId: args.teamId } : {}),
+  }, ctx),
+});
+
+export function buildReadOnlyMemoryTools(): ToolDef[] {
+  return [memReadTool, memSearchTool];
+}
+
 /** The `mem_*` ToolDefs plus the `artifact_*` tools (same transport, same
  * publish chokepoint — see the artifact-pages design), in registration
  * order. */
 export function buildMemoryTools(): ToolDef[] {
   return [
     memWriteTool,
+    savePrincipleTool,
     memPatchTool,
     memReadTool,
     memSearchTool,

@@ -598,6 +598,36 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
 --> statement-breakpoint
+-- How agents use each memory file (brain spec, "Usage"). A table of its own,
+-- not columns on `memory_files`: an update there rewrites the row and
+-- recomputes `search_vector`, and reads far outnumber writes. Counts arrive
+-- in batches from `services/memory-usage.ts`, which only inserts a row for a
+-- file that exists. `read` is a file the agent chose to open, `inject` a
+-- file the memory snapshot put in the prompt, `cite` a principle a turn named.
+CREATE TABLE "memory_file_usage" (
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"namespace" text DEFAULT '' NOT NULL,
+	"path" text NOT NULL,
+	"read_count" integer DEFAULT 0 NOT NULL,
+	"last_read_at" bigint,
+	"inject_count" integer DEFAULT 0 NOT NULL,
+	"last_injected_at" bigint,
+	"cite_count" integer DEFAULT 0 NOT NULL,
+	"last_cited_at" bigint,
+	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
+);
+--> statement-breakpoint
+-- When usage tracking started. One row. Before this time, "never used" only
+-- means "not seen", so the memory page calls no file stale until tracking
+-- has run for 30 days.
+CREATE TABLE "memory_usage_tracking" (
+	"id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"),
+	"started_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint);
+--> statement-breakpoint
 CREATE TABLE "artifacts" (
 	"id" text PRIMARY KEY NOT NULL,
 	"token" text NOT NULL,

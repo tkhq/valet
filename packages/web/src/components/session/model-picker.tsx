@@ -336,7 +336,7 @@ export function ModelPicker({
         <div className="min-w-0 max-w-40 flex-1">
           <ReasoningSelect id={thinkingFieldId} descriptionId={unavailableReasoning ? thinkingHelpId : undefined} ariaLabel="Thinking level"
             value={currentReasoning ?? null} onChange={onSelectReasoning} emptyLabel="Default"
-            allowedLevels={activeThinkingLevels} disabled={disabled} chevron="inset" surface="plain" />
+            allowedLevels={activeThinkingLevels} disabled={disabled} surface="plain" />
         </div>
       </div>
       {unavailableReasoning && <p id={thinkingHelpId} className="mt-1.5 text-xs text-muted">Choose an available thinking level.</p>}

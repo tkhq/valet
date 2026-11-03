@@ -34,17 +34,17 @@ import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import type { RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { journalHasEntries } from "../orchestrator/bootstrap.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { getTeamInOrg, isTeamMember } from "../services/teams.js";
-import { assistantMemoryNamespace, workflowMemoryNamespace } from "../services/memory-scope.js";
+import { assistantMemoryNamespace, workflowMemoryNamespace, memorySessionId } from "../services/memory-scope.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { agentSessions, memoryFiles, securityCells } from "../schema/index.js";
 import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
+import type { GetMemoryPrinciplesResponse, GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
   copyFileFromTeam,
@@ -54,13 +54,16 @@ import {
   linksForFile,
   moveFile,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
   writeFile,
+  listPrincipleFiles,
   type MemoryScope,
   type WriteSource,
 } from "../services/memory.js";
+import { memoryUsageRecorder, memoryUsageSince, readMemoryUsage } from "../services/memory-usage.js";
 
 export const memoryRouter = new Hono<AppEnv>();
 
@@ -182,8 +185,10 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
   const internal = isValidInternalToken(c.req.header("x-valet-internal"));
   // Explicit team writes retain their authorized shared destination.
   if (internal && c.req.query("teamId")) return scope;
-  const sessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
-  if (!sessionId) return scope;
+  const requestedSessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
+  if (!requestedSessionId) return scope;
+  // A child session reads its parent's memory: it has no app session row.
+  const sessionId = await memorySessionId(c.var.providers.db, requestedSessionId);
   const orgId = c.var.sandbox?.orgId ?? (internal ? c.req.header("x-valet-org-id") : c.var.user.orgId);
   const { db } = c.var.providers;
   const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
@@ -354,6 +359,16 @@ for (const [route, copy] of [
   });
 }
 
+/** True when an agent, not a person, made this request: a session tool
+ * (internal token), a sandbox, or an MCP or CLI client. Only an agent's
+ * read counts as usage. A person opening a file on the memory page does
+ * not make it "used". */
+function isAgentRead(c: Context<AppEnv>): boolean {
+  if (isValidInternalToken(c.req.header("x-valet-internal")) || c.var.sandbox) return true;
+  const via = c.var.authVia;
+  return via !== undefined && isAgentCaller(via);
+}
+
 memoryRouter.get("/", async (c) => {
   let scope: MemoryScope;
   try {
@@ -368,6 +383,13 @@ memoryRouter.get("/", async (c) => {
   try {
     const { db } = c.var.providers;
     const result = await readFile(db, scope, path);
+    // A directory read lists files without opening them, so it is no use
+    // of any one file. The recorder buffers: the response never waits on it.
+    // A built-in principle with no file (version 0) has no row to count against.
+    if (result.kind === "file" && result.file.version > 0 && isAgentRead(c)) {
+      const { ownerType, ownerId, namespace, path: stored } = result.file;
+      memoryUsageRecorder(db).record({ ownerType, ownerId, namespace, path: stored }, "read");
+    }
     return c.json(result);
   } catch (err) {
     const mapped = handleServiceError(err);
@@ -475,6 +497,26 @@ memoryRouter.get("/journal-summary", async (c) => {
  * A caller who names a team owner therefore gets that team's files and
  * nothing else — one owner per response, still no union.
  */
+/**
+ * GET /api/memory/principles — every principle file the scope reads: its
+ * own, its teams', and what its org's content sources mirror. The tree is
+ * own-scope only, so the Principles view reads this list instead.
+ */
+memoryRouter.get("/principles", async (c) => {
+  try {
+    const scope = await resolveScope(c, "read");
+    const files = await listPrincipleFiles(c.var.providers.db, scope);
+    const body: GetMemoryPrinciplesResponse = {
+      principles: files.map((file) => ({ path: file.path, title: file.title, description: file.description })),
+    };
+    return c.json(body);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
+
 memoryRouter.get("/tree", async (c) => {
   let scope: MemoryScope;
   try {
@@ -490,20 +532,28 @@ memoryRouter.get("/tree", async (c) => {
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
+  const usage = await readMemoryUsage(db, scope);
 
   const entries: MemoryTreeEntry[] = rows
-    .map((r) => ({
-      path: r.path,
-      title: r.title,
-      type: r.type,
-      pinned: r.pinned,
-      updatedAt: r.updatedAt,
-      dir: false,
-      sizeBytes: r.content.length,
-    }))
+    .map((r) => {
+      const u = usage.get(r.path);
+      const used = [u?.lastReadAt ?? null, u?.lastCitedAt ?? null].filter((t): t is number => t !== null);
+      return {
+        path: r.path,
+        title: r.title,
+        type: r.type,
+        pinned: r.pinned,
+        updatedAt: r.updatedAt,
+        dir: false,
+        sizeBytes: r.content.length,
+        lastUsedAt: used.length > 0 ? Math.max(...used) : null,
+        useCount: (u?.readCount ?? 0) + (u?.citeCount ?? 0),
+        lastLoadedAt: u?.lastInjectedAt ?? null,
+      };
+    })
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  const body: GetMemoryTreeResponse = { entries };
+  const body: GetMemoryTreeResponse = { entries, usageSince: await memoryUsageSince(db) };
   return c.json(body);
 });
 
@@ -561,6 +611,18 @@ memoryRouter.put("/", async (c) => {
   }
 });
 
+function parsePatches(value: unknown): { path: string; oldString: string; newString: string }[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: { path: string; oldString: string; newString: string }[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || !("path" in item) || !("oldString" in item) || !("newString" in item)) return null;
+    const { path, oldString, newString } = item;
+    if (typeof path !== "string" || !path || typeof oldString !== "string" || typeof newString !== "string") return null;
+    out.push({ path, oldString, newString });
+  }
+  return out;
+}
+
 memoryRouter.post("/patch", async (c) => {
   let scope: MemoryScope;
   try {
@@ -571,12 +633,29 @@ memoryRouter.post("/patch", async (c) => {
     throw err;
   }
 
-  let body: { path?: string; oldString?: string; newString?: string };
+  let body: { path?: string; oldString?: string; newString?: string; patches?: unknown };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+
+  // A batched patch set: every patch applies, or none does.
+  if (body.patches !== undefined) {
+    const patches = parsePatches(body.patches);
+    if (!patches || body.path !== undefined) {
+      return c.json({ error: "Send patches as an array of { path, oldString, newString }, without a top-level path." }, 400);
+    }
+    try {
+      const results = await patchFiles(c.var.providers.db, scope, { patches, source: writeSource(c) });
+      return c.json({ files: results.map((r) => r.file), warnings: results.flatMap((r) => r.warnings) });
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
+    }
+  }
+
   if (!body.path || body.oldString === undefined || body.newString === undefined) {
     return c.json({ error: "path, oldString, and newString are required" }, 400);
   }

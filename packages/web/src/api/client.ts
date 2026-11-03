@@ -86,6 +86,7 @@ import type {
   GetChangelogResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
+  GetMemoryPrinciplesResponse,
   GetMemoryTreeResponse,
   ListArtifactsResponse,
   PatchArtifactRequest,
@@ -859,6 +860,8 @@ export const api = {
    * — a team's memory is the team's, not a view of yours. */
   getMemoryTree: (owner?: OwnerFilter) =>
     request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryPrinciples: (owner?: OwnerFilter) =>
+    request<GetMemoryPrinciplesResponse>("GET", `/memory/principles${ownerQuery(owner)}`),
 
   // artifacts (artifacts design). `getArtifact` is the token-addressed
   // read the public `/a/$token` page uses — org-visibility artifacts 401
