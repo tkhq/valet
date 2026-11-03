@@ -4,6 +4,7 @@ import type { ThreadPlanItem, ThreadPlanStatus, TurnProgress } from "@valet/shar
 import { useThreadProgress } from "~/api/thread-progress";
 import { useThreadPlan } from "~/api/thread-plan";
 import { Button, cardClass, StatusDot } from "~/components/primitives";
+import { useWorkingLine, type WorkingLineInput } from "~/components/session/processing-status";
 import { cn } from "~/lib/cn";
 
 /** "2 of 5" with a thin bar. For a plan bar, a task row, or a card. */
@@ -48,17 +49,30 @@ export function PlanChecklist({ items, id, className }: { items: ThreadPlanItem[
   );
 }
 
+/** A card for a turn that still runs carries the working line. */
+function activeProgress(progress: TurnProgress): boolean {
+  return progress.status === "pending" || progress.status === "in_progress" || progress.status === "waiting";
+}
+
+/** True while the task card shows a running turn, so the working line moves into it. */
+export function useProgressCardActive(threadId?: string): boolean {
+  const progress = useThreadProgress(threadId).data?.progress;
+  return progress ? activeProgress(progress) : false;
+}
+
 /**
  * One execution surface above the composer. A successful empty progress
  * snapshot preserves plans from threads created before execution tracking.
+ * `live` is the working line's state: a running turn's card shows its step
+ * and clock, so no second row stacks under the card.
  */
-export function PinnedPlan({ threadId }: { threadId?: string }) {
+export function PinnedPlan({ threadId, live }: { threadId?: string; live?: WorkingLineInput }) {
   const progress = useThreadProgress(threadId);
   if (!threadId) return null;
   if (progress.isError) return <ProgressNotice>Progress unavailable. Refresh to retry.</ProgressNotice>;
   // Most threads have neither progress nor a plan, so nothing shows while it loads.
   if (progress.isPending) return null;
-  if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} />;
+  if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} live={live} />;
   return <LegacyPinnedPlan threadId={threadId} />;
 }
 
@@ -104,10 +118,25 @@ function ProgressMark({ status, small = false }: { status: TurnProgress["status"
   return <span className={cn(size, "flex shrink-0 items-center justify-center")}><StatusDot tone={PROGRESS_TONE[status]} label={PROGRESS_LABEL[status]} /></span>;
 }
 
-function PinnedProgress({ progress }: { progress: TurnProgress }) {
+const IDLE_LINE: WorkingLineInput = { status: "idle" };
+
+/** The card's second line: what runs now, the count, and the clock. */
+function progressSummary(progress: TurnProgress, notice: string | undefined): string {
+  const done = progress.tasks.filter(task => task.status === "complete").length;
+  const total = progress.tasks.length + progress.omittedTasks;
+  const current = progress.tasks.find(task => task.status === "in_progress")?.title;
+  const running = progress.status === "in_progress";
+  // Every task is done but the turn has not settled: it is writing the answer.
+  const wrappingUp = running && total > 0 && done === total;
+  const lead = notice ?? (wrappingUp ? "Wrapping up" : running && current ? current : PROGRESS_LABEL[progress.status]);
+  return total > 0 ? `${lead} · ${done} of ${total} done` : lead;
+}
+
+function PinnedProgress({ progress, live }: { progress: TurnProgress; live?: WorkingLineInput }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
-  const done = progress.tasks.filter(task => task.status === "complete").length;
+  const active = Boolean(live) && activeProgress(progress);
+  const line = useWorkingLine(active && live ? live : IDLE_LINE);
   return (
     <section aria-label="Task progress" className="mx-auto mt-2 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
       <div className={cardClass}>
@@ -118,7 +147,11 @@ function PinnedProgress({ progress }: { progress: TurnProgress }) {
           <ProgressMark status={progress.status} />
           <span className="min-w-0 flex-1">
             <span className="block truncate leading-5 text-ink">{progress.title}</span>
-            <span className="mt-0.5 block text-xs leading-4 text-muted">{PROGRESS_LABEL[progress.status]}{progress.tasks.length > 0 && ` · ${done} of ${progress.tasks.length + progress.omittedTasks} tasks`}</span>
+            <span className="mt-0.5 flex min-w-0 gap-2 text-xs leading-4 text-muted">
+              <span className="min-w-0 truncate">{progressSummary(progress, line.notice)}</span>
+              {/* Outside the label: the working line's live region announces status, not the clock. */}
+              {line.elapsed && <span aria-hidden className="shrink-0 tabular-nums">{line.elapsed}</span>}
+            </span>
           </span>
           <ChevronDown aria-hidden className={cn("h-3.5 w-3.5 shrink-0 text-muted", open && "rotate-180")} />
         </Button>

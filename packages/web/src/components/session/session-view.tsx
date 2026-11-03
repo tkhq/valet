@@ -38,8 +38,8 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList, ThreadShell } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
-import { PinnedPlan, useCurrentStep } from "~/components/session/thread-plan";
-import { ProcessingStatus } from "./processing-status";
+import { PinnedPlan, useCurrentStep, useProgressCardActive } from "~/components/session/thread-plan";
+import { ProcessingStatus, type WorkingLineInput } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
@@ -302,6 +302,9 @@ export function SessionView({
   }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const currentStep = useCurrentStep(effectiveThreadId);
+  const progressCardActive = useProgressCardActive(effectiveThreadId);
+  const workingLine: WorkingLineInput = { status: threadStatus.status, queue: threadQueueState, needsResponse: Boolean(pendingGate),
+    activity: currentStep, startedAt: threadStatus.turnStartedAt, retry: threadRetry, compacting };
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
@@ -510,7 +513,7 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
-          <PinnedPlan threadId={effectiveThreadId} />
+          <PinnedPlan threadId={effectiveThreadId} live={workingLine} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
@@ -520,8 +523,8 @@ export function SessionView({
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />
-          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
-            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} compacting={compacting} />
+          {/* While the task card shows a running turn, it carries this line: one row, one mascot. */}
+          <ProcessingStatus {...workingLine} inCard={progressCardActive} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
