@@ -7,10 +7,13 @@
  * between away and active would otherwise start many runs a day.
  *
  * The check reads the line's own `event_deliveries` rows through the
- * `(subscription_id, created_at)` index. It stores nothing new.
+ * `(subscription_id, created_at)` index. It stores nothing new. Ingest runs
+ * it twice: once at match time for the receipt, and again inside the
+ * transaction that inserts the deliveries, under `lockOncePerLine`, so two
+ * concurrent events cannot both pass the window.
  */
-import { and, eq, gte, ne } from "drizzle-orm";
-import type { AppDb } from "../lib/drizzle.js";
+import { and, eq, gte, ne, sql } from "drizzle-orm";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { eventDeliveries } from "../schema/index.js";
 
 export const MAX_ONCE_PER_HOURS = 168;
@@ -32,7 +35,7 @@ export function oncePerHoursOf(target: unknown): number | null {
 }
 
 /** True when the line has a limit and made a delivery inside the window. */
-export async function oncePerHoursBlocks(db: AppDb, sub: { id: string; target: unknown }, now: number): Promise<boolean> {
+export async function oncePerHoursBlocks(db: AppQueryable, sub: { id: string; target: unknown }, now: number): Promise<boolean> {
   const hours = oncePerHoursOf(sub.target);
   if (hours === null) return false;
   const [recent] = await db
@@ -45,4 +48,13 @@ export async function oncePerHoursBlocks(db: AppDb, sub: { id: string; target: u
     ))
     .limit(1);
   return recent !== undefined;
+}
+
+/**
+ * `pg_advisory_xact_lock` keyed by the line, released at transaction end.
+ * The delivery insert takes it before its second `oncePerHoursBlocks` read,
+ * so a concurrent ingest of another event waits, then sees this delivery.
+ */
+export async function lockOncePerLine(tx: AppQueryable, subscriptionId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`once-per:${subscriptionId}`}))`);
 }

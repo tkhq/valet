@@ -243,4 +243,17 @@ describe("once every N hours", () => {
     expect(bySub("limited")).toBe(1);
     expect(bySub("every")).toBe(2);
   });
+
+  it("admits one delivery when two events for a limited line ingest at once", async () => {
+    await db.appDb.insert(eventSubscriptions).values(
+      line("limited", "U1", { target: { kind: "workflow", workflowId: "wf-1", oncePerHours: 4 } }),
+    );
+    const deps = { db: db.appDb, plugins: [slackPlugin] };
+    const results = await Promise.all(["c1", "c2", "c3"].map((key) =>
+      ingestEvent(deps, { orgId: ORG, service: "slack", event: online(key) })));
+
+    const rows = await db.appDb.select().from(eventDeliveries);
+    expect(rows.filter((r) => r.subscriptionId === "limited")).toHaveLength(1);
+    expect(results.reduce((sum, r) => sum + r.deliveries, 0)).toBe(1);
+  });
 });

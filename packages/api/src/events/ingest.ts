@@ -3,7 +3,7 @@
  * rows, one transaction. Callers (generic webhook route, github-app
  * forwarder) handle org resolution and signature verification first.
  */
-import { oncePerHoursBlocks } from "./once-per.js";
+import { lockOncePerLine, oncePerHoursBlocks, oncePerHoursOf } from "./once-per.js";
 import { createEventReceipt, appendReceiptStage } from "./receipts.js";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
@@ -482,9 +482,20 @@ export async function ingestEvent(
         return { eventId: existing?.id ?? eventId, duplicate: true, deliveries: 0, linkedEventId: existing?.id };
       }
 
-      if (matched.length > 0) {
+      // The match-time check above ran outside this transaction. A line with
+      // a "once every N hours" limit re-checks here under its lock, in id
+      // order, so concurrent events admit at most one delivery per window.
+      const admitted: typeof matched = [];
+      for (const sub of [...matched].sort((a, b) => a.id.localeCompare(b.id))) {
+        if (oncePerHoursOf(sub.target) !== null) {
+          await lockOncePerLine(tx, sub.id);
+          if (await oncePerHoursBlocks(tx, sub, now)) continue;
+        }
+        admitted.push(sub);
+      }
+      if (admitted.length > 0) {
         await tx.insert(eventDeliveries).values(
-          matched.map((sub) => ({
+          admitted.map((sub) => ({
             id: randomUUID(),
             eventId,
             subscriptionId: sub.id,
@@ -498,7 +509,7 @@ export async function ingestEvent(
           })),
         );
       }
-      return { eventId, duplicate: false, deliveries: matched.length, linkedEventId: eventId };
+      return { eventId, duplicate: false, deliveries: admitted.length, linkedEventId: eventId };
     });
     let result: Awaited<ReturnType<typeof persist>>;
     try {
