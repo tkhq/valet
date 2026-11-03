@@ -97,6 +97,21 @@ describe("Lifecycle state machine", () => {
     expect(settled).toBe(false);
   });
 
+  it("beginDrain starts the request wait at once, so a slow later shutdown step cannot use up its window", async () => {
+    vi.useFakeTimers();
+    const lc = new Lifecycle(10_000);
+    lc.markReady();
+    const release = lc.enter();
+    const drained = lc.beginDrain();
+    expect(lc.beginDrain()).toBe(drained);
+    // The request ends at 4 s while another shutdown step (an active workflow
+    // drive) keeps running until 12 s, past the window.
+    await vi.advanceTimersByTimeAsync(4_000);
+    release();
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(drained).resolves.toBe(true);
+  });
+
   it("waitForIdle returns false at once when the window has already passed", async () => {
     vi.useFakeTimers();
     const lc = new Lifecycle(1_000);

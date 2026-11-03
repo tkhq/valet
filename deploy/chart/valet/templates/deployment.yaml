@@ -153,7 +153,7 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
-          # Probe split (boot-ordering fix, chart 0.10.2; drain fix 0.10.30):
+          # Probe split (boot-ordering fix, chart 0.10.2; drain fix 0.10.32):
           #
           # The api binds a boot listener before database upgrades. It
           # answers every path, /api/health included, with 503 + Retry-After.

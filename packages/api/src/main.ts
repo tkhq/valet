@@ -743,7 +743,7 @@ async function close(): Promise<void> {
   closed = true;
   // Readiness goes 503 and new external API requests get 503 + Retry-After
   // from here on; the stops below end the claim loops and schedulers.
-  lifecycle.beginDrain();
+  const requestsDrained = lifecycle.beginDrain();
   stopProcessHealthSampler();
   // The WakeWatcher's stop flag goes up first: the awaited stops below can
   // take most of the hard-exit budget, and a pass must not start new rows
@@ -849,9 +849,10 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("autoTitleHost.stop failed:", err);
   }
-  // Requests already in flight finish before their sessions are evicted,
-  // bounded by the drain window that started at beginDrain().
-  if (!(await lifecycle.waitForIdle())) {
+  // Requests already in flight finish before their sessions are evicted.
+  // The wait started at beginDrain(), alongside the stops above, so a slow
+  // stop (an active workflow drive) does not use up the requests' window.
+  if (!(await requestsDrained)) {
     console.warn(`shutdown: drain window ended with ${lifecycle.requestsInFlight} request(s) still in flight`);
   }
   try {

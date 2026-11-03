@@ -64,6 +64,7 @@ export function unavailableBody(reason: "booting" | "draining"): UnavailableBody
 export class Lifecycle {
   private current: LifecyclePhase = "booting";
   private inFlight = 0;
+  private drained: Promise<boolean> | undefined;
   private drainDeadline = 0;
   private idleWaiters: Array<() => void> = [];
 
@@ -90,11 +91,18 @@ export class Lifecycle {
     if (this.current === "booting") this.current = "ready";
   }
 
-  /** SIGTERM: stop reporting ready and start the drain clock. Idempotent. */
-  beginDrain(): void {
-    if (this.current === "draining") return;
+  /**
+   * SIGTERM: stop reporting ready and start the drain clock. Returns the wait
+   * for in-flight requests, started now, so slow shutdown steps that run
+   * before eviction cannot use up the requests' window. Idempotent: a second
+   * call returns the same wait.
+   */
+  beginDrain(): Promise<boolean> {
+    if (this.current === "draining" && this.drained) return this.drained;
     this.current = "draining";
     this.drainDeadline = this.now() + this.drainMs;
+    this.drained = this.waitForIdle();
+    return this.drained;
   }
 
   /** Counts one gated request in flight. Returns the matching release, which
