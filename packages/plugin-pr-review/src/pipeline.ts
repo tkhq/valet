@@ -1,0 +1,106 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { ToolDef } from "@valet/engine";
+import { git } from "./git.js";
+import { createReviewerSpec, type ReviewerSpecOptions } from "./review.js";
+import type { Review } from "./types.js";
+import { createVerifierSpec, decideFinding, type FinalVerdict } from "./verify.js";
+
+/** One agent session to run: the host supplies the engine, model and sandbox. */
+export interface AgentSpec {
+  /** `review` or `verify:<n>`, for logs and trajectories. */
+  label: string;
+  systemPrompt: string;
+  /** Names of the engine built-ins the agent keeps. */
+  builtinToolNames: ReadonlySet<string>;
+  tools: ToolDef[];
+  prompt: string;
+}
+
+export interface AgentRunResult {
+  outcome: "completed" | "failed" | "timeout";
+  error?: string;
+}
+
+/** Runs one agent to completion. The plugin CLI and the eval runner each supply one. */
+export type AgentRunner = (spec: AgentSpec) => Promise<AgentRunResult>;
+
+export interface FindingVerdict {
+  /** Index into `draft.findings`. */
+  index: number;
+  /** `unverified`: the verifier ended without a verdict; the finding is kept and counted. */
+  verdict: FinalVerdict;
+  /** Whether the finding stays in the posted review. */
+  kept: boolean;
+  reason: string;
+}
+
+export interface PipelineResult {
+  outcome: AgentRunResult["outcome"] | "no_review";
+  error?: string;
+  /** The review after verification: the findings `decideFinding` kept. */
+  review?: Review;
+  /** The reviewer's own review, before verification. */
+  draft?: Review;
+  verdicts: FindingVerdict[];
+}
+
+export interface PipelineOptions extends ReviewerSpecOptions {
+  /** Check each finding with a verifier agent. Default true. */
+  verify?: boolean;
+  /** Verifier agents in flight at once. Default 4. */
+  verifyConcurrency?: number;
+}
+
+/**
+ * Review a pull request: the reviewer proposes findings, then one verifier
+ * per finding checks it in a fresh session, and `decideFinding` keeps or
+ * drops it. Refuted findings are dropped; see `decideFinding` for the rest.
+ */
+export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner): Promise<PipelineResult> {
+  // Review what GitHub shows: the change since the merge-base. A two-dot
+  // diff from a base branch that moved on shows its later commits reversed.
+  const opts = { ...input, base: await mergeBase(input.workspace, input.base, input.head) };
+  const reviewer = await createReviewerSpec(opts);
+  const reviewRun = await run({ ...reviewer, label: "review" });
+  const draft = reviewer.review();
+  if (reviewRun.outcome !== "completed" || draft === undefined) {
+    return {
+      outcome: reviewRun.outcome === "completed" ? "no_review" : reviewRun.outcome,
+      ...(reviewRun.error !== undefined ? { error: reviewRun.error } : {}),
+      ...(draft !== undefined ? { draft, review: draft } : {}),
+      verdicts: [],
+    };
+  }
+  if (opts.verify === false || draft.findings.length === 0) return { outcome: "completed", review: draft, draft, verdicts: [] };
+
+  const verdicts: FindingVerdict[] = new Array(draft.findings.length);
+  let next = 0;
+  const limit = Math.max(1, opts.verifyConcurrency ?? 4);
+  await Promise.all(
+    Array.from({ length: Math.min(limit, draft.findings.length) }, async () => {
+      while (next < draft.findings.length) {
+        const index = next++;
+        const spec = await createVerifierSpec({ ...opts, finding: draft.findings[index], label: `verify:${index}` });
+        const result = await run(spec);
+        const finding = draft.findings[index];
+        const fileText = await readFile(join(opts.workspace, finding.path), "utf8").catch(() => undefined);
+        const decision = decideFinding(finding, spec.verdict(), fileText);
+        verdicts[index] = {
+          index,
+          verdict: decision.verdict,
+          kept: decision.keep,
+          reason: decision.verdict === "unverified" ? (result.error ?? `verifier ended (${result.outcome}) without a verdict`) : decision.reason,
+        };
+      }
+    }),
+  );
+  const kept = draft.findings.filter((_, i) => verdicts[i].kept);
+  return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts };
+}
+
+async function mergeBase(workspace: string, base: string, head: string): Promise<string> {
+  const sha = (await git(workspace, ["merge-base", base, head])).trim();
+  if (!sha) throw new Error(`No merge-base between ${base} and ${head}. Fetch both commits with their history.`);
+  return sha;
+}

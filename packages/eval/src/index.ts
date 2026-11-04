@@ -30,7 +30,19 @@ export {
   type BaselineComparison,
   type BaselineRecord,
 } from "./baseline.js";
-export { formatScorecard } from "./scorecard.js";
+export { formatReviewSummary, formatScorecard } from "./scorecard.js";
+export {
+  DEFAULT_REVIEW_JUDGE_MODEL,
+  REVIEW_PROFILE_CATEGORIES,
+  buildReviewMatcher,
+  profileMetrics,
+  reviewCommentText,
+  type ReviewLlm,
+  type ReviewMatcher,
+  type ReviewMatcherOptions,
+} from "./checks/review-match.js";
+export { gatewayModelResolver, llmGatewayFromEnv, viaGateway, type LlmGateway } from "./gateway.js";
+export { repoCacheDir, runPullRequestCase } from "./pull-request.js";
 export { runSuite, type SuiteOptions, type SuiteResult } from "./suite.js";
 export { DEFAULT_MODEL, filterCases, parseCliArgs, type CliOptions } from "./cli-args.js";
 export {

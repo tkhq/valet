@@ -32,6 +32,8 @@ export interface CliOptions {
   pruneBaselinesKeep?: number;
   /** Suite-level reasoning effort for the model under test. */
   reasoning?: ReasoningLevel;
+  /** Cases in flight at once. */
+  concurrency?: number;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -53,6 +55,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "allow-live-baselines": { type: "boolean", default: false },
       "prune-baselines": { type: "string" },
       reasoning: { type: "string" },
+      concurrency: { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -76,6 +79,13 @@ export function parseCliArgs(argv: string[]): CliOptions {
   const pullRating = values.rating ?? "positive";
   if (pullRating !== "positive" && pullRating !== "negative") {
     throw new Error(`--rating must be "positive" or "negative", got \`${values.rating}\``);
+  }
+  let concurrency: number | undefined;
+  if (values.concurrency !== undefined) {
+    concurrency = Number.parseInt(values.concurrency, 10);
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
+      throw new Error(`--concurrency must be an integer from 1 to 32, got \`${values.concurrency}\``);
+    }
   }
   let timeoutMs: number | undefined;
   if (values.timeout !== undefined) {
@@ -102,6 +112,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     allowLiveBaselines: values["allow-live-baselines"],
     ...(pruneBaselinesKeep !== undefined ? { pruneBaselinesKeep } : {}),
     ...(reasoning !== undefined ? { reasoning: reasoning as ReasoningLevel } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
   };
 }
 

@@ -10,6 +10,11 @@
  *   --timeout <ms>       override the per-case timeout
  *   --cases <dir>        cases directory (default: evals/cases)
  *   --baselines <dir>    baselines directory (default: evals/baselines)
+ *   --concurrency <n>    cases in flight at once (default 1)
+ *
+ * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,
+ * every model call goes through that Valet gateway with the Valet key, and
+ * provider keys in the environment are ignored.
  *
  * Exits 0 when every run case passes, 1 otherwise.
  */
@@ -21,6 +26,8 @@ import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { loadCases } from "./case-loader.js";
 import { filterCases, parseCliArgs } from "./cli-args.js";
 import { buildJudgeRunner } from "./checks/judge.js";
+import { buildReviewMatcher } from "./checks/review-match.js";
+import { llmGatewayFromEnv } from "./gateway.js";
 import { pruneBaselines } from "./baseline.js";
 import { dockerAvailable, loadEvalCredentials } from "./integration.js";
 import { pullFlagged } from "./pull-flagged.js";
@@ -75,10 +82,20 @@ async function main(): Promise<number> {
   const needsDocker = cases.some((c) => c.profile === "full");
   const hasDocker = needsDocker ? await dockerAvailable() : false;
 
+  const gateway = llmGatewayFromEnv();
+  if (gateway !== undefined) {
+    // Gateway mode: no call may fall back to a personal provider key.
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"]) delete process.env[key];
+    if (!opts.json) console.error(`[eval] model calls go through the Valet gateway at ${gateway.url}`);
+  }
+
   const result = await runSuite(cases, {
     model: opts.model,
     baselinesDir: opts.baselinesDir,
-    judge: buildJudgeRunner({ modelUnderTest: opts.model }),
+    judge: buildJudgeRunner({ modelUnderTest: opts.model, ...(gateway !== undefined ? { gateway } : {}) }),
+    reviewMatcher: buildReviewMatcher(gateway !== undefined ? { gateway } : {}),
+    ...(gateway !== undefined ? { gateway } : {}),
+    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
     mockPlugins: bundledPlugins,
     realPlugins: bundledPlugins,
     credentials,
