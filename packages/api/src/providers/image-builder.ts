@@ -155,8 +155,8 @@ export function parseBuildTolerations(value: string | undefined): V1Toleration[]
       toleration.effect = entry.effect;
     }
     if (entry.tolerationSeconds !== undefined) {
-      if (typeof entry.tolerationSeconds !== "number" || !Number.isInteger(entry.tolerationSeconds)) {
-        return fail(`entry ${index} tolerationSeconds is not an integer`);
+      if (typeof entry.tolerationSeconds !== "number" || !Number.isInteger(entry.tolerationSeconds) || entry.tolerationSeconds < 0) {
+        return fail(`entry ${index} tolerationSeconds is not a non-negative integer`);
       }
       toleration.tolerationSeconds = entry.tolerationSeconds;
     }
