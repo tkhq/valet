@@ -1423,17 +1423,24 @@ function makeListTool(
 
       const total = entries.length;
       // A focused thread (a workflow editor starts in one) sees only its focus.
-      // When nothing in focus matches, search the ceiling too, so an
-      // integration such as Granola is not reported as missing.
-      const outsideFocus = total === 0 && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
+      // When nothing in focus matches, or the call searches, search the
+      // ceiling too and name what the focus hides. Otherwise an integration
+      // such as Granola reads as missing, and a diagnose focus answers
+      // "update schedule" with list_schedules alone.
+      const searched = query.hasInput || Boolean(a.service);
+      const outsideFocus = (total === 0 || searched) && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
         ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true }, ctx))
+          .filter((t) => !actionInScope(ctx.toolScope, t.tool_id))
         : [];
       const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
-      if (outsideFocus.length > 0) {
+      // An outside_focus listing names its own rows, so it needs the same
+      // next step.
+      const hidden = a.outside_focus ? tools.filter((t) => !actionInScope(ctx.toolScope, t.tool_id)) : outsideFocus;
+      if (hidden.length > 0) {
         warnings.push({
           service: "catalog",
           reason: "these actions are outside this thread's focus. To use them, call focus_tools with your phase and actions: " +
-            JSON.stringify(outsideFocus.map((t) => t.tool_id)) + ", then call list_tools again for their schemas.",
+            JSON.stringify(hidden.map((t) => t.tool_id)) + ", then call list_tools again for their schemas.",
         });
       } else if (total === 0) {
         const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
