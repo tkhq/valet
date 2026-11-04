@@ -8,11 +8,14 @@
 export type ThreadPlanStatus = "pending" | "in_progress" | "done";
 
 export interface ThreadPlanItem {
+  id?: string;
   text: string;
   status: ThreadPlanStatus;
 }
 
 export interface ThreadPlan {
+  title?: string;
+  turnId?: string;
   items: ThreadPlanItem[];
   updatedAt: number;
 }
@@ -33,7 +36,7 @@ export function readThreadPlanItems(value: unknown): ThreadPlanItem[] | undefine
     const { text } = item;
     const status = STATUSES.find((known) => known === item.status);
     if (typeof text !== "string" || text.trim().length === 0 || text.length > THREAD_PLAN_MAX_TEXT || !status) return undefined;
-    items.push({ text, status });
+    items.push({ text, status, ...("id" in item && typeof item.id === "string" && item.id ? { id: item.id } : {}) });
   }
   return items;
 }
@@ -45,7 +48,7 @@ export function readThreadPlan(metadata: Record<string, unknown> | undefined): T
   const items = readThreadPlanItems(value.items);
   const { updatedAt } = value;
   if (!items || typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) return undefined;
-  return { items, updatedAt };
+  return { items, updatedAt, ...("title" in value && typeof value.title === "string" && value.title.trim().length > 0 && value.title.length <= THREAD_PLAN_MAX_TEXT ? { title: value.title } : {}), ...("turnId" in value && typeof value.turnId === "string" ? { turnId: value.turnId } : {}) };
 }
 
 /** How far a plan is: done items, all items, and the text of the first `in_progress` item. */
@@ -56,4 +59,17 @@ export function planProgress(plan: Pick<ThreadPlan, "items">): { done: number; t
     total: plan.items.length,
     ...(current !== undefined ? { current } : {}),
   };
+}
+
+/** Turn plans retained in thread metadata. */
+export const TURN_PLAN_HISTORY_KEY = "turnPlans";
+export const TURN_PLAN_HISTORY_LIMIT = 8;
+
+export function readTurnPlans(metadata: Record<string, unknown> | undefined): ThreadPlan[] {
+  const history = metadata?.[TURN_PLAN_HISTORY_KEY];
+  if (!Array.isArray(history)) return [];
+  return history.flatMap((value) => {
+    const plan = readThreadPlan({ [THREAD_PLAN_KEY]: value });
+    return plan?.turnId ? [plan] : [];
+  }).slice(-TURN_PLAN_HISTORY_LIMIT);
 }
