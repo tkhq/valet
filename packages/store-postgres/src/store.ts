@@ -264,9 +264,10 @@ const PENDING_COUNT_SQL = `
     AND status != 'settled' AND superseded_by_item_id IS NULL
 `;
 
-// The same rows with metadata, for a steer: it counts only the items it keeps.
+// The same rows with metadata and admission time, for a full steer: it
+// counts only the items it keeps.
 const PENDING_METADATA_SQL = `
-  SELECT metadata FROM engine_queue_items
+  SELECT metadata, created_at FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2
     AND status != 'settled' AND superseded_by_item_id IS NULL
 `;
@@ -1077,12 +1078,14 @@ export class PgSessionStore implements SessionStore {
           }
 
           if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-            // A full steer supersedes everything but workflow items in this
-            // transaction, so only those count. A scoped steer keeps queued
-            // siblings, so they all count.
+            // Count every item the admission leaves live. A full steer
+            // supersedes the items admitted at or before it, except workflow
+            // items (STEER_CANDIDATES_SQL), so it keeps workflow items and
+            // later items. A scoped steer keeps queued siblings, so they all count.
             const count = opts.steer === true && (opts.steerScope ?? "all") === "all"
               ? (await tx.query(PENDING_METADATA_SQL, [sessionId, threadId])).rows
-                .filter((row) => steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
+                .filter((row) => toNum(row.created_at, "created_at") > item.createdAt
+                  || steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
               : toNum((await tx.query(PENDING_COUNT_SQL, [sessionId, threadId])).rows[0]?.count, "count");
             if (count >= opts.maxPending) {
               throw new PendingCapError(threadId, opts.maxPending);

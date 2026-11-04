@@ -907,6 +907,13 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(admitted.supersededItemIds).toHaveLength(1);
     });
 
+    it("a full steer counts a later item it keeps against the pending cap", async () => {
+      // A delayed admission or clock skew can leave a queued item newer than the steer.
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 500, updatedAt: 500, content: "later" }));
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, maxPending: 1 }))
+        .rejects.toBeInstanceOf(PendingCapError);
+    });
+
     it("a scoped steer counts every item it keeps against the pending cap", async () => {
       await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100, content: "queued" }));
       await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200 }), { steer: true, steerScope: "active", maxPending: 1 }))
