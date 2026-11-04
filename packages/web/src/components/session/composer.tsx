@@ -1299,6 +1299,7 @@ export function Composer({
             )}
             <Button
               type="submit"
+              data-perf-flow="message.send"
               disabled={preparing || !canSend}
               size="lg"
               title={sendTitle}
