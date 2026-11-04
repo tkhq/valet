@@ -7,6 +7,13 @@ metadata:
     app.kubernetes.io/component: api
 spec:
   type: {{ .Values.service.type }}
+  {{- if .Values.api.publishNotReadyAddresses }}
+  # One replica on Recreate: there is no other pod to route to while this one
+  # boots or drains, so route to it anyway. The api answers 503 + Retry-After
+  # itself until it is ready (packages/api/src/lib/lifecycle.ts). Set
+  # api.publishNotReadyAddresses=false before moving to RollingUpdate.
+  publishNotReadyAddresses: true
+  {{- end }}
   selector:
     {{- include "valet.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: api

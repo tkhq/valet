@@ -322,3 +322,16 @@ During a rolling upgrade, the old ready pod serves traffic until the new pod bec
 For the first usage-rollup upgrade, operators must set the Helm timeout to at least 35 minutes.
 The runbook uses `--wait --timeout 40m` to allow additional deployment work.
 Golden chart tests verify the default budgets and explicit overrides without contacting a cluster.
+
+## Update (2026-11-03): Recreate boot and drain
+
+The 2026-09-26 note above says the old pod serves traffic during an upgrade. That is not correct for `Recreate`: the old pod stops before the new pod starts.
+Chart 0.10.32 and `packages/api/src/lib/lifecycle.ts` make the window shorter and make it answer 503 with `Retry-After`:
+
+- A `pre-upgrade` hook Job pulls the new api image before the old pod stops.
+- The api binds a boot listener before database upgrades. The startup probe now polls every second, and the chart multiplies `api.startupProbe.failureThreshold` by 5, so the 30-minute budget does not change.
+- Gated routes (API, MCP, webhooks, proxy) return 503 with `Retry-After` until the boot chain finishes, and again during the SIGTERM drain.
+- The api Service publishes not-ready addresses, so callers reach the pod during boot and drain.
+- Liveness allows a busy event loop about a minute (`timeoutSeconds: 5`, `failureThreshold: 6`).
+
+The chart README section "Moving to RollingUpdate" lists the changes that two concurrent api pods need.
