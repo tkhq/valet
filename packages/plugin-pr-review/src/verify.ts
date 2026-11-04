@@ -16,7 +16,9 @@ export const VerdictSchema = Type.Object({
   }),
   evidence: Type.String({ description: "What you read that bears on the claim, each fact with path:line." }),
   trigger: Type.String({ description: "The concrete input or state that makes the code fail, or empty if none." }),
-  introduced_by_pr: Type.Boolean({ description: "True if the PR adds or changes the faulty code, or newly reaches it." }),
+  introduced_by_pr: Type.Boolean({
+    description: "True if the faulty code is in a hunk or function the PR changes, or the PR newly reaches it. An older defect in code the PR touches counts.",
+  }),
   counter_evidence: Type.String({
     description: "Code that rules the claim out (a guard, a type, a caller contract), with path:line. Empty if none.",
   }),
@@ -44,11 +46,11 @@ How to work:
 1. Find the cited code at the cited path and line, and copy it verbatim. If it does not exist there or nearby, the claim is refuted (not_found).
 2. Before you judge anything about a symbol defined elsewhere, look up its definition and its callers. Do not assume what a function, type or config does.
 3. Look for evidence on both sides: what makes the code fail, and what would prevent it (a guard, a type, a caller contract, framework behavior visible in the repository).
-4. Check whether the PR introduces the faulty code or newly reaches it. Use the diff below or \`git diff\`.
+4. Check whether the faulty code is in a hunk or function the PR changes, or whether the PR newly reaches it. Use the diff below or \`git diff\`.
 
 Decide:
-- confirmed: you can name the concrete trigger (an input or state that real callers can produce) and the wrong result, and the PR introduces it.
-- refuted: code you read rules the claim out (cite it as path:line), the cited code is not there, the issue is pre-existing and the PR does not affect it, or it is style, naming, docs, or a request for tests without a concrete defect. Give the counter-evidence and a refutation_reason.
+- confirmed: you can name the concrete trigger (an input or state that real callers can produce) and the wrong result, and the faulty code is in a hunk or function the PR changes, or the PR newly reaches it. A defect the PR did not create still counts when it sits in code the PR touches: the PR is the time to fix it.
+- refuted: code you read rules the claim out (cite it as path:line), the cited code is not there, the faulty code is outside every hunk and function the PR changes and the PR does not change how it is reached (pre_existing), or it is style, naming, docs, or a request for tests without a concrete defect. Give the counter-evidence and a refutation_reason.
 - unverifiable: you could neither confirm nor refute it from the code. Do not guess either way.
 
 A behavior that looks intended is not a refutation. Refute only when the code shows the failure cannot happen or the PR does not cause it.
