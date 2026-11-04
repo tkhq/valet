@@ -16,7 +16,6 @@ const SEVERITIES = ["critical", "high", "medium", "low"] as const;
 const OPEN = "<!-- valet-pr-review:finding";
 const CLOSE = "<!-- /valet-pr-review:finding -->";
 const BLOCK_RE = /<!-- valet-pr-review:finding (f\d+) (critical|high|medium|low) ([a-z_]+) -->\n\*\*(.*)\*\*\n\n([\s\S]*?)\n<!-- \/valet-pr-review:finding -->/g;
-const SUMMARY_MARKER_RE = /<!-- valet-pr-review:summary ([0-9a-f]{7,40}) -->/;
 
 const label = (severity: Finding["severity"]): string => severity.charAt(0).toUpperCase() + severity.slice(1);
 
@@ -60,11 +59,6 @@ export function parseFindings(text: string): Map<string, Omit<PostedFinding, "pa
     });
   }
   return out;
-}
-
-/** The head sha the summary review covers, from its marker. */
-export function summaryHead(body: string): string | undefined {
-  return SUMMARY_MARKER_RE.exec(body)?.[1];
 }
 
 export interface SummaryInput {

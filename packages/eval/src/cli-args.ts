@@ -63,7 +63,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       reasoning: { type: "string" },
       concurrency: { type: "string" },
       "verify-model": { type: "string" },
-      "no-verify": { type: "boolean", default: false },
+      verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
     },
   });
@@ -130,7 +130,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(reasoning !== undefined ? { reasoning: reasoning as ReasoningLevel } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
-    ...(values["no-verify"] ? { verify: false } : {}),
+    ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
   };
 }

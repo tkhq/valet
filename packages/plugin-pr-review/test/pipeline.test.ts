@@ -57,7 +57,7 @@ describe("runReviewPipeline", () => {
       }
       return { outcome: "completed" };
     };
-    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "" }, run);
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: true }, run);
     expect(seen.sort()).toEqual(["review", "verify:0", "verify:1"]);
     expect(result.draft?.findings.map((f) => f.title)).toEqual(["Division by zero", "Bogus"]);
     expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero"]);
@@ -70,7 +70,7 @@ describe("runReviewPipeline", () => {
       if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [finding("F")] });
       return spec.label === "review" ? { outcome: "completed" } : { outcome: "timeout", error: "slow" };
     };
-    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "" }, run);
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: true }, run);
     expect(result.review?.findings).toHaveLength(1);
     expect(result.verdicts[0]).toMatchObject({ verdict: "unverified", reason: "slow" });
   });
@@ -87,7 +87,7 @@ describe("runReviewPipeline", () => {
       await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
       return { outcome: "completed" };
     };
-    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", passes: 2, verify: false }, run);
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", passes: 2 }, run);
     expect(labels.sort()).toEqual(["review", "review:2"]);
     expect(result.review?.summary).toBe("review");
     expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero", "Other file"]);
@@ -101,7 +101,7 @@ describe("runReviewPipeline", () => {
       if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [finding("F")] });
       return { outcome: "completed" };
     };
-    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verifyModel: "openai/gpt-5.6-terra" }, run);
+    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: true, verifyModel: "openai/gpt-5.6-terra" }, run);
     expect(models).toEqual({ review: undefined, "verify:0": "openai/gpt-5.6-terra" });
   });
 
@@ -127,7 +127,7 @@ describe("runReviewPipeline", () => {
     expect(prompt).toContain(`BASE commit: ${base}`);
   });
 
-  it("skips verification when verify is false", async () => {
+  it("skips verification unless verify is on", async () => {
     const { dir, base, head } = repo();
     const labels: string[] = [];
     const run: AgentRunner = async (spec) => {
@@ -135,7 +135,7 @@ describe("runReviewPipeline", () => {
       await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [finding("F")] });
       return { outcome: "completed" };
     };
-    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: false }, run);
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "" }, run);
     expect(labels).toEqual(["review"]);
     expect(result.review?.findings).toHaveLength(1);
   });

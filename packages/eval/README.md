@@ -133,8 +133,11 @@ gateway is not set, the code-review cases SKIP.
   this suite only on repos you trust to read.
 - To regenerate the cases, run `pnpm --filter @valet/eval import:martian`.
   It needs the `gh` CLI.
-- One full run costs about $10 to $15 for the reviews on Sonnet 5.5,
-  plus the judge calls.
+- A run measures the reviewer the plugin ships: one reviewer pass and no
+  verifier. `--verify` checks each finding with a verifier agent, and
+  `--review-passes <n>` merges n independent reviewer passes.
+- One full run costs about $5 for the reviews on Sonnet 5.5, plus the
+  judge calls. `--verify` roughly doubles the review cost.
 
 ## Compare models
 

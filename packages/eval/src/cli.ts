@@ -12,7 +12,7 @@
  *   --baselines <dir>    baselines directory (default: evals/baselines)
  *   --concurrency <n>    cases in flight at once (default 1)
  *   --verify-model <spec> model for code-review verifiers (default: --model)
- *   --no-verify          skip code-review verification in every case
+ *   --verify             check each code-review finding with a verifier (default: off)
  *   --review-passes <n>  independent code-review passes per case (default 1)
  *
  * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,

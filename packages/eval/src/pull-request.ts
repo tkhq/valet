@@ -183,7 +183,7 @@ async function reviewInWorkspace(
     return result;
   };
 
-  const verify = opts.verify ?? evalCase.pull_request?.verify ?? true;
+  const verify = opts.verify ?? evalCase.pull_request?.verify ?? false;
   const pipeline = await runReviewPipeline(
     {
       workspace,

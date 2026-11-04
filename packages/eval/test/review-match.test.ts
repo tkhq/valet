@@ -142,8 +142,8 @@ describe("--verify-model", () => {
     expect(parseCliArgs([]).verifyModel).toBeUndefined();
   });
 
-  it("parses --no-verify and --review-passes", () => {
-    expect(parseCliArgs(["--no-verify", "--review-passes", "2"])).toMatchObject({ verify: false, reviewPasses: 2 });
+  it("parses --verify and --review-passes", () => {
+    expect(parseCliArgs(["--verify", "--review-passes", "2"])).toMatchObject({ verify: true, reviewPasses: 2 });
     expect(parseCliArgs([]).verify).toBeUndefined();
     expect(() => parseCliArgs(["--review-passes", "9"])).toThrow(/--review-passes/);
   });

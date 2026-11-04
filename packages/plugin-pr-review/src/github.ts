@@ -5,12 +5,10 @@
  */
 
 export interface PullRequest {
-  number: number;
   state: "open" | "closed";
   draft: boolean;
   title: string;
   body: string | null;
-  html_url: string;
   head: { sha: string; ref: string; repo: { full_name: string } | null };
   base: { sha: string; ref: string; repo: { full_name: string } };
 }
@@ -33,18 +31,13 @@ export interface PullFile {
 
 export interface ReviewComment {
   id: number;
-  path: string;
-  line: number | null;
-  original_line: number | null;
   body: string;
-  html_url: string;
   pull_request_review_id: number | null;
 }
 
 export interface Review {
   id: number;
   body: string;
-  html_url: string;
 }
 
 export interface NewReviewComment {

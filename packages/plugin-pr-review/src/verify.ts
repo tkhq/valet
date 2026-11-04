@@ -7,8 +7,8 @@ import type { AgentSpec } from "./pipeline.js";
 import type { Finding } from "./types.js";
 
 /**
- * Evidence comes before the verdict: in BitsAI-CR (arXiv 2501.15134) a
- * verdict-first filter lost 12.8 recall points against reasoning-first.
+ * Evidence comes before the verdict, so the verdict follows from the code
+ * the verifier read.
  */
 export const VerdictSchema = Type.Object({
   located_code: Type.String({

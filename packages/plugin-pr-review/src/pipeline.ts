@@ -48,7 +48,7 @@ export interface PipelineResult {
 }
 
 export interface PipelineOptions extends ReviewerSpecOptions {
-  /** Check each finding with a verifier agent. Default true. */
+  /** Check each finding with a verifier agent. Default false. */
   verify?: boolean;
   /** Verifier agents in flight at once. Default 4. */
   verifyConcurrency?: number;
@@ -109,7 +109,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
       verdicts: [],
     };
   }
-  if (opts.verify === false || draft.findings.length === 0) return { outcome: "completed", review: draft, draft, verdicts: [] };
+  if (opts.verify !== true || draft.findings.length === 0) return { outcome: "completed", review: draft, draft, verdicts: [] };
 
   const verdicts: FindingVerdict[] = new Array(draft.findings.length);
   let next = 0;

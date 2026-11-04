@@ -38,7 +38,7 @@ export interface ReviewPullRequestOptions {
   diffBudgetChars?: number;
   /** Called for each tool call, for progress logs. */
   onToolCall?: (tool: string, args: unknown) => void;
-  /** Check each finding with a verifier agent. Default true. */
+  /** Check each finding with a verifier agent. Default false. */
   verify?: boolean;
   /** provider/model for the verifiers. Unset: `model`. */
   verifyModel?: string;
@@ -262,7 +262,7 @@ export function createLocalAgentRunner(opts: LocalAgentRunnerOptions): { run: Ag
       tools: spec.tools,
       warmSandboxOnClaim: false,
       ...(opts.reasoning !== undefined ? { sampling: { reasoning: opts.reasoning } } : {}),
-      // Review runs are unattended and measured; one attempt keeps cost honest.
+      // A failed turn fails the review instead of running it again at full cost.
       turnRetry: { maxAttempts: 1 },
     });
     const thread = session.thread();
