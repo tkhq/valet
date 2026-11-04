@@ -384,9 +384,10 @@ export async function recordTerminalPullRequestWrite(
 /**
  * The key of the thread in `owner`'s workspace runtime that opened the pull
  * request at `url`, or null. A pull request comment for that owner goes to this
- * thread, so the conversation continues where the pull request started. An
- * archived thread is skipped: work there would run where no list shows it, so
- * the comment goes to the shared events thread instead.
+ * thread, so the conversation continues where the pull request started. A
+ * thread a person archived is skipped: work there would run where no list
+ * shows it, so the comment goes to the shared events thread instead. A thread
+ * the idle sweep archived is kept, and the delivery reopens it.
  */
 export async function threadForPullRequest(
   db: AppDb, orgId: string, owner: Principal, url: string,
@@ -401,7 +402,8 @@ export async function threadForPullRequest(
     LEFT JOIN session_threads st ON st.session_id = pr.session_id AND st.id = pr.thread_id
     LEFT JOIN session_threads governing ON governing.session_id = a.session_id AND governing.id = x.governing_thread_id
     WHERE pr.url = ${url} AND a.org_id = ${orgId} AND a.owner_type = ${owner.type} AND a.owner_id = ${owner.id}
-      AND a.archived_at IS NULL AND st.archived_at IS NULL AND governing.archived_at IS NULL
+      AND a.archived_at IS NULL AND (st.archived_at IS NULL OR st.archived_by = 'system')
+      AND (governing.archived_at IS NULL OR governing.archived_by = 'system')
     ORDER BY pr.created_at DESC LIMIT 1`) as { rows: Array<{ sessionId: string; threadId: string; key: string }> };
   return result.rows[0] ?? null;
 }

@@ -271,7 +271,8 @@ CREATE TABLE "session_threads" (
 	"archived_at" bigint,
 	"share_mode" text,
 	"approval_bypass_by" text,
-	"approval_bypass_at" bigint
+	"approval_bypass_at" bigint,
+	"archived_by" text
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");

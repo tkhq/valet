@@ -38,6 +38,8 @@ let headerThreads: Array<{
   key?: string;
   share?: "view" | "reply";
   approvalBypass?: true;
+  archivedAt?: number;
+  autoArchived?: { idleDays: number };
 }> = [];
 /** The signed-in viewer. Undefined by default; the bypass cases set the owner. */
 let meData: { id: string } | undefined;
@@ -74,6 +76,7 @@ let isWorkspaceRuntime: boolean | undefined = false;
 // spreading the real module keeps every export present no matter whose
 // factory the shared registry ends up using.
 const markThreadsReadMutate = vi.fn();
+const setArchivedMutateAsync = vi.fn(async () => ({}));
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -85,6 +88,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetThreadReasoning: () => ({ isPending: false, mutate: setThreadReasoningMutate }),
     useSetThreadApprovalBypass: () => ({ isPending: false, mutate: setBypassMutate }),
     useDuplicateThread: () => ({ isPending: false, mutate: duplicateMutate }),
+    useSetThreadArchived: () => ({ isPending: false, mutateAsync: setArchivedMutateAsync }),
     useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
@@ -262,6 +266,27 @@ describe("SessionHeader — phone thread menu", () => {
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     await screen.findByRole("menuitem", { name: /copy transcript/i });
     expect(screen.queryByRole("menuitem", { name: "Open browser" })).toBeNull();
+  });
+});
+
+describe("SessionHeader: archived thread", () => {
+  afterEach(() => { headerThreads = []; setArchivedMutateAsync.mockClear(); });
+
+  it("says the sweep archived it, with an Unarchive action", async () => {
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, archivedAt: 5, autoArchived: { idleDays: 7 } }];
+    renderHeader(undefined, "t1");
+    expect(screen.getByRole("status").textContent).toContain("Archived automatically after 7 days idle.");
+    await userEvent.click(screen.getByRole("button", { name: "Unarchive" }));
+    expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "t1", archived: false });
+  });
+
+  it("says Archived for a thread a person archived, and nothing for a live thread", () => {
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, archivedAt: 5 }, { id: "t2", sessionId: "sess-1", createdAt: 1 }];
+    const { unmount } = renderHeader(undefined, "t1");
+    expect(screen.getByRole("status").textContent).toMatch(/^Archived\. A new message/);
+    unmount();
+    renderHeader(undefined, "t2");
+    expect(screen.queryByRole("button", { name: "Unarchive" })).toBeNull();
   });
 });
 

@@ -48,6 +48,9 @@ export async function recordThreadUserActivity(
       target: sessionThreads.id,
       set: {
         lastUserActivityAt: sql`GREATEST(COALESCE(${sessionThreads.lastUserActivityAt}, EXCLUDED.last_user_activity_at), EXCLUDED.last_user_activity_at)`,
+        // A new message in an archived thread brings it back to the list.
+        archivedAt: null,
+        archivedBy: null,
       },
     })
     .returning({ lastUserActivityAt: sessionThreads.lastUserActivityAt });

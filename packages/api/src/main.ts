@@ -45,6 +45,7 @@ import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { wireHomeTaskReports } from "./home/service.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
+import { startThreadAutoArchiveSweep, threadArchiveDays } from "./services/thread-auto-archive.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
 import { memoryUsageRecorder } from "./services/memory-usage.js";
 import { wirePrincipleCitations } from "./orchestrator/principle-citations.js";
@@ -242,6 +243,8 @@ try {
 // `EngineHost` can be constructed with the sandbox JWT master / API base
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
+// An invalid VALET_THREAD_ARCHIVE_DAYS fails here, at boot, naming the variable.
+threadArchiveDays();
 
 // Both-set guard + merge for allowedEmailDomains and for the sso team
 // mapping. Must run after authConfig is loaded (we need the env-parsed
@@ -415,6 +418,7 @@ let closed = false;
 let bootReady = false;
 let installationSweep: InstallationSweepHandle | undefined;
 let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
+let threadAutoArchiveSweep: ReturnType<typeof startThreadAutoArchiveSweep> | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
@@ -669,6 +673,9 @@ async function runBootChain(): Promise<void> {
     db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey),
   }, providers.db);
 
+  // Archive threads nobody used for VALET_THREAD_ARCHIVE_DAYS (0 turns it off).
+  if (threadArchiveDays() > 0) threadAutoArchiveSweep = startThreadAutoArchiveSweep(providers.db, threadArchiveDays());
+
   // GitHub App installations: pick up a new installation without anybody
   // pressing "Refresh installations". The tick wakes every minute and checks at
   // most one org that is past its own due time, so most ticks do nothing. An
@@ -771,6 +778,11 @@ async function close(): Promise<void> {
     await pullRequestSweep?.stop();
   } catch (err) {
     console.error("pullRequestSweep.stop failed:", err);
+  }
+  try {
+    await threadAutoArchiveSweep?.stop();
+  } catch (err) {
+    console.error("threadAutoArchiveSweep.stop failed:", err);
   }
   try {
     await installationSweep?.stop();

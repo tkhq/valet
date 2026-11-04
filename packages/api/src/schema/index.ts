@@ -480,6 +480,10 @@ export const sessionThreads = pgTable(
     // (`services/thread-approval-bypass.ts`).
     approvalBypassBy: text("approval_bypass_by"),
     approvalBypassAt: bigint("approval_bypass_at", { mode: "number" }),
+    // Who set `archivedAt`: the person's user id, or "system" for the idle
+    // sweep (`services/thread-auto-archive.ts`). Null while not archived, and
+    // on rows archived before this column existed.
+    archivedBy: text("archived_by"),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );

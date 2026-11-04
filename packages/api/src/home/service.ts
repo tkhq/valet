@@ -6,7 +6,7 @@
  * gathers what is in flight and what needs the person across all of them.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { EventStream, Principal, QueueItem, Session, SessionStore, Thread } from "@valet/engine";
 import { planProgress, readThreadPlan } from "@valet/shared";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
@@ -64,7 +64,12 @@ async function visibleStartedTasks(deps: HomeDeps, user: HomeUser, workspaces: H
     const shown = await visibleThreadIds(deps, { ownerType: ws.owner.type }, { orgId: user.orgId, userId: user.id }, owned);
     return owned.filter((row) => shown.has(`${row.sessionId}:${row.threadId}`));
   }));
-  return groups.flat();
+  // An archived task thread leaves the Tasks panel, as it leaves the sidebar.
+  const tasks = groups.flat();
+  if (tasks.length === 0) return tasks;
+  const archived = new Set((await deps.db.select({ id: sessionThreads.id }).from(sessionThreads)
+    .where(and(inArray(sessionThreads.id, tasks.map((row) => row.threadId)), isNotNull(sessionThreads.archivedAt)))).map((row) => row.id));
+  return tasks.filter((row) => !archived.has(row.threadId));
 }
 
 /** A workspace's first page can omit a busy task. Read all saved tasks' live
