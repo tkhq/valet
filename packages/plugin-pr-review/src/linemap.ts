@@ -55,3 +55,25 @@ export async function mapLine(cwd: string, from: string, to: string, path: strin
   const diff = await git(cwd, ["diff", "--unified=0", from, to, "--", path]);
   return mapLineThroughHunks(parseHunks(diff), line);
 }
+
+/**
+ * The lines of the new file that a GitHub review comment can anchor to:
+ * every added or context line inside the patch's hunks (the RIGHT side).
+ */
+export function commentableLines(patch: string): Set<number> {
+  const lines = new Set<number>();
+  let right = 0;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    const m = HUNK_RE.exec(line);
+    if (m) {
+      right = Number(m[3]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith("+") || line.startsWith(" ")) lines.add(right++);
+    else if (line.startsWith("diff --git ")) inHunk = false;
+  }
+  return lines;
+}

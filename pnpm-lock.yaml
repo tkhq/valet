@@ -137,6 +137,9 @@ importers:
       '@valet/plugin-openai':
         specifier: workspace:*
         version: link:../plugin-openai
+      '@valet/plugin-pr-review':
+        specifier: workspace:*
+        version: link:../plugin-pr-review
       '@valet/plugin-sandbox-tunnels':
         specifier: workspace:*
         version: link:../plugin-sandbox-tunnels

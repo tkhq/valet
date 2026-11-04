@@ -43,7 +43,18 @@ export {
   type ReviewStateStore,
   type TrackedFinding,
 } from "./state.js";
-export { mapLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
-export { diffPullRequest, type PullRequestDiff } from "./git.js";
+export { commentableLines, mapLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
+export { cutPatch, diffPullRequest, type PullRequestDiff } from "./git.js";
 export { REVIEWER_SYSTEM_PROMPT, buildReviewPrompt } from "./prompt.js";
 export * from "./types.js";
+export {
+  createReviewHandler,
+  excluded,
+  pullTarget,
+  ReviewSettingsSchema,
+  type FindingPointer,
+  type PullPointers,
+  type ReviewSettings,
+} from "./handler.js";
+export { githubClient, GitHubError, type GitHubClient } from "./github.js";
+export { parseFindings, renderFinding, renderSummary, type PostedFinding } from "./render.js";

@@ -29,8 +29,12 @@ export async function diffPullRequest(
   const stat = await git(cwd, ["diff", "--stat=200", base, head, ...only]);
   const names = (await git(cwd, ["diff", "--name-only", base, head, ...only])).split("\n").filter(Boolean);
   const full = await git(cwd, ["diff", "--unified=5", base, head, ...only]);
-  if (full.length <= budgetChars) return { stat, patch: full, truncated: false, files: names };
+  return { stat, files: names, ...cutPatch(full, budgetChars) };
+}
 
+/** Keep whole files of a unified diff until the character budget runs out, and name the files left out. */
+export function cutPatch(full: string, budgetChars: number): { patch: string; truncated: boolean } {
+  if (full.length <= budgetChars) return { patch: full, truncated: false };
   const chunks = full.split(/^(?=diff --git )/m);
   const kept: string[] = [];
   let used = 0;
@@ -44,5 +48,5 @@ export async function diffPullRequest(
     }
   }
   const note = `\n# Diff budget reached. Not shown (run git diff yourself):\n${skipped.map((s) => `#   ${s}`).join("\n")}\n`;
-  return { stat, patch: kept.join("") + note, truncated: true, files: names };
+  return { patch: kept.join("") + note, truncated: true };
 }

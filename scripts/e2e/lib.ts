@@ -187,6 +187,7 @@ export const TESTED_PLUGINS = [
   "@valet/plugin-linear",
   "@valet/plugin-native-documents",
   "@valet/plugin-openai",
+  "@valet/plugin-pr-review",
   "@valet/plugin-security",
   "@valet/plugin-slack",
   "@valet/plugin-slack-user",
