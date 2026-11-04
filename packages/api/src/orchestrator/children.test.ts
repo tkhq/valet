@@ -1208,6 +1208,49 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
+  it("settles a plugin's child without waking the parent thread when reportToParent is false", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = testChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+    const parent = await engineHost.sessionFor("parent-silent", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+    const child = await engineHost.childSessionFor("child-silent", {
+      parentSessionId: "parent-silent",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    const itemId = "qi-silent-1";
+    await engineStore.admitSubmission("child-silent", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await appendTerminalResult(engineStore, "child-silent", childThread.id, itemId);
+    await engineStore.settleUnclaimed("child-silent", childThread.id, itemId, { outcome: "completed" });
+    const watch = {
+      childSessionId: "child-silent",
+      queueItemId: itemId,
+      parentSessionId: "parent-silent",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), reportToParent: false });
+
+    watcher.arm(watch);
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-silent")).limit(1);
+      return rows[0]?.settled === true;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const signals = (await engineStore.listUnsettledSubmissions("parent-silent")).filter(
+      (i) => typeof i.content === "object" && i.content !== null && "kind" in i.content && i.content.kind === "signal",
+    );
+    expect(signals).toHaveLength(0);
+  });
+
   describe("child event subscriptions", () => {
     async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}, origin?: ChannelOrigin, boot?: Parameters<typeof bootTestApi>[0], outcome: "completed" | "failed" = "completed") {
       api = await bootTestApi(boot);

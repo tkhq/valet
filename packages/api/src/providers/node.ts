@@ -1,3 +1,5 @@
+import { githubInstallationTokenFor } from "../events/derive.js";
+import { buildPluginThreads } from "../plugins/plugin-threads.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
@@ -919,6 +921,25 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // skipped after ingest (`events/claim-recovery.ts`).
     recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
       waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
+    // Plugin event handlers run AI work as threads and children of the
+    // subscription owner's assistant (`plugins/plugin-threads.ts`).
+    pluginHandlers: {
+      threads: (scope) => buildPluginThreads({
+        db,
+        engineHost,
+        engineStore,
+        childSpawner: (req, ctx) => {
+          if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+          return spawnerRef(req, ctx);
+        },
+      }, scope),
+      appToken: (() => {
+        const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });
+        // Only GitHub has an app credential a handler can borrow today.
+        return async (orgId: string, service: string, scope?: { owner?: string }) =>
+          service === "github" ? githubToken(orgId, scope?.owner) : null;
+      })(),
+    },
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub

@@ -39,6 +39,7 @@ import { GITHUB_CREDENTIAL_SERVICE, GitHubAuthError, resolveInstallationApiToken
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventChannelColumns, eventHeadColumns, type EventHead } from "../services/event-columns.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import type {
   EventDeliveryThreadRef,
   EventDeliveryWire,
@@ -965,6 +966,19 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     if (owned.ownerType === "team") {
       ownerType = "team";
       ownerId = owned.ownerId;
+    }
+  } else if (body.target.kind === "plugin") {
+    // Like a team assistant line: a team handler acts for the team, so the
+    // caller must be on it.
+    if (body.target.teamId !== undefined) {
+      if (!(await isTeamMember(db, body.target.teamId, user.id))) {
+        return c.json({ error: "team not found" }, 404);
+      }
+      ownerType = "team";
+      ownerId = body.target.teamId;
+    }
+    if (!(await orgAllowsPluginForOwner(db, user.orgId, { type: ownerType === "team" ? "team" : "user", id: ownerId }, body.target.plugin))) {
+      return c.json({ error: `Plugin ${body.target.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` }, 403);
     }
   } else if (body.target.kind === "assistant") {
     const who = body.target.assistant ?? "user";

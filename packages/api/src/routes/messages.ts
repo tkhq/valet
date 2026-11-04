@@ -18,6 +18,7 @@ import { threadPage } from "../services/thread-page.js";
 import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
+import { isPluginThreadKey } from "../plugins/plugin-thread-key.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY, threadOwner, workspaceName } from "../services/thread-links.js";
 import { randomUUID } from "node:crypto";
@@ -565,7 +566,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
   // Parse stored tokens: a legacy "off" row has no pin and shows the session
   // default, which is filled in for the returned page below.
-  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key))
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || (!isWorkflowRunConversation(group.session.id, t.key) && !isPluginThreadKey(t.key)))
     .map(t => ({ ...t, reasoning: parseReasoningLevel(t.reasoning) })));
 
   // Titles + archive state live in the app-side `session_threads` mirror

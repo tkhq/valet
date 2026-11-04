@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
 import {
+  pluginHandlerAccepts,
   validateValetPlugin,
   subjectService,
   type ValetPlugin,
@@ -817,5 +818,35 @@ describe("validateValetPlugin event contracts", () => {
     if (!res.ok) {
       expect(res.issues.some((i) => i.path === "conversationalTwin")).toBe(true);
     }
+  });
+});
+
+describe("plugin event handlers", () => {
+  const handler = { id: "review-pr", description: "Review a pull request.", events: ["github.pull_request.*"], handle: async () => {} };
+
+  it("accepts a declared handler", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), eventHandlers: [handler] }).ok).toBe(true);
+  });
+
+  it("rejects bad ids, duplicates, empty events and a missing handle", () => {
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      eventHandlers: [handler, handler, { ...handler, id: "Bad Id" }, { ...handler, id: "no-events", events: [] }, { id: "no-handle", description: "d", events: ["x.y"] }],
+    });
+    expect(res.ok).toBe(false);
+    const paths = res.ok ? [] : res.issues.map((i) => `${i.path}: ${i.message}`);
+    expect(paths).toEqual(expect.arrayContaining([
+      "eventHandlers[1].id: duplicate handler id review-pr",
+      "eventHandlers[2].id: must match /^[a-z][a-z0-9-]*$/",
+      "eventHandlers[3].events: required non-empty array of event keys",
+      "eventHandlers[4].handle: required function",
+    ]));
+  });
+
+  it("matches exact keys and trailing-wildcard families", () => {
+    expect(pluginHandlerAccepts(handler, "github.pull_request.synchronize")).toBe(true);
+    expect(pluginHandlerAccepts(handler, "github.issues.opened")).toBe(false);
+    expect(pluginHandlerAccepts({ events: ["github.push"] }, "github.push")).toBe(true);
+    expect(pluginHandlerAccepts({ events: ["github.push"] }, "github.push.x")).toBe(false);
   });
 });

@@ -660,6 +660,7 @@ export function replies(sub: Pick<EventSubscriptionWire, "target">): boolean {
 export function presenceDoesParts(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   const target = sub.target;
   if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
+  if (target.kind === "plugin") return [text(`let the ${target.plugin} plugin ${target.handler.replace(/-/g, " ")}`)];
   const policy = displayThreadPolicy(target, sub.eventKeys);
   switch (policy.mode) {
     case "new":

@@ -1056,6 +1056,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
       END $$`,
   },
   {
+    describe: "child_watches.report_to_parent column",
+    probe: { kind: "column", table: "child_watches", column: "report_to_parent" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "report_to_parent" boolean NOT NULL DEFAULT true',
+  },
+  {
     describe: "child_watches.pending_cap_incident column",
     probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',

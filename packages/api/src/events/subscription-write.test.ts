@@ -154,3 +154,24 @@ describe("existingThreadError", () => {
     expect(await existingThreadError(deps, writer, owner, undefined)).toBeNull();
   });
 });
+
+describe("plugin targets", () => {
+  const reviewer: ValetPlugin = {
+    name: "reviewer",
+    version: "0.0.1",
+    eventHandlers: [{ id: "review", description: "Review a pull request.", events: ["github.pull_request.*"], handle: async () => {} }],
+  };
+  const body = (target: Record<string, unknown>, eventKeys = ["github.pull_request.synchronize"]) =>
+    ({ name: "Review PRs", eventKeys, filters: [], target: { kind: "plugin", plugin: "reviewer", handler: "review", ...target } });
+
+  it("accepts a declared handler for event keys it handles", () => {
+    expect(validateSubscription([githubPlugin, reviewer], body({}))).toBeNull();
+    expect(validateSubscription([githubPlugin, reviewer], body({ teamId: "team-1" }))).toBeNull();
+  });
+
+  it("refuses an unknown handler, events it does not take, and assistant-only fields", () => {
+    expect(validateSubscription([githubPlugin, reviewer], body({ handler: "nope" }))).toContain("Unknown plugin handler reviewer/nope");
+    expect(validateSubscription([githubPlugin, reviewer], body({}, ["github.issues.opened"]))).toContain("does not accept github.issues.opened");
+    expect(validateSubscription([githubPlugin, reviewer], body({ thread: { mode: "new" } }))).toContain("Remove the thread from this plugin line");
+  });
+});

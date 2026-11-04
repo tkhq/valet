@@ -696,6 +696,9 @@ export const childWatches = pgTable(
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // False for a plugin's child: its settlement does not wake the parent
+    // thread, because the plugin reads the result itself (plugin-threads.ts).
+    reportToParent: boolean("report_to_parent").notNull().default(true),
     // Reply-route state, kept apart from the origin above, which never
     // changes and also decides transcript sharing. "origin": the origin's
     // own reply policy, written only at spawn. "manual": explicit replies

@@ -18,6 +18,7 @@ import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
 import type { WorkflowTemplate } from "./workflow-template.js";
+import type { PluginEventHandler } from "./plugin-agents.js";
 
 export interface OAuthIdentity {
   provider: string;
@@ -703,6 +704,11 @@ export interface ValetPlugin {
   triggers?: TriggerDef[];
   /** Portable HTTP handlers mounted and authorized by the host. */
   httpRoutes?: PluginHttpRoute[];
+  /**
+   * Handlers that plugin subscriptions route events to. A handler runs AI
+   * work through `ctx.threads` and keeps pointers in `ctx.store`.
+   */
+  eventHandlers?: PluginEventHandler[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
@@ -1131,6 +1137,26 @@ export function validateValetPlugin(
       }
     }
   }
+
+  const handlerIds = new Set<string>();
+  checkArray(v.eventHandlers, "eventHandlers", issues, (h, path) => {
+    const record = asRecord(h, path, issues);
+    if (!record) return;
+    if (typeof record.id !== "string" || !NAME_RE.test(record.id)) {
+      issues.push({ path: `${path}.id`, message: "must match /^[a-z][a-z0-9-]*$/" });
+    } else if (handlerIds.has(record.id)) {
+      issues.push({ path: `${path}.id`, message: `duplicate handler id ${record.id}` });
+    } else {
+      handlerIds.add(record.id);
+    }
+    if (typeof record.description !== "string" || record.description === "") {
+      issues.push({ path: `${path}.description`, message: "required non-empty string" });
+    }
+    if (!Array.isArray(record.events) || record.events.length === 0 || record.events.some((e) => typeof e !== "string" || e === "")) {
+      issues.push({ path: `${path}.events`, message: "required non-empty array of event keys" });
+    }
+    if (typeof record.handle !== "function") issues.push({ path: `${path}.handle`, message: "required function" });
+  });
 
   checkArray(v.storeIndexes, "storeIndexes", issues, (idx, path) => {
     const record = asRecord(idx, path, issues);

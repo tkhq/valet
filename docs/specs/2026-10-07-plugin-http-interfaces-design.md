@@ -254,3 +254,31 @@ The binding then loads the session's engagement and calls the plugin's exported 
 The existing tables, services, and action invoker do the work. Security storage stays relational pending TKAI-378.
 
 For these two routes, the mount adds three limits. A former organization member gets 403. A body above 16 KiB or 256 KiB gets 413. When the Security plugin is not loaded, both URLs answer 404.
+
+## Plugin agents and event handlers
+
+A plugin runs AI work on the assistant's own primitives. The contract is in `packages/engine/src/plugin-agents.ts`; the host side is `packages/api/src/plugins/plugin-threads.ts`. A plugin never receives a `Session`, `AppDb` or a model client.
+
+Threads:
+
+- `threads.ensure(key)` returns the thread `plugin:<plugin>:<key>` in the owner's assistant. It uses `ensureAssistantExecution`, the path workflow thread steps use, so people see it as an ordinary conversation. Each plugin thread gets an isolated execution session, so its children, queue and cost stay apart from the owner's other conversations.
+- `threads.post` adds a signal to that thread. The turn is marked as an unattended delivery, so it refuses decision cards.
+- `threads.spawnChild` starts a child session under the thread with a role the plugin declares, a tool scope, and an optional repository at a ref. The host resolves the parent from the thread key, never from ids the plugin passes. Without a tool scope the child gets no integration actions, because it reads untrusted input.
+- The child id is `child_plg_<sha256(plugin, owner, thread key, dispatch id)>`, so a retried dispatch returns the first child, and two workspaces that handle the same event never share one. A child of another parent is refused. If a crash left a session for the id without a watch row, the host logs `plugin_child_orphan` and starts the child under a replacement id.
+- A plugin child has `child_watches.report_to_parent = false`. Its settlement and its gate events do not start a turn in the parent thread. The watch row still links the child to the parent for usage.
+- `threads.awaitChild` polls the child's queue item and reads the result with `settledSubmissionResult`. With a result schema it returns the validated JSON of the child's final message.
+
+Event handlers:
+
+- `ValetPlugin.eventHandlers` declares handlers with an id, a description and the event keys each accepts.
+- A subscription target `{ kind: "plugin", plugin, handler, teamId? }` routes matching events to a handler. The validator refuses an unknown handler, event keys the handler does not accept, and assistant-only fields. A team target needs the caller's team membership.
+- The dispatcher runs a handler beside its loop and renews the delivery's claim lease while it runs. Each process runs at most 8 handlers; a busy process leaves the row for a later poll.
+- The lease value is a fence. A run renews the lease and records its outcome only while `next_attempt_at` still holds the value it wrote. If its lease lapsed and another process re-claimed the row, the stale run aborts and writes nothing.
+- The attempt counts when the handler starts, so a handler that crashes the process still uses up its retries. After the last retry the delivery is dead.
+- A throw records a failed delivery with the usual backoff. A graceful shutdown records nothing: the lease lapses and a later poll runs the handler again. If the line is turned off or deleted mid-run, the handler is aborted and the delivery is skipped. Handlers must be idempotent per event; dispatch ids give that for threads and children.
+- The handler acts as the line's owner: the owner's user id, or `team:<id>` for a team, as a workflow run does. The org must admit the plugin for that owner when the line is armed and again at each delivery.
+- The handler context carries the owner, the plugin store scoped to the owner, and `appToken(service, { owner })`. A plugin gets tokens only for its own name or for services it declares credentials for. Only GitHub app tokens are available.
+
+Keep plugin state to pointers, such as a reviewed commit sha and posted comment ids. The thread and the provider hold the content.
+
+Not yet implemented: `threads` on action contexts, a UI for choosing a plugin handler (the API accepts the target), Linear app tokens for handlers, and usage attribution to the plugin itself.

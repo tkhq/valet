@@ -11,7 +11,7 @@
 import { USER_ONLINE_EVENT_KEY } from "@valet/plugin-slack/actions";
 import { validateOncePerHours } from "./once-per.js";
 import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
-import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
+import { pluginHandlerAccepts, type EventCatalogEntry, type ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
 import { eventKeyMatches, FILTER_OPS, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
@@ -29,7 +29,30 @@ const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // would emit, so a signal-target subscription would validate and then
 // silently never fire. Re-add once a waitForEvent node exists.
 // The old `orchestrator` kind is renamed before this check (`target-names.ts`).
-const TARGET_KINDS = ["workflow", "assistant"] as const;
+const TARGET_KINDS = ["workflow", "assistant", "plugin"] as const;
+
+/**
+ * A plugin target names a declared handler, and every event key the rule
+ * listens for is one the handler accepts. Assistant-only fields are refused.
+ */
+function validatePluginTarget(target: Record<string, unknown>, patterns: string[], plugins: ValetPlugin[]): string | undefined {
+  if (typeof target.plugin !== "string" || typeof target.handler !== "string") {
+    return "A plugin target needs plugin and handler. Pick a handler from the plugin's event handlers.";
+  }
+  const handler = plugins.find((p) => p.name === target.plugin)?.eventHandlers?.find((h) => h.id === target.handler);
+  if (!handler) return `Unknown plugin handler ${target.plugin}/${target.handler}. Pick a handler the plugin declares.`;
+  const refused = patterns.filter((key) => !pluginHandlerAccepts(handler, key.replace(/\*$/, "x")));
+  if (refused.length > 0) {
+    return `Handler ${target.plugin}/${target.handler} does not accept ${refused.join(", ")}. It accepts ${handler.events.join(", ")}.`;
+  }
+  if (target.teamId !== undefined && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
+    return "teamId must be a team id. Remove it to arm the handler for yourself.";
+  }
+  for (const field of ["thread", "systemPrompt", "userPromptTemplate", "follow", "assistant"]) {
+    if (target[field] !== undefined) return `A plugin target does not take ${field}. Remove it.`;
+  }
+  return undefined;
+}
 
 /**
  * Validates a subscription body against the merged plugin catalog. Returns a
@@ -164,13 +187,17 @@ export function validateSubscription(
   // it with `validateExistingThread` once the owner is known.
   if (target.thread !== undefined) {
     if (target.kind !== "assistant") {
-      return "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line.";
+      return `A thread choice applies only when the assistant does the work. Remove the thread from this ${target.kind} line.`;
     }
     const error = validateThreadPolicy(target.thread);
     if (error) return error;
     if (readThreadPolicy(target.thread).mode === "subject" && !subjectModeAllowed(patterns, plugins)) {
       return NO_SUBJECT_ERROR;
     }
+  }
+  if (target.kind === "plugin") {
+    const error = validatePluginTarget(target, patterns, plugins);
+    if (error) return error;
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "A workflow line needs workflowId. Choose the workflow that runs.";
