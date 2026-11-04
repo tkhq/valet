@@ -599,7 +599,10 @@ export class InMemorySessionStore implements SessionStore {
     // exactly: idempotent replays never trip the cap, and the count reflects
     // state as of immediately before this item lands.
     if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled" && (!opts.steer || steerKeepsSubmission(i.metadata)));
+      // A full steer supersedes everything but workflow items, so only those
+      // count. A scoped steer keeps queued siblings, so they all count.
+      const fullSteer = opts.steer === true && (opts.steerScope ?? "all") === "all";
+      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled" && (!fullSteer || steerKeepsSubmission(i.metadata)));
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
       }

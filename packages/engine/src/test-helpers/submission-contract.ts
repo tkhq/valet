@@ -907,6 +907,12 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(admitted.supersededItemIds).toHaveLength(1);
     });
 
+    it("a scoped steer counts every item it keeps against the pending cap", async () => {
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100, content: "queued" }));
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200 }), { steer: true, steerScope: "active", maxPending: 1 }))
+        .rejects.toBeInstanceOf(PendingCapError);
+    });
+
     it("steer does not stamp settled items or items admitted after it", async () => {
       const settled = makeItem({ createdAt: 100, updatedAt: 100 });
       await store.admitSubmission(SESSION_ID, THREAD_ID, settled);

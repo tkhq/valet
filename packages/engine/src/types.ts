@@ -2325,8 +2325,8 @@ export interface SessionStore {
    * before the count) and throws PendingCapError when that count is already
    * >= maxPending. Doing the check and the insert in one transaction is what
    * closes the TOCTOU window a separate pre-check would leave open under
-   * concurrent admissions. With steer:true it counts only the items the steer keeps
-   * (`steerKeepsSubmission`), since it supersedes the rest.
+   * concurrent admissions. A full steer (steer:true, scope "all") counts only the
+   * items it keeps (`steerKeepsSubmission`), since it supersedes the rest.
    *
    * opts.promoteFromItemId, when set, requires that item to still be queued
    * and not superseded on this thread. If it is not, the call throws

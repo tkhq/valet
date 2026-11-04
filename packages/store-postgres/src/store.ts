@@ -1077,9 +1077,10 @@ export class PgSessionStore implements SessionStore {
           }
 
           if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-            // A steer supersedes the rest in this transaction, so only the
-            // items it keeps count against the cap.
-            const count = opts.steer
+            // A full steer supersedes everything but workflow items in this
+            // transaction, so only those count. A scoped steer keeps queued
+            // siblings, so they all count.
+            const count = opts.steer === true && (opts.steerScope ?? "all") === "all"
               ? (await tx.query(PENDING_METADATA_SQL, [sessionId, threadId])).rows
                 .filter((row) => steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
               : toNum((await tx.query(PENDING_COUNT_SQL, [sessionId, threadId])).rows[0]?.count, "count");
