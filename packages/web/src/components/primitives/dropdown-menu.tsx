@@ -6,6 +6,7 @@ import {
   type ElementRef,
 } from "react";
 import { cn } from "~/lib/cn";
+import { quietCloseAutoFocus } from "./close-focus";
 
 export const DropdownMenu = RDropdown.Root;
 export const DropdownMenuTrigger = RDropdown.Trigger;
@@ -28,13 +29,14 @@ const ITEM_BASE =
 export const DropdownMenuContent = forwardRef<
   ElementRef<typeof RDropdown.Content>,
   ComponentPropsWithoutRef<typeof RDropdown.Content>
->(function DropdownMenuContent({ className, sideOffset = 4, ...rest }, ref) {
+>(function DropdownMenuContent({ className, sideOffset = 4, onCloseAutoFocus, ...rest }, ref) {
   return (
     <RDropdown.Portal>
       <RDropdown.Content
         ref={ref}
         sideOffset={sideOffset}
         className={cn(MENU_BASE, className)}
+        onCloseAutoFocus={(event) => quietCloseAutoFocus(event, onCloseAutoFocus)}
         {...rest}
       />
     </RDropdown.Portal>
