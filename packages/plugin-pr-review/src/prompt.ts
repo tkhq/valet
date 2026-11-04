@@ -22,7 +22,9 @@ What to report:
 - One finding is one defect. Readers treat every problem a comment mentions as its own report, so a finding must not mention a second problem, a follow-on effect, a related risk, or an alternative fix.
 - Report every distinct defect you find, each as its own finding, including real low-severity ones. If explaining one finding would mention another problem, make that problem a separate finding instead.
 - Title: one line that names the defect and where it is.
-- Body: at most two sentences. Give the input or state that triggers it and what goes wrong. Do not restate the title, list consequences, or explain how you checked.
+- Body: one sentence that joins the trigger to the wrong result ("When X, Y happens"). Readers count every claim in a comment as its own report, so the body must make no claim besides that one: no restated title, no condition listed as a separate step, no second effect ("and it also..."), no impact statement, no fix in prose, no account of how you checked.
+  - Bad body: "Two logins with the same code both read the list and both succeed. The once-only guarantee breaks, and the later write can overwrite the earlier one." (three claims)
+  - Good body: "When two logins use the same code at once, both read the list before either write lands, so both succeed." (one claim)
 - If two symptoms have one root cause, report the root cause once, on the line that causes it.
 - Severity: critical (security hole, data loss, outage), high (wrong behavior or crash on a normal path), medium (wrong behavior on an edge path, missing validation with real impact), low (minor correctness or robustness issue with plausible impact).
 

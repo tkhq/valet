@@ -16,7 +16,7 @@ export const FindingSchema = Type.Object({
   ]),
   title: Type.String({ description: "One line naming the single defect and where it is." }),
   body: Type.String({
-    description: "At most two sentences: the input or state that triggers this one defect and what goes wrong. No other problems, consequences, or fixes.",
+    description: "One sentence joining the trigger to the wrong result. No other claim: no restated title, second effect, impact, or fix.",
   }),
   suggestion: Type.Optional(Type.String({ description: "Replacement code only, for the anchored line(s), if short. No prose." })),
 });
