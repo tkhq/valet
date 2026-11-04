@@ -1056,8 +1056,11 @@ export class ChildWatcher {
 
     if (!digest && !row.reportToParent) {
       // A plugin's child: the plugin reads the result (`awaitChild`), so
-      // the parent thread gets no child.settled turn.
+      // the parent thread gets no child.settled turn. Its sandbox goes like
+      // any settled child's: a live sandbox counts against the parent's
+      // child cap, and the plugin reads the result from the store.
       await this.markSettled(watch.childSessionId, watch.queueItemId);
+      await this.parkChildSandbox(watch.childSessionId);
       return;
     }
 

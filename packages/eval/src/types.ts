@@ -273,6 +273,41 @@ export interface WorkflowDefinitionCheck {
   saved?: boolean;
 }
 
+/** One known issue a code reviewer should find (Martian golden comment). */
+export interface GoldenComment {
+  comment: string;
+  severity?: string;
+  /** Martian category: bug, security, concurrency, data, api, perf, test_gap, doc_defect, style, speculative. */
+  category: string;
+}
+
+/** Martian scoring profiles: which golden categories count toward TP and FN. */
+export const REVIEW_PROFILES = ["strict", "core", "all"] as const;
+export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
+
+/**
+ * Scores a `pull_request` case's submitted review against golden comments
+ * with Martian Code Review Bench's method: an LLM splits the review into
+ * issues, groups duplicates, then matches every issue against every golden
+ * comment. Reports tp/fp/fn as metrics; the scorecard sums them into
+ * precision, recall, F1 and F2 next to the `reference` tools.
+ */
+export interface ReviewMatchCheck {
+  type: "review_match";
+  golden: GoldenComment[];
+  /** Default `core`, Martian's primary metric. */
+  profile?: ReviewProfile;
+  /** Pass when recall on this case reaches this fraction. Default 0: any submitted review passes. */
+  min_recall?: number;
+  /** Default anthropic/claude-sonnet-4-5, the judge Martian published vendor results with. */
+  judge_model?: string;
+  /**
+   * Published results for other review tools on the same PR, under the same
+   * judge: the golden indexes each tool matched and its unmatched issue count.
+   */
+  reference?: Record<string, { matched: number[]; fp: number }>;
+}
+
 /** LLM-as-judge checks — score with a grading model, pass at score >= threshold. */
 export type JudgeCheck =
   | { type: "judge_output"; rubric: string; threshold?: number; judge_model?: string }
@@ -285,7 +320,7 @@ export type JudgeCheck =
       judge_model?: string;
     };
 
-export type Check = DeterministicCheck | JudgeCheck;
+export type Check = DeterministicCheck | JudgeCheck | ReviewMatchCheck;
 
 /** Every legal `Check.type` value, used by the case loader for validation. */
 export const CHECK_TYPES = [
@@ -308,6 +343,7 @@ export const CHECK_TYPES = [
   "judge_output",
   "judge_trajectory",
   "judge_equivalence",
+  "review_match",
 ] as const;
 
 /** Outcome of one check against one trajectory. */
@@ -357,13 +393,37 @@ export interface MockToolSpec {
   response: string;
 }
 
+/**
+ * A pull request for the code reviewer to review. The runner checks out
+ * `head` from a cached bare repo (fetched from `remote` on first use), runs
+ * the `@valet/plugin-pr-review` reviewer on a local sandbox over that
+ * checkout, and records the submitted review in `trajectory.metadata.review`.
+ */
+export interface PullRequestSpec {
+  /** Cache key for the bare repo, e.g. `sentry`. Cases of one project share it. */
+  repo: string;
+  /** Git URL that holds both commits. */
+  remote: string;
+  base: string;
+  head: string;
+  title: string;
+  body?: string;
+  /** Check each finding with a verifier agent before scoring. Default true. */
+  verify?: boolean;
+}
+
 /** One eval case, loaded from a YAML file in `evals/cases/`. */
 export interface EvalCase {
   /** Unique id, kebab-case. Doubles as the baseline directory name. */
   id: string;
   description?: string;
-  /** User turns, in order. Single-prompt cases use a one-element array. */
+  /**
+   * User turns, in order. Single-prompt cases use a one-element array.
+   * Empty for `pull_request` cases: the reviewer builds its own prompt.
+   */
   turns: EvalTurn[];
+  /** Run the code reviewer on this pull request instead of scripted turns. */
+  pull_request?: PullRequestSpec;
   /** Model spec pin. Absent → the suite default model. */
   model?: string;
   /** Per-case timeout. Absent → the suite default. */

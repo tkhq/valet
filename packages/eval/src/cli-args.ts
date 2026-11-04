@@ -32,6 +32,14 @@ export interface CliOptions {
   pruneBaselinesKeep?: number;
   /** Suite-level reasoning effort for the model under test. */
   reasoning?: ReasoningLevel;
+  /** Cases in flight at once. */
+  concurrency?: number;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
+  /** Code-review verification on or off for every case. Unset: each case's `pull_request.verify`. */
+  verify?: boolean;
+  /** Independent code-review passes per case. */
+  reviewPasses?: number;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -53,6 +61,10 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "allow-live-baselines": { type: "boolean", default: false },
       "prune-baselines": { type: "string" },
       reasoning: { type: "string" },
+      concurrency: { type: "string" },
+      "verify-model": { type: "string" },
+      verify: { type: "boolean", default: false },
+      "review-passes": { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -73,9 +85,23 @@ export function parseCliArgs(argv: string[]): CliOptions {
       throw new Error(`--runs must be an integer from 1 to 25, got \`${values.runs}\``);
     }
   }
+  let reviewPasses: number | undefined;
+  if (values["review-passes"] !== undefined) {
+    reviewPasses = Number.parseInt(values["review-passes"], 10);
+    if (!Number.isInteger(reviewPasses) || reviewPasses < 1 || reviewPasses > 5) {
+      throw new Error(`--review-passes must be an integer from 1 to 5, got \`${values["review-passes"]}\``);
+    }
+  }
   const pullRating = values.rating ?? "positive";
   if (pullRating !== "positive" && pullRating !== "negative") {
     throw new Error(`--rating must be "positive" or "negative", got \`${values.rating}\``);
+  }
+  let concurrency: number | undefined;
+  if (values.concurrency !== undefined) {
+    concurrency = Number.parseInt(values.concurrency, 10);
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
+      throw new Error(`--concurrency must be an integer from 1 to 32, got \`${values.concurrency}\``);
+    }
   }
   let timeoutMs: number | undefined;
   if (values.timeout !== undefined) {
@@ -102,6 +128,10 @@ export function parseCliArgs(argv: string[]): CliOptions {
     allowLiveBaselines: values["allow-live-baselines"],
     ...(pruneBaselinesKeep !== undefined ? { pruneBaselinesKeep } : {}),
     ...(reasoning !== undefined ? { reasoning: reasoning as ReasoningLevel } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
+    ...(values.verify ? { verify: true } : {}),
+    ...(reviewPasses !== undefined ? { reviewPasses } : {}),
   };
 }
 

@@ -100,6 +100,7 @@
     "@valet/plugin-notion": "workspace:*",
     "@valet/plugin-openai": "workspace:*",
     "@valet/plugin-sandbox-tunnels": "workspace:*",
+    "@valet/plugin-pr-review": "workspace:*",
     "@valet/plugin-security": "workspace:*",
     "@valet/plugin-sentry": "workspace:*",
     "@valet/plugin-slack": "workspace:*",

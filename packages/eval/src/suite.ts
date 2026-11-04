@@ -12,6 +12,8 @@ import {
   type BaselineRecord,
 } from "./baseline.js";
 import { runChecks, type JudgeRunner } from "./checks/index.js";
+import type { ReviewMatcher } from "./checks/review-match.js";
+import type { LlmGateway } from "./gateway.js";
 import { runProductCase } from "./product-drive.js";
 import { runCase } from "./runner.js";
 import { aggregateUsage } from "./trajectory.js";
@@ -26,6 +28,16 @@ export interface SuiteOptions {
   baselinesDir: string;
   /** Judge for judge_* checks. Absent → judge checks fail with a config detail. */
   judge?: JudgeRunner;
+  /** Scorer for review_match checks. */
+  reviewMatcher?: ReviewMatcher;
+  /**
+   * Valet LLM gateway for every model call. `pull_request` cases SKIP
+   * without one: code-review benchmark runs bill the Valet key, never a
+   * personal provider key.
+   */
+  gateway?: LlmGateway;
+  /** Cases in flight at once. Default 1. Scorecard order stays case order. */
+  concurrency?: number;
   /** Real plugin manifests backing `profile: mock` cases. */
   mockPlugins?: ValetPlugin[];
   /** Real plugin manifests backing `profile: integration`/`full` cases. */
@@ -42,6 +54,12 @@ export interface SuiteOptions {
   runsOverride?: number;
   /** Suite-level reasoning effort (a case's own `reasoning:` wins). */
   reasoning?: ReasoningLevel;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
+  /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
+  verify?: boolean;
+  /** Independent code-review passes per case. */
+  reviewPasses?: number;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -75,12 +93,19 @@ export interface SuiteResult {
 export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<SuiteResult> {
   const now = opts.now ?? (() => new Date());
   const startedAt = now().getTime();
-  const entries: ScorecardEntry[] = [];
-  const comparisons: BaselineComparison[] = [];
-  const savedBaselinePaths: string[] = [];
-  const skippedLiveBaselineCaseIds: string[] = [];
+  interface CaseSlot {
+    entries: ScorecardEntry[];
+    comparisons: BaselineComparison[];
+    savedBaselinePaths: string[];
+    skippedLiveBaselineCaseIds: string[];
+  }
+  const slots: CaseSlot[] = [];
 
-  for (const [index, evalCase] of cases.entries()) {
+  const processCase = async (evalCase: EvalCase, index: number): Promise<void> => {
+    // Per-case collectors; merged in case order after every case finishes.
+    const slot: CaseSlot = { entries: [], comparisons: [], savedBaselinePaths: [], skippedLiveBaselineCaseIds: [] };
+    slots[index] = slot;
+    const { entries, comparisons, savedBaselinePaths, skippedLiveBaselineCaseIds } = slot;
     opts.onCaseStart?.(evalCase, index, cases.length);
 
     const profile = evalCase.profile ?? "unit";
@@ -90,7 +115,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
 
     if (evalCase.drive === "product" && (process.env.ANTHROPIC_API_KEY ?? "") === "") {
       skip("drive: product boots the real api and makes real LLM calls. Set ANTHROPIC_API_KEY.");
-      continue;
+      return;
+    }
+    if (evalCase.pull_request !== undefined && opts.gateway === undefined) {
+      skip("code-review cases run on a Valet key. Set VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE).");
+      return;
     }
 
     if (profile === "integration" || profile === "full") {
@@ -102,11 +131,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       if (missing.length > 0) {
         const hints = missing.map((s) => envKeyForService(s) ?? s).join(", ");
         skip(`missing credential(s): ${missing.join(", ")}. Set ${hints} in .env.eval.`);
-        continue;
+        return;
       }
       if (profile === "full" && opts.dockerAvailable !== true) {
         skip("Docker is not available. Start the Docker daemon to run full-profile cases.");
-        continue;
+        return;
       }
     }
 
@@ -144,7 +173,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
             : await runCase(caseForRun, {
                 model: evalCase.model ?? opts.model,
                 ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
+                ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+                ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
+                ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+                ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
                 ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
                 ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
@@ -154,6 +187,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
               });
         const checkResults = await runChecks(evalCase.checks, result.trajectory, {
           ...(opts.judge !== undefined ? { judge: opts.judge } : {}),
+          ...(opts.reviewMatcher !== undefined ? { reviewMatcher: opts.reviewMatcher } : {}),
           ...(baseline !== null ? { baseline: baseline.trajectory } : {}),
         });
         // Recursive totals: an orchestrator case's spend includes every
@@ -242,7 +276,22 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
         }),
       );
     }
-  }
+  };
+
+  const concurrency = Math.max(1, opts.concurrency ?? 1);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, cases.length) }, async () => {
+      while (next < cases.length) {
+        const index = next++;
+        await processCase(cases[index], index);
+      }
+    }),
+  );
+  const entries = slots.flatMap((s) => s.entries);
+  const comparisons = slots.flatMap((s) => s.comparisons);
+  const savedBaselinePaths = slots.flatMap((s) => s.savedBaselinePaths);
+  const skippedLiveBaselineCaseIds = slots.flatMap((s) => s.skippedLiveBaselineCaseIds);
 
   return {
     entries,

@@ -10,6 +10,7 @@
     { "path": "../engine" },
     { "path": "../api" },
     { "path": "../sandbox-docker" },
-    { "path": "../sandbox-local" }
+    { "path": "../sandbox-local" },
+    { "path": "../plugin-pr-review" }
   ]
 }

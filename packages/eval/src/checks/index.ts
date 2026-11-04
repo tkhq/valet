@@ -9,6 +9,7 @@
  */
 import type { Check, CheckResult, JudgeCheck, Trajectory } from "../types.js";
 import { runDeterministicCheck } from "./deterministic.js";
+import type { ReviewMatcher } from "./review-match.js";
 
 const JUDGE_TYPES = new Set<Check["type"]>(["judge_output", "judge_trajectory", "judge_equivalence"]);
 
@@ -27,6 +28,8 @@ export interface CheckContext {
   baseline?: Trajectory;
   /** Judge handler; absent → judge checks fail with a configuration detail. */
   judge?: JudgeRunner;
+  /** `review_match` handler; absent → those checks fail with a configuration detail. */
+  reviewMatcher?: ReviewMatcher;
 }
 
 function isJudgeCheck(check: Check): check is JudgeCheck {
@@ -48,6 +51,12 @@ export async function runCheck(
       };
     }
     return ctx.judge(check, trajectory, ctx.baseline);
+  }
+  if (check.type === "review_match") {
+    if (ctx.reviewMatcher === undefined) {
+      return { check, pass: false, detail: "review_match needs a review judge. Configure reviewMatcher in the runner." };
+    }
+    return ctx.reviewMatcher(check, trajectory);
   }
   return runDeterministicCheck(check, trajectory);
 }
