@@ -67,6 +67,8 @@ export interface VerifierSpecOptions {
   label: string;
   /** Recheck of a finding posted on an earlier commit whose code has since changed. */
   recheckFrom?: string;
+  /** provider/model for the verifier. Unset: the host's model. */
+  model?: string;
 }
 
 export interface VerifierSpec extends AgentSpec {
@@ -122,6 +124,7 @@ export async function createVerifierSpec(opts: VerifierSpecOptions): Promise<Ver
     builtinToolNames: new Set(["read"]),
     tools: [reviewerBashTool(opts.workspace), submitVerdict],
     prompt,
+    ...(opts.model !== undefined ? { model: opts.model } : {}),
     verdict: () => submitted,
   };
 }

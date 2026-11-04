@@ -38,6 +38,8 @@ export interface ReviewPullRequestOptions {
   onToolCall?: (tool: string, args: unknown) => void;
   /** Check each finding with a verifier agent. Default true. */
   verify?: boolean;
+  /** provider/model for the verifiers. Unset: `model`. */
+  verifyModel?: string;
   /** Send every model call through this Valet gateway with its key. */
   gateway?: LlmGatewayConfig;
 }
@@ -152,6 +154,11 @@ export function createLocalAgentRunner(opts: LocalAgentRunnerOptions): { run: Ag
     if (m.provider === "openai") return { ...m, baseUrl: `${gateway.url}/proxy/openai/v1` };
     throw new Error(`The Valet gateway has no route for provider ${m.provider}. Use an anthropic or openai model.`);
   };
+  const resolveSpecModel = (spec: string): Model<string> => {
+    const m = resolveModelId(spec);
+    if (!m) throw new Error(`Unknown model "${spec}". Use provider/model, e.g. anthropic/claude-sonnet-5-5.`);
+    return viaGateway(m);
+  };
   const model = viaGateway(resolved);
 
   const store = new InMemorySessionStore();
@@ -179,8 +186,8 @@ export function createLocalAgentRunner(opts: LocalAgentRunnerOptions): { run: Ag
       orgId: "pr-review",
       workspace: opts.workspace,
       sandbox: { workspace: opts.workspace },
-      model,
-      modelSpec: opts.model,
+      model: spec.model !== undefined ? resolveSpecModel(spec.model) : model,
+      modelSpec: spec.model ?? opts.model,
       ...(gateway !== undefined
         ? { resolveModel: async (s: string) => { const m = resolveModelId(s); return m ? { model: viaGateway(m), apiKey: gateway.apiKey } : null; } }
         : {}),

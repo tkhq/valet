@@ -15,6 +15,8 @@ export interface AgentSpec {
   builtinToolNames: ReadonlySet<string>;
   tools: ToolDef[];
   prompt: string;
+  /** provider/model for this agent. Unset: the host's model. */
+  model?: string;
 }
 
 export interface AgentRunResult {
@@ -50,6 +52,8 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   verify?: boolean;
   /** Verifier agents in flight at once. Default 4. */
   verifyConcurrency?: number;
+  /** provider/model for the verifiers. Unset: the reviewer's model. */
+  verifyModel?: string;
 }
 
 /**
@@ -81,7 +85,12 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
     Array.from({ length: Math.min(limit, draft.findings.length) }, async () => {
       while (next < draft.findings.length) {
         const index = next++;
-        const spec = await createVerifierSpec({ ...opts, finding: draft.findings[index], label: `verify:${index}` });
+        const spec = await createVerifierSpec({
+          ...opts,
+          finding: draft.findings[index],
+          label: `verify:${index}`,
+          ...(opts.verifyModel !== undefined ? { model: opts.verifyModel } : {}),
+        });
         const result = await run(spec);
         const finding = draft.findings[index];
         const fileText = await readFile(join(opts.workspace, finding.path), "utf8").catch(() => undefined);

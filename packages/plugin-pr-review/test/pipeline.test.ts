@@ -73,6 +73,18 @@ describe("runReviewPipeline", () => {
     expect(result.verdicts[0]).toMatchObject({ verdict: "unverified", reason: "slow" });
   });
 
+  it("runs the verifiers on verifyModel and the reviewer on the host's model", async () => {
+    const { dir, base, head } = repo();
+    const models: Record<string, string | undefined> = {};
+    const run: AgentRunner = async (spec) => {
+      models[spec.label] = spec.model;
+      if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [finding("F")] });
+      return { outcome: "completed" };
+    };
+    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verifyModel: "openai/gpt-5.6-terra" }, run);
+    expect(models).toEqual({ review: undefined, "verify:0": "openai/gpt-5.6-terra" });
+  });
+
   it("diffs from the merge-base when the base branch moved on", async () => {
     const { dir, base, head } = repo();
     const g = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
