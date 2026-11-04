@@ -486,10 +486,11 @@ export async function ingestEvent(
       // a "once every N hours" limit re-checks here under its lock, in id
       // order, so concurrent events admit at most one delivery per window.
       const admitted: typeof matched = [];
+      const limited: string[] = [];
       for (const sub of [...matched].sort((a, b) => a.id.localeCompare(b.id))) {
         if (oncePerHoursOf(sub.target) !== null) {
           await lockOncePerLine(tx, sub.id);
-          if (await oncePerHoursBlocks(tx, sub, now)) continue;
+          if (await oncePerHoursBlocks(tx, sub, now)) { limited.push(sub.id); continue; }
         }
         admitted.push(sub);
       }
@@ -509,7 +510,7 @@ export async function ingestEvent(
           })),
         );
       }
-      return { eventId, duplicate: false, deliveries: admitted.length, linkedEventId: eventId };
+      return { eventId, duplicate: false, deliveries: admitted.length, linkedEventId: eventId, limited };
     });
     let result: Awaited<ReturnType<typeof persist>>;
     try {
@@ -521,6 +522,15 @@ export async function ingestEvent(
       throw error;
     }
     await appendDigests(claims?.waiters);
+
+    // A line the locked re-check dropped read as matched above. Correct its decision.
+    const limited = "limited" in result ? result.limited ?? [] : [];
+    if (limited.length > 0) {
+      await appendReceiptStage(deps.db, receiptId, {
+        stage: "subscription_match", outcome: result.deliveries > 0 ? "matched" : "rate_limited",
+        detail: `${limited.length} ${limited.length === 1 ? "line" : "lines"} already ran inside ${limited.length === 1 ? "its" : "their"} once-every-N-hours window, so ${limited.length === 1 ? "it" : "they"} skipped this event.`,
+      }, { subscriptions: decisions.map((d) => (limited.includes(d.id) ? { ...d, outcome: "rate_limited" as const } : d)) });
+    }
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
       detail: result.duplicate ? "This provider event was already stored. No line acted on it again." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,

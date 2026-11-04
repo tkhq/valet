@@ -3,7 +3,8 @@ import { InMemoryCredentialStore, type NormalizedEvent } from "@valet/engine";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { OnlineStatusResult } from "@valet/plugin-slack/actions";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventDeliveries, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventReceipts, eventSubscriptions } from "../schema/index.js";
+import { sanitizeReceiptSubscriptions } from "../events/receipts.js";
 import { ingestEvent } from "../events/ingest.js";
 import { validateSubscription } from "../events/subscription-write.js";
 import {
@@ -364,5 +365,9 @@ describe("once every N hours", () => {
     const rows = await db.appDb.select().from(eventDeliveries);
     expect(rows.filter((r) => r.subscriptionId === "limited")).toHaveLength(1);
     expect(results.reduce((sum, r) => sum + r.deliveries, 0)).toBe(1);
+    // Each losing event's receipt says why the line skipped it.
+    const receipts = await db.appDb.select().from(eventReceipts);
+    const outcomes = receipts.map((r) => sanitizeReceiptSubscriptions(r.subscriptions).find((d) => d.id === "limited")?.outcome).sort();
+    expect(outcomes).toEqual(["matched", "rate_limited", "rate_limited"]);
   });
 });
