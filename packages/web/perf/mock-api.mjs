@@ -137,7 +137,7 @@ const ROUTES = [
   ["GET", /^\/api\/notifications$/, () => json({ notifications: [] })],
   ["GET", /^\/api\/notifications\/decisions$/, () => json({ items: [] })],
   ["POST", /^\/api\/notifications\/presence$/, () => json({ ok: true })],
-  ["GET", /^\/api\/product-announcements$/, () => json({ announcements: [] })],
+  ["GET", /^\/api\/tutorial$/, () => json({ version: 1, orgVersion: 0, seenVersion: 1, seenOrgVersion: 0, outcome: "completed", step: null, due: false })],
   ["GET", /^\/api\/workflows\/action-required$/, () => json({ items: [], count: 0 })],
   ["GET", /^\/api\/changelog$/, () => json({
     manifest: { schema: "valet-changelog/v2", generatedAt: new Date(NOW).toISOString(), checkpoints: [] },
