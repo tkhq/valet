@@ -45,6 +45,10 @@ function useMembershipLoaded(): boolean {
   }, () => membershipLoaded);
 }
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", () => ({
   pluginEnabledForCaller: () => false,
   useOrg: () => useMembershipLoaded()

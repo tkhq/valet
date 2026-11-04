@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspaceAssistant } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { ChevronDown, GitPullRequest, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
+import { usePlugins } from "~/api/integrations";
 import { useSession } from "~/api/queries";
 import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
+import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
@@ -131,11 +133,20 @@ export function TopNav() {
   });
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
-  const onSecurityPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") });
+  const onPluginPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") || st.location.pathname.startsWith("/code-review") });
   // Gate the Security link on the `security` plugin's entitlement for this
   // caller. `undefined` (org not yet loaded) hides the link — no flash of a
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
+  // Code review shows once the deployment loads the PR review plugin.
+  const pluginsQ = usePlugins();
+  const pluginPages = [
+    ...(securityEnabled ? [{ to: "/security", label: "Valet Security", Icon: ShieldCheck }] : []),
+    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
+  ];
+  const pluginItems = pluginPages.map(({ to, label, Icon }) => (
+    <DropdownMenuItem key={to} asChild><Link to={to}><Icon className="h-4 w-4" aria-hidden />{label}</Link></DropdownMenuItem>
+  ));
   // Threads, Workflows, Presence and Artifacts belong to a space: the
   // sidebar lists them under each space. The bar keeps the global pages.
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
@@ -197,14 +208,12 @@ export function TopNav() {
       </DropdownMenu>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
+          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onPluginPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
             Plugins <ChevronDown className="h-3 w-3" aria-hidden />
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" aria-label="Plugins" className="w-56">
-          {securityEnabled ? <DropdownMenuItem asChild>
-            <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
-          </DropdownMenuItem> : <div className="px-2 py-3 text-xs text-muted">No plugins available.</div>}
+          {pluginItems.length > 0 ? pluginItems : <div className="px-2 py-3 text-xs text-muted">No plugins available.</div>}
         </DropdownMenuContent>
       </DropdownMenu>
       <div className="ml-auto shrink-0 md:hidden">
@@ -237,12 +246,10 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/settings"><Settings className="h-4 w-4" aria-hidden />Settings</Link>
             </DropdownMenuItem>
-            {securityEnabled && <>
+            {pluginItems.length > 0 && <>
               <DropdownMenuSeparator />
               <div className="px-2 py-1 text-xs text-muted">Plugins</div>
-              <DropdownMenuItem asChild>
-                <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
-              </DropdownMenuItem>
+              {pluginItems}
             </>}
           </DropdownMenuContent>
         </DropdownMenu>

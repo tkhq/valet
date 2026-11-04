@@ -26,6 +26,11 @@ vi.mock("@tanstack/react-router", () => ({
 let pathname = "/settings/profile";
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }> } | undefined;
 let teams: Array<{ id: string; name: string; callerRole: "admin" | "member" | null }> = [];
+let pluginNames: string[] = [];
+
+vi.mock("~/api/integrations", () => ({
+  usePlugins: () => ({ data: { plugins: pluginNames.map((name) => ({ name })) }, isLoading: false, error: null }),
+}));
 
 vi.mock("~/api/settings", async (importOriginal) => ({
   pluginEnabledForCaller: (await importOriginal<typeof import("~/api/settings")>()).pluginEnabledForCaller,
@@ -40,6 +45,7 @@ beforeEach(() => {
   linkProps.length = 0;
   pathname = "/settings/profile";
   orgData = { callerRole: "admin", features: { organizations: true }, plugins: [] };
+  pluginNames = [];
   teams = [
     { id: "t2", name: "platform", callerRole: "admin" },
     { id: "t1", name: "team-tvc", callerRole: "member" },
@@ -72,6 +78,14 @@ describe("SettingsRail", () => {
     render(<SettingsRail />);
     const plugins = within(rail()).getByRole("group", { name: "Plugins" });
     expect(within(plugins).getByRole("link", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
+  });
+
+  it("links Code review under Plugins once the deployment loads the PR review plugin", () => {
+    pluginNames = ["pr-review"];
+    render(<SettingsRail />);
+    const plugins = within(rail()).getByRole("group", { name: "Plugins" });
+    expect(within(plugins).getByRole("link", { name: "Code review" }).getAttribute("href")).toBe("/code-review");
+    expect(within(plugins).queryByRole("link", { name: "Valet Security" })).toBeNull();
   });
 
   it("links each team through its typed route and params", () => {

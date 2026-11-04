@@ -6,6 +6,7 @@ import {
   Building2,
   ChevronDown,
   Cpu,
+  GitPullRequest,
   KeyRound,
   Shield,
   ShieldCheck,
@@ -15,7 +16,9 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
+import { usePlugins } from "~/api/integrations";
 import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
+import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -31,8 +34,9 @@ import { cn } from "~/lib/cn";
  *   and policies.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
- * - **Plugins**: Valet Security, for a caller with the plugin. It opens the
- *   Security hub in the active space; the sidebar's space rows leave it out.
+ * - **Plugins**: Valet Security, for a caller with the plugin, and Code
+ *   review, when the deployment loads the PR review plugin. Each opens its
+ *   page in the active space; the sidebar's space rows leave them out.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
@@ -180,6 +184,7 @@ const MCP_SERVERS_ITEM: RailItem = {
 };
 
 const SECURITY_ITEM: RailItem = { to: "/security", label: "Valet Security", icon: ShieldCheck, active: (p) => onRoute(p, "/security") };
+const CODE_REVIEW_ITEM: RailItem = { to: "/code-review", label: "Code review", icon: GitPullRequest, active: (p) => onRoute(p, "/code-review") };
 
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
@@ -197,6 +202,7 @@ export function SettingsRail() {
   const sectionMenu = useResponsiveOverlay("sm");
   const orgQ = useOrg();
   const teamsQ = useTeams();
+  const pluginsQ = usePlugins();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const organizationsOn = orgQ.data?.features.organizations === true;
   const orgAdmin = orgQ.data?.callerRole === "admin";
@@ -216,11 +222,15 @@ export function SettingsRail() {
     active: (p) => onRoute(p, `/settings/teams/${team.id}`),
   }));
 
+  const pluginItems = [
+    ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [SECURITY_ITEM] : []),
+    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
+  ];
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
     { label: "Personal workspace", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
-    ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [{ label: "Plugins", items: [SECURITY_ITEM] }] : []),
+    ...(pluginItems.length > 0 ? [{ label: "Plugins", items: pluginItems }] : []),
     ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));

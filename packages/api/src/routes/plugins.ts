@@ -275,6 +275,17 @@ pluginsRouter.get("/", async (c) => {
       services,
       actionServices,
       skills: (plugin.skills ?? []).map((skill) => ({ name: skill.name, description: skill.description })),
+      ...(plugin.eventHandlers?.length
+        ? {
+          eventHandlers: plugin.eventHandlers.map((handler) => ({
+            id: handler.id,
+            description: handler.description,
+            events: handler.events,
+            // A TypeBox schema is plain JSON Schema plus symbol keys, which JSON drops.
+            ...(handler.configSchema ? { configSchema: handler.configSchema as Record<string, unknown> } : {}),
+          })),
+        }
+        : {}),
     };
   }));
 

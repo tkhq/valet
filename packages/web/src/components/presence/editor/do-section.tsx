@@ -1,9 +1,10 @@
 /**
  * The editor's **Do** section (docs/specs/2026-10-16-presence-hub-design.md
- * Part H step 4): three cards, the instructions, the workflow picker with a
+ * Part H step 4): the cards, the instructions, the workflow picker with a
  * routine's run input under Advanced, the event message under Advanced with
  * `Insert a detail from the event`, and the assistant choice when the
- * workspace offers more than one.
+ * workspace offers more than one. `Run a plugin` shows when a plugin
+ * declares event handlers: a handler picker and the handler's settings form.
  */
 import { useId, useRef } from "react";
 import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
@@ -20,6 +21,7 @@ import {
   Select,
   Textarea,
 } from "~/components/primitives";
+import { HandlerSettingsForm, type HandlerOption } from "~/components/plugins/handler-settings";
 import { cn } from "~/lib/cn";
 import { selectsSlackMention } from "~/lib/slack-mention";
 import type { WorkflowNames } from "../sentences";
@@ -27,7 +29,9 @@ import {
   characterCount,
   instructionsLength,
   instructionsTooLong,
+  isAssistantDraft,
   parseRunInput,
+  setHandler,
   type AssistantKind,
   type DoKind,
   type Draft,
@@ -51,7 +55,7 @@ interface Card {
   line: string;
 }
 
-function cards(routine: boolean): Card[] {
+function cards(routine: boolean, plugins: boolean): Card[] {
   if (routine) {
     return [
       { kind: "work", title: "Work on it", line: "Valet works on your instructions in a thread, with your workspace's access." },
@@ -62,6 +66,7 @@ function cards(routine: boolean): Card[] {
     { kind: "reply", title: "Reply", line: "Answer in the conversation the event came from. Slack only." },
     { kind: "work", title: "Work on it", line: "Valet reads the event and acts in a thread, with your workspace's access." },
     { kind: "workflow", title: "Run a workflow", line: "Start a workflow with the event as its input." },
+    ...(plugins ? [{ kind: "plugin" as const, title: "Run a plugin", line: "A plugin's event handler works on the event, with its own settings." }] : []),
   ];
 }
 
@@ -91,6 +96,7 @@ export function DoSection({
   services,
   workflows,
   assistants,
+  handlers,
   teamName,
 }: {
   draft: Draft;
@@ -100,6 +106,8 @@ export function DoSection({
   workflows: WorkflowNames;
   /** The assistants the workspace offers. One or none hides the choice. */
   assistants: readonly AssistantOption[];
+  /** The plugin event handlers the reader may pick. None hides `Run a plugin`. */
+  handlers: readonly HandlerOption[];
   /** The team's name, for who may mention a team assistant. */
   teamName?: string;
 }) {
@@ -116,13 +124,16 @@ export function DoSection({
   const fixedWorkflow = fixedWorkflowId !== undefined;
   const fixedWorkflowName = workflows.find((w) => w.id === fixedWorkflowId)?.name ?? "this workflow";
   const runInputBad = parseRunInput(draft.runInput).kind === "bad";
-  const assistant = draft.doKind !== "workflow";
+  const assistant = isAssistantDraft(draft);
+  const plugin = draft.doKind === "plugin";
   const required = routine && assistant;
   // Only a mention starts a conversation to reply in (Reply stores `follow`
   // only for a mention). A Slack line without one offers Work on it.
   const mention = selectsSlackMention([...draft.events]);
   const replyNeedsMention = !stored && !routine && draft.service === "slack" && !mention;
-  const chosen = cards(routine).find((card) => card.kind === draft.doKind);
+  const offered = cards(routine, handlers.length > 0 || plugin);
+  const chosen = offered.find((card) => card.kind === draft.doKind);
+  const handler = handlers.find((h) => h.plugin === draft.handler?.plugin && h.id === draft.handler?.handler);
   // A line's instructions have the api's limit; a routine's have none.
   const tooLong = instructionsTooLong(draft);
   const length = instructionsLength(draft);
@@ -131,6 +142,11 @@ export function DoSection({
 
   function pick(kind: DoKind) {
     if (kind === draft.doKind || fixedWorkflow) return;
+    const first = handlers[0];
+    if (kind === "plugin" && first !== undefined) {
+      onChange(setHandler({ ...draft, where: null, whereChosen: false, whereTitle: undefined }, first, services));
+      return;
+    }
     onChange({
       ...draft,
       doKind: kind,
@@ -168,8 +184,8 @@ export function DoSection({
           </span>
         </div>
       ) : (
-        <div role="radiogroup" aria-label="Do" className="grid gap-2.5 sm:grid-cols-3">
-          {cards(routine).map((card) => {
+        <div role="radiogroup" aria-label="Do" className={cn("grid gap-2.5", offered.length === 4 ? "sm:grid-cols-2" : "sm:grid-cols-3")}>
+          {offered.map((card) => {
             const on = draft.doKind === card.kind;
             // A Reply already picked stays open, so the reader can see it and move off it.
             const off = (fixedWorkflow && card.kind !== "workflow") || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
@@ -252,6 +268,38 @@ export function DoSection({
         </div>
       )}
 
+      {plugin && (
+        <div className="grid gap-3">
+          <div className="grid gap-1">
+            <Label htmlFor={`${id}-handler`}>Plugin handler</Label>
+            <Select
+              id={`${id}-handler`}
+              value={draft.handler === null ? "" : `${draft.handler.plugin}/${draft.handler.handler}`}
+              disabled={stored}
+              onChange={(e) => {
+                const next = handlers.find((h) => `${h.plugin}/${h.id}` === e.target.value);
+                if (next !== undefined) onChange(setHandler(draft, next, services));
+              }}
+              className="w-full min-w-0 truncate"
+            >
+              {draft.handler === null && <option value="">Pick a handler</option>}
+              {handlers.map((h) => <option key={`${h.plugin}/${h.id}`} value={`${h.plugin}/${h.id}`}>{h.label}</option>)}
+              {/* A stored handler reads by its ids before the plugins load, or after its plugin is gone. */}
+              {draft.handler !== null && handler === undefined && (
+                <option value={`${draft.handler.plugin}/${draft.handler.handler}`}>{`${draft.handler.plugin}: ${draft.handler.handler}`}</option>
+              )}
+            </Select>
+            {handler !== undefined && <p className="text-xs text-muted">{handler.description}</p>}
+          </div>
+          {handler?.configSchema !== undefined && (
+            <div className="grid gap-2 rounded-lg border border-line px-3.5 py-3">
+              <p className="text-xs text-muted">Settings</p>
+              <HandlerSettingsForm schema={handler.configSchema} value={draft.handlerConfig} onChange={(handlerConfig) => onChange({ ...draft, handlerConfig })} />
+            </div>
+          )}
+        </div>
+      )}
+
       {assistant && (
         <div className="grid gap-1.5">
           <Label htmlFor={`${id}-instructions`}>{required ? "Instructions (required)" : "Instructions (optional)"}</Label>
@@ -314,10 +362,10 @@ export function DoSection({
         </details>
       )}
 
-      {assistant && assistants.length > 1 && (
+      {(assistant || plugin) && assistants.filter((a) => assistant || a.value !== "org").length > 1 && (
         <div role="radiogroup" aria-label="Assistant" className="grid gap-1.5">
           <p className="text-xs text-muted">Assistant</p>
-          {assistants.map((a) => (
+          {assistants.filter((a) => assistant || a.value !== "org").map((a) => (
             <label key={a.value} className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
               <input
                 type="radio"
