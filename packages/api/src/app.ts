@@ -9,7 +9,7 @@ import { reportError } from "@valet/engine";
 import { cliUsage } from "./middleware/cli-usage.js";
 import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
-import { productAnnouncementsRouter } from "./routes/product-announcements.js";
+import { tutorialRouter } from "./routes/tutorial.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
@@ -402,7 +402,7 @@ export function createApp(
   app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
   app.route("/api/me", meRouter);
-  app.route("/api/product-announcements", productAnnouncementsRouter);
+  app.route("/api/tutorial", tutorialRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/proxy", proxyUsageRouter);

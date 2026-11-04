@@ -4,6 +4,7 @@ import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import {
   Button,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogFooter,
@@ -12,6 +13,7 @@ import {
   Switch,
 } from "~/components/primitives";
 import { useOrg, usePatchOrg, usePatchOrgSettings } from "~/api/settings";
+import { useResetTutorialForEveryone } from "~/api/tutorial";
 
 /**
  * `/settings/organization` (index) — Organization · General. Org name +
@@ -19,6 +21,7 @@ import { useOrg, usePatchOrg, usePatchOrgSettings } from "~/api/settings";
  * which confirms before flipping `features.organizations` off (spec: the
  * confirm copy must state that nothing is deleted — teams and members stay
  * dormant, not removed) and then returns the caller to their own settings.
+ * An admin can also show the tour to every member again, after a confirm.
  */
 export const Route = createFileRoute("/settings/organization/")({
   component: OrganizationGeneralPage,
@@ -32,6 +35,9 @@ export function OrganizationGeneralPage() {
 
   const [name, setName] = useState("");
   const [confirmDisable, setConfirmDisable] = useState(false);
+  const resetTour = useResetTutorialForEveryone();
+  const [confirmTour, setConfirmTour] = useState(false);
+  const [tourReset, setTourReset] = useState(false);
 
   useEffect(() => {
     if (orgQ.data) setName(orgQ.data.name);
@@ -103,6 +109,19 @@ export function OrganizationGeneralPage() {
             </div>
           </FieldRow>
 
+          {orgQ.data.callerRole === "admin" && (
+            <FieldRow
+              label="Tour"
+              hint={tourReset
+                ? "Done. Each member sees the tour the next time they open Valet."
+                : "Each member sees the tour again the next time they open Valet. Their data does not change."}
+            >
+              <Button type="button" variant="secondary" size="sm" onClick={() => setConfirmTour(true)}>
+                Show the tour to everyone again
+              </Button>
+            </FieldRow>
+          )}
+
           <FieldRow
             label="Organization features"
             hint="Hides member roles and teams for everyone in your organization."
@@ -113,6 +132,19 @@ export function OrganizationGeneralPage() {
           </FieldRow>
         </>
       )}
+
+      <ConfirmDialog
+        open={confirmTour}
+        onOpenChange={setConfirmTour}
+        title="Show the tour to everyone again?"
+        description="Each member of your organization sees the tour the next time they open Valet."
+        confirmLabel="Show the tour"
+        pendingLabel="Saving…"
+        confirmVariant="primary"
+        pending={resetTour.isPending}
+        error={resetTour.error ? `Could not save. ${resetTour.error.message} Try again.` : undefined}
+        onConfirm={() => resetTour.mutate(undefined, { onSuccess: () => { setConfirmTour(false); setTourReset(true); } })}
+      />
 
       <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}>
         <DialogContent

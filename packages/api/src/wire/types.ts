@@ -6753,14 +6753,42 @@ export interface HomeTasksResponse {
   finished: HomeTaskItem[];
 }
 
-/** A release notice with a stable identity and an internal destination. */
-export interface ProductAnnouncement {
-  id: string;
-  title: string;
-  body: string;
-  action: { label: string; href: string };
+// ── In-app tour (`/api/tutorial`) ──
+
+/** How the person last left the tour. */
+export type TutorialOutcome = "completed" | "skipped";
+
+/**
+ * `GET /api/tutorial`. `version` comes from instance config
+ * (`org.tutorialVersion` or `VALET_TUTORIAL_VERSION`); `orgVersion` rises when
+ * an org admin shows the tour to everyone again. `due` is true when the
+ * person has no outcome yet, or their stored versions are below either one.
+ */
+export interface TutorialStateResponse {
+  version: number;
+  orgVersion: number;
+  seenVersion: number;
+  seenOrgVersion: number;
+  outcome: TutorialOutcome | null;
+  /** The step to resume at while the tour is in progress. */
+  step: string | null;
+  due: boolean;
 }
-export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
+
+/**
+ * `PUT /api/tutorial`. Send `step` to save progress, or `outcome` to finish
+ * or skip, each with the `version` and `orgVersion` of the tour shown. A
+ * write for other than the current versions is ignored.
+ */
+export interface UpdateTutorialRequest {
+  step?: string | null;
+  outcome?: TutorialOutcome;
+  version: number;
+  orgVersion: number;
+}
+
+/** `POST /api/tutorial/reset` (org admin). */
+export interface ResetTutorialResponse { orgVersion: number }
 
 // ── Tool broker (`/api/actions`, docs/specs/2026-10-07-mcp-agent-tools-design.md) ──
 

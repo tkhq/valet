@@ -10,7 +10,7 @@ import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanst
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { ErrorRow, LoadingRow } from "~/components/primitives/query-state";
-import { ProductAnnouncement } from "~/components/product-announcement";
+import { FeatureTourProvider } from "~/components/tour/feature-tour";
 import { AppShell } from "~/components/layout/app-shell";
 import { ReconnectingBanner } from "~/components/layout/reconnecting-banner";
 import { TopNav } from "~/components/layout/top-nav";
@@ -139,8 +139,8 @@ function RootLayout() {
     <WorkspaceScopeProvider persist={!gallery}>
       <WorkspaceAssistantProvider>
         <SignedInEffects />
-        <ProductAnnouncement />
-        {shell}
+        {/* The gallery's fixture account takes no tour. */}
+        <FeatureTourProvider enabled={!gallery}>{shell}</FeatureTourProvider>
       </WorkspaceAssistantProvider>
     </WorkspaceScopeProvider>
   );

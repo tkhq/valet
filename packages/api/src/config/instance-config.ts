@@ -101,6 +101,9 @@ export interface InstanceConfig {
     features?: Record<string, boolean>;
     bareSkillCommands?: boolean;
     members?: InstanceMemberDecl[];
+    /** The in-app tour version. Raise it after a large UI change and every
+     * user whose stored version is lower sees the tour again on next load. */
+    tutorialVersion?: number;
   };
   teams?: { name: string; members?: InstanceMemberDecl[] }[];
   llmProviders?: {
@@ -441,6 +444,16 @@ function validateMembers(
   });
 }
 
+/** Largest tour version accepted, so a typo cannot overflow the int column. */
+export const MAX_TUTORIAL_VERSION = 1_000_000;
+
+function assertTutorialVersion(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_TUTORIAL_VERSION) {
+    err(`${label} must be a whole number from 1 to ${MAX_TUTORIAL_VERSION}, got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
 function validateOrg(
   value: unknown,
   path: string,
@@ -461,6 +474,8 @@ function validateOrg(
       result.bareSkillCommands = assertBoolean(v, "org.bareSkillCommands", path);
     } else if (key === "members") {
       result.members = validateMembers(v, "org.members", path);
+    } else if (key === "tutorialVersion") {
+      result.tutorialVersion = assertTutorialVersion(v, `${path}: org.tutorialVersion`);
     } else {
       err(`${path}: unknown key "org.${key}". Remove it or check for a typo.`);
     }
@@ -984,4 +999,23 @@ export function resolveSsoTeamMapping(
   };
   if (declared?.groups !== undefined) result.groups = declared.groups;
   return result;
+}
+
+/** The tour version when neither the file nor the env sets one. */
+export const DEFAULT_TUTORIAL_VERSION = 1;
+
+/**
+ * Both-set guard + parse for the in-app tour version. `VALET_TUTORIAL_VERSION`
+ * and `org.tutorialVersion` set together fail boot, the same as the other
+ * env/file pairs. Unset everywhere → `DEFAULT_TUTORIAL_VERSION`.
+ */
+export function resolveTutorialVersion(cfg: InstanceConfig | null, env: NodeJS.ProcessEnv): number {
+  const declared = cfg?.org?.tutorialVersion;
+  const raw = env["VALET_TUTORIAL_VERSION"]?.trim();
+  if (raw && declared !== undefined) {
+    err(`VALET_TUTORIAL_VERSION is set and ${env["VALET_CONFIG"]} declares org.tutorialVersion. Remove one.`);
+  }
+  if (declared !== undefined) return declared;
+  if (!raw) return DEFAULT_TUTORIAL_VERSION;
+  return assertTutorialVersion(/^\d+$/.test(raw) ? Number(raw) : raw, "VALET_TUTORIAL_VERSION");
 }

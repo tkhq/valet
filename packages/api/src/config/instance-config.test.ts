@@ -8,6 +8,7 @@ import {
   parseInstanceConfig,
   resolveAllowedEmailDomains,
   resolveSsoTeamMapping,
+  resolveTutorialVersion,
 } from "./instance-config.js";
 
 // The illustrative example from the design spec — used verbatim as fixture.
@@ -818,5 +819,32 @@ describe("resolveSsoTeamMapping", () => {
       ...envDefaults,
       groups: ["/platform"],
     });
+  });
+});
+
+describe("resolveTutorialVersion", () => {
+  const configPath = "config/valet.test.yaml";
+
+  it("defaults to 1 and reads the env or the file", () => {
+    expect(resolveTutorialVersion(null, {})).toBe(1);
+    expect(resolveTutorialVersion(null, { VALET_TUTORIAL_VERSION: "3" })).toBe(3);
+    const cfg = parseInstanceConfig("version: 1\norg:\n  tutorialVersion: 4", configPath);
+    expect(resolveTutorialVersion(cfg, {})).toBe(4);
+  });
+
+  it("fails boot when both are set", () => {
+    const cfg = parseInstanceConfig("version: 1\norg:\n  tutorialVersion: 4", configPath);
+    expect(() => resolveTutorialVersion(cfg, { VALET_TUTORIAL_VERSION: "4", VALET_CONFIG: configPath })).toThrow(
+      `VALET_TUTORIAL_VERSION is set and ${configPath} declares org.tutorialVersion. Remove one.`,
+    );
+  });
+
+  it("rejects a version that is not a whole number from 1", () => {
+    for (const raw of ["0", "-1", "1.5", "two", "1000001"]) {
+      expect(() => resolveTutorialVersion(null, { VALET_TUTORIAL_VERSION: raw })).toThrow(InstanceConfigError);
+    }
+    expect(() => parseInstanceConfig("version: 1\norg:\n  tutorialVersion: 0", configPath)).toThrow(
+      "org.tutorialVersion must be a whole number from 1 to 1000000",
+    );
   });
 });

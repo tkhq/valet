@@ -17,6 +17,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
 | `VALET_CONFIG` | No | Path to the instance config file (`valet.yaml`). `make dev-local` points it at `config/valet.dev.yaml`; the helm chart mounts `api.instanceConfig` and sets it. See docs/specs/2026-08-14-instance-config-design.md |
 | `OPENAI_API_KEY` | No | Fallback OpenAI key |
+| `VALET_TUTORIAL_VERSION` | No | In-app tour version, a whole number from 1 (default 1). Raise it after a large UI change: each user whose stored version is lower sees the tour again on next load. No data is deleted. Do not set it and `org.tutorialVersion` in `valet.yaml` together; the server refuses to boot |
 
 The instance config's `mcpServers` entries with `auth: bearer` each name
 their own env var (`tokenEnv`). Set that variable in the api's environment;

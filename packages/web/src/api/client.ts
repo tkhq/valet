@@ -616,8 +616,10 @@ export const api = {
   agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
   disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
   disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
-  productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
-  acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
+  tutorial: () => request<import("@valet/api/wire").TutorialStateResponse>("GET", "/tutorial"),
+  updateTutorial: (body: import("@valet/api/wire").UpdateTutorialRequest) =>
+    request<import("@valet/api/wire").TutorialStateResponse>("PUT", "/tutorial", body),
+  resetTutorial: () => request<import("@valet/api/wire").ResetTutorialResponse>("POST", "/tutorial/reset"),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
