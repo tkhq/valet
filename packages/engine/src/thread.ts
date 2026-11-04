@@ -944,9 +944,11 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
-    // Unscoped steering replaces all pending work. Conversation steering
-    // preserves queued work, so the store checks the cap after excluding
-    // the active turn it will replace. Admission and the check are atomic.
+    // Unscoped steering replaces all pending work except workflow tasks and
+    // steps (`steerKeepsSubmission`), so the store counts what it keeps.
+    // Conversation steering preserves queued work, so the store checks the
+    // cap after excluding the active turn it will replace. Admission and the
+    // check are atomic.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
@@ -954,7 +956,7 @@ export class Thread {
       this.id,
       item,
       effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id)
-        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), ...(opts.steerScope === "active-origin" ? { maxPending: cap } : {}) }
+        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), maxPending: cap }
         : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);

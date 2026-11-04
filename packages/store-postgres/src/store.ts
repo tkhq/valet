@@ -21,7 +21,7 @@ import {
   walkTranscriptDag,
   withSpan,
 } from "@valet/engine";
-import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, steerKeepsSubmission, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -190,7 +190,7 @@ const PROMOTION_PENDING_SQL = `
 `;
 
 const STEER_CANDIDATES_SQL = `
-  SELECT id FROM engine_queue_items
+  SELECT id, metadata FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2 AND id != $3
     AND status != 'settled'
     AND superseded_by_item_id IS NULL
@@ -260,6 +260,14 @@ const ABORT_ACTIVE_SUBMISSION_SQL = `
 // admissions.
 const PENDING_COUNT_SQL = `
   SELECT COUNT(*) as count FROM engine_queue_items
+  WHERE session_id = $1 AND thread_id = $2
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+`;
+
+// The same rows with metadata and admission time, for a full steer: it
+// counts only the items it keeps.
+const PENDING_METADATA_SQL = `
+  SELECT metadata, created_at FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2
     AND status != 'settled' AND superseded_by_item_id IS NULL
 `;
@@ -1070,8 +1078,15 @@ export class PgSessionStore implements SessionStore {
           }
 
           if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-            const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
-            const count = toNum(countResult.rows[0]?.count, "count");
+            // Count every item the admission leaves live. A full steer
+            // supersedes the items admitted at or before it, except workflow
+            // items (STEER_CANDIDATES_SQL), so it keeps workflow items and
+            // later items. A scoped steer keeps queued siblings, so they all count.
+            const count = opts.steer === true && (opts.steerScope ?? "all") === "all"
+              ? (await tx.query(PENDING_METADATA_SQL, [sessionId, threadId])).rows
+                .filter((row) => toNum(row.created_at, "created_at") > item.createdAt
+                  || steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
+              : toNum((await tx.query(PENDING_COUNT_SQL, [sessionId, threadId])).rows[0]?.count, "count");
             if (count >= opts.maxPending) {
               throw new PendingCapError(threadId, opts.maxPending);
             }
@@ -1174,8 +1189,8 @@ export class PgSessionStore implements SessionStore {
                   .filter(
                     (candidate) =>
                       (carriedIds.has(candidate.id) || candidate.id === opts.promoteFromItemId ||
-                      candidate.status === "running" ||
-                      candidate.status === "blocked_on_decision_gate") &&
+                      ((candidate.status === "running" ||
+                      candidate.status === "blocked_on_decision_gate") && !steerKeepsSubmission(candidate.metadata))) &&
                       (!originScope || carriedIds.has(candidate.id) || (matchingActive && interruptibleBy(candidate, item))),
                   )
                   .map((candidate) => candidate.id)
@@ -1186,7 +1201,9 @@ export class PgSessionStore implements SessionStore {
                     itemToInsert.id,
                     itemToInsert.createdAt,
                   ])
-                ).rows.map(rowId);
+                ).rows
+                  .filter((row) => !steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined))
+                  .map(rowId);
             if (ids.length > 0) {
               await tx.query(
                 `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,

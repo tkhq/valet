@@ -1,6 +1,6 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { withoutCarriedInputs, carryInputMetadata, queuedOriginInputs, isInteractiveSlackInput, interruptibleBy, countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
-import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, steerKeepsSubmission, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -599,7 +599,13 @@ export class InMemorySessionStore implements SessionStore {
     // exactly: idempotent replays never trip the cap, and the count reflects
     // state as of immediately before this item lands.
     if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
+      // Count every item the admission leaves live. A full steer supersedes
+      // the items admitted at or before it, except workflow items (the steer
+      // loop below), so it keeps workflow items and later items. A scoped
+      // steer keeps queued siblings, so they all count.
+      const fullSteer = opts.steer === true && (opts.steerScope ?? "all") === "all";
+      const keptByFullSteer = (i: QueueItem) => steerKeepsSubmission(i.metadata) || i.createdAt > item.createdAt;
+      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled" && (!fullSteer || keptByFullSteer(i)));
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
       }
@@ -679,6 +685,7 @@ export class InMemorySessionStore implements SessionStore {
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
+        if (other.id !== opts.promoteFromItemId && steerKeepsSubmission(other.metadata)) continue;
         if (
           headScope && !carriedIds.has(other.id) &&
           other.id !== opts.promoteFromItemId &&
