@@ -8,11 +8,13 @@
  * plugin never receives a `Session`; it holds `PluginThreadRef` values.
  */
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { UNATTENDED_DELIVERY_KEY } from "@valet/shared";
 import {
   settledSubmissionResult,
   TimeoutError,
   type ChildSpawner,
+  type ChildStopper,
   type PluginChild,
   type PluginThreadRef,
   type PluginThreads,
@@ -23,11 +25,11 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import type { TSchema } from "typebox";
-import { eq, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches } from "../schema/index.js";
+import { agentSessions, childWatches, eventDeliveries } from "../schema/index.js";
 import { PLUGIN_CHILD_SESSION_PREFIX, pluginThreadKey } from "./plugin-thread-key.js";
 
 export { pluginThreadKey };
@@ -43,6 +45,7 @@ export interface PluginThreadsDeps {
   resolveThread?: (key: string) => Promise<{ sessionId: string; threadId: string }>;
   engineStore: SessionStore;
   childSpawner: ChildSpawner;
+  childStopper: ChildStopper;
   /** Poll interval while a child runs. Tests shorten it. */
   pollMs?: number;
 }
@@ -52,6 +55,22 @@ export interface PluginThreadsScope {
   orgId: string;
   owner: Principal;
   actorUserId: string;
+  /**
+   * The event delivery this run handles. Children it starts or reuses are
+   * recorded against it (`child_watches.plugin_delivery_id`), so cancelling
+   * the delivery stops them (`stopPluginDeliveryChildren`).
+   */
+  deliveryId: string;
+  /** The handler run's signal. When it aborts, `awaitReply` and `awaitChild` end with an `AbortError`. */
+  signal?: AbortSignal;
+  /**
+   * Aborts when the run is cancelled for good (its line turned off, or a
+   * newer event superseded it). The dispatcher stops the delivery's
+   * children then; this run starts no more, and stops a child whose spawn
+   * lands after the cancel. Shutdown does not abort it: a later process
+   * resumes the run and finds the same children by dispatch id.
+   */
+  cancelChildren?: AbortSignal;
 }
 
 const DEFAULT_POLL_MS = 2_000;
@@ -78,6 +97,15 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
   const prefix = pluginThreadKey(plugin.name, "");
   const meta = { actorUserId, orgId };
 
+  /** A child whose spawn landed after the run was cancelled: stop it too. */
+  const stopIfCancelled = (child: PluginChild, parent: { sessionId: string; threadId: string }): PluginChild => {
+    if (scope.cancelChildren?.aborted) {
+      void deps.childStopper({ childSessionId: child.childSessionId }, { parentSessionId: parent.sessionId, parentThreadId: parent.threadId })
+        .catch((err) => console.error(`plugin ${plugin.name}: stopping child ${child.childSessionId} failed:`, err));
+    }
+    return child;
+  };
+
   const openThread = async (key: string, title?: string) => {
     if (!deps.engineHost) throw new Error("Plugin threads need the engine host. Wire engineHost into the plugin threads deps.");
     // Isolated: each plugin thread runs in its own execution session, so its
@@ -96,6 +124,30 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
     if (deps.resolveThread) return deps.resolveThread(key);
     const { session, thread } = await openThread(key);
     return { sessionId: session.id, threadId: thread.id };
+  };
+
+  /** Whether `threadId` in `sessionId` is one of this plugin's threads in this owner's workspace. */
+  const ownsThread = async (sessionId: string, threadId: string): Promise<boolean> => {
+    const [row] = await deps.db
+      .select({ id: agentSessions.id })
+      .from(agentSessions)
+      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.orgId, orgId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id)))
+      .limit(1);
+    if (!row) return false;
+    const thread = await deps.engineStore.getThread(sessionId, threadId);
+    return thread?.key.startsWith(prefix) ?? false;
+  };
+  /** The watch row of a child under one of this plugin's threads for this owner, or a refusal. */
+  const ownedChild = async (child: PluginChild): Promise<{ parentSessionId: string; parentThreadId: string }> => {
+    const [watch] = await deps.db
+      .select({ parentSessionId: childWatches.parentSessionId, parentThreadId: childWatches.parentThreadId })
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, child.childSessionId))
+      .limit(1);
+    if (!watch || !(await ownsThread(watch.parentSessionId, watch.parentThreadId))) {
+      throw new Error(`Child ${child.childSessionId} was not started by plugin ${plugin.name} for this workspace. Use only children from threads.spawnChild.`);
+    }
+    return watch;
   };
 
   const owned = (ref: PluginThreadRef): void => {
@@ -131,7 +183,13 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
     },
 
     async awaitReply(reply, opts) {
-      return awaitSubmission(deps, { sessionId: reply.sessionId, queueItemId: reply.queueItemId }, opts);
+      // The host checks the ids it is handed: the reply must sit in one of
+      // this plugin's threads in this owner's workspace.
+      const notOurs = new Error(`Reply ${reply.queueItemId} is not in a thread of plugin ${plugin.name} for this workspace. Use the reply that threads.post returned.`);
+      if (!(await ownsThread(reply.sessionId, reply.threadId))) throw notOurs;
+      const item = await deps.engineStore.getQueueItem(reply.sessionId, reply.queueItemId);
+      if (item?.threadId !== reply.threadId) throw notOurs;
+      return awaitSubmission(deps, { sessionId: reply.sessionId, queueItemId: reply.queueItemId }, { ...opts, signal: scope.signal });
     },
 
     async spawnChild(ref, req, opts) {
@@ -142,11 +200,26 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       if (req.ref !== undefined && req.repo === undefined) {
         throw new Error("A child ref needs a repo. Pass repo with ref.");
       }
+      if (scope.cancelChildren?.aborted) throw new DOMException("This plugin run was cancelled. Start no more children.", "AbortError");
       // The parent comes from the key, never from the caller's ids.
       const parent = await resolveThread(ref.key);
       const baseId = pluginChildSessionId(plugin.name, owner, ref.key, opts.dispatchId);
       const existing = await findChild(deps, baseId, parent.sessionId);
-      if (existing) return existing;
+      if (existing) {
+        // This run reuses the child, so it now belongs to this delivery:
+        // cancelling the delivery that first started it must not stop it.
+        // Only a live delivery takes a child over. A run superseded in
+        // another process may not know yet; it must not take the child back
+        // from the run that superseded it.
+        const taken = await deps.db.update(childWatches).set({ pluginDeliveryId: scope.deliveryId })
+          .where(and(
+            eq(childWatches.childSessionId, existing.childSessionId),
+            sql`EXISTS (SELECT 1 FROM ${eventDeliveries} WHERE ${eventDeliveries.id} = ${scope.deliveryId} AND ${eventDeliveries.status} IN ('pending', 'failed'))`,
+          ))
+          .returning({ id: childWatches.childSessionId });
+        if (taken.length === 0) throw new DOMException("This plugin run's delivery was cancelled. Start no more children.", "AbortError");
+        return stopIfCancelled(existing, parent);
+      }
       const childSessionId = await freeChildId(deps, baseId);
 
       const spawned = await deps.childSpawner(
@@ -172,15 +245,51 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           owner,
           unattendedWorkflow: true,
           reportToParent: false,
+          pluginDeliveryId: scope.deliveryId,
         },
       );
-      return { childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId };
+      return stopIfCancelled({ childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId }, parent);
     },
 
     async awaitChild(child, opts) {
-      return awaitSubmission(deps, { sessionId: child.childSessionId, queueItemId: child.queueItemId }, opts);
+      await ownedChild(child);
+      return awaitSubmission(deps, { sessionId: child.childSessionId, queueItemId: child.queueItemId }, { ...opts, signal: scope.signal });
+    },
+
+    async stopChild(child) {
+      // Whichever run started it, the child must hang off one of this
+      // plugin's threads in this owner's workspace.
+      const watch = await ownedChild(child);
+      const result = await deps.childStopper({ childSessionId: child.childSessionId }, watch);
+      if (!result) throw new Error(`Child ${child.childSessionId} was not started by plugin ${plugin.name} for this workspace. Use only children from threads.spawnChild.`);
+      return result;
     },
   };
+}
+
+/**
+ * Stop the unsettled children recorded against these plugin deliveries.
+ * The dispatcher calls it when it cancels deliveries for good (line off,
+ * superseded), whether or not a run for them is live in this process.
+ */
+export async function stopPluginDeliveryChildren(
+  deps: Pick<PluginThreadsDeps, "db" | "childStopper">,
+  deliveryIds: readonly string[],
+): Promise<number> {
+  if (deliveryIds.length === 0) return 0;
+  const rows = await deps.db
+    .select({ childSessionId: childWatches.childSessionId, parentSessionId: childWatches.parentSessionId, parentThreadId: childWatches.parentThreadId })
+    .from(childWatches)
+    .where(and(inArray(childWatches.pluginDeliveryId, [...deliveryIds]), eq(childWatches.settled, false)));
+  let stopped = 0;
+  for (const row of rows) {
+    try {
+      stopped += (await deps.childStopper({ childSessionId: row.childSessionId }, row))?.stopped ?? 0;
+    } catch (err) {
+      console.error(`plugin child ${row.childSessionId}: stop failed:`, err);
+    }
+  }
+  return stopped;
 }
 
 /**
@@ -192,13 +301,14 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
 export async function awaitSubmission(
   deps: Pick<PluginThreadsDeps, "engineStore" | "pollMs">,
   target: { sessionId: string; queueItemId: string },
-  opts: Parameters<PluginThreads["awaitChild"]>[1] = {},
+  opts: Parameters<PluginThreads["awaitChild"]>[1] & { signal?: AbortSignal | undefined } = {},
 ): Promise<SubmissionResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   let itemId = target.queueItemId;
   for (let hop = 0; hop <= MAX_MERGE_HOPS; hop++) {
     for (;;) {
+      if (opts.signal?.aborted) throw new DOMException("The plugin run was stopped.", "AbortError");
       const item = await deps.engineStore.getQueueItem(target.sessionId, itemId);
       if (!item) throw new Error(`Submission ${itemId} is missing from session ${target.sessionId}.`);
       if (item.status === "settled") {
@@ -213,7 +323,8 @@ export async function awaitSubmission(
         // The work keeps running; a later wait with the same handle picks it up.
         throw new TimeoutError(itemId, timeoutMs);
       }
-      await new Promise((resolve) => setTimeout(resolve, deps.pollMs ?? DEFAULT_POLL_MS));
+      // Rejects with an AbortError when the handler run stops.
+      await sleep(deps.pollMs ?? DEFAULT_POLL_MS, undefined, opts.signal ? { signal: opts.signal } : undefined);
     }
   }
   return { queueItemId: itemId, outcome: "failed", error: `merge chain longer than ${MAX_MERGE_HOPS} hops` };

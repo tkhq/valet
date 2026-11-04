@@ -1156,6 +1156,12 @@ export function validateValetPlugin(
       issues.push({ path: `${path}.events`, message: "required non-empty array of event keys" });
     }
     if (typeof record.handle !== "function") issues.push({ path: `${path}.handle`, message: "required function" });
+    if (record.concurrency !== undefined && record.concurrency !== "parallel" && record.concurrency !== "supersede") {
+      issues.push({ path: `${path}.concurrency`, message: 'must be "parallel" or "supersede"' });
+    }
+    if (record.configSchema !== undefined && (typeof record.configSchema !== "object" || record.configSchema === null || Array.isArray(record.configSchema))) {
+      issues.push({ path: `${path}.configSchema`, message: "must be a JSON Schema object" });
+    }
   });
 
   checkArray(v.storeIndexes, "storeIndexes", issues, (idx, path) => {

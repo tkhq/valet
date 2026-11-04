@@ -1,5 +1,5 @@
 import { githubInstallationTokenFor } from "../events/derive.js";
-import { buildPluginThreads } from "../plugins/plugin-threads.js";
+import { buildPluginThreads, stopPluginDeliveryChildren } from "../plugins/plugin-threads.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
@@ -932,7 +932,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
           if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
           return spawnerRef(req, ctx);
         },
+        childStopper: (req, ctx) => {
+          if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+          return stopperRef(req, ctx);
+        },
       }, scope),
+      stopDeliveryChildren: async (deliveryIds) => {
+        await stopPluginDeliveryChildren({
+          db,
+          childStopper: (req, ctx) => {
+            if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+            return stopperRef(req, ctx);
+          },
+        }, deliveryIds);
+      },
       appToken: (() => {
         const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });
         // Only GitHub has an app credential a handler can borrow today.

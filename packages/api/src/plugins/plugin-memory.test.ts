@@ -28,7 +28,7 @@ describe("buildPluginMemory", () => {
     await writeFile(db, { owner, actorUserId: "u1" }, { path: "conventions/review.md", content: "Flag missing awaits in handlers." });
     await writeFile(db, { owner, actorUserId: "u1", namespace: "execution-x" }, { path: "notes/private.md", content: "Private awaits note" });
 
-    const memory = buildPluginMemory(db, owner, `team:${team.id}`);
+    const memory = buildPluginMemory(db, owner, `team:${team.id}`, orgId);
     const hits = await memory.search("awaits");
     expect(hits.map((h) => h.path)).toEqual(["conventions/review.md"]);
     expect(hits[0].snippet).toContain("awaits");
@@ -36,5 +36,23 @@ describe("buildPluginMemory", () => {
     const file = await memory.read("conventions/review.md");
     expect(file?.content).toContain("Flag missing awaits in handlers.");
     expect(await memory.read("conventions/missing.md")).toBeNull();
+  });
+
+  it("keeps a person's line to the line's org: no teams or org memory from their other orgs", async () => {
+    const otherOrg = "org-other";
+    await db.insert(orgs).values({ id: otherOrg, name: "Other", createdAt: Date.now() });
+    await db.insert(orgMembers).values({ orgId: otherOrg, userId: "u1", role: "member" });
+    const here = await createTeam(db, { orgId, name: "Here", creatorUserId: "u1" });
+    await addMember(db, { teamId: here.id, userId: "u1", role: "admin" });
+    const there = await createTeam(db, { orgId: otherOrg, name: "There", creatorUserId: "u1" });
+    await addMember(db, { teamId: there.id, userId: "u1", role: "admin" });
+    await writeFile(db, { owner: { type: "team", id: here.id }, actorUserId: "u1" }, { path: "conventions/a.md", content: "Lint rule alpha." });
+    await writeFile(db, { owner: { type: "team", id: there.id }, actorUserId: "u1" }, { path: "conventions/b.md", content: "Lint rule beta." });
+
+    const memory = buildPluginMemory(db, { type: "user", id: "u1" }, "u1", orgId);
+    const paths = (await memory.search("lint rule")).map((h) => h.path);
+    expect(paths).toEqual([`team:${here.id}/conventions/a.md`]);
+    expect(await memory.read(`team:${there.id}/conventions/b.md`)).toBeNull();
+    expect(await memory.read(`team:${here.id}/conventions/a.md`)).not.toBeNull();
   });
 });

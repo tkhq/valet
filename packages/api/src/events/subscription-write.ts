@@ -11,8 +11,11 @@
 import { USER_ONLINE_EVENT_KEY } from "@valet/plugin-slack/actions";
 import { validateOncePerHours } from "./once-per.js";
 import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
-import { pluginHandlerAccepts, type EventCatalogEntry, type ValetPlugin } from "@valet/engine";
+import { pluginHandlerAccepts, prepareActionArgs, type EventCatalogEntry, type PluginEventHandler, type ValetPlugin } from "@valet/engine";
+
+type PluginEventHandlerSchema = PluginEventHandler["configSchema"];
 import type { AppDb } from "../lib/drizzle.js";
+import { isRecord } from "../lib/oauth-state.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
 import { eventKeyMatches, FILTER_OPS, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
@@ -35,7 +38,7 @@ const TARGET_KINDS = ["workflow", "assistant", "plugin"] as const;
  * A plugin target names a declared handler, and every event key the rule
  * listens for is one the handler accepts. Assistant-only fields are refused.
  */
-function validatePluginTarget(target: Record<string, unknown>, patterns: string[], plugins: ValetPlugin[]): string | undefined {
+function validatePluginTarget(target: Record<string, unknown>, patterns: string[], plugins: ValetPlugin[], checkConfig: boolean): string | undefined {
   if (typeof target.plugin !== "string" || typeof target.handler !== "string") {
     return "A plugin target needs plugin and handler. Pick a handler from the plugin's event handlers.";
   }
@@ -51,7 +54,24 @@ function validatePluginTarget(target: Record<string, unknown>, patterns: string[
   for (const field of ["thread", "systemPrompt", "userPromptTemplate", "follow", "assistant"]) {
     if (target[field] !== undefined) return `A plugin target does not take ${field}. Remove it.`;
   }
-  return undefined;
+  const config = target.config;
+  if (config !== undefined && (!isRecord(config) || Array.isArray(config))) {
+    return "config must be an object of handler settings. Remove it, or pass an object.";
+  }
+  if (!checkConfig) return undefined;
+  if (!handler.configSchema) {
+    return config === undefined ? undefined : `Handler ${target.plugin}/${target.handler} takes no settings. Remove config.`;
+  }
+  // The same check runs at each delivery (`dispatcher.ts`), in case the
+  // plugin's schema changed after the line was saved.
+  const checked = pluginHandlerConfig(handler.configSchema, config);
+  return checked.ok ? undefined : `Settings for ${target.plugin}/${target.handler} do not match its schema: ${checked.error}. Fix config.`;
+}
+
+/** A line's handler settings with defaults filled in, checked against the handler's schema. */
+export function pluginHandlerConfig(schema: NonNullable<PluginEventHandlerSchema>, config: unknown): ReturnType<typeof prepareActionArgs> {
+  if (config !== undefined && (!isRecord(config) || Array.isArray(config))) return { ok: false, error: "config is not an object" };
+  return prepareActionArgs(schema, config ?? {});
 }
 
 /**
@@ -69,6 +89,7 @@ export function validateSubscription(
     filters: unknown;
     target: unknown;
   },
+  opts: { checkPluginConfig?: boolean } = {},
 ): string | null {
   const entries = allCatalogEntries(plugins);
 
@@ -196,7 +217,7 @@ export function validateSubscription(
     }
   }
   if (target.kind === "plugin") {
-    const error = validatePluginTarget(target, patterns, plugins);
+    const error = validatePluginTarget(target, patterns, plugins, opts.checkPluginConfig ?? true);
     if (error) return error;
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
@@ -255,6 +276,11 @@ export interface SubscriptionWriteScope {
   /** The subscription's creator (`created_by`) — the caller on create, the
    * row's own creator on patch. */
   creatorUserId: string;
+  /** False skips checking a plugin line's settings: a patch that does not
+   * set them must still work after the handler's schema changed, so the
+   * line can be turned off or renamed. The dispatcher checks them at each
+   * delivery. Default true. */
+  checkPluginConfig?: boolean;
   /** The request's explicit any-channel opt-out. */
   anyChannel: boolean;
   ownerType?: "user" | "team" | "org";
@@ -288,7 +314,7 @@ export async function validateSubscriptionWrite(
   | { ok: true; filters: SubscriptionFilter[]; audience: MentionAudience | undefined }
   | { ok: false; error: string }
 > {
-  const error = validateSubscription(plugins, body);
+  const error = validateSubscription(plugins, body, { checkPluginConfig: scope.checkPluginConfig ?? true });
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
       ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." };

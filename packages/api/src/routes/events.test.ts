@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * `/api/events*` + `/api/event-subscriptions` route tests (event-system plan,
@@ -3340,5 +3341,73 @@ describe("Part H renames on /api/event-subscriptions", () => {
     const renamed = await patchSubscription(a.baseUrl, "legacy-row", { name: "renamed" });
     expect(renamed.status).toBe(200);
     expect(await storedTarget(a, "legacy-row")).toEqual({ kind: "assistant", assistant: "user", appearance: { displayName: "Legacy helper" } });
+  });
+});
+
+describe("plugin line settings", () => {
+  const reviewer: ValetPlugin = {
+    name: "reviewer",
+    version: "0.0.1",
+    eventHandlers: [{
+      id: "review",
+      description: "Review a pull request.",
+      events: ["github.pull_request.*"],
+      configSchema: Type.Object({ instructions: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      handle: async () => {},
+    }],
+  };
+
+  it("saves settings with the line, replaces and clears them by patch, and refuses bad ones", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, {
+      name: "review PRs",
+      eventKeys: ["github.pull_request.synchronize"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+    });
+    expect(created.status).toBe(201);
+    const { id, target } = (await created.json()) as { id: string; target: Record<string, unknown> };
+    expect(target.config).toEqual({ instructions: "Check auth." });
+
+    const replaced = await patchSubscription(a.baseUrl, id, { config: { instructions: "Check SQL." } });
+    expect(replaced.status).toBe(200);
+    expect(((await replaced.json()) as { target: Record<string, unknown> }).target.config).toEqual({ instructions: "Check SQL." });
+
+    // An appearance-only patch keeps the settings.
+    const renamed = await patchSubscription(a.baseUrl, id, { name: "review all PRs" });
+    expect(((await renamed.json()) as { target: Record<string, unknown> }).target.config).toEqual({ instructions: "Check SQL." });
+
+    const bad = await patchSubscription(a.baseUrl, id, { config: { extra: true } });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("Settings for reviewer/review do not match its schema");
+
+    const cleared = await patchSubscription(a.baseUrl, id, { config: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { target: Record<string, unknown> }).target.config).toBeUndefined();
+  });
+
+  it("turns off or renames a line whose saved settings no longer match the handler's schema", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, {
+      name: "review PRs",
+      eventKeys: ["github.pull_request.synchronize"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+    });
+    const { id } = (await created.json()) as { id: string };
+    // The plugin's schema changed after the line was saved.
+    await a.providers.db.update(eventSubscriptions)
+      .set({ target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { retired: true } } })
+      .where(eq(eventSubscriptions.id, id));
+    expect((await patchSubscription(a.baseUrl, id, { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { name: "old review line" })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { config: { retired: true } })).status).toBe(400);
+  });
+
+  it("refuses settings on a line that is not a plugin line", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, { name: "to me", eventKeys: ["github.pull_request.opened"], target: { kind: "assistant" } });
+    const { id } = (await created.json()) as { id: string };
+    const res = await patchSubscription(a.baseUrl, id, { config: { instructions: "x" } });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("config is only valid on a plugin line. Remove config, or point the line at a plugin handler.");
   });
 });

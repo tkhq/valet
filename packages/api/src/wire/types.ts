@@ -5566,8 +5566,9 @@ export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignor
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string; appearance?: Appearance; oncePerHours?: number }
   /** A plugin's event handler (`ValetPlugin.eventHandlers`). With `teamId`
-   * the handler acts for that team; without it, for the person who arms it. */
-  | { kind: "plugin"; plugin: string; handler: string; teamId?: string; appearance?: Appearance; oncePerHours?: number }
+   * the handler acts for that team; without it, for the person who arms it.
+   * `config` holds the handler's settings, checked against its `configSchema`. */
+  | { kind: "plugin"; plugin: string; handler: string; teamId?: string; config?: Record<string, unknown>; appearance?: Appearance; oncePerHours?: number }
   /** `teamId` is required when `assistant` is `"team"`, and refused
    * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
@@ -5798,6 +5799,11 @@ export interface PatchEventSubscriptionRequest {
   systemPrompt?: string | null;
   /** See `systemPrompt`. */
   userPromptTemplate?: string | null;
+  /**
+   * Replace a plugin line's handler settings. `null` clears them. Absent
+   * leaves them alone. The handler's `configSchema` checks the new value.
+   */
+  config?: Record<string, unknown> | null;
   /** See `CreateEventSubscriptionRequest.audience`. Absent leaves the stored
    * audience alone. */
   audience?: EventSubscriptionAudienceWire;

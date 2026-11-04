@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import {
   Engine,
@@ -8,12 +9,13 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   type ChildSpawner,
+  type ChildStopper,
   type ValetPlugin,
 } from "@valet/engine";
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { agentSessions, childWatches } from "../schema/index.js";
-import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, type PluginThreadsDeps } from "./plugin-threads.js";
+import { agentSessions, childWatches, eventDeliveries } from "../schema/index.js";
+import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, stopPluginDeliveryChildren, type PluginThreadsDeps } from "./plugin-threads.js";
 
 const reviewer: ValetPlugin = {
   name: "reviewer",
@@ -44,9 +46,10 @@ describe("PluginThreads.spawnChild", () => {
       db: tdb.appDb,
       engineStore: new InMemorySessionStore(),
       childSpawner: spawner,
+      childStopper: vi.fn<ChildStopper>(async () => ({ stopped: 0 })),
       resolveThread: async () => ({ sessionId: thread.sessionId, threadId: thread.threadId }),
     };
-    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1" });
+    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-1" });
     return { tdb, spawner, threads };
   }
 
@@ -65,11 +68,13 @@ describe("PluginThreads.spawnChild", () => {
     });
     // No integration actions unless the plugin asks for them.
     expect(req.toolScope).toEqual({ actions: [] });
-    expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false });
+    expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false, pluginDeliveryId: "del-1" });
   });
 
   it("returns the existing child on a retry of the same dispatch", async () => {
     const { tdb, spawner, threads } = await setup();
+    // The retrying run's delivery is still live.
+    await tdb.appDb.insert(eventDeliveries).values({ id: "del-1", eventId: "ev-1", subscriptionId: "sub-1", status: "failed", attempts: 1, nextAttemptAt: Date.now(), createdAt: Date.now() });
     const childSessionId = pluginChildSessionId("reviewer", owner, thread.key, "verify:abc:0");
     await tdb.appDb.insert(childWatches).values({
       childSessionId,
@@ -115,7 +120,142 @@ describe("PluginThreads.spawnChild", () => {
   });
 });
 
+describe("PluginThreads child stopping", () => {
+  async function setup() {
+    const tdb = await freshTestPgDb();
+    const spawner = vi.fn<ChildSpawner>(async (req) => ({ childSessionId: req.sessionId ?? "x", queueItemId: "q-1" }));
+    const stopper = vi.fn<ChildStopper>(async () => ({ stopped: 1 }));
+    const engineStore = new InMemorySessionStore();
+    const deps: PluginThreadsDeps = {
+      db: tdb.appDb,
+      engineStore,
+      childSpawner: spawner,
+      childStopper: stopper,
+      resolveThread: async () => ({ sessionId: thread.sessionId, threadId: thread.threadId }),
+    };
+    const cancel = new AbortController();
+    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-new", cancelChildren: cancel.signal });
+    return { tdb, spawner, stopper, engineStore, cancel, deps, threads };
+  }
+
+  async function seedParent(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, engineStore: InMemorySessionStore, key: string, ownerId: string) {
+    await tdb.appDb.insert(agentSessions).values({
+      id: thread.sessionId, userId: "user-1", orgId: "org-1", workspace: "/tmp", status: "active",
+      ownerType: "team", ownerId, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    vi.spyOn(engineStore, "getThread").mockImplementation(async (sessionId, threadId) =>
+      sessionId === thread.sessionId && threadId === thread.threadId
+        ? { id: threadId, sessionId, key, status: "active", queueMode: "followup", createdAt: Date.now(), updatedAt: Date.now() }
+        : null);
+  }
+
+  async function seedDelivery(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, id: string, status: "pending" | "skipped") {
+    await tdb.appDb.insert(eventDeliveries).values({ id, eventId: "ev-1", subscriptionId: "sub-1", status, attempts: 1, nextAttemptAt: Date.now(), createdAt: Date.now() });
+  }
+
+  async function seedWatch(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, childSessionId: string, pluginDeliveryId: string | null = null) {
+    await tdb.appDb.insert(childWatches).values({
+      childSessionId, queueItemId: "q-1", parentSessionId: thread.sessionId, parentThreadId: thread.threadId,
+      actorUserId: "user-1", orgId: "org-1", createdAt: Date.now(), reportToParent: false, pluginDeliveryId,
+    });
+  }
+
+  it("stops a child of one of this plugin's threads in this workspace", async () => {
+    const { tdb, stopper, engineStore, threads } = await setup();
+    await seedParent(tdb, engineStore, thread.key, owner.id);
+    await seedWatch(tdb, "child_plg_a");
+    expect(await threads.stopChild({ childSessionId: "child_plg_a", queueItemId: "q-1" })).toEqual({ stopped: 1 });
+    expect(stopper).toHaveBeenCalledWith({ childSessionId: "child_plg_a" }, { parentSessionId: thread.sessionId, parentThreadId: thread.threadId });
+  });
+
+  it.each([
+    ["another plugin's thread", pluginThreadKey("other", "k"), owner.id],
+    ["another workspace's thread", thread.key, "team-2"],
+  ])("refuses to stop a child of %s", async (_label, key, ownerId) => {
+    const { tdb, stopper, engineStore, threads } = await setup();
+    await seedParent(tdb, engineStore, key, ownerId);
+    await seedWatch(tdb, "child_plg_a");
+    await expect(threads.stopChild({ childSessionId: "child_plg_a", queueItemId: "q-1" })).rejects.toThrow("was not started by plugin reviewer");
+    await expect(threads.stopChild({ childSessionId: "child_none", queueItemId: "q-1" })).rejects.toThrow("was not started by plugin reviewer");
+    expect(stopper).not.toHaveBeenCalled();
+  });
+
+  it("takes over a reused child for this delivery, and after a cancel stops a late spawn and starts no more", async () => {
+    const { tdb, stopper, spawner, cancel, threads } = await setup();
+    await seedDelivery(tdb, "del-new", "pending");
+    const found = pluginChildSessionId("reviewer", owner, thread.key, "found");
+    await seedWatch(tdb, found, "del-old");
+    await threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "found" });
+    const [row] = await tdb.appDb.select({ d: childWatches.pluginDeliveryId }).from(childWatches).where(eq(childWatches.childSessionId, found));
+    // Cancelling the delivery that first started it must not stop it now.
+    expect(row?.d).toBe("del-new");
+
+    // A spawn that lands after the cancel is stopped at once.
+    let land: () => void = () => {};
+    const landed = new Promise<void>((r) => { land = r; });
+    spawner.mockImplementationOnce(async (req) => { await landed; return { childSessionId: req.sessionId ?? "x", queueItemId: "q-late" }; });
+    const late = threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "racing" });
+    await vi.waitFor(() => expect(spawner).toHaveBeenCalled());
+    cancel.abort();
+    land();
+    const lateChild = await late;
+    await vi.waitFor(() => expect(stopper).toHaveBeenCalledWith({ childSessionId: lateChild.childSessionId }, { parentSessionId: thread.sessionId, parentThreadId: thread.threadId }));
+    await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "after" })).rejects.toThrow("This plugin run was cancelled");
+  });
+
+  it("never takes a child back once this run's delivery was superseded elsewhere", async () => {
+    const { tdb, threads } = await setup();
+    // Another process skipped this run's delivery; the run has not noticed yet.
+    await seedDelivery(tdb, "del-new", "skipped");
+    const shared = pluginChildSessionId("reviewer", owner, thread.key, "shared");
+    await seedWatch(tdb, shared, "del-newer");
+    await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "shared" })).rejects.toMatchObject({ name: "AbortError" });
+    const [row] = await tdb.appDb.select({ d: childWatches.pluginDeliveryId }).from(childWatches).where(eq(childWatches.childSessionId, shared));
+    expect(row?.d).toBe("del-newer");
+  });
+
+  it("refuses to wait on a child or a reply outside this plugin's threads", async () => {
+    const { tdb, engineStore, threads } = await setup();
+    await seedParent(tdb, engineStore, pluginThreadKey("other", "k"), owner.id);
+    await seedWatch(tdb, "child_plg_a");
+    await expect(threads.awaitChild({ childSessionId: "child_plg_a", queueItemId: "q-1" })).rejects.toThrow("was not started by plugin reviewer");
+    await expect(threads.awaitReply({ sessionId: thread.sessionId, threadId: thread.threadId, queueItemId: "q-x" }))
+      .rejects.toThrow("is not in a thread of plugin reviewer");
+  });
+});
+
+describe("stopPluginDeliveryChildren", () => {
+  it("stops the unsettled children recorded against the deliveries, and only those", async () => {
+    const tdb = await freshTestPgDb();
+    const stopper = vi.fn<ChildStopper>(async () => ({ stopped: 1 }));
+    const watch = (childSessionId: string, pluginDeliveryId: string | null, settled = false) => ({
+      childSessionId, queueItemId: "q", parentSessionId: "p", parentThreadId: "t", actorUserId: "u", orgId: "o",
+      createdAt: Date.now(), reportToParent: false, pluginDeliveryId, settled,
+    });
+    await tdb.appDb.insert(childWatches).values([
+      watch("c-a", "del-a"), watch("c-a2", "del-a"), watch("c-done", "del-a", true), watch("c-b", "del-b"), watch("c-none", null),
+    ]);
+    expect(await stopPluginDeliveryChildren({ db: tdb.appDb, childStopper: stopper }, ["del-a"])).toBe(2);
+    expect(stopper.mock.calls.map(([req]) => req.childSessionId).sort()).toEqual(["c-a", "c-a2"]);
+    expect(stopper).toHaveBeenCalledWith({ childSessionId: "c-a" }, { childSessionId: "c-a", parentSessionId: "p", parentThreadId: "t" });
+  });
+});
+
 describe("awaitSubmission", () => {
+  it("ends with an AbortError when the handler run stops", async () => {
+    const store = new InMemorySessionStore();
+    const now = Date.now();
+    vi.spyOn(store, "getQueueItem").mockResolvedValue({
+      id: "q", threadId: "t", content: "work", status: "running", attemptCount: 1, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    const stop = new AbortController();
+    // A long poll interval: the abort must end the wait, not the next poll.
+    const waiting = awaitSubmission({ engineStore: store, pollMs: 60_000 }, { sessionId: "s", queueItemId: "q" }, { signal: stop.signal });
+    setTimeout(() => stop.abort("plugin-line-off"), 20);
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+
   it("reads a settled child's final message and validates it against the result schema", async () => {
     const faux = registerFauxProvider({ provider: "plugin-threads-test" });
     faux.setResponses([fauxAssistantMessage('Done.\n```json\n{"verdict": "confirmed", "line": 12}\n```')]);

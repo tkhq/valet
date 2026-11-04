@@ -699,6 +699,9 @@ export const childWatches = pgTable(
     // False for a plugin's child: its settlement does not wake the parent
     // thread, because the plugin reads the result itself (plugin-threads.ts).
     reportToParent: boolean("report_to_parent").notNull().default(true),
+    /** The plugin event delivery whose run started or adopted this child.
+     * Cancelling that delivery (line off, superseded) stops the child. */
+    pluginDeliveryId: text("plugin_delivery_id"),
     // Reply-route state, kept apart from the origin above, which never
     // changes and also decides transcript sharing. "origin": the origin's
     // own reply policy, written only at spawn. "manual": explicit replies

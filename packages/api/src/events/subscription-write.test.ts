@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
@@ -173,5 +174,21 @@ describe("plugin targets", () => {
     expect(validateSubscription([githubPlugin, reviewer], body({ handler: "nope" }))).toContain("Unknown plugin handler reviewer/nope");
     expect(validateSubscription([githubPlugin, reviewer], body({}, ["github.issues.opened"]))).toContain("does not accept github.issues.opened");
     expect(validateSubscription([githubPlugin, reviewer], body({ thread: { mode: "new" } }))).toContain("Remove the thread from this plugin line");
+  });
+
+  it("checks a line's settings against the handler's schema", () => {
+    const configured: ValetPlugin = {
+      ...reviewer,
+      eventHandlers: [{
+        ...reviewer.eventHandlers![0]!,
+        configSchema: Type.Object({ instructions: Type.Optional(Type.String()), minSeverity: Type.Union([Type.Literal("low"), Type.Literal("high")], { default: "low" }) }),
+      }],
+    };
+    expect(validateSubscription([githubPlugin, configured], body({}))).toBeNull();
+    expect(validateSubscription([githubPlugin, configured], body({ config: { instructions: "Check auth paths." } }))).toBeNull();
+    expect(validateSubscription([githubPlugin, configured], body({ config: { minSeverity: "medium" } })))
+      .toContain("Settings for reviewer/review do not match its schema: /minSeverity");
+    expect(validateSubscription([githubPlugin, configured], body({ config: ["x"] }))).toBe("config must be an object of handler settings. Remove it, or pass an object.");
+    expect(validateSubscription([githubPlugin, reviewer], body({ config: {} }))).toBe("Handler reviewer/review takes no settings. Remove config.");
   });
 });

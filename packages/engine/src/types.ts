@@ -3402,6 +3402,9 @@ export type ChildSpawner = (
     /** False: the child's settlement does not wake the parent thread. A
      * plugin that spawned the child reads its result itself. Default true. */
     reportToParent?: boolean;
+    /** The plugin event delivery that started the child. Cancelling that
+     * delivery stops the child. Absent for every other child. */
+    pluginDeliveryId?: string;
   },
 ) => Promise<SpawnChildResult>;
 
