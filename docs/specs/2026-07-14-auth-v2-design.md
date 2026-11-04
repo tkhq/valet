@@ -176,14 +176,6 @@ The auth middleware sends a `vltc_` value to `verifyCliAccessToken` instead of b
 
 `valet proxy setup` uses the same routes with `purpose: "proxy-key"` (`docs/specs/2026-10-27-cli-proxy-setup-design.md`). The CLI starts the request with its CLI token. Only that token's user can approve it. The approved poll returns an API key with `metadata.scope = "proxy"` instead of a token pair. `identityFromApiKey` refuses a proxy-scoped key, so the key works only at the LLM proxy gateway. `AGENT_WRITES` gets one route, `DELETE /api/proxy/keys/:id`, which deletes only proxy-scoped keys.
 
-### CLI behind Cloudflare Access
-
-An instance can sit behind a Cloudflare Access app that accepts only an Access session. Access redirects every other request to `<team>.cloudflareaccess.com`, and `fetch` follows the redirect to an HTML login page. Cloudflare's method for a person's CLI is `cloudflared access`: a browser sign-in once, then a token in a `cf-access-token` header (https://developers.cloudflare.com/cloudflare-one/tutorials/cli/).
-
-`cli/cloudflare-access.ts` holds this logic. `withAccess` sends a request. If the response was redirected to an Access host, or is a 3xx whose `location` is one, it gets a token and sends the request once more with the header. If no token passes, it throws `AuthError` with the `cloudflared` steps. The token comes from `VALET_CF_ACCESS_TOKEN`, else `cloudflared access token -app=<origin>`. When that has no token and stdin and stderr are a terminal, the CLI runs `cloudflared access login <origin>` (its output goes to stderr), then asks for the token again. The process keeps one lookup and one token per origin.
-
-`InstanceClient`, the device sign-in requests, and the `auth-config` read in `valet login` use `withAccess`, so an instance without Access never runs `cloudflared`. The stream socket sends the token on the upgrade when the process has one. A WebSocket client cannot read the upgrade's redirect, so when the first connection fails before any frame, the stream checks `GET /api/health` once with `withAccess` and connects again with the token. The `valet proxy` harnesses and `/mcp` clients do not send the header; the Access app must exempt `/proxy` and `/mcp`, which use Valet's own auth.
-
 ### Agent access
 
 Settings > Agent access (`routes/agent-access.ts`, `GET /api/me/agent-access`) lists the MCP apps that hold OAuth tokens for the person and the CLIs signed in with `valet login`. Disconnect deletes the app's `oauthAccessToken` and `oauthConsent` rows, or the CLI's `cli_tokens` row, so it stops working at once. An agent credential cannot disconnect anything.

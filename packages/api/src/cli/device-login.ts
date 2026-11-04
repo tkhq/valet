@@ -12,7 +12,6 @@
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
-import { withAccess } from "./cloudflare-access.js";
 import type { PendingLogin } from "./config.js";
 import type { CliDeviceCodeResponse, CliProxyKeyResponse, CliTokenResponse } from "../wire/types.js";
 
@@ -35,13 +34,12 @@ async function post<T>(
   body: unknown,
   headers: Record<string, string> = {},
 ): Promise<{ status: number; body: T | { error?: string; error_description?: string } }> {
-  const res = await withAccess(url, async (access) => {
-    try {
-      return await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers, ...access }, body: JSON.stringify(body) });
-    } catch (err) {
-      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
-    }
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  } catch (err) {
+    throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+  }
   const text = await res.text();
   try {
     // The routes answer JSON; a non-JSON body is a proxy or a wrong URL.
