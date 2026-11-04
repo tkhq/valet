@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { buildVerifierPrompt, createVerifierSpec, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { anchorProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -17,7 +17,9 @@ function repo(): { dir: string; base: string; head: string } {
   g("commit", "-qm", "base");
   const base = g("rev-parse", "HEAD");
   writeFileSync(join(dir, "a.py"), "x = 1\ny = x / 0\n");
-  g("commit", "-qam", "head");
+  writeFileSync(join(dir, "b.py"), "z = 1\n");
+  g("add", ".");
+  g("commit", "-qm", "head");
   return { dir, base, head: g("rev-parse", "HEAD") };
 }
 
@@ -81,7 +83,7 @@ describe("runReviewPipeline", () => {
       const findings =
         spec.label === "review"
           ? [finding("Division by zero")]
-          : [{ ...finding("Divides by zero again"), line: 3 }, { ...finding("Other file"), path: "b.py" }];
+          : [{ ...finding("Divides by zero again"), line: 1 }, { ...finding("Other file"), path: "b.py", line: 1 }];
       await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
       return { outcome: "completed" };
     };
@@ -206,5 +208,49 @@ describe("buildVerifierPrompt", () => {
     expect(remote).toContain("(no changes to this file in the PR)");
     expect(remote).toContain("posted this claim on commit abc");
     expect(remote.endsWith("Answer in JSON.")).toBe(true);
+  });
+});
+
+describe("line anchors", () => {
+  it("flags a line past the end of the file and a file the PR does not change", () => {
+    const counts = new Map([["users.ts", 22]]);
+    const at = (path: string, line: number) => ({ ...finding("F"), path, line });
+    const problems = anchorProblems([at("users.ts", 22), at("users.ts", 50), at("other.ts", 3)], counts);
+    expect(problems.map((p) => p.index)).toEqual([1, 2]);
+    expect(problems[0].problem).toContain("has 22 lines at HEAD, so line 50 does not exist");
+    expect(problems[1].problem).toContain("not a file this PR adds or changes");
+    expect([lineCount(""), lineCount("a\n"), lineCount("a\nb"), lineCount("a\nb\n")]).toEqual([0, 1, 2, 2]);
+  });
+
+  it("submit_review refuses lines past the end twice, then drops those findings", async () => {
+    const { dir, base, head } = repo();
+    const spec = await createReviewerSpec({ workspace: dir, base, head, title: "t", body: "" });
+    const tool = spec.tools.find((t) => t.name === "submit_review");
+    if (!tool) throw new Error("no submit_review tool");
+    // The submit tool ignores its context.
+    const call = async (findings: unknown[]) => tool.execute({ summary: "s", confidence: 3, findings } as never, {} as ToolContext);
+    const past = { ...finding("Past the end"), line: 50 };
+    const first = await call([finding("Division by zero"), past]);
+    expect(JSON.stringify(first)).toContain("a.py has 2 lines at HEAD, so line 50 does not exist");
+    expect(spec.review()).toBeUndefined();
+    await call([finding("Division by zero"), past]);
+    expect(spec.review()).toBeUndefined();
+    const third = await call([finding("Division by zero"), past]);
+    expect(JSON.stringify(third)).toContain("without 1 finding(s)");
+    expect(spec.review()?.findings.map((f) => f.title)).toEqual(["Division by zero"]);
+  });
+
+  it("treats a submodule the PR adds as a one-line file", async () => {
+    const { dir, base } = repo();
+    const g = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+    g("update-index", "--add", "--cacheinfo", `160000,${base},sub`);
+    g("commit", "-qm", "add submodule");
+    const head = g("rev-parse", "HEAD");
+    const spec = await createReviewerSpec({ workspace: dir, base, head, title: "t", body: "" });
+    const tool = spec.tools.find((t) => t.name === "submit_review");
+    if (!tool) throw new Error("no submit_review tool");
+    // The submit tool ignores its context.
+    await tool.execute({ summary: "s", confidence: 3, findings: [{ ...finding("Accidental submodule"), path: "sub", line: 1 }] } as never, {} as ToolContext);
+    expect(spec.review()?.findings.map((f) => f.path)).toEqual(["sub"]);
   });
 });

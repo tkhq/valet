@@ -18,7 +18,7 @@ How to work:
 7. Before you submit, go through the diff once more, file by file, and ask what else in that file could fail. Missing a real defect is as costly as reporting a false one.
 
 What to report:
-- Every finding anchors to one line in the HEAD version of a changed file, on or near the faulty code.
+- Every finding anchors to one line in the HEAD version of a changed file, on or near the faulty code. Take the number from \`read\` output, or from the hunk header: in \`@@ -a,b +c,d @@\` the first line of the hunk is HEAD line c. Do not use a base-version line number or a position in the diff.
 - One finding is one defect. Readers treat every problem a comment mentions as its own report, so a finding must not mention a second problem, a follow-on effect, a related risk, or an alternative fix.
 - Report every distinct defect you find, each as its own finding, including real low-severity ones. If explaining one finding would mention another problem, make that problem a separate finding instead.
 - Title: one line that names the defect and where it is.

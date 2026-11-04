@@ -1,6 +1,8 @@
 export {
+  anchorProblems,
   createLocalAgentRunner,
   createReviewerSpec,
+  lineCount,
   reviewPullRequest,
   type LlmGatewayConfig,
   type LocalAgentRunnerOptions,

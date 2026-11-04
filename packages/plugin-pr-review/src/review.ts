@@ -11,13 +11,15 @@ import {
   type SessionEntry,
   type ToolDef,
 } from "@valet/engine";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { Value } from "typebox/value";
 import { reviewerBashTool } from "./bash.js";
-import { diffPullRequest } from "./git.js";
+import { diffPullRequest, git } from "./git.js";
 import { runReviewPipeline, type AgentRunner, type AgentRunResult, type AgentSpec } from "./pipeline.js";
 import { buildReviewPrompt, REVIEWER_SYSTEM_PROMPT } from "./prompt.js";
-import { ReviewSchema, type Review, type ReviewRun, type ReviewUsage } from "./types.js";
+import { ReviewSchema, type Finding, type Review, type ReviewRun, type ReviewUsage } from "./types.js";
 
 /** Built-in tools the reviewer keeps. Everything that writes or delegates is dropped; bash is the reviewer's own. */
 const REVIEWER_BUILTINS = new Set(["read"]);
@@ -83,13 +85,69 @@ export interface ReviewerSpecOptions {
   knownFindings?: { path: string; line: number; title: string }[];
 }
 
+/** Lines in a file's text; a trailing newline does not start another line. */
+export function lineCount(text: string): number {
+  if (text.length === 0) return 0;
+  const n = text.split("\n").length;
+  return text.endsWith("\n") ? n - 1 : n;
+}
+
+/**
+ * Findings whose anchor cannot exist: a path the PR does not add or change
+ * at HEAD, or a line past the end of the file. `lineCounts` maps each such
+ * path to its line count at HEAD. A line outside the diff hunks is not a
+ * problem: hosts post those findings outside the inline comments.
+ */
+export function anchorProblems(findings: Finding[], lineCounts: ReadonlyMap<string, number>): { index: number; problem: string }[] {
+  const problems: { index: number; problem: string }[] = [];
+  findings.forEach((f, index) => {
+    const n = lineCounts.get(f.path);
+    if (n === undefined) {
+      problems.push({ index, problem: `${f.path} is not a file this PR adds or changes at HEAD. Anchor the finding to a line of a changed file.` });
+    } else if (f.line > n) {
+      problems.push({ index, problem: `${f.path} has ${n} lines at HEAD, so line ${f.line} does not exist. Read the file and give the line of the faulty code.` });
+    }
+  });
+  return problems;
+}
+
+/**
+ * Line count at `head` of each path that still exists there. A deleted file
+ * is absent. A submodule counts as one line: its diff shows one
+ * "Subproject commit" line, and an empty directory stands in the checkout.
+ */
+async function headLineCounts(workspace: string, head: string, paths: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (paths.length === 0) return counts;
+  const tree = await git(workspace, ["ls-tree", "-z", head, "--", ...paths]).catch(() => "");
+  for (const entry of tree.split("\0").filter(Boolean)) {
+    // "<mode> <type> <sha>\t<path>"
+    const tab = entry.indexOf("\t");
+    const type = entry.slice(0, tab).split(" ")[1];
+    const path = entry.slice(tab + 1);
+    if (type === "commit") counts.set(path, 1);
+    else if (type === "blob") {
+      const text = await readFile(join(workspace, path), "utf8").catch(() => undefined);
+      if (text !== undefined) counts.set(path, lineCount(text));
+    }
+  }
+  return counts;
+}
+
+/** Times submit_review refuses bad anchors before it drops those findings instead. */
+const ANCHOR_REFUSALS = 2;
+
 export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<ReviewerSpec> {
   const budget = opts.diffBudgetChars ?? DEFAULT_DIFF_BUDGET;
   let diff = await diffPullRequest(opts.workspace, opts.base, opts.head, budget);
+  // A follow-up review may still anchor to any file of the PR.
+  const prFiles = diff.files;
   if (opts.incrementFrom !== undefined) {
     // Only the PR's own files: a merge of the base branch into the PR is not new PR code.
     diff = await diffPullRequest(opts.workspace, opts.incrementFrom, opts.head, budget, diff.files);
   }
+  const lineCounts = await headLineCounts(opts.workspace, opts.head, prFiles);
+  let refusals = 0;
   let submitted: Review | undefined;
   const submitReview: ToolDef<typeof ReviewSchema> = {
     name: "submit_review",
@@ -101,8 +159,16 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
         const first = [...Value.Errors(ReviewSchema, args)].slice(0, 3);
         return { text: `Review rejected: ${first.map((e) => `${e.instancePath} ${e.message}`).join("; ")}. Fix and call again.` };
       }
-      submitted = args;
-      return { text: "Review recorded. Stop now." };
+      const problems = anchorProblems(args.findings, lineCounts);
+      if (problems.length > 0 && refusals < ANCHOR_REFUSALS) {
+        refusals++;
+        return {
+          text: `Review rejected: ${problems.map((p) => `finding ${p.index + 1} (${args.findings[p.index].path}:${args.findings[p.index].line}): ${p.problem}`).join(" ")} Fix the lines and call submit_review again with every finding.`,
+        };
+      }
+      const bad = new Set(problems.map((p) => p.index));
+      submitted = { ...args, findings: args.findings.filter((_, i) => !bad.has(i)) };
+      return { text: bad.size > 0 ? `Review recorded without ${bad.size} finding(s) whose line does not exist. Stop now.` : "Review recorded. Stop now." };
     },
   };
   return {
