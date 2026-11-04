@@ -24,7 +24,8 @@ import {
   type PostedFinding,
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
-import { decideFinding, VerdictSchema, type Verdict } from "./verify.js";
+import { anchorProblems, lineCount } from "./review.js";
+import { buildVerifierPrompt, decideFinding, VerdictSchema, type Verdict } from "./verify.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
 export const VERIFIER_ROLE = "pr-verifier";
@@ -48,6 +49,10 @@ export const ReviewSettingsSchema = Type.Object(
       description: "Post only findings at this severity or above.",
     }),
     reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests too." }),
+    verify: Type.Boolean({
+      default: false,
+      description: "Check each new finding in its own verifier child before posting. Rechecks of earlier findings run either way.",
+    }),
     model: Type.String({
       default: "anthropic/claude-sonnet-5-5",
       description: "provider/model for the reviewer and verifier children.",
@@ -194,7 +199,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`recheck:${f.id}`),
       model: settings.model,
-      prompt: verifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path), ...(prior?.lastReviewedHead ? { recheckFrom: prior.lastReviewedHead } : {}) }),
+      prompt: buildVerifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path), finish: VERDICT_FINISH, ...(prior?.lastReviewedHead ? { recheckFrom: prior.lastReviewedHead } : {}) }),
       title: `Recheck ${f.id} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
@@ -241,15 +246,22 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   const [draft] = await Promise.all([review, recheck]);
 
-  // 3. Verify each new finding in a fresh child; refuted ones are dropped.
-  const candidates = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
+  // 3. Drop findings on a line that does not exist at HEAD: the reviewer
+  // child answers through awaitChild, so no tool refused them.
+  const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
+  const lineCounts = await headLineCounts(gh, files, inPaths.map((f) => f.path), head);
+  const misplaced = new Set(anchorProblems(inPaths, lineCounts).map((p) => p.index));
+  if (misplaced.size > 0) log(slug, `dropped ${misplaced.size} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
+  const candidates = inPaths.filter((_, i) => !misplaced.has(i));
+
+  // 4. With `verify` on, check each new finding in a fresh child; refuted ones are dropped.
   const kept: Finding[] = [];
   await forEachLimit(candidates.map((f, i) => ({ f, i })), CHILD_CONCURRENCY, async ({ f, i }) => {
-    if (i >= MAX_VERIFIED) return void kept.push(f);
+    if (!settings.verify || i >= MAX_VERIFIED) return void kept.push(f);
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`verify:${i}`),
       model: settings.model,
-      prompt: verifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path) }),
+      prompt: buildVerifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path), finish: VERDICT_FINISH }),
       title: `Verify finding ${i + 1} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
@@ -258,7 +270,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (decision.keep) kept.push(f);
   });
 
-  // 4. New findings: drop repeats of open ones and those below the minimum severity, then assign ids.
+  // 5. New findings: drop repeats of open ones and those below the minimum severity, then assign ids.
   const minRank = SEVERITY_ORDER.indexOf(settings.minSeverity);
   let nextId = prior?.nextId ?? 1;
   const posted: PostedFinding[] = [];
@@ -272,12 +284,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     posted.push({ ...f, id: `f${nextId++}` });
   }
 
-  // 5. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
+  // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, commentableLines(f.patch ?? "")]));
   let inline = posted.filter((f) => anchorable.get(f.path)?.has(f.line) ?? false);
   let outside = posted.filter((f) => !inline.includes(f));
 
-  // 6. Post: one summary review, edited in place, plus inline comments.
+  // 7. Post: one summary review, edited in place, plus inline comments.
   ctx.signal.throwIfAborted();
   const summaryOf = (): string =>
     renderSummary({
@@ -328,7 +340,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     });
   }
 
-  // 7. Save the new pointers.
+  // 8. Save the new pointers.
   const byId = new Map<string, FindingPointer>((prior?.findings ?? []).map((p) => [p.id, p]));
   for (const id of open.dismissed) {
     const p = byId.get(id);
@@ -416,32 +428,23 @@ export function reviewerPrompt(input: { review: string; instructions: string; ex
   ].join("\n");
 }
 
-/** The verifier's prompt, the same claim and diff `createVerifierSpec` gives a local verifier. */
-export function verifierPrompt(input: { title: string; base: string; head: string; finding: Finding; fileDiff: string; recheckFrom?: string }): string {
-  const f = input.finding;
-  return [
-    `# Pull request: ${input.title}`,
-    `BASE commit: ${input.base}`,
-    `HEAD commit: ${input.head} (checked out)`,
-    "",
-    "## Claim to check",
-    input.recheckFrom !== undefined
-      ? `A reviewer posted this claim on commit ${input.recheckFrom}. Later commits changed the code at that line. Check whether the defect is still present at HEAD; the line may have moved. Refute it if the new code fixes it.`
-      : "Another reviewer posted this claim. Check it against the code.",
-    `File: ${f.path}, line ${f.line} (HEAD)`,
-    `Severity claimed: ${f.severity}, category: ${f.category}`,
-    `Title: ${f.title}`,
-    `Body: ${f.body}`,
-    "",
-    `## Diff of ${f.path}`,
-    "```diff",
-    input.fileDiff.trimEnd() || "(no changes to this file in the PR)",
-    "```",
-    "",
-    "Check the claim, then give your verdict.",
-    "",
-    answerFormat(VerdictSchema),
-  ].join("\n");
+/** How a verifier child ends: JSON the verdict schema accepts, not a submit tool. */
+const VERDICT_FINISH = `Check the claim, then give your verdict.\n\n${answerFormat(VerdictSchema)}`;
+
+/**
+ * Line count at HEAD of each path a finding names, for `anchorProblems`.
+ * Only files the PR adds or changes count; a file GitHub will not return
+ * as text (a submodule) counts as one line.
+ */
+async function headLineCounts(gh: GitHubClient, files: PullFile[], paths: string[], head: string): Promise<Map<string, number>> {
+  const present = new Set(files.filter((f) => f.status !== "removed").map((f) => f.filename));
+  const counts = new Map<string, number>();
+  for (const path of new Set(paths)) {
+    if (!present.has(path)) continue;
+    const text = await gh.fileText(path, head);
+    counts.set(path, text === undefined ? 1 : lineCount(text));
+  }
+  return counts;
 }
 
 /** The PR diff limited to the reviewed files, cut to the budget. */

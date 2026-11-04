@@ -78,7 +78,7 @@ export interface SummaryInput {
   /** Open findings on lines GitHub cannot comment on: their text lives here. */
   outsideDiff: PostedFinding[];
   fixed: { finding: Pick<PostedFinding, "id" | "title" | "path">; sha: string }[];
-  /** Findings the reviewer reported that the line's settings hid. */
+  /** Findings the reviewer reported that the line's settings or a missing line hid. */
   hidden: number;
 }
 
@@ -109,7 +109,7 @@ export function renderSummary(s: SummaryInput): string {
     for (const f of s.outsideDiff) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
     lines.push("</details>");
   }
-  if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) below the line's minimum severity or in excluded paths are not shown.`);
+  if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);
   return lines.join("\n");
 }
 

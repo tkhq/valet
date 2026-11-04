@@ -91,7 +91,8 @@ class FakeGitHub {
     if (method === "GET" && path === "/pulls/7/files") {
       return ok(url.searchParams.get("page") === "1" ? [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3, patch: PATCH_A }] : []);
     }
-    if (method === "GET" && path.startsWith("/contents/")) return ok(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n"));
+    // a.ts has 60 lines; the diff covers lines 1-20.
+    if (method === "GET" && path.startsWith("/contents/")) return ok(Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n"));
     if (method === "GET" && path === "/pulls/7/comments") {
       const all = this.comments.map((c) => ({ ...c, original_line: c.line, html_url: `https://github.com/c/${c.id}` }));
       return ok(url.searchParams.get("page") === "1" ? all : []);
@@ -250,7 +251,7 @@ describe("review-pull-request handler", () => {
         { "Refuted race in cache": verdict("refuted") },
       ),
     );
-    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, store));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, store, { verify: true }));
 
     expect(gh.reviews.size).toBe(1);
     const [review] = [...gh.reviews.values()];
@@ -394,8 +395,28 @@ describe("review-pull-request handler", () => {
     await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store, { minSeverity: "medium", excludePaths: ["gen/"] }));
     const body = [...gh.reviews.values()][0].body;
     expect(body).toContain("Open findings (1)");
-    expect(body).toContain("2 finding(s) below the line's minimum severity or in excluded paths");
+    expect(body).toContain("2 finding(s) are not shown");
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- `gen/`");
+  });
+
+  it("starts no verifier when the line leaves verify off", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 9, title: "Second bug" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    expect(threads.spawned.map((s) => s.req.role)).toEqual(["pr-reviewer"]);
+    expect(store.pointers()?.findings).toHaveLength(2);
+  });
+
+  it("drops a finding on a line past the end of its file", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([finding({ line: 61, title: "Past the end" }), finding({ path: "b.ts", title: "Unchanged file" }), finding({ title: "Real" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    const body = [...gh.reviews.values()][0].body;
+    expect(body).toContain("Open findings (1)");
+    expect(body).not.toContain("Past the end");
+    expect(body).toContain("2 finding(s) are not shown");
   });
 
   it("moves inline findings into the summary when GitHub refuses their lines", async () => {

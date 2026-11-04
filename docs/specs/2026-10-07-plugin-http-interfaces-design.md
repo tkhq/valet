@@ -294,10 +294,10 @@ The first handler is `pr-review/review-pull-request` (`packages/plugin-pr-review
 1. Reads the pull request's head from GitHub, and skips a closed PR, a draft (unless the line's `reviewDrafts` is on), or a head it already reviewed.
 2. Posts a notice instead of a review for a fork PR, because a child cannot check out a fork's head.
 3. Starts a `pr-reviewer` child at the head sha with the diff in its prompt, and reads the findings JSON through `resultSchema`. A later push gets a diff of only the new commits; a force-push gets the whole PR again.
-4. Starts one `pr-verifier` child per new finding, and one per open finding in a file the new commits changed. A refuted recheck marks the finding fixed.
+4. Drops a finding on a line that does not exist at the head. With the line's `verify` setting on, starts one `pr-verifier` child per new finding. It always starts one per open finding in a file the new commits changed; a refuted recheck marks the finding fixed.
 5. Posts one summary review per PR and edits it in place. New findings on diff lines become inline comments. Findings on other lines stay in the summary.
 6. Saves the review id, the reviewed head, and each finding's id, path, line and comment id. The finding text stays in the GitHub comments, and the next run reads it back from their markers.
 
-Line settings: `instructions`, `excludePaths`, `minSeverity`, `reviewDrafts` and `model`.
+Line settings: `instructions`, `excludePaths`, `minSeverity`, `reviewDrafts`, `verify` (off by default) and `model`.
 
 Not yet implemented: `threads` on action contexts, a UI for choosing a plugin handler and editing its settings (the API accepts both), Linear app tokens for handlers, usage attribution to the plugin itself, schedules that fire a plugin handler, a child checkout of a fork pull request (`refs/pull/<n>/head`) or of a commit that no branch of the base repository contains, and actions a plugin line may run without asking (consent recorded when a person arms the line, like workflow step grants).
