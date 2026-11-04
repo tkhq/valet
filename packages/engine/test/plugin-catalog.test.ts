@@ -1432,6 +1432,19 @@ it("names a hidden action when a focused search also matches a focused one", asy
   expect((await list.execute({}, ctx)).text).not.toContain("update_schedule");
 });
 
+it("names a hidden action when focused matches fill the default limit", async () => {
+  const reads = Array.from({ length: 8 }, (_, i) => ({ id: `workflows.list_schedules_${i}`, name: `List schedules ${i}`, description: "List cron schedules", riskLevel: "low" as const, parameters: Type.Object({}), execute: async () => ({ success: true }) }));
+  const workflows: ActionPlugin = { service: "workflows", actions: [
+    ...reads,
+    { id: "workflows.update_schedule", name: "Update schedule", description: "Update a cron schedule by id", riskLevel: "high", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+  ] };
+  const list = pluginCatalogTools({ plugins: [workflows] }).find((tool) => tool.name === "list_tools");
+  if (!list) throw new Error("list_tools missing");
+  const ctx = makeCtx({ toolScope: { actions: reads.map((r) => r.id) } });
+  const found = await list.execute({ service: "workflows", query: "schedule" }, ctx);
+  expect(found.text).toContain("outside_focus[1]{tool_id,name,description}:\n  workflows.update_schedule");
+});
+
 it("refuses a guessed dynamic action before discovering or executing it", async () => {
   let discoveries = 0;
   const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };

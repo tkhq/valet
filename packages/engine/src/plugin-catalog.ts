@@ -1429,8 +1429,10 @@ function makeListTool(
       // "update schedule" with list_schedules alone.
       const searched = query.hasInput || Boolean(a.service);
       const outsideFocus = (total === 0 || searched) && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
-        ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true }, ctx))
+        // Filter before the limit: focused matches must not fill the rows.
+        ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true, limit: LIST_LIMIT_MAX }, ctx))
           .filter((t) => !actionInScope(ctx.toolScope, t.tool_id))
+          .slice(0, limit)
         : [];
       const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
       // An outside_focus listing names its own rows, so it needs the same
