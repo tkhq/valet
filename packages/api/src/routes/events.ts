@@ -1394,6 +1394,9 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // validated jsonb, same as `rowToSubscription`.
   const write = await validateSubscriptionWrite(db, plugins, merged, {
     creatorUserId: row.createdBy,
+    // Only a patch that sets the settings re-checks them, as with the thread
+    // policy below.
+    checkPluginConfig: body.config !== undefined,
     ownerType: row.ownerType,
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,

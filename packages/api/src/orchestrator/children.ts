@@ -515,6 +515,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       unattendedWorkflow?: boolean;
       parentQueueItemId?: string;
       reportToParent?: boolean;
+      pluginDeliveryId?: string;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -710,6 +711,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         replyRoute: ctx.origin !== undefined ? ("origin" satisfies ChildReplyRoute) : null,
         batchKey: req.batch?.trim() || null,
         reportToParent: ctx.reportToParent ?? true,
+        pluginDeliveryId: ctx.pluginDeliveryId ?? null,
       })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 

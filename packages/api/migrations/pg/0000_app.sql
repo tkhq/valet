@@ -399,12 +399,15 @@ CREATE TABLE "child_watches" (
 	"reply_route" text,
 	"batch_key" text,
 	"batch_held_json" text,
-	"report_to_parent" boolean DEFAULT true NOT NULL
+	"report_to_parent" boolean DEFAULT true NOT NULL,
+	"plugin_delivery_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
+--> statement-breakpoint
+CREATE INDEX "child_watches_plugin_delivery" ON "child_watches" ("plugin_delivery_id") WHERE "plugin_delivery_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint

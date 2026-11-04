@@ -30,7 +30,7 @@ import type { EventHead } from "../services/event-columns.js";
 import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginEventHandler, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import { and, arrayContains, asc, eq, gt, inArray, lte, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, arrayContains, asc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -100,14 +100,6 @@ function supersededText(label: string): string {
   return `A newer event for ${label} superseded this one.`;
 }
 
-/** Events after `event`: later `occurred_at`, ties broken by id so exactly one of two events is newer. */
-function newerThan(event: typeof events.$inferSelect): SQL {
-  const cond = or(gt(events.occurredAt, event.occurredAt), and(eq(events.occurredAt, event.occurredAt), gt(events.id, event.id)));
-  // `or` is typed as possibly undefined only for an empty argument list.
-  if (!cond) throw new Error("newerThan: empty condition");
-  return cond;
-}
-
 /** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
 function pluginServices(plugin: ValetPlugin): Set<string> {
   return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name)]);
@@ -119,6 +111,13 @@ export interface PluginHandlerHost {
   threads(scope: PluginThreadsScope): PluginThreads;
   /** The org's app credential for `service`, or null when it is not connected. */
   appToken(orgId: string, service: string, scope?: { owner?: string }): Promise<string | null>;
+  /**
+   * Stop the children recorded against these deliveries
+   * (`stopPluginDeliveryChildren` in production). Called when deliveries
+   * are cancelled for good: the line was turned off, or a newer event
+   * superseded them, whether or not their run is live in this process.
+   */
+  stopDeliveryChildren(deliveryIds: string[]): Promise<void>;
   maxConcurrent?: number;
   /** How often a running handler renews its lease and checks its line. Tests shorten it. */
   leaseRenewMs?: number;
@@ -851,7 +850,12 @@ export class EventDispatcher {
     // a lost lease do not: the next run finds those children by dispatch id.
     const cancelChildren = new AbortController();
     abort.signal.addEventListener("abort", () => {
-      if (abort.signal.reason === PLUGIN_LINE_OFF || abort.signal.reason === PLUGIN_SUPERSEDED) cancelChildren.abort(abort.signal.reason);
+      if (abort.signal.reason !== PLUGIN_LINE_OFF && abort.signal.reason !== PLUGIN_SUPERSEDED) return;
+      cancelChildren.abort(abort.signal.reason);
+      // A superseding run already stopped this delivery's children; stopping
+      // twice finds nothing to stop.
+      this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id])
+        .catch((err) => console.error(`plugin delivery ${delivery.id}: stopping children failed:`, err));
     }, { once: true });
     // The lease value is the fence. This run owns the row only while
     // `next_attempt_at` still holds the value it last wrote, so a run that
@@ -923,18 +927,22 @@ export class EventDispatcher {
             .set({ status: "skipped", lastError: supersededText(superseding.label) }).where(owned()));
           return;
         }
-        for (const id of await this.supersedeOlder(sub.id, event, superseding)) {
+        const superseded = await this.supersedeOlder(sub.id, event, superseding);
+        for (const id of superseded) {
           // Same process: stop now. Another process finds its row skipped at
           // its next renewal and stops then.
           this.pluginRuns.get(id)?.abort(PLUGIN_SUPERSEDED);
         }
+        // Children of a superseded delivery stop even when no run holds it,
+        // such as one waiting to retry after a failed attempt.
+        if (superseded.length > 0) await this.deps.pluginHandlers?.stopDeliveryChildren(superseded);
       }
       // The outcome is decided after the run, abort reason first: a handler
       // that ignores `ctx.signal` and returns normally after its line was
       // turned off must not read as delivered.
       let failure: { err: unknown } | undefined;
       try {
-        await this.runPluginDelivery(event, sub, target, abort.signal, cancelChildren.signal);
+        await this.runPluginDelivery(delivery.id, event, sub, target, abort.signal, cancelChildren.signal);
       } catch (err) {
         failure = { err };
       }
@@ -979,36 +987,40 @@ export class EventDispatcher {
    * the line skipped never ran.
    */
   private async newerSubjectDelivery(subscriptionId: string, event: typeof events.$inferSelect, subject: string): Promise<boolean> {
-    const [row] = await this.deps.db.select({ id: eventDeliveries.id })
-      .from(eventDeliveries)
-      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
-      .where(and(
-        eq(eventDeliveries.subscriptionId, subscriptionId),
-        inArray(eventDeliveries.status, ["pending", "failed", "delivered", "dead"]),
-        arrayContains(events.subjects, [subject]),
-        newerThan(event),
-      ))
-      .limit(1);
-    return row !== undefined;
+    const rows = await this.subjectDeliveries(subscriptionId, subject, and(
+      inArray(eventDeliveries.status, ["pending", "failed", "delivered", "dead"]),
+      sql`(${events.occurredAt}, ${events.receivedAt}, ${events.id}) > (${event.occurredAt}, ${event.receivedAt}, ${event.id})`,
+    ));
+    return rows.length > 0;
   }
 
   /** Skip this line's unfinished deliveries of older events for the subject. Returns their ids. */
   private async supersedeOlder(subscriptionId: string, event: typeof events.$inferSelect, subject: { subject: string; label: string }): Promise<string[]> {
-    const { db } = this.deps;
-    const older = db.select({ id: eventDeliveries.id })
-      .from(eventDeliveries)
-      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
-      .where(and(
-        eq(eventDeliveries.subscriptionId, subscriptionId),
-        arrayContains(events.subjects, [subject.subject]),
-        ne(events.id, event.id),
-        sql`NOT ${newerThan(event)}`,
-      ));
-    const rows = await db.update(eventDeliveries)
+    const older = await this.subjectDeliveries(subscriptionId, subject.subject, and(
+      inArray(eventDeliveries.status, ["pending", "failed"]),
+      sql`(${events.occurredAt}, ${events.receivedAt}, ${events.id}) < (${event.occurredAt}, ${event.receivedAt}, ${event.id})`,
+    ));
+    if (older.length === 0) return [];
+    const rows = await this.deps.db.update(eventDeliveries)
       .set({ status: "skipped", lastError: supersededText(subject.label) })
       .where(and(inArray(eventDeliveries.id, older), inArray(eventDeliveries.status, ["pending", "failed"])))
       .returning({ id: eventDeliveries.id });
     return rows.map((r) => r.id);
+  }
+
+  /**
+   * This line's deliveries whose event has `subject` as its natural subject.
+   * The SQL prefilter only finds events that carry the subject; an event
+   * also carries broader subjects (a GitHub PR event names its repo too),
+   * so each candidate's own natural subject must equal `subject`. Otherwise
+   * a repo-level event would supersede every pull request in the repo.
+   */
+  private async subjectDeliveries(subscriptionId: string, subject: string, where: SQL | undefined): Promise<string[]> {
+    const candidates = await this.deps.db.select({ id: eventDeliveries.id, event: events })
+      .from(eventDeliveries)
+      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
+      .where(and(eq(eventDeliveries.subscriptionId, subscriptionId), arrayContains(events.subjects, [subject]), where));
+    return candidates.filter((row) => this.naturalSubject(row.event)?.subject === subject).map((row) => row.id);
   }
 
   /** Why a renewal missed its fence: a superseding run skipped the row, or another run re-claimed it. */
@@ -1019,6 +1031,7 @@ export class EventDispatcher {
   }
 
   private async runPluginDelivery(
+    deliveryId: string,
     event: typeof events.$inferSelect,
     sub: typeof eventSubscriptions.$inferSelect,
     target: SubscriptionTarget,
@@ -1072,10 +1085,10 @@ export class EventDispatcher {
         orgId: sub.orgId,
         owner,
         actorUserId,
-        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, signal, cancelChildren }),
+        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, deliveryId, signal, cancelChildren }),
         config,
         store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
-        memory: buildPluginMemory(this.deps.db, owner, actorUserId),
+        memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId),
         appToken: async (service, scope) => {
           if (!services.has(service)) {
             throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);

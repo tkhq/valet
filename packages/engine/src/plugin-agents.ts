@@ -171,9 +171,11 @@ export interface PluginEventHandler {
    * default) runs every delivery. "supersede" runs only the newest event
    * per subject (the owning plugin's natural subject, such as one pull
    * request): a newer event skips older deliveries that have not finished,
-   * aborts their runs and stops the children those runs started, and a
-   * late older delivery is skipped. Events with no natural subject run in
-   * parallel.
+   * aborts their runs and stops their children, and a late older delivery
+   * is skipped. Only events with the same natural subject compete. Order
+   * is `occurredAt`, then receive time, so read the subject's current state
+   * rather than trusting the event, and put the event id in dispatch ids.
+   * Events with no natural subject run in parallel.
    */
   concurrency?: "parallel" | "supersede";
   handle(event: PluginEvent, ctx: PluginEventContext): Promise<void>;

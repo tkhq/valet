@@ -38,7 +38,7 @@ const TARGET_KINDS = ["workflow", "assistant", "plugin"] as const;
  * A plugin target names a declared handler, and every event key the rule
  * listens for is one the handler accepts. Assistant-only fields are refused.
  */
-function validatePluginTarget(target: Record<string, unknown>, patterns: string[], plugins: ValetPlugin[]): string | undefined {
+function validatePluginTarget(target: Record<string, unknown>, patterns: string[], plugins: ValetPlugin[], checkConfig: boolean): string | undefined {
   if (typeof target.plugin !== "string" || typeof target.handler !== "string") {
     return "A plugin target needs plugin and handler. Pick a handler from the plugin's event handlers.";
   }
@@ -58,6 +58,7 @@ function validatePluginTarget(target: Record<string, unknown>, patterns: string[
   if (config !== undefined && (!isRecord(config) || Array.isArray(config))) {
     return "config must be an object of handler settings. Remove it, or pass an object.";
   }
+  if (!checkConfig) return undefined;
   if (!handler.configSchema) {
     return config === undefined ? undefined : `Handler ${target.plugin}/${target.handler} takes no settings. Remove config.`;
   }
@@ -88,6 +89,7 @@ export function validateSubscription(
     filters: unknown;
     target: unknown;
   },
+  opts: { checkPluginConfig?: boolean } = {},
 ): string | null {
   const entries = allCatalogEntries(plugins);
 
@@ -215,7 +217,7 @@ export function validateSubscription(
     }
   }
   if (target.kind === "plugin") {
-    const error = validatePluginTarget(target, patterns, plugins);
+    const error = validatePluginTarget(target, patterns, plugins, opts.checkPluginConfig ?? true);
     if (error) return error;
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
@@ -274,6 +276,11 @@ export interface SubscriptionWriteScope {
   /** The subscription's creator (`created_by`) — the caller on create, the
    * row's own creator on patch. */
   creatorUserId: string;
+  /** False skips checking a plugin line's settings: a patch that does not
+   * set them must still work after the handler's schema changed, so the
+   * line can be turned off or renamed. The dispatcher checks them at each
+   * delivery. Default true. */
+  checkPluginConfig?: boolean;
   /** The request's explicit any-channel opt-out. */
   anyChannel: boolean;
   ownerType?: "user" | "team" | "org";
@@ -307,7 +314,7 @@ export async function validateSubscriptionWrite(
   | { ok: true; filters: SubscriptionFilter[]; audience: MentionAudience | undefined }
   | { ok: false; error: string }
 > {
-  const error = validateSubscription(plugins, body);
+  const error = validateSubscription(plugins, body, { checkPluginConfig: scope.checkPluginConfig ?? true });
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
       ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." };

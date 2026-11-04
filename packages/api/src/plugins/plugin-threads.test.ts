@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import {
   Engine,
@@ -14,7 +15,7 @@ import {
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions, childWatches } from "../schema/index.js";
-import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, type PluginThreadsDeps } from "./plugin-threads.js";
+import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, stopPluginDeliveryChildren, type PluginThreadsDeps } from "./plugin-threads.js";
 
 const reviewer: ValetPlugin = {
   name: "reviewer",
@@ -48,7 +49,7 @@ describe("PluginThreads.spawnChild", () => {
       childStopper: vi.fn<ChildStopper>(async () => ({ stopped: 0 })),
       resolveThread: async () => ({ sessionId: thread.sessionId, threadId: thread.threadId }),
     };
-    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1" });
+    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-1" });
     return { tdb, spawner, threads };
   }
 
@@ -67,7 +68,7 @@ describe("PluginThreads.spawnChild", () => {
     });
     // No integration actions unless the plugin asks for them.
     expect(req.toolScope).toEqual({ actions: [] });
-    expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false });
+    expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false, pluginDeliveryId: "del-1" });
   });
 
   it("returns the existing child on a retry of the same dispatch", async () => {
@@ -131,7 +132,7 @@ describe("PluginThreads child stopping", () => {
       resolveThread: async () => ({ sessionId: thread.sessionId, threadId: thread.threadId }),
     };
     const cancel = new AbortController();
-    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", cancelChildren: cancel.signal });
+    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-new", cancelChildren: cancel.signal });
     return { tdb, spawner, stopper, engineStore, cancel, deps, threads };
   }
 
@@ -146,10 +147,10 @@ describe("PluginThreads child stopping", () => {
         : null);
   }
 
-  async function seedWatch(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, childSessionId: string) {
+  async function seedWatch(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, childSessionId: string, pluginDeliveryId: string | null = null) {
     await tdb.appDb.insert(childWatches).values({
       childSessionId, queueItemId: "q-1", parentSessionId: thread.sessionId, parentThreadId: thread.threadId,
-      actorUserId: "user-1", orgId: "org-1", createdAt: Date.now(), reportToParent: false,
+      actorUserId: "user-1", orgId: "org-1", createdAt: Date.now(), reportToParent: false, pluginDeliveryId,
     });
   }
 
@@ -173,17 +174,52 @@ describe("PluginThreads child stopping", () => {
     expect(stopper).not.toHaveBeenCalled();
   });
 
-  it("stops every child the run started or found when the run is cancelled, and starts no more", async () => {
-    const { tdb, stopper, cancel, threads } = await setup();
+  it("takes over a reused child for this delivery, and after a cancel stops a late spawn and starts no more", async () => {
+    const { tdb, stopper, spawner, cancel, threads } = await setup();
     const found = pluginChildSessionId("reviewer", owner, thread.key, "found");
-    await seedWatch(tdb, found);
+    await seedWatch(tdb, found, "del-old");
     await threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "found" });
-    const spawned = await threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "fresh" });
-    expect(stopper).not.toHaveBeenCalled();
+    const [row] = await tdb.appDb.select({ d: childWatches.pluginDeliveryId }).from(childWatches).where(eq(childWatches.childSessionId, found));
+    // Cancelling the delivery that first started it must not stop it now.
+    expect(row?.d).toBe("del-new");
+
+    // A spawn that lands after the cancel is stopped at once.
+    let land: () => void = () => {};
+    const landed = new Promise<void>((r) => { land = r; });
+    spawner.mockImplementationOnce(async (req) => { await landed; return { childSessionId: req.sessionId ?? "x", queueItemId: "q-late" }; });
+    const late = threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "racing" });
+    await vi.waitFor(() => expect(spawner).toHaveBeenCalled());
     cancel.abort();
-    await vi.waitFor(() => expect(stopper).toHaveBeenCalledTimes(2));
-    expect(stopper.mock.calls.map(([req]) => req.childSessionId).sort()).toEqual([found, spawned.childSessionId].sort());
-    await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "late" })).rejects.toThrow("This plugin run was cancelled");
+    land();
+    const lateChild = await late;
+    await vi.waitFor(() => expect(stopper).toHaveBeenCalledWith({ childSessionId: lateChild.childSessionId }, { parentSessionId: thread.sessionId, parentThreadId: thread.threadId }));
+    await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "after" })).rejects.toThrow("This plugin run was cancelled");
+  });
+
+  it("refuses to wait on a child or a reply outside this plugin's threads", async () => {
+    const { tdb, engineStore, threads } = await setup();
+    await seedParent(tdb, engineStore, pluginThreadKey("other", "k"), owner.id);
+    await seedWatch(tdb, "child_plg_a");
+    await expect(threads.awaitChild({ childSessionId: "child_plg_a", queueItemId: "q-1" })).rejects.toThrow("was not started by plugin reviewer");
+    await expect(threads.awaitReply({ sessionId: thread.sessionId, threadId: thread.threadId, queueItemId: "q-x" }))
+      .rejects.toThrow("is not in a thread of plugin reviewer");
+  });
+});
+
+describe("stopPluginDeliveryChildren", () => {
+  it("stops the unsettled children recorded against the deliveries, and only those", async () => {
+    const tdb = await freshTestPgDb();
+    const stopper = vi.fn<ChildStopper>(async () => ({ stopped: 1 }));
+    const watch = (childSessionId: string, pluginDeliveryId: string | null, settled = false) => ({
+      childSessionId, queueItemId: "q", parentSessionId: "p", parentThreadId: "t", actorUserId: "u", orgId: "o",
+      createdAt: Date.now(), reportToParent: false, pluginDeliveryId, settled,
+    });
+    await tdb.appDb.insert(childWatches).values([
+      watch("c-a", "del-a"), watch("c-a2", "del-a"), watch("c-done", "del-a", true), watch("c-b", "del-b"), watch("c-none", null),
+    ]);
+    expect(await stopPluginDeliveryChildren({ db: tdb.appDb, childStopper: stopper }, ["del-a"])).toBe(2);
+    expect(stopper.mock.calls.map(([req]) => req.childSessionId).sort()).toEqual(["c-a", "c-a2"]);
+    expect(stopper).toHaveBeenCalledWith({ childSessionId: "c-a" }, { childSessionId: "c-a", parentSessionId: "p", parentThreadId: "t" });
   });
 });
 

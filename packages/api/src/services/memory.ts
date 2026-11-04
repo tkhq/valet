@@ -39,6 +39,12 @@ export interface MemoryScope {
   /** Host-selected execution scope; empty means explicitly shared owner memory. */
   namespace?: string;
   actorUserId: string;
+  /**
+   * Limits the teams and orgs a read reaches to this org. Absent: a
+   * person's read reaches every team and org they belong to. A plugin
+   * handler sets it, so a line in one org never reads another org's memory.
+   */
+  orgId?: string;
 }
 
 // ─── Directory type defaults (OKF spec "Type vocabulary") ─────────────────
@@ -190,6 +196,7 @@ async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<Rea
   if (scope.owner.type === "user") {
     const teams = await listTeamsForUser(db, scope.owner.id);
     for (const team of teams) {
+      if (scope.orgId !== undefined && team.orgId !== scope.orgId) continue;
       owners.push({ ownerType: "team", ownerId: team.id, namespace: "", prefix: `team:${team.id}/` });
     }
   }
@@ -206,15 +213,15 @@ async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<Rea
  * to agents and members.
  */
 async function readableOrgIds(db: AppDb, scope: MemoryScope): Promise<string[]> {
+  let orgIds: string[] = [];
   if (scope.owner.type === "user") {
     const rows = await db.select({ orgId: orgMembers.orgId }).from(orgMembers).where(eq(orgMembers.userId, scope.owner.id));
-    return rows.map((row) => row.orgId);
-  }
-  if (scope.owner.type === "team") {
+    orgIds = rows.map((row) => row.orgId);
+  } else if (scope.owner.type === "team") {
     const rows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, scope.owner.id)).limit(1);
-    return rows.map((row) => row.orgId);
+    orgIds = rows.map((row) => row.orgId);
   }
-  return [];
+  return scope.orgId === undefined ? orgIds : orgIds.filter((id) => id === scope.orgId);
 }
 
 async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<boolean> {
@@ -257,6 +264,10 @@ async function resolveReadTarget(
   if (scope.owner.type !== "user") return null;
   const member = await isTeamMember(db, teamId, scope.owner.id);
   if (!member) return null;
+  if (scope.orgId !== undefined) {
+    const [team] = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, teamId)).limit(1);
+    if (team?.orgId !== scope.orgId) return null;
+  }
   return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
 }
 

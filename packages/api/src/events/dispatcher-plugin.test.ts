@@ -50,7 +50,7 @@ const noThreads: PluginThreads = {
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {
-  return { threads: () => noThreads, appToken, leaseRenewMs: 20 };
+  return { threads: () => noThreads, appToken, stopDeliveryChildren: vi.fn(async () => {}), leaseRenewMs: 20 };
 }
 
 describe("EventDispatcher plugin target", () => {
@@ -62,13 +62,16 @@ describe("EventDispatcher plugin target", () => {
 
   async function seed(opts: {
     ownerType?: "user" | "team"; ownerId?: string; attempts?: number;
-    config?: Record<string, unknown>; subscriptionId?: string; occurredAt?: number; pr?: string; status?: "pending" | "delivered";
+    config?: Record<string, unknown>; subscriptionId?: string; occurredAt?: number; receivedAt?: number;
+    /** The PR number, or null for a repo-level event such as a check suite on main. */
+    pr?: string | null; status?: "pending" | "delivered";
   } = {}) {
     const db = tdb.appDb;
     const now = Date.now();
     const eventId = randomUUID();
     const subscriptionId = opts.subscriptionId ?? randomUUID();
     const deliveryId = randomUUID();
+    const pr = opts.pr === undefined ? "7" : opts.pr;
     await db.insert(events).values({
       id: eventId,
       orgId: ORG,
@@ -76,12 +79,13 @@ describe("EventDispatcher plugin target", () => {
       eventKey: "github.pull_request.synchronize",
       dedupeKey: randomUUID(),
       actor: null,
-      refs: { repo: "acme/site", pr_number: opts.pr ?? "7", head_sha: "abc" },
-      summary: `PR #${opts.pr ?? "7"} updated`,
+      refs: { repo: "acme/site", pr_number: pr ?? "", head_sha: "abc" },
+      summary: pr === null ? "Check suite completed" : `PR #${pr} updated`,
       payload: { action: "synchronize" },
       occurredAt: opts.occurredAt ?? now - 5_000,
-      receivedAt: now,
-      subjects: [`github:acme/site#${opts.pr ?? "7"}`],
+      receivedAt: opts.receivedAt ?? now,
+      // As GitHub ingest stamps them: owner, repo, then the PR.
+      subjects: ["github:acme", "github:acme/site", ...(pr === null ? [] : [`github:acme/site#${pr}`])],
     });
     if (!opts.subscriptionId) await db.insert(eventSubscriptions).values({
       id: subscriptionId,
@@ -266,15 +270,18 @@ describe("EventDispatcher plugin target", () => {
 
   it("skips the delivery when its line is turned off while the handler runs", async () => {
     const { deliveryId } = await seed();
+    const host = handlerHost();
     const d = dispatcher(pluginWith(async (_event, ctx) => {
       await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
       throw new Error("stopped");
-    }));
+    }), host);
     await d.pollOnce();
     await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
     const row = await settled(deliveryId);
     expect(row.status).toBe("skipped");
     expect(row.lastError).toContain("turned off");
+    // The run's children stop with it.
+    expect(host.stopDeliveryChildren).toHaveBeenCalledWith([deliveryId]);
     await d.stop();
   });
 
@@ -370,6 +377,41 @@ describe("EventDispatcher plugin target", () => {
         expect(row.status).toBe("skipped");
         expect(row.lastError).toBe("A newer event for acme/site#7 superseded this one.");
       }
+      // Children stop for both, including the queued delivery no run holds.
+      const stopped = vi.mocked(host.stopDeliveryChildren).mock.calls.flatMap(([ids]) => ids);
+      expect(new Set(stopped)).toEqual(new Set([first.deliveryId, queued.deliveryId]));
+      await d.stop();
+    });
+
+    it("never lets a repo-level event supersede a pull request's delivery, or the reverse", async () => {
+      const now = Date.now();
+      const prRun = await seed({ occurredAt: now - 20_000 });
+      const { runs, host, handle, release } = gatedHandler();
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }), host);
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      // A newer repo-level event (a check suite on main) arrives while the PR run is live.
+      const repoEvent = await seed({ subscriptionId: prRun.subscriptionId, occurredAt: now - 10_000, pr: null });
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(2));
+      expect(runs[0]?.signal.aborted).toBe(false);
+      release();
+      expect((await settled(prRun.deliveryId)).status).toBe("delivered");
+      expect((await settled(repoEvent.deliveryId)).status).toBe("delivered");
+      expect(host.stopDeliveryChildren).not.toHaveBeenCalled();
+      await d.stop();
+    });
+
+    it("breaks a same-second tie by receive time", async () => {
+      const now = Date.now();
+      const occurredAt = now - 10_000;
+      const earlier = await seed({ occurredAt, receivedAt: now - 2_000 });
+      const later = await seed({ subscriptionId: earlier.subscriptionId, occurredAt, receivedAt: now - 1_000 });
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede" }));
+      await d.pollOnce();
+      expect((await settled(later.deliveryId)).status).toBe("delivered");
+      expect((await settled(earlier.deliveryId)).status).toBe("skipped");
       await d.stop();
     });
 

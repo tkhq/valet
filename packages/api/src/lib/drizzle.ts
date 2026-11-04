@@ -1061,6 +1061,16 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "report_to_parent" boolean NOT NULL DEFAULT true',
   },
   {
+    describe: "child_watches.plugin_delivery_id column",
+    probe: { kind: "column", table: "child_watches", column: "plugin_delivery_id" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "plugin_delivery_id" text',
+  },
+  {
+    describe: "child_watches_plugin_delivery index",
+    probe: { kind: "index", index: "child_watches_plugin_delivery" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_watches_plugin_delivery" ON "child_watches" ("plugin_delivery_id") WHERE "plugin_delivery_id" IS NOT NULL',
+  },
+  {
     describe: "child_watches.pending_cap_incident column",
     probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',

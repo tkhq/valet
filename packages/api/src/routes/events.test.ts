@@ -3385,6 +3385,23 @@ describe("plugin line settings", () => {
     expect(((await cleared.json()) as { target: Record<string, unknown> }).target.config).toBeUndefined();
   });
 
+  it("turns off or renames a line whose saved settings no longer match the handler's schema", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, {
+      name: "review PRs",
+      eventKeys: ["github.pull_request.synchronize"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+    });
+    const { id } = (await created.json()) as { id: string };
+    // The plugin's schema changed after the line was saved.
+    await a.providers.db.update(eventSubscriptions)
+      .set({ target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { retired: true } } })
+      .where(eq(eventSubscriptions.id, id));
+    expect((await patchSubscription(a.baseUrl, id, { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { name: "old review line" })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { config: { retired: true } })).status).toBe(400);
+  });
+
   it("refuses settings on a line that is not a plugin line", async () => {
     const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
     const created = await postSubscription(a.baseUrl, { name: "to me", eventKeys: ["github.pull_request.opened"], target: { kind: "assistant" } });
