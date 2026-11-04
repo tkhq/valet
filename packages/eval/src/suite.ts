@@ -56,6 +56,10 @@ export interface SuiteOptions {
   reasoning?: ReasoningLevel;
   /** provider/model for code-review verifiers. Unset: the model under test. */
   verifyModel?: string;
+  /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
+  verify?: boolean;
+  /** Independent code-review passes per case. */
+  reviewPasses?: number;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -170,6 +174,8 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 model: evalCase.model ?? opts.model,
                 ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
                 ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+                ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
+                ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),

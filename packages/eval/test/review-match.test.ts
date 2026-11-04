@@ -141,6 +141,12 @@ describe("--verify-model", () => {
     expect(parseCliArgs(["--verify-model", "openai/gpt-5.6-terra"]).verifyModel).toBe("openai/gpt-5.6-terra");
     expect(parseCliArgs([]).verifyModel).toBeUndefined();
   });
+
+  it("parses --no-verify and --review-passes", () => {
+    expect(parseCliArgs(["--no-verify", "--review-passes", "2"])).toMatchObject({ verify: false, reviewPasses: 2 });
+    expect(parseCliArgs([]).verify).toBeUndefined();
+    expect(() => parseCliArgs(["--review-passes", "9"])).toThrow(/--review-passes/);
+  });
 });
 
 describe("Valet LLM gateway", () => {

@@ -173,7 +173,7 @@ async function reviewInWorkspace(
       trajectory: compactForBaseline(
         extractTrajectory({
           caseId: `${evalCase.id}#${agent.label}`,
-          prompt: agent.label === "review" ? reviewPrompt(spec) : `Verify finding ${agent.label}`,
+          prompt: agent.label.startsWith("review") ? reviewPrompt(spec) : `Verify finding ${agent.label}`,
           model: agent.model ?? modelSpec,
           durationMs: Date.now() - agentStarted,
           entries,
@@ -183,7 +183,7 @@ async function reviewInWorkspace(
     return result;
   };
 
-  const verify = evalCase.pull_request?.verify ?? true;
+  const verify = opts.verify ?? evalCase.pull_request?.verify ?? true;
   const pipeline = await runReviewPipeline(
     {
       workspace,
@@ -193,6 +193,7 @@ async function reviewInWorkspace(
       body: spec.body ?? "",
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+      ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
     },
     runAgent,
   );

@@ -89,6 +89,10 @@ export interface RunnerOptions {
   reasoning?: ReasoningLevel;
   /** provider/model for code-review verifiers. Unset: the model under test. */
   verifyModel?: string;
+  /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
+  verify?: boolean;
+  /** Independent code-review passes per case. */
+  reviewPasses?: number;
   /**
    * Send every model call through this Valet LLM gateway with its `vlt_`
    * key, instead of provider keys from the environment.
