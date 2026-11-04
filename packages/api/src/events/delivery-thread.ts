@@ -16,26 +16,13 @@ import type { AppDb } from "../lib/drizzle.js";
  */
 export async function reopenThread(db: AppDb, sessionId: string, threadId: string): Promise<number> {
   const result = await db.execute(sql`
-    UPDATE session_threads SET archived_at = NULL, archived_by = NULL
+    UPDATE session_threads SET archived_at = NULL
     WHERE archived_at IS NOT NULL AND (
       (session_id = ${sessionId} AND id = ${threadId})
       OR (session_id, id) IN (
         SELECT a.session_id, x.governing_thread_id FROM assistant_executions x
         JOIN assistants a ON a.id = x.assistant_id
         WHERE x.session_id = ${sessionId}))
-    RETURNING id`) as { rows: Array<{ id: string }> };
-  return result.rows.length;
-}
-
-/**
- * Reopen a thread that the idle sweep archived (`services/thread-auto-archive.ts`)
- * when a delivery lands in it. A thread a person archived stays archived;
- * `isDeliverableTarget` already refused it. Returns the number of rows reopened.
- */
-export async function reopenIdleArchivedThread(db: AppDb, sessionId: string, threadId: string): Promise<number> {
-  const result = await db.execute(sql`
-    UPDATE session_threads SET archived_at = NULL, archived_by = NULL
-    WHERE session_id = ${sessionId} AND id = ${threadId} AND archived_by = 'system'
     RETURNING id`) as { rows: Array<{ id: string }> };
   return result.rows.length;
 }

@@ -964,11 +964,6 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "compaction_window_tokens" integer',
   },
   {
-    describe: "session_threads.archived_by column",
-    probe: { kind: "column", table: "session_threads", column: "archived_by" },
-    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "archived_by" text',
-  },
-  {
     // Org-wide tour reset counter ("Show the tour to everyone again").
     describe: "orgs.tutorial_version column",
     probe: { kind: "column", table: "orgs", column: "tutorial_version" },

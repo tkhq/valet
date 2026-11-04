@@ -25,7 +25,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 import type { DestinationReason } from "./destination.js";
-import { reopenThread, reopenIdleArchivedThread, seedThreadTitle } from "./delivery-thread.js";
+import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
 import { CONVERSATIONAL_THREAD_KEY, isAutomatedThreadKey } from "./automated-threads.js";
 import { answerOpenQuestion } from "../channels/open-question-reply.js";
 
@@ -167,8 +167,7 @@ async function resolveLiveAssistant(
 
 /** True when `target`'s thread is live. The session is not deleted and the
  * thread is not archived. For an execution session, its assistant and
- * governing thread are not archived either. A thread the idle sweep archived
- * counts as live: the delivery reopens it (`reopenIdleArchivedThread`). `deliverToAssistantThread`'s
+ * governing thread are not archived either. `deliverToAssistantThread`'s
  * pre-submit check and `isDeliverableTarget` below share it. */
 async function isTargetThreadLive(
   db: AppDb,
@@ -185,8 +184,8 @@ async function isTargetThreadLive(
       LEFT JOIN engine_threads g ON g.session_id = a.session_id AND g.id = x.governing_thread_id
       LEFT JOIN session_threads gm ON gm.session_id = a.session_id AND gm.id = g.id
       WHERE s.id = ${target.sessionId} AND s.org_id = ${orgId} AND s.status <> 'deleted'
-        AND s.owner_type = ${owner.type} AND s.owner_id = ${owner.id} AND (m.archived_at IS NULL OR m.archived_by = 'system')
-        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND (gm.archived_at IS NULL OR gm.archived_by = 'system')))
+        AND s.owner_type = ${owner.type} AND s.owner_id = ${owner.id} AND m.archived_at IS NULL
+        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND gm.archived_at IS NULL))
       LIMIT 1`) as { rows: Array<{ id: string }> };
   return result.rows.length > 0;
 }
@@ -425,8 +424,6 @@ async function deliverToAssistantThreadInner(
       await seedThreadTitle(deps.db, { sessionId: session.id, threadId: thread.id, createdAt: thread.toThreadData().createdAt }, destination.title);
     }
     await reopenThread(deps.db, session.id, thread.id);
-  } else if (destination.kind === "target") {
-    await reopenIdleArchivedThread(deps.db, session.id, thread.id);
   }
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
