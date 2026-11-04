@@ -165,6 +165,34 @@ describe("image-source changes wait for a second admin", () => {
     expect((await sourceRows())[0]?.setupCommands).toEqual([]);
   });
 
+  it("refuses to approve a pending change to a built-in source made before built-ins were read-only", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(imageSources).values({ id: "src_default_full", orgId: "local-org", kind: "base", parentId: null, name: "default-full", externalRef: null, pullSecretName: null, setupCommands: [], profile: "full", repoHost: null, repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now });
+    await api.providers.db.insert(imageSourceChangeRequests).values({
+      id: "isc_legacy", orgId: "local-org", targetKey: "src_default_full", sourceId: "src_default_full", sourceName: "default-full",
+      action: "update", payload: { setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }, baseUpdatedAt: now,
+      requestedBy: "local-user", requestedAt: now, expiresAt: now + 60_000, status: "pending", decidedBy: null, decidedAt: null, decisionNote: null,
+    });
+    const approve = await post("/api/org/sources/changes/isc_legacy/approve", APPROVER);
+    expect(approve.status).toBe(403);
+    expect(((await approve.json()) as { error: string }).error).toMatch(/default-full is a built-in image source\. Reject this request/);
+    expect((await sourceRows())[0]?.setupCommands).toEqual([]);
+  });
+
+  it("refuses to approve a pending create that would shadow a built-in name", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(imageSourceChangeRequests).values({
+      id: "isc_shadow", orgId: "local-org", targetKey: "new:stock-full", sourceId: null, sourceName: "stock-full",
+      action: "create", payload: { id: "img_shadow", orgId: "local-org", kind: "external", parentId: null, name: "stock-full", externalRef: "evil.example/img:1", pullSecretName: null, setupCommands: null, profile: null, repoHost: null, repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now },
+      baseUpdatedAt: null, requestedBy: "local-user", requestedAt: now, expiresAt: now + 60_000, status: "pending", decidedBy: null, decidedAt: null, decisionNote: null,
+    });
+    const approve = await post("/api/org/sources/changes/isc_shadow/approve", APPROVER);
+    expect(approve.status).toBe(403);
+    expect(await sourceRows()).toEqual([]);
+  });
+
   it("refuses approval of an expired request", async () => {
     api = await bootTestApi();
     const pending = await requestExternal();

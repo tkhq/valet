@@ -7,9 +7,11 @@
  * All routes require `requireOrgAdmin`.
  *
  * kind='repo' rows are auto-created when a session binds a repo (Task 15).
- * POST rejects kind='repo' with 400; kind='base' is limited to one per org
- * (partial unique index in migrations/pg/0000_app.sql). POST /:id/bake
- * delegates to SourceService and maps its typed errors to HTTP codes.
+ * POST rejects kind='repo' with 400 and kind='base' with 403: the one base
+ * an org has is the seeded full base. Built-in rows (`builtInSourceKind`)
+ * refuse PATCH and DELETE with 403, and POST refuses their reserved names
+ * with 409. POST /:id/bake delegates to SourceService and maps its typed
+ * errors to HTTP codes.
  *
  * SETUP_COMMANDS validation: reject entries that contain newlines or carriage
  * returns (Dockerfile structural-injection guard, Task 15 spec review).
@@ -18,14 +20,20 @@ import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
-import { isPgUniqueViolation } from "@valet/store-postgres";
 import { isScratchRequestError, isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange, validateScratchRequest } from "@valet/shared";
 import { recordScratchRefused } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
-import { AnonymousImageBakesDisabledError, GitHubApiError, PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
+import {
+  AnonymousImageBakesDisabledError,
+  GitHubApiError,
+  PrebuildConfigNotFoundError,
+  PrebuildUnavailableError,
+  builtInSourceKind,
+  isReservedSourceName,
+} from "../bakes/source-service.js";
 import type { ApiError, ListSourceChangesResponse, PendingSourceChangeResponse, SourceChangeSummary } from "../wire/types.js";
 import {
   approveSourceChange,
@@ -40,13 +48,6 @@ import {
 } from "../bakes/source-change-requests.js";
 import { auditRequest } from "./_admin-audit.js";
 import { commandDigest, diffFields, displayUrl } from "../services/admin-audit.js";
-
-/** The org's seeded `default-full` base (`seedDefaultBasesIfMissing`). Every sandbox image inherits it. */
-const BUILTIN_BASE_NAME = "default-full";
-
-function isBuiltInSource(row: Pick<ImageSourceRow, "kind" | "name">): boolean {
-  return row.kind === "base" && row.name === BUILTIN_BASE_NAME;
-}
 
 /** The audit summary of a pending change: what the requester asked for.
  * `externalRef` is shown as a display URL, and setup commands as a digest. */
@@ -97,8 +98,15 @@ function newExternalSourceId(): string {
   return `img_${randomUUID()}`;
 }
 
-function newBaseSourceId(): string {
-  return `base_${randomUUID()}`;
+/**
+ * Refusal for a write to a built-in image source (`builtInSourceKind`). The
+ * status is 403, not 409: the request is valid and the caller is an org
+ * admin, but no API caller may do this, and no change of state makes a retry
+ * succeed. Code and the deploy configuration own these rows, because their
+ * setup commands and image refs run in every later bake and sandbox.
+ */
+function builtInRefusal(name: string): ApiError {
+  return { error: `${name} is a built-in image source. Change it in code or the deploy configuration, not through the API.` };
 }
 
 /** Fetch a source owned by the org, optionally filtered by kind. Returns
@@ -191,7 +199,11 @@ sourcesRouter.get("/", async (c) => {
     .orderBy(bakes.sourceId, desc(bakes.createdAt), desc(bakes.id));
   const latestBySource = new Map(latestBakes.map(({ sourceId, ...bake }) => [sourceId, bake]));
   return c.json({
-    sources: rows.map((source) => ({ ...source, latestBake: latestBySource.get(source.id) ?? null })),
+    sources: rows.map((source) => ({
+      ...source,
+      builtIn: builtInSourceKind(source) !== null,
+      latestBake: latestBySource.get(source.id) ?? null,
+    })),
     builderAvailable: prebuildService.builderBackend !== null,
   });
 });
@@ -247,6 +259,9 @@ sourcesRouter.post("/", async (c) => {
     ) {
       return c.json({ error: "Provide name and externalRef when you create an external image source." }, 400);
     }
+    if (isReservedSourceName(body.name)) {
+      return c.json({ error: `${body.name.trim()} is a reserved built-in image source name. Choose a different name.` }, 409);
+    }
     const pullSecretName =
       typeof body.pullSecretName === "string" && body.pullSecretName.trim() !== ""
         ? body.pullSecretName
@@ -293,72 +308,12 @@ sourcesRouter.post("/", async (c) => {
     return c.json({ source: row }, 201);
   }
 
+  // Single image lineage: the one base an org has is the seeded full base,
+  // and code owns it. A second base would be refused by the one-base-per-
+  // (org, profile) index, and a first one before seeding would shadow the
+  // built-in row.
   if (kind === "base") {
-    if (typeof body.name !== "string" || body.name.trim() === "") {
-      return c.json({ error: "name is required" }, 400);
-    }
-    // Single image lineage (2026-08-16 design): only 'full' bases exist. A
-    // new headless base would be inert — nothing resolves it — but would
-    // burn a nightly bake until the next boot disables it.
-    if (body.profile !== "full") {
-      return c.json(
-        {
-          error:
-            "profile must be 'full' for kind='base' sources. Sandboxes use one image lineage; the profile session flag only switches interactive services.",
-        },
-        400,
-      );
-    }
-    const setupCommands = body.setupCommands ?? [];
-    const cmdErr = validateSetupCommands(setupCommands);
-    if (cmdErr) return c.json({ error: cmdErr }, 400);
-
-    const row = {
-      id: newBaseSourceId(),
-      orgId: c.var.user.orgId,
-      kind: "base" as const,
-      parentId: null,
-      name: body.name as string,
-      externalRef: null,
-      pullSecretName: null,
-      setupCommands: setupCommands as string[],
-      profile: body.profile as "headless" | "full",
-      repoHost: null,
-      repoFullName: null,
-      cloneUrl: null,
-      schedule: "nightly" as const,
-      enabled: true,
-      lastBoundAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    if (imageSourceApprovalMode() === "required") {
-      try {
-        const pending = await requestSourceChange(db, { orgId: row.orgId, requestedBy: c.var.user.id, action: "create", sourceName: row.name, payload: row });
-        await auditChangeRequested(c, pending);
-        const resp: PendingSourceChangeResponse = { pendingChange: changeSummary(pending) };
-        return c.json(resp, 202);
-      } catch (err) {
-        return refusalResponse(c, err);
-      }
-    }
-    try {
-      await db.insert(imageSources).values(row);
-    } catch (err) {
-      if (isPgUniqueViolation(err)) {
-        return c.json({ error: "a base source already exists for this org and profile" }, 409);
-      }
-      throw err;
-    }
-    await auditRequest(c, {
-      action: "image_source.create",
-      targetType: "image_source",
-      targetId: row.id,
-      targetName: row.name,
-      changes: { kind: row.kind, profile: row.profile, setupCommands: commandDigest(row.setupCommands) },
-      alert: "image_source_created",
-    });
-    return c.json({ source: row }, 201);
+    return c.json(builtInRefusal("The full base image"), 403);
   }
 
   return c.json({ error: "kind must be 'external' or 'base'" }, 400);
@@ -392,7 +347,7 @@ sourcesRouter.post("/changes/:changeId/approve", async (c) => {
       targetId: source.id,
       targetName: source.name,
       changes: { ...changeAuditView(request), approvedBy: c.var.user.id },
-      alert: request.action === "create" ? "image_source_created" : isBuiltInSource(source) ? "builtin_image_changed" : "image_source_changed",
+      alert: request.action === "create" ? "image_source_created" : builtInSourceKind(source) !== null ? "builtin_image_changed" : "image_source_changed",
     });
     return c.json({ change: changeSummary(request), source });
   } catch (err) {
@@ -461,6 +416,14 @@ sourcesRouter.patch("/:id", async (c) => {
 
   const body: unknown = await c.req.json().catch(() => null);
   if (!isRecord(body)) return c.json({ error: "invalid request body" }, 400);
+
+  // Built-in rows accept no field changes. Content fields change what every
+  // later bake and sandbox runs. `enabled: false` on the full base or
+  // stock-full breaks sandbox starts. `schedule: "off"` stops the nightly
+  // rebake that carries a deploy pin change into the base image.
+  if (builtInSourceKind(existing) && Object.keys(body).length > 0) {
+    return c.json(builtInRefusal(existing.name), 403);
+  }
 
   const patch: Partial<typeof imageSources.$inferInsert> = { updatedAt: Date.now() };
 
@@ -593,7 +556,7 @@ sourcesRouter.patch("/:id", async (c) => {
     // `enabled` or `schedule` on a custom source is recorded without an alert.
     const buildInputChanged = (existing.externalRef ?? null) !== (updated.externalRef ?? null) ||
       "setupCommands" in changes || "parentId" in changes;
-    const builtIn = isBuiltInSource(existing);
+    const builtIn = builtInSourceKind(existing) !== null;
     await auditRequest(c, {
       action: "image_source.update",
       targetType: "image_source",
@@ -615,9 +578,10 @@ sourcesRouter.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await getOwnedSource(db, id, c.var.user.orgId);
   if (!existing) return c.json({ error: "source not found" }, 404);
+  if (builtInSourceKind(existing)) return c.json(builtInRefusal(existing.name), 403);
 
   await db.delete(imageSources).where(eq(imageSources.id, id));
-  const builtIn = isBuiltInSource(existing);
+  const builtIn = builtInSourceKind(existing) !== null;
   await auditRequest(c, {
     action: "image_source.delete",
     targetType: "image_source",

@@ -5398,6 +5398,10 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 export interface SourceSummary {
   /** Latest build summary on list responses. Older servers omit this field. */
   latestBake?: Pick<BakeSummary, "status" | "createdAt"> | null;
+  /** True for a source that code owns: stock-full, the full base, and a
+   * repo-declared base layer. The API refuses PATCH and DELETE on it. Set on
+   * list responses; older servers omit it. */
+  builtIn?: boolean;
   id: string;
   orgId: string;
   kind: "external" | "base" | "repo";
@@ -5406,6 +5410,9 @@ export interface SourceSummary {
   externalRef: string | null;
   pullSecretName: string | null;
   setupCommands: string[] | null;
+  /** `full` for the org's full base; null for other kinds and for a
+   * repository base layer. Optional because older servers omit it. */
+  profile?: "headless" | "full" | null;
   repoHost: string | null;
   repoFullName: string | null;
   cloneUrl: string | null;

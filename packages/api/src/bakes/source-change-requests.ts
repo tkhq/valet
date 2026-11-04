@@ -21,6 +21,7 @@ import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { imageSourceChangeRequests, imageSources, orgMembers, users, type ImageSourceRow } from "../schema/index.js";
 import { markAttentionNotificationsRead, routeAttention } from "../orchestrator/attention.js";
+import { builtInSourceKind, isReservedSourceName } from "./source-service.js";
 
 export type ImageSourceApprovalMode = "required" | "off";
 export type SourceChangeRequestRow = typeof imageSourceChangeRequests.$inferSelect;
@@ -200,6 +201,10 @@ export async function approveSourceChange(
       // The route stored a full, validated `image_sources` row as the
       // payload; jsonb returns it as a plain record.
       const values = { ...(row.payload as ImageSourceRow), orgId: row.orgId, createdAt: now, updatedAt: now };
+      // A request made before built-ins became read-only may still be pending.
+      if (builtInSourceKind(values) || isReservedSourceName(values.name)) {
+        throw new SourceChangeRefusal(`${values.name} is a built-in image source. Reject this request; built-ins change only in code.`, 403);
+      }
       try {
         await tx.insert(imageSources).values(values);
       } catch (err) {
@@ -218,6 +223,10 @@ export async function approveSourceChange(
         .limit(1)
         .for("update");
       if (!current) throw new SourceChangeRefusal("The image source was deleted. Reject this request.", 409);
+      // A request made before built-ins became read-only may still be pending.
+      if (builtInSourceKind(current)) {
+        throw new SourceChangeRefusal(`${current.name} is a built-in image source. Reject this request; built-ins change only in code.`, 403);
+      }
       if (current.updatedAt !== row.baseUpdatedAt) {
         throw new SourceChangeRefusal(
           "The image source changed after this request was made. Reject this request and submit the change again.",

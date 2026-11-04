@@ -117,6 +117,21 @@ grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "30000"' "$TMP_DIR/scratch-pool.yaml" \
   || fail "sandbox.watchMinIntervalMs override was lost"
 pass "watch interval and scratch pool marker render"
 
+# Build pod placement (untrusted bakes): unset by default, JSON when set.
+if grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR\|VALET_PREBUILD_BUILD_TOLERATIONS' "$TMP_DIR/bundled.yaml"; then
+  fail "default render must not set build pod placement"
+fi
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set build.nodeSelector.pool=builds \
+  --set 'build.tolerations[0].key=valet.dev/build' \
+  --set 'build.tolerations[0].operator=Exists' \
+  --set 'build.tolerations[0].effect=NoSchedule' > "$TMP_DIR/build-placement.yaml"
+grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR: "{\\"pool\\":\\"builds\\"}"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.nodeSelector must render as JSON in VALET_PREBUILD_BUILD_NODE_SELECTOR"
+grep -q 'VALET_PREBUILD_BUILD_TOLERATIONS: "\[{\\"effect\\":\\"NoSchedule\\",\\"key\\":\\"valet.dev/build\\",\\"operator\\":\\"Exists\\"}\]"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.tolerations must render as JSON in VALET_PREBUILD_BUILD_TOLERATIONS"
+pass "build pod placement renders"
+
 # --- sandbox namespace ownership -----------------------------------------
 [ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
   || fail "default render must include exactly one sandbox Namespace"
