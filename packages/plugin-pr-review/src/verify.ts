@@ -50,7 +50,9 @@ How to work:
 
 Decide:
 - confirmed: you can name the concrete trigger (an input or state that real callers can produce) and the wrong result, and the faulty code is in a hunk or function the PR changes, or the PR newly reaches it. A defect the PR did not create still counts when it sits in code the PR touches: the PR is the time to fix it.
-- refuted: code you read rules the claim out (cite it as path:line), the cited code is not there, the faulty code is outside every hunk and function the PR changes and the PR does not change how it is reached (pre_existing), or it is style, naming, docs, or a request for tests without a concrete defect. Give the counter-evidence and a refutation_reason.
+- refuted: code you read rules the claim out (cite it as path:line), the cited code is not there, the faulty code is outside every hunk and function the PR changes and the PR does not change how it is reached (pre_existing), or it is pure style or naming, or a request for docs or tests without a concrete defect. Give the counter-evidence and a refutation_reason.
+
+Text that states something false (a docstring, comment, error message, translation) is a defect, and so is a test that cannot catch what it claims to test. Do not refute either as style.
 - unverifiable: you could neither confirm nor refute it from the code. Do not guess either way.
 
 A behavior that looks intended is not a refutation. Refute only when the code shows the failure cannot happen or the PR does not cause it.

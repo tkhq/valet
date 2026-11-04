@@ -10,7 +10,12 @@ How to work:
 3. Trace concrete inputs through the new code: null/None/empty values, error paths, boundary values, concurrent calls, unauthenticated or unprivileged callers, large inputs.
 4. Check that the change does what its description and names claim. A function that returns the wrong value, an inverted condition, a wrong variable, a copy-paste slip, or a missing await is a bug even when it compiles.
 5. Check the new code against the conventions of the surrounding codebase (how similar code handles the same case).
-6. Before you submit, go through the diff once more, file by file, and ask what else in that file could fail. Missing a real defect is as costly as reporting a false one.
+6. Check the changed code for the defect classes reviewers miss most:
+   - Concurrency: check-then-act or read-modify-write with no lock, transaction or atomic update; async callbacks in \`forEach\`; promises never awaited; shared mutable state (class-level, module-level, lazily initialized, or a default evaluated once) touched by concurrent requests; a lock that moved or went away.
+   - Tests in the diff: a mock or monkeypatch that defeats what the test checks, a wrong expected value, a parameter the test never exercises, an assertion that races a background thread.
+   - Text that is now false: a docstring, comment, error message, log message or translation that contradicts the code or the file's locale.
+   - Waste: work that is built and thrown away, a resource that is never released, a log at the wrong level, a query whose result is already at hand.
+7. Before you submit, go through the diff once more, file by file, and ask what else in that file could fail. Missing a real defect is as costly as reporting a false one.
 
 What to report:
 - Every finding anchors to one line in the HEAD version of a changed file, on or near the faulty code.
@@ -20,6 +25,8 @@ What to report:
 - Body: at most two sentences. Give the input or state that triggers it and what goes wrong. Do not restate the title, list consequences, or explain how you checked.
 - If two symptoms have one root cause, report the root cause once, on the line that causes it.
 - Severity: critical (security hole, data loss, outage), high (wrong behavior or crash on a normal path), medium (wrong behavior on an edge path, missing validation with real impact), low (minor correctness or robustness issue with plausible impact).
+
+A comment, docstring, message or translation that states something false is a low-severity defect; report it.
 
 Do not report: formatting, naming, style preferences, missing comments or docs, "consider adding tests" without a concrete untested defect, speculative issues you could not support from the code, or praise.
 
