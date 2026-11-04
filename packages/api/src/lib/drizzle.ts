@@ -2487,6 +2487,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
  "id" text PRIMARY KEY NOT NULL, "address" text NOT NULL, "pending" boolean NOT NULL, "created_at" bigint NOT NULL
 )` },
   { describe: "mcp_registrations_address_idx", probe: { kind: "index", index: "mcp_registrations_address_idx" }, sql: `CREATE INDEX IF NOT EXISTS "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at")` },
+  { describe: "admin_audit_events table", probe: { kind: "table", table: "admin_audit_events" }, sql: `CREATE TABLE IF NOT EXISTS "admin_audit_events" (
+ "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "actor_user_id" text, "actor_email" text, "action" text NOT NULL,
+ "target_type" text NOT NULL, "target_id" text, "target_name" text, "changes" jsonb, "ip" text, "user_agent" text, "created_at" bigint NOT NULL
+)` },
+  { describe: "admin_audit_events_org_created index", probe: { kind: "index", index: "admin_audit_events_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC)` },
 ];
 
 /**

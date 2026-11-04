@@ -1,4 +1,5 @@
 import { deleteTeamCredential } from "../services/team-resource-deletion.js";
+import { auditRequest } from "./_admin-audit.js";
 /**
  * `/api/credentials` — manual token entry + connection summary for the
  * connect UI (plugin-system-v2 plan Task 15). OAuth connect/callback lives
@@ -178,6 +179,28 @@ async function resolveCredentialOwner(
     return { type: "team", id: teamId };
   }
   return { type: "user", id: user.id };
+}
+
+/**
+ * Records an org- or team-scope credential change (admin audit log). A
+ * personal credential is the member's own and is not audited here. The row
+ * names the service and scope only, never the secret or the reference.
+ */
+async function auditSharedCredential(
+  c: Context<AppEnv>,
+  owner: CredentialOwner,
+  service: string,
+  action: "credential.set" | "credential.delete",
+  changes: Record<string, unknown> = {},
+): Promise<void> {
+  if (owner.type === "user") return;
+  await auditRequest(c, {
+    action,
+    targetType: "credential",
+    targetId: `${owner.type}:${owner.id}:${service}`,
+    targetName: serviceDisplayName(service),
+    changes: { scope: owner.type, ...(owner.type === "team" ? { teamId: owner.id } : {}), ...changes },
+  });
 }
 
 /**
@@ -629,6 +652,7 @@ credentialsRouter.put("/:service", async (c) => {
     const saveError = await persistCredential(c, owner, service, credential, false);
     if (saveError) return saveError;
     await refreshCredentialReadiness(c.var.providers, owner, service);
+    await auditSharedCredential(c, owner, service, "credential.set", { type: body.type, source: "onepassword_reference", tokenScope });
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
   }
@@ -642,6 +666,7 @@ credentialsRouter.put("/:service", async (c) => {
       { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: body.apiKey.trim() });
     if (!ok) return c.json({ error: "Team not found." }, 404);
     await resyncTeamWorkflows(c, [owner.id]);
+    await auditSharedCredential(c, owner, service, "credential.set", { type: body.type });
     return c.json({ ok: true } satisfies PutCredentialResponse);
   }
 
@@ -674,6 +699,7 @@ credentialsRouter.put("/:service", async (c) => {
   if (saveError) return saveError;
 
   await refreshCredentialReadiness(c.var.providers, owner, service);
+  await auditSharedCredential(c, owner, service, "credential.set", { type: body.type, source: "direct" });
 
   const resp: PutCredentialResponse = { ok: true };
   return c.json(resp);
@@ -810,6 +836,13 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     }, 409);
   }
   await resyncTeamWorkflows(c, [body.teamId]);
+  await auditRequest(c, {
+    action: "credential_share.create",
+    targetType: "credential_share",
+    targetId: `${body.teamId}:${service}:${user.id}`,
+    targetName: `${label} for ${team.name}`,
+    changes: { teamId: body.teamId, service, sharedBy: user.id },
+  });
   const resp: DelegateCredentialResponse = { ok: true };
   return c.json(resp, 201);
 });
@@ -831,6 +864,13 @@ credentialsRouter.delete("/:service/delegations/:teamId", async (c) => {
     return c.json({ error: "Team not found." }, 404);
   }
   await resyncTeamWorkflows(c, [teamId]);
+  await auditRequest(c, {
+    action: "credential_share.revoke",
+    targetType: "credential_share",
+    targetId: `${teamId}:${service}:${sharer}`,
+    targetName: `${serviceDisplayName(service)} for ${team.name}`,
+    changes: { teamId, service, sharedBy: sharer },
+  });
   const resp: DeleteCredentialResponse = { ok: true };
   return c.json(resp);
 });
@@ -849,12 +889,14 @@ credentialsRouter.delete("/:service", async (c) => {
       { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: null });
     if (!ok) return c.json({ error: "Team not found." }, 404);
     await resyncTeamWorkflows(c, [owner.id]);
+    await auditSharedCredential(c, owner, service, "credential.delete");
     return c.json({ ok: true } satisfies DeleteCredentialResponse);
   }
 
   if (owner.type === "team") await deleteTeamCredential(db, { orgId: user.orgId, userId: user.id }, owner.id, service);
   else await engineCredentials.delete(owner, service);
   if (owner.type !== "user") await refreshCredentialReadiness(c.var.providers, owner, service);
+  await auditSharedCredential(c, owner, service, "credential.delete");
   if (owner.type === "user") {
     // Every team that rode this credential loses it, so each is resynced.
     const revoked = await deleteSharesFrom(db, { userId: user.id, service });

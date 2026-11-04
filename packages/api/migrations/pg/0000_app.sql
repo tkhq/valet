@@ -196,6 +196,23 @@ CREATE TABLE "mcp_registrations" (
 --> statement-breakpoint
 CREATE INDEX "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at");
 --> statement-breakpoint
+CREATE TABLE "admin_audit_events" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"actor_user_id" text,
+	"actor_email" text,
+	"action" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text,
+	"target_name" text,
+	"changes" jsonb,
+	"ip" text,
+	"user_agent" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC);
+--> statement-breakpoint
 CREATE TABLE "invites" (
 	"id" text PRIMARY KEY NOT NULL,
 	"code_hash" text NOT NULL,

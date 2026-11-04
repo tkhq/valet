@@ -4839,6 +4839,30 @@ export interface OrgMcpServersResponse {
   servers: OrgMcpServerWire[];
 }
 
+/** One admin configuration change (`GET /api/org/audit-log`,
+ * docs/specs/2026-11-03-admin-audit-log-design.md). `actorUserId` is null
+ * when the system made the change. `changes` is a redacted field summary:
+ * it never holds a secret value. */
+export interface AdminAuditEventWire {
+  id: string;
+  createdAt: number;
+  actorUserId: string | null;
+  actorEmail: string | null;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  targetName: string | null;
+  changes: Record<string, unknown> | null;
+  ip: string | null;
+  userAgent: string | null;
+}
+
+/** `GET /api/org/audit-log` — newest first. `nextCursor` is null on the last page. */
+export interface ListAdminAuditResponse {
+  events: AdminAuditEventWire[];
+  nextCursor: string | null;
+}
+
 /** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
  * for `teams` mode and ignored otherwise. */
 export interface PatchOrgPluginRequest {

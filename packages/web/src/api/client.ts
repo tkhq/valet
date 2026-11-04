@@ -127,6 +127,7 @@ import type {
   DelegateCredentialRequest,
   DelegateCredentialResponse,
   ListActionLogResponse,
+  ListAdminAuditResponse,
   ListDecisionsResponse,
   ListGrantsResponse,
   ListIdentityLinksResponse,
@@ -1671,6 +1672,17 @@ export const api = {
     if (opts?.to !== undefined) qs.set("to", String(opts.to));
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListActionLogResponse>("GET", `/org/action-log${tail}`);
+  },
+
+  // admin audit log (docs/specs/2026-11-03-admin-audit-log-design.md)
+  listAdminAudit: (opts?: { cursor?: string; limit?: number; targetType?: string; actorUserId?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.targetType) qs.set("targetType", opts.targetType);
+    if (opts?.actorUserId) qs.set("actorUserId", opts.actorUserId);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListAdminAuditResponse>("GET", `/org/audit-log${tail}`);
   },
 
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
