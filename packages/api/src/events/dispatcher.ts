@@ -69,6 +69,7 @@ import {
 import { readStoredTarget } from "./target-names.js";
 import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
 import { pluginStore } from "../services/plugin-store.js";
+import { buildPluginMemory } from "../plugins/plugin-memory.js";
 import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import { actorUserIdFor } from "../workflows/engine-deps.js";
 import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
@@ -964,6 +965,7 @@ export class EventDispatcher {
         actorUserId,
         threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId }),
         store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
+        memory: buildPluginMemory(this.deps.db, owner, actorUserId),
         appToken: async (service, scope) => {
           if (!services.has(service)) {
             throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);

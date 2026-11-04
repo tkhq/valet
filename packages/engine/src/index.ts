@@ -110,6 +110,8 @@ export {
   type PluginEvent,
   type PluginEventContext,
   type PluginEventHandler,
+  type PluginMemory,
+  type PluginReply,
   type PluginThreadRef,
   type PluginThreads,
 } from "./plugin-agents.js";

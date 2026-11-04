@@ -13,7 +13,7 @@ import {
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions, childWatches } from "../schema/index.js";
-import { awaitPluginChild, buildPluginThreads, pluginChildSessionId, pluginThreadKey, type PluginThreadsDeps } from "./plugin-threads.js";
+import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, type PluginThreadsDeps } from "./plugin-threads.js";
 
 const reviewer: ValetPlugin = {
   name: "reviewer",
@@ -54,12 +54,15 @@ describe("PluginThreads.spawnChild", () => {
     const { spawner, threads } = await setup();
     const child = await threads.spawnChild(
       thread,
-      { prompt: "check it", role: "verifier", repo: "acme/site", ref: "abc123" },
+      { prompt: "check it", role: "verifier", repo: "acme/site", ref: "abc123", profile: "full", docker: true, resources: { cpu: 4 } },
       { dispatchId: "verify:abc:0" },
     );
     expect(child.childSessionId).toBe(pluginChildSessionId("reviewer", owner, thread.key, "verify:abc:0"));
     const [req, ctx] = spawner.mock.calls[0];
-    expect(req).toMatchObject({ prompt: "check it", role: "verifier", repo: "acme/site", branch: "abc123", sessionId: child.childSessionId });
+    expect(req).toMatchObject({
+      prompt: "check it", role: "verifier", repo: "acme/site", branch: "abc123", sessionId: child.childSessionId,
+      profile: "full", docker: true, resources: { cpu: 4 },
+    });
     // No integration actions unless the plugin asks for them.
     expect(req.toolScope).toEqual({ actions: [] });
     expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false });
@@ -112,7 +115,7 @@ describe("PluginThreads.spawnChild", () => {
   });
 });
 
-describe("awaitPluginChild", () => {
+describe("awaitSubmission", () => {
   it("reads a settled child's final message and validates it against the result schema", async () => {
     const faux = registerFauxProvider({ provider: "plugin-threads-test" });
     faux.setResponses([fauxAssistantMessage('Done.\n```json\n{"verdict": "confirmed", "line": 12}\n```')]);
@@ -131,15 +134,23 @@ describe("awaitPluginChild", () => {
     await session.thread().awaitResult(receipt.queueItemId);
 
     const schema = Type.Object({ verdict: Type.String(), line: Type.Integer() });
-    const result = await awaitPluginChild({ engineStore: store, pollMs: 5 }, { childSessionId: session.id, queueItemId: receipt.queueItemId }, { resultSchema: schema });
+    const result = await awaitSubmission({ engineStore: store, pollMs: 5 }, { sessionId: session.id, queueItemId: receipt.queueItemId }, { resultSchema: schema });
     expect(result.outcome).toBe("completed");
     expect(result.output).toEqual({ verdict: "confirmed", line: 12 });
 
-    const bad = await awaitPluginChild({ engineStore: store, pollMs: 5 }, { childSessionId: session.id, queueItemId: receipt.queueItemId },
+    const bad = await awaitSubmission({ engineStore: store, pollMs: 5 }, { sessionId: session.id, queueItemId: receipt.queueItemId },
       { resultSchema: Type.Object({ missing: Type.String() }) });
     expect(bad.output).toBeUndefined();
     expect(bad.error).toContain("did not match schema");
     await session.destroy();
     faux.unregister();
+  });
+});
+
+describe("answerFormat", () => {
+  it("asks for one json block that matches the schema", () => {
+    const text = answerFormat(Type.Object({ conventions: Type.Array(Type.String()) }));
+    expect(text).toContain("```json");
+    expect(text).toContain('"conventions"');
   });
 });

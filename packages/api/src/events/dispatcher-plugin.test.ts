@@ -42,6 +42,7 @@ const noThreads: PluginThreads = {
   post: async () => { throw new Error("threads are not used in this test"); },
   spawnChild: async () => { throw new Error("threads are not used in this test"); },
   awaitChild: async () => { throw new Error("threads are not used in this test"); },
+  awaitReply: async () => { throw new Error("threads are not used in this test"); },
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {

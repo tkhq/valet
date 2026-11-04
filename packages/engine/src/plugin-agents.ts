@@ -15,7 +15,7 @@
 import type { TSchema } from "typebox";
 import type { NormalizedEvent } from "./valet-plugin.js";
 import type { ToolScope } from "@valet/shared";
-import type { Principal, ScopedPluginStore, SubmissionResult } from "./types.js";
+import type { Principal, SandboxResources, ScopedPluginStore, SubmissionResult } from "./types.js";
 
 /** A plugin's thread in the owner's assistant. */
 export interface PluginThreadRef {
@@ -39,10 +39,23 @@ export interface PluginChildRequest {
   repo?: string;
   /** Branch, tag or commit to check out. Needs `repo`. */
   ref?: string;
+  /** Sandbox profile: "headless" (default) for agent work, "full" for interactive services. */
+  profile?: "headless" | "full";
+  /** A Docker daemon in the child's sandbox, to run the project's own containers. */
+  docker?: boolean;
+  /** CPU, memory and scratch for this child only. */
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 }
 
 export interface PluginChild {
   childSessionId: string;
+  queueItemId: string;
+}
+
+/** A message `post` put into a plugin thread, to wait on with `awaitReply`. */
+export interface PluginReply {
+  sessionId: string;
+  threadId: string;
   queueItemId: string;
 }
 
@@ -60,8 +73,14 @@ export interface PluginThreads {
   post(
     thread: PluginThreadRef,
     body: string,
-    opts: { dispatchId: string; attributes?: Record<string, string> },
-  ): Promise<{ queueItemId: string }>;
+    opts: { dispatchId: string; attributes?: Record<string, string>; resultSchema?: TSchema },
+  ): Promise<PluginReply>;
+  /**
+   * Wait for the assistant's answer to a `post`. With `resultSchema`, the
+   * answer's JSON is validated into `output`; pass the same schema to `post`
+   * so the message asks for it.
+   */
+  awaitReply(reply: PluginReply, opts?: { resultSchema?: TSchema; timeoutMs?: number }): Promise<SubmissionResult>;
   /**
    * Start a child session under the thread. Its result does not wake the
    * thread: the plugin reads it with `awaitChild`. Idempotent per
@@ -75,6 +94,14 @@ export interface PluginThreads {
   awaitChild(child: PluginChild, opts?: { resultSchema?: TSchema; timeoutMs?: number }): Promise<SubmissionResult>;
 }
 
+/** The owner's memory, read-only. A plugin puts what it finds into a child's prompt. */
+export interface PluginMemory {
+  /** Full-text search over the owner's memory files. */
+  search(query: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string; snippet: string }[]>;
+  /** One file's rendered text, or null when there is no file at `path`. */
+  read(path: string): Promise<{ path: string; content: string } | null>;
+}
+
 /** What a plugin event handler receives besides the event. */
 export interface PluginEventContext {
   orgId: string;
@@ -85,6 +112,8 @@ export interface PluginEventContext {
   threads: PluginThreads;
   /** This plugin's store, scoped to `owner`. Keep pointers here, not content. */
   store: ScopedPluginStore;
+  /** The owner's memory, read-only (a team's shared memory, or the person's own). */
+  memory: PluginMemory;
   /**
    * The org's app credential for one of this plugin's services, or null when
    * it is not connected. The service must be the plugin's own name or one it
