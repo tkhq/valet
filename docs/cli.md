@@ -97,6 +97,29 @@ the profile, then makes the new profile the default. A command resolves
 its profile in this order: the `--instance <name>` flag, then the
 `VALET_INSTANCE` env var, then `defaultProfile` in the config file.
 
+### Instances behind Cloudflare Access
+
+An instance can sit behind a Cloudflare Access app that accepts only an
+Access session. Access then sends a request without that session to its
+login page. When the CLI sees this redirect, it gets an Access token and
+sends the request once more with a `cf-access-token` header. Later requests
+and the stream socket send the same token. An instance without Access never
+starts `cloudflared`.
+
+The CLI gets the token from `VALET_CF_ACCESS_TOKEN` when it is set, else from
+`cloudflared access token`. If `cloudflared` has no token and the command runs
+in a terminal, the CLI starts `cloudflared access login`, which opens a
+browser. A script or agent without a terminal gets an error instead. To
+prepare a computer, do these steps:
+
+1. Install `cloudflared` (`brew install cloudflared`).
+2. Run `cloudflared access login https://valet.example.com`.
+3. Run `valet login https://valet.example.com`.
+
+The harnesses that `valet proxy setup` and `valet mcp setup` configure do
+not send the header. They call `/proxy` and `/mcp` directly, so the Access
+app must exempt those paths.
+
 That precedence rule is general. For every setting the CLI resolves (port,
 data dir, sandbox backend, instance): **flag > environment variable >
 config file > built-in default**. Empty-string values count as unset.

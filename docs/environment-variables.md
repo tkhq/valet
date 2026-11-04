@@ -346,6 +346,7 @@ are stored through Organization settings.
 |----------|-------------|
 | `VALET_INSTANCE` | Named instance profile to target (client subcommands) |
 | `VALET_DATA_DIR` | Also locates `~/.valet/config.json` for the CLI |
+| `VALET_CF_ACCESS_TOKEN` | Cloudflare Access token for an instance behind Access. The CLI sends it as `cf-access-token` when Access blocks a request. Unset: the CLI asks `cloudflared` |
 
 ## Test-only
 
