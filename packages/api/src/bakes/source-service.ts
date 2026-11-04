@@ -37,7 +37,7 @@ import { recordBakeHealth, recordBuiltInSourceRepair } from "./metrics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { and, desc, eq, gte, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -1394,10 +1394,12 @@ export class SourceService {
   private async ensureRepoBaseLayer(source: ImageSourceRow, baseSetup: string[]): Promise<ImageSourceRow> {
     if (source.kind !== "repo") return source;
     const name = repoBaseSourceName(source.repoFullName ?? "");
+    // `profile IS NULL`: a legacy full base that happens to carry this name is
+    // the org's built-in base, and repository config must never write to it.
     const rows = await this.db
       .select()
       .from(imageSources)
-      .where(and(eq(imageSources.orgId, source.orgId), eq(imageSources.kind, "base"), eq(imageSources.name, name)))
+      .where(and(eq(imageSources.orgId, source.orgId), eq(imageSources.kind, "base"), eq(imageSources.name, name), isNull(imageSources.profile)))
       .limit(1);
     const synthetic = rows[0];
     const now = this.now();

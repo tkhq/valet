@@ -6,7 +6,7 @@
  * lifecycle scenarios (poll sync, retention, orphan sweep, manual rebuild).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
@@ -1418,6 +1418,27 @@ describe("SourceService", () => {
       expect(builder.specs[1].kind).toBe("repo");
       const baseBake = (await db.select().from(bakes).where(eq(bakes.sourceId, synthetic.id)))[0];
       expect(builder.specs[1].baseImage).toBe(baseBake.imageRef);
+    });
+
+    it("never writes repository baseSetup into a legacy full base that carries the layer's name", async () => {
+      prebuildYaml = BASE_YAML;
+      const now = Date.now();
+      await db.insert(imageSources).values({
+        id: "legacy_full", orgId, kind: "base", parentId: null, name: repoBaseSourceName("acme/widgets"),
+        externalRef: null, pullSecretName: null, setupCommands: ["echo org-wide"], profile: "full", repoHost: null,
+        repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+
+      expect((await loadSource("legacy_full")).setupCommands).toEqual(["echo org-wide"]);
+      const layers = await db
+        .select()
+        .from(imageSources)
+        .where(and(eq(imageSources.kind, "base"), eq(imageSources.name, repoBaseSourceName("acme/widgets")), isNull(imageSources.profile)));
+      expect(layers).toHaveLength(1);
+      expect((await loadSource(repoId)).parentId).toBe(layers[0]!.id);
     });
 
     it("a new commit reuses the pushed base (identity-keyed): no second base bake", async () => {
