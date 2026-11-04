@@ -9,6 +9,7 @@ export {
   type ReviewPullRequestOptions,
 } from "./review.js";
 export {
+  mergeFindings,
   runReviewPipeline,
   type AgentRunner,
   type AgentRunResult,

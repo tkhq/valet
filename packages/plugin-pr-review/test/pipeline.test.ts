@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { decideFinding, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -71,6 +71,24 @@ describe("runReviewPipeline", () => {
     const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "" }, run);
     expect(result.review?.findings).toHaveLength(1);
     expect(result.verdicts[0]).toMatchObject({ verdict: "unverified", reason: "slow" });
+  });
+
+  it("merges two reviewer passes and drops a repeat on the same spot", async () => {
+    const { dir, base, head } = repo();
+    const labels: string[] = [];
+    const run: AgentRunner = async (spec) => {
+      labels.push(spec.label);
+      const findings =
+        spec.label === "review"
+          ? [finding("Division by zero")]
+          : [{ ...finding("Divides by zero again"), line: 3 }, { ...finding("Other file"), path: "b.py" }];
+      await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", passes: 2, verify: false }, run);
+    expect(labels.sort()).toEqual(["review", "review:2"]);
+    expect(result.review?.summary).toBe("review");
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero", "Other file"]);
   });
 
   it("runs the verifiers on verifyModel and the reviewer on the host's model", async () => {
@@ -161,5 +179,17 @@ describe("decideFinding", () => {
   it("quoteInFile ignores indentation and blank lines", () => {
     expect(quoteInFile("  y = x / 0\n\n", file)).toBe(true);
     expect(quoteInFile("", file)).toBe(false);
+  });
+});
+
+describe("mergeFindings", () => {
+  it("keeps the first report on a spot and every report elsewhere", () => {
+    const at = (path: string, line: number, title: string) => ({ ...finding(title), path, line });
+    expect(
+      mergeFindings([
+        [at("a.py", 10, "A"), at("a.py", 11, "A2"), at("a.py", 40, "B")],
+        [at("a.py", 13, "A again"), at("a.py", 20, "C"), at("b.py", 10, "D")],
+      ]).map((f) => f.title),
+    ).toEqual(["A", "A2", "B", "C", "D"]);
   });
 });
