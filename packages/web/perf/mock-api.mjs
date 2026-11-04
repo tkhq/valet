@@ -176,6 +176,7 @@ const ROUTES = [
   ["GET", /^\/api\/sessions\/[^/]+\/wakeups$/, () => json({ wakeups: [], leases: [] })],
   ["GET", /^\/api\/sessions\/[^/]+\/commands$/, () => json({ commands: [], diagnostics: [] })],
   ["GET", /^\/api\/threads\/[^/]+\/plan$/, () => json({ plan: null })],
+  ["GET", /^\/api\/threads\/[^/]+\/progress$/, () => json({ progress: null })],
   ["GET", /^\/api\/threads\/[^/]+\/context$/, () => json({ context: null })],
   ["GET", /^\/api\/home\/tasks$/, () => json({ needsYou: [], working: [], updates: [], finished: [] })],
   ["GET", /^\/api\/workspaces\/[^/]+\/channels$/, () => json({ channels: [] })],
