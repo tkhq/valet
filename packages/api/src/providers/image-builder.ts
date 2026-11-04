@@ -166,6 +166,11 @@ export function parseBuildTolerations(value: string | undefined): V1Toleration[]
     if (toleration.value !== undefined && !isLabelValue(toleration.value)) {
       return fail(`entry ${index} value "${toleration.value}" is not a valid Kubernetes label value`);
     }
+    // An empty key matches every taint, which Kubernetes allows only with
+    // operator Exists. An omitted operator means Equal.
+    if (!toleration.key && toleration.operator !== "Exists") {
+      return fail(`entry ${index} has no key, which needs operator "Exists"`);
+    }
     if (toleration.tolerationSeconds !== undefined && toleration.effect !== "NoExecute") {
       return fail(`entry ${index} sets tolerationSeconds without effect "NoExecute"`);
     }
