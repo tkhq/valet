@@ -48,6 +48,8 @@ describe("parseBuildNodeSelector", () => {
     expect(parseBuildNodeSelector('{"pool":"builds","valet.dev/tier":"untrusted"}')).toEqual({ pool: "builds", "valet.dev/tier": "untrusted" });
     expect(parseBuildNodeSelector("pool=builds, zone=a")).toEqual({ pool: "builds", zone: "a" });
     expect(parseBuildNodeSelector('{"node.kubernetes.io/instance-type":"m7i.large","empty":""}')).toEqual({ "node.kubernetes.io/instance-type": "m7i.large", empty: "" });
+    const longLabel = `${"a".repeat(63)}.example.com/pool`;
+    expect(parseBuildNodeSelector(JSON.stringify({ [longLabel]: "builds" }))).toEqual({ [longLabel]: "builds" });
   });
 
   it.each([
@@ -61,6 +63,7 @@ describe("parseBuildNodeSelector", () => {
     ['{"pool?":"builds"}', /"pool\?" is not a valid Kubernetes label key/],
     ['{"Valet.Dev/pool":"builds"}', /not a valid Kubernetes label key/],
     ['{"/pool":"builds"}', /not a valid Kubernetes label key/],
+    [`{"${"a".repeat(64)}.example.com/pool":"builds"}`, /not a valid Kubernetes label key/],
     [`{"${"a".repeat(64)}":"builds"}`, /not a valid Kubernetes label key/],
     ['{"pool":"-builds"}', /not a valid Kubernetes label value/],
     [`{"pool":"${"b".repeat(64)}"}`, /not a valid Kubernetes label value/],

@@ -46,7 +46,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const LABEL_NAME = /^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
-const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+// Each dot-separated label holds at most 63 characters.
+const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$/;
 
 /** A Kubernetes label key: an optional DNS-subdomain prefix (at most 253
  * characters) and `/`, then a name of at most 63 characters. Kubernetes
