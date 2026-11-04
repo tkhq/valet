@@ -169,6 +169,10 @@ export function SessionView({
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
   const summarySwipe = useSwipeDismiss("down", () => setSummaryOpen(false));
+  // A summary action that targets the composer or the transcript waits for
+  // the phone sheet to close: the open modal would cover the composer and
+  // pull focus back into itself.
+  const afterSummaryClose = useRef<(() => void) | null>(null);
   const [composerModelTarget, setComposerModelTarget] = useState<HTMLDivElement | null>(null);
   const mobile = useMobileLayout();
   const mobileNavigation = mobile && !panel;
@@ -378,6 +382,11 @@ export function SessionView({
     );
   }
 
+  const runAfterSummary = (action: () => void) => {
+    if (!mobileConversation || !summaryOpen) return action();
+    afterSummaryClose.current = action;
+    setSummaryOpen(false);
+  };
   const summaryPanel = effectiveThreadId ? (
     <ThreadContextPanel
       key={`${sessionId}:${effectiveThreadId}`}
@@ -385,18 +394,18 @@ export function SessionView({
       sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
       canCancelWork={canCancelWork}
       pullRequests={helperThread?.pullRequests}
-      onCreate={() => {
+      onCreate={() => runAfterSummary(() => {
         const key = draftKey(sessionId, effectiveThreadId);
         const store = useComposerDraftStore.getState();
         const text = store.byKey[key]?.text ?? "";
         store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
         viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
-      }}
-      onAttach={() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click()}
-      onReveal={(messageId) => {
+      })}
+      onAttach={() => runAfterSummary(() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click())}
+      onReveal={(messageId) => runAfterSummary(() => {
         const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
         row?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }}
+      })}
     />
   ) : null;
   const summaryIcon = <ListTree className="h-4 w-4" aria-hidden />;
@@ -408,6 +417,13 @@ export function SessionView({
       onClick={() => setSummaryOpen((open) => !open)} className="shrink-0 max-md:min-w-11">{summaryIcon}</Button>
     <Dialog open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
       <DialogContent hideClose aria-describedby={undefined} onOpenAutoFocus={(event) => event.preventDefault()} {...summarySwipe}
+        onCloseAutoFocus={(event) => {
+          const action = afterSummaryClose.current;
+          if (!action) return;
+          afterSummaryClose.current = null;
+          event.preventDefault();
+          action();
+        }}
         className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 gap-0 rounded-b-none rounded-t-2xl border-x-0 border-b-0 p-0 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom motion-reduce:animate-none [&>aside]:rounded-none [&>aside]:bg-transparent">
         <DialogTitle className="sr-only">Thread summary</DialogTitle>
         <div aria-hidden className="mx-auto mb-1 mt-2 h-1 w-9 shrink-0 rounded-full bg-line" />
