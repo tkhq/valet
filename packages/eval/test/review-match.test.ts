@@ -150,4 +150,13 @@ describe("Valet LLM gateway", () => {
     if (!model) throw new Error("model missing from catalog");
     expect(viaGateway(model, { url: "https://v.example", apiKey: "vlt_x" }).baseUrl).toBe("https://v.example/proxy/anthropic");
   });
+
+  it("sends a Cloudflare Access token on every model call when one is set", () => {
+    const gateway = llmGatewayFromEnv({ VALET_LLM_GATEWAY_URL: "https://v.example", VALET_API_KEY: "vlt_abc", VALET_GATEWAY_ACCESS_TOKEN: "tok" });
+    expect(gateway?.accessToken).toBe("tok");
+    const model = resolveModelId("anthropic/claude-haiku-4-5");
+    if (!model || !gateway) throw new Error("model missing from catalog");
+    expect(viaGateway(model, gateway).headers?.["cf-access-token"]).toBe("tok");
+    expect(viaGateway(model, { url: "https://v.example", apiKey: "vlt_x" }).headers).toBe(model.headers);
+  });
 });
