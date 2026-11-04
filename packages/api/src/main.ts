@@ -10,6 +10,7 @@
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
 import { imageSourceApprovalMode } from "./bakes/source-change-requests.js";
+import { currentOutboundPolicy } from "./lib/outbound-url.js";
 import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
 import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
@@ -207,6 +208,16 @@ if (authConflict) {
 
 if (imageSourceApprovalMode() === "off") {
   console.warn("[security] VALET_IMAGE_SOURCE_APPROVAL=off: image-source changes apply without a second org admin.");
+}
+
+// The outbound URL guard reads its allowlist lazily; parse it now so a
+// malformed VALET_OUTBOUND_URL_ALLOWLIST stops boot instead of refusing
+// every custom provider at request time.
+try {
+  currentOutboundPolicy();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(1);
 }
 
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;

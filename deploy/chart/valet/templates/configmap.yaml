@@ -175,6 +175,14 @@ data:
   AUTH_MCP_APP_SCHEMES: {{ .appSchemes | quote }}
   {{- end }}
   {{- end }}
+  {{- with .Values.api.security }}
+  {{- if .outboundUrlAllowlist }}
+  VALET_OUTBOUND_URL_ALLOWLIST: {{ .outboundUrlAllowlist | quote }}
+  {{- end }}
+  {{- if .internalHosts }}
+  VALET_INTERNAL_HOSTS: {{ .internalHosts | quote }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.api.githubApp.appId }}
   GITHUB_APP_ID: {{ .Values.api.githubApp.appId | quote }}
   {{- end }}

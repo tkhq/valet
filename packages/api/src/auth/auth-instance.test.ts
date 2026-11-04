@@ -14,7 +14,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { users, invites } from "../schema/index.js";
+import { users, invites, ssoProvider } from "../schema/index.js";
+import { SSO_ROUTE_REFUSED_MESSAGE } from "./sso-hooks.js";
 import { createInvite } from "./invites.js";
 import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import type { AuthConfigResponse } from "../wire/types.js";
@@ -178,4 +179,59 @@ it("unrestricted signup creates a member without an invitation", async () => {
   const session = await fetch(`${api.baseUrl}/api/auth/get-session`, { headers: { cookie } });
   expect(session.status).toBe(200);
   expect(await session.json()).toMatchObject({ user: { id: created!.id, role: "member" } });
+});
+
+it("refuses SSO provider routes and stored providers; allows the configured provider's callback", async () => {
+  vi.stubEnv("AUTH_ALLOW_SIGNUP", "1");
+  vi.stubEnv("AUTH_METHODS", "password,oidc");
+  vi.stubEnv("AUTH_OIDC_ISSUER", "https://idp.example.test/realms/valet");
+  vi.stubEnv("AUTH_OIDC_CLIENT_ID", "valet");
+  vi.stubEnv("AUTH_OIDC_CLIENT_SECRET", "valet-secret");
+  api = await bootTestApi({ auth: true });
+  await api.providers.db.insert(users).values({ id: "existing-admin", email: "owner@example.test", name: "Owner", role: "admin" });
+  const signUp = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Member", email: "member@unlisted.test", password: "valid-password-for-test" }),
+  });
+  expect(signUp.status).toBe(200);
+  const cookie = extractSessionCookie(signUp.headers.get("set-cookie"));
+  // A provider row that an older image let a member store.
+  await api.providers.db.insert(ssoProvider).values({
+    id: "stored-1", providerId: "stored", issuer: "https://idp.attacker.test", domain: "attacker.test",
+    oidcConfig: JSON.stringify({ clientId: "x", clientSecret: "y", tokenEndpoint: "https://idp.attacker.test/token" }),
+  });
+
+  const post = (path: string, body: Record<string, unknown>) => fetch(`${api!.baseUrl}/api/auth${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json", cookie }, body: JSON.stringify(body),
+  });
+  const refused = [
+    await post("/sso/register", {
+      providerId: "evil", issuer: "https://idp.attacker.test", domain: "attacker.test",
+      oidcConfig: { clientId: "x", clientSecret: "y", skipDiscovery: true, authorizationEndpoint: "https://idp.attacker.test/auth",
+        tokenEndpoint: "https://idp.attacker.test/token", jwksEndpoint: "https://idp.attacker.test/jwks" },
+    }),
+    await post("/sso/update-provider", { providerId: "stored", issuer: "https://idp2.attacker.test" }),
+    await fetch(`${api.baseUrl}/api/auth/sso/providers`, { headers: { cookie } }),
+    await fetch(`${api.baseUrl}/api/auth/sso/get-provider?providerId=stored`, { headers: { cookie } }),
+    await post("/sign-in/sso", { providerId: "stored", callbackURL: "/" }),
+    await post("/sign-in/sso", { email: "someone@attacker.test", callbackURL: "/" }),
+    await fetch(`${api.baseUrl}/api/auth/sso/callback/stored?code=c&state=s`, { redirect: "manual" }),
+  ];
+  for (const res of refused) {
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ message: SSO_ROUTE_REFUSED_MESSAGE });
+  }
+  expect(await api.providers.db.select().from(ssoProvider)).toHaveLength(1);
+
+  // The configured provider's callback reaches the plugin, which rejects the missing state itself.
+  const callback = await fetch(`${api.baseUrl}/api/auth/sso/callback/oidc?code=c&state=s`, { redirect: "manual" });
+  expect(callback.status).not.toBe(403);
+});
+
+it("refuses SSO sign-in when no OIDC provider is configured", async () => {
+  api = await bootTestApi({ auth: true });
+  const res = await fetch(`${api.baseUrl}/api/auth/sign-in/sso`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providerId: "oidc", callbackURL: "/" }),
+  });
+  expect(res.status).toBe(403);
 });

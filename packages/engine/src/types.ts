@@ -2922,6 +2922,14 @@ export interface CreateSessionOptions {
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
+   * Picks the fetch for a model request this session makes (turn stream and
+   * compaction summarizer). The host returns a fetch that refuses internal
+   * destinations, so an admin-configured provider URL cannot reach cloud
+   * metadata, loopback, or cluster services. Undefined, or an undefined
+   * result for a model: pi-ai's default fetch.
+   */
+  modelFetch?: (model: Model<any>) => typeof fetch | undefined;
+  /**
    * Select a configured, credentialed model on another approved provider.
    * The engine calls this after a transient provider or billing/quota failure,
    * including interactive turns. Return null when no candidate is available.

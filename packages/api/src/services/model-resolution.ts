@@ -55,6 +55,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { TIER_SET, resolveTier } from "./model-tiers.js";
+import { checkOutboundUrlShape, recordOutboundRefusal } from "../lib/outbound-url.js";
 
 /** The registry-backed kinds (narrower than `LlmProviderKind`). Note
  * `openrouter` model ids themselves contain slashes
@@ -297,6 +298,14 @@ async function resolveConcreteSpec(
     // Custom (openai_compatible): org key only, no env fallback.
     const model = synthesizeCustomModel(row, modelId);
     if (!model) throw new ModelUnavailableError(`model ${modelId} is not active on provider ${row.name}`);
+    // Request-time half of the SSRF guard: a row saved before the save-time
+    // check existed, or written by config, still cannot reach an internal
+    // address. `guardedFetch` re-checks DNS answers at connect time.
+    const urlCheck = checkOutboundUrlShape(model.baseUrl);
+    if (!urlCheck.ok) {
+      recordOutboundRefusal("request");
+      throw new ModelUnavailableError(`provider ${row.name} has a refused base URL. ${urlCheck.reason}`);
+    }
     const apiKey = await orgKey(credentials, orgId, row.id);
     if (!apiKey) throw new NoCredentialsError(`provider ${row.name} has no API key`, { ...model, id: canonicalId });
     return { model, apiKey, canonicalId };
