@@ -2572,10 +2572,37 @@ export class SourceService {
         `old=${JSON.stringify(before)} new=${JSON.stringify(want)}`,
     );
     for (const field of drift) recordBuiltInSourceRepair(orgId, DEFAULT_FULL_SOURCE_NAME, field);
-    // A bake already queued or building may carry the tampered commands.
-    // Fail it so its image is never used, then bake the repaired row.
-    await this.failActiveBuilds("superseded by a built-in source repair", row.id);
+    // Every image of this base, and of each source built FROM it, may carry
+    // the drifted commands: fail its queued, building, and pushed bakes so
+    // no session boots one (resolution uses pushed bakes only; sessions fall
+    // back to the stock image). The repaired base bake then cascades to its
+    // children.
+    const tainted = await this.sourceWithDescendants(orgId, row.id);
+    await this.failActiveBuilds("superseded by a built-in source repair", tainted);
+    await this.db
+      .update(bakes)
+      .set({ status: "failed", error: "built from drifted built-in commands; rebuilt after the repair" })
+      .where(and(inArray(bakes.sourceId, tainted), eq(bakes.status, "pushed")));
     await this.maybeFireBaseBake(row.id, orgId);
+  }
+
+  /** `rootId` and every org source whose parent chain reaches it. */
+  private async sourceWithDescendants(orgId: string, rootId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: imageSources.id, parentId: imageSources.parentId })
+      .from(imageSources)
+      .where(eq(imageSources.orgId, orgId));
+    const found = new Set([rootId]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const row of rows) {
+        if (row.parentId && found.has(row.parentId) && !found.has(row.id)) {
+          found.add(row.id);
+          grew = true;
+        }
+      }
+    }
+    return [...found];
   }
 
   /** Best-effort background bake for a newly-seeded base source. Skips when
@@ -2599,13 +2626,14 @@ export class SourceService {
     await this.failActiveBuilds("interrupted by restart");
   }
 
-  /** Marks `queued`/`building` rows `failed` with `reason`, for one source
-   * or all, and best-effort `cleanupOrphan`s their cluster resources. A
+  /** Marks `queued`/`building` rows `failed` with `reason`, for the given
+   * sources or all, and best-effort `cleanupOrphan`s their cluster resources. A
    * failed row is never synced again, so its image is never used. */
-  private async failActiveBuilds(reason: string, sourceId?: string): Promise<void> {
-    const active = sourceId === undefined
+  private async failActiveBuilds(reason: string, sourceIds?: string[]): Promise<void> {
+    if (sourceIds?.length === 0) return;
+    const active = sourceIds === undefined
       ? inArray(bakes.status, ["queued", "building"])
-      : and(eq(bakes.sourceId, sourceId), inArray(bakes.status, ["queued", "building"]));
+      : and(inArray(bakes.sourceId, sourceIds), inArray(bakes.status, ["queued", "building"]));
     const orphaned = await this.db
       .select({ id: bakes.id, sourceId: bakes.sourceId, provider: bakes.builderBackend })
       .from(bakes)

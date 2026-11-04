@@ -1869,6 +1869,28 @@ describe("SourceService", () => {
       errors.mockRestore();
     });
 
+    it("re-seed fails pushed images of the tampered base and of every source built from it", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const seeded = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const stockFull = seeded.find((s) => s.name === "stock-full")!;
+      const full = seeded.find((s) => s.kind === "base" && s.profile === "full")!;
+      await db.update(bakes).set({ status: "failed" }).where(eq(bakes.sourceId, full.id));
+      const repoId = await seedRepoSource(db, { id: "repo_child", parentId: full.id });
+      await seedBake(db, full.id, { id: "pb_base_tainted" });
+      await seedBake(db, repoId, { id: "pb_repo_tainted" });
+      await seedBake(db, stockFull.id, { id: "pb_stock_clean" });
+      await db.update(imageSources).set({ setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }).where(eq(imageSources.id, full.id));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const byId = new Map((await db.select().from(bakes)).map((b) => [b.id, b]));
+      expect(byId.get("pb_base_tainted")?.status).toBe("failed");
+      expect(byId.get("pb_repo_tainted")).toMatchObject({ status: "failed", error: "built from drifted built-in commands; rebuilt after the repair" });
+      expect(byId.get("pb_stock_clean")?.status).toBe("pushed");
+      errors.mockRestore();
+    });
+
     it("re-seed puts a tampered stock-full row back and alarms", async () => {
       await service.seedDefaultBasesIfMissing(orgId);
       await db
