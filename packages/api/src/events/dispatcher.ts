@@ -516,6 +516,9 @@ export class EventDispatcher {
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `The team already listens for this.${paused ? " This personal line is paused." : ""}`
           : "This line is off. Turn it on to receive these events." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+        // A plugin delivery waiting to retry may have children from an
+        // earlier attempt; the line is off, so they stop too.
+        if (target.kind === "plugin") await this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id]);
         return;
       }
 

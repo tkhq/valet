@@ -25,11 +25,11 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import type { TSchema } from "typebox";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches } from "../schema/index.js";
+import { agentSessions, childWatches, eventDeliveries } from "../schema/index.js";
 import { PLUGIN_CHILD_SESSION_PREFIX, pluginThreadKey } from "./plugin-thread-key.js";
 
 export { pluginThreadKey };
@@ -131,7 +131,7 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
     const [row] = await deps.db
       .select({ id: agentSessions.id })
       .from(agentSessions)
-      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id)))
+      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.orgId, orgId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id)))
       .limit(1);
     if (!row) return false;
     const thread = await deps.engineStore.getThread(sessionId, threadId);
@@ -208,8 +208,16 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       if (existing) {
         // This run reuses the child, so it now belongs to this delivery:
         // cancelling the delivery that first started it must not stop it.
-        await deps.db.update(childWatches).set({ pluginDeliveryId: scope.deliveryId })
-          .where(eq(childWatches.childSessionId, existing.childSessionId));
+        // Only a live delivery takes a child over. A run superseded in
+        // another process may not know yet; it must not take the child back
+        // from the run that superseded it.
+        const taken = await deps.db.update(childWatches).set({ pluginDeliveryId: scope.deliveryId })
+          .where(and(
+            eq(childWatches.childSessionId, existing.childSessionId),
+            sql`EXISTS (SELECT 1 FROM ${eventDeliveries} WHERE ${eventDeliveries.id} = ${scope.deliveryId} AND ${eventDeliveries.status} IN ('pending', 'failed'))`,
+          ))
+          .returning({ id: childWatches.childSessionId });
+        if (taken.length === 0) throw new DOMException("This plugin run's delivery was cancelled. Start no more children.", "AbortError");
         return stopIfCancelled(existing, parent);
       }
       const childSessionId = await freeChildId(deps, baseId);

@@ -285,6 +285,19 @@ describe("EventDispatcher plugin target", () => {
     await d.stop();
   });
 
+  it("stops the children of a delivery waiting to retry when its line is turned off", async () => {
+    const { deliveryId } = await seed({ attempts: 1 });
+    await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
+    const host = handlerHost();
+    const handle = vi.fn(async () => {});
+    const d = dispatcher(pluginWith(handle), host);
+    await d.pollOnce();
+    expect((await settled(deliveryId)).status).toBe("skipped");
+    expect(handle).not.toHaveBeenCalled();
+    expect(host.stopDeliveryChildren).toHaveBeenCalledWith([deliveryId]);
+    await d.stop();
+  });
+
   it("skips, not delivers, when a handler that ignores the signal returns after its line was turned off", async () => {
     const { deliveryId } = await seed();
     let release: () => void = () => {};

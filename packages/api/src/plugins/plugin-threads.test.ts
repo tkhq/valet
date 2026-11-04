@@ -14,7 +14,7 @@ import {
 } from "@valet/engine";
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { agentSessions, childWatches } from "../schema/index.js";
+import { agentSessions, childWatches, eventDeliveries } from "../schema/index.js";
 import { answerFormat, awaitSubmission, buildPluginThreads, pluginChildSessionId, pluginThreadKey, stopPluginDeliveryChildren, type PluginThreadsDeps } from "./plugin-threads.js";
 
 const reviewer: ValetPlugin = {
@@ -73,6 +73,8 @@ describe("PluginThreads.spawnChild", () => {
 
   it("returns the existing child on a retry of the same dispatch", async () => {
     const { tdb, spawner, threads } = await setup();
+    // The retrying run's delivery is still live.
+    await tdb.appDb.insert(eventDeliveries).values({ id: "del-1", eventId: "ev-1", subscriptionId: "sub-1", status: "failed", attempts: 1, nextAttemptAt: Date.now(), createdAt: Date.now() });
     const childSessionId = pluginChildSessionId("reviewer", owner, thread.key, "verify:abc:0");
     await tdb.appDb.insert(childWatches).values({
       childSessionId,
@@ -147,6 +149,10 @@ describe("PluginThreads child stopping", () => {
         : null);
   }
 
+  async function seedDelivery(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, id: string, status: "pending" | "skipped") {
+    await tdb.appDb.insert(eventDeliveries).values({ id, eventId: "ev-1", subscriptionId: "sub-1", status, attempts: 1, nextAttemptAt: Date.now(), createdAt: Date.now() });
+  }
+
   async function seedWatch(tdb: Awaited<ReturnType<typeof freshTestPgDb>>, childSessionId: string, pluginDeliveryId: string | null = null) {
     await tdb.appDb.insert(childWatches).values({
       childSessionId, queueItemId: "q-1", parentSessionId: thread.sessionId, parentThreadId: thread.threadId,
@@ -176,6 +182,7 @@ describe("PluginThreads child stopping", () => {
 
   it("takes over a reused child for this delivery, and after a cancel stops a late spawn and starts no more", async () => {
     const { tdb, stopper, spawner, cancel, threads } = await setup();
+    await seedDelivery(tdb, "del-new", "pending");
     const found = pluginChildSessionId("reviewer", owner, thread.key, "found");
     await seedWatch(tdb, found, "del-old");
     await threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "found" });
@@ -194,6 +201,17 @@ describe("PluginThreads child stopping", () => {
     const lateChild = await late;
     await vi.waitFor(() => expect(stopper).toHaveBeenCalledWith({ childSessionId: lateChild.childSessionId }, { parentSessionId: thread.sessionId, parentThreadId: thread.threadId }));
     await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "after" })).rejects.toThrow("This plugin run was cancelled");
+  });
+
+  it("never takes a child back once this run's delivery was superseded elsewhere", async () => {
+    const { tdb, threads } = await setup();
+    // Another process skipped this run's delivery; the run has not noticed yet.
+    await seedDelivery(tdb, "del-new", "skipped");
+    const shared = pluginChildSessionId("reviewer", owner, thread.key, "shared");
+    await seedWatch(tdb, shared, "del-newer");
+    await expect(threads.spawnChild(thread, { prompt: "p" }, { dispatchId: "shared" })).rejects.toMatchObject({ name: "AbortError" });
+    const [row] = await tdb.appDb.select({ d: childWatches.pluginDeliveryId }).from(childWatches).where(eq(childWatches.childSessionId, shared));
+    expect(row?.d).toBe("del-newer");
   });
 
   it("refuses to wait on a child or a reply outside this plugin's threads", async () => {

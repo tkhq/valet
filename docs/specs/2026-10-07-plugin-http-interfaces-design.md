@@ -269,7 +269,7 @@ Threads:
 - `threads.awaitChild` polls the child's queue item and reads the result with `settledSubmissionResult`. With a result schema it returns the validated JSON of the child's final message.
 - `awaitReply`, `awaitChild` and `stopChild` check the ids a plugin passes. A reply must sit in one of this plugin's threads in this owner's workspace, and a child must hang off one.
 - `threads.stopChild` stops a child's running turn and queued work through the host's `ChildStopper`, the path the `child_stop` tool uses. The child settles as aborted, so a pending `awaitChild` returns.
-- Each plugin child records the delivery whose run started it (`child_watches.plugin_delivery_id`). A run that reuses a child through its dispatch id takes it over, so cancelling the delivery that first started it does not stop it.
+- Each plugin child records the delivery whose run started it (`child_watches.plugin_delivery_id`). A run that reuses a child through its dispatch id takes it over, so cancelling the delivery that first started it does not stop it. Only a run whose delivery is still pending or failed can take a child over, so a run superseded in another process cannot take the child back.
 - `awaitReply` and `awaitChild` end with an `AbortError` when the handler run's signal aborts.
 
 Event handlers:
@@ -283,7 +283,7 @@ Event handlers:
 - The attempt counts when the handler starts, so a handler that crashes the process still uses up its retries. After the last retry the delivery is dead.
 - Lease writes from one run go through one queue. A renewal tick is skipped while the previous one is still running, and the outcome write waits for the queue. So a slow database cannot make two renewals race and abandon a row the run still owns.
 - A throw records a failed delivery with the usual backoff. A graceful shutdown records nothing: the lease lapses and a later poll runs the handler again. If the line is turned off or deleted mid-run, the handler is aborted and the delivery is skipped. Handlers must be idempotent per event; dispatch ids give that for threads and children.
-- A delivery cancelled for good stops the children recorded against it: the dispatcher stops them when the line is turned off or a newer event supersedes the delivery. A spawn that lands after the cancel is stopped at once. Shutdown and a lost lease leave the children running, because the next run finds them by dispatch id.
+- A delivery cancelled for good stops the children recorded against it: the dispatcher stops them when the line is turned off (also for a delivery waiting to retry) or a newer event supersedes the delivery. A spawn that lands after the cancel is stopped at once. Shutdown and a lost lease leave the children running, because the next run finds them by dispatch id.
 - The handler acts as the line's owner: the owner's user id, or `team:<id>` for a team, as a workflow run does. The org must admit the plugin for that owner when the line is armed and again at each delivery.
 - The handler context carries the owner, the plugin store scoped to the owner, `memory` (read-only `search` and `read` over the owner's shared memory, limited to the line's org, `plugins/plugin-memory.ts`), and `appToken(service, { owner })`. A plugin reads the memory a task needs and puts it in the child's prompt; children get no memory tools. A plugin gets tokens only for its own name or for services it declares credentials for. Only GitHub app tokens are available.
 
