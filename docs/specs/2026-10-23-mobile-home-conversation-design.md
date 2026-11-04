@@ -229,6 +229,23 @@ People without model administration access retain the context control beside the
 The phone thread menu omits sandbox configuration. Desktop retains those controls.
 Assistant reply, rating, copy, and branch actions appear together below the response on phones.
 
+### Phone sidebar and sheets
+
+Added 2026-11-03. These rules apply below 768px only. Desktop does not change.
+
+- The drawer uses the sidebar's type tiers at touch size. Rows are 44px tall
+  with 15px text, section labels are 12px, and New thread and Search are 44px
+  targets. Home is a top-level row with the same neutral selected fill as the
+  sidebar. The drawer lists each space's pages, its Settings row, and every Recent.
+- The drawer slides in from the left. A swipe left closes it.
+- The thread summary opens as a bottom sheet with a grabber, not a popover. A
+  swipe down closes it when its content is scrolled to the top.
+- Thread controls beside Chat, Tasks, and Make are 44px wide.
+- A breadcrumb header ("Space / Page") stays on one line. The space name
+  truncates before the page title. A title without a space step wraps.
+- Tasks stays a tab beside Chat and Make. It is a full-height view, so it
+  needs no separate sheet.
+
 ### Home on desktop
 
 Added 2026-11-02, revised 2026-11-03. Desktop opens Home inside the Threads

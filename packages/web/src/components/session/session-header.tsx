@@ -614,7 +614,7 @@ export function SessionHeader({
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className="shrink-0" aria-label="Thread menu">
+            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className="shrink-0 max-md:min-w-11" aria-label="Thread menu">
               {del.isPending || replace.isPending || setProfile.isPending ? (
                 <Spinner size={14} />
               ) : (

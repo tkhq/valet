@@ -826,12 +826,12 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           type="button"
           onClick={() => void createAndNavigate()}
           disabled={createThread.isPending}
-          className="flex-1 flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50 whitespace-nowrap"
+          className="flex-1 flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50 whitespace-nowrap max-md:min-h-11 max-md:text-[15px]"
         >
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
-        <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
+        <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink max-md:h-11 max-md:w-11"><Search className="h-4 w-4" /></button>
         {!mobile && sidebarControls?.present && <button type="button" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={sidebarControls.toggleCollapsed}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><PanelLeftClose className="h-4 w-4" /></button>}
       </div>
@@ -899,7 +899,7 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
           {/* A space's Projects and threads show while its Threads or Home is open; a phone's drawer always shows them. */}
           {(mobile || onThreadsPage) && <>
           <div data-tour="projects" className="group flex items-center gap-1 pb-1 pl-4 pr-3 pt-4">
-            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-[11px] font-medium text-muted hover:text-ink focus-visible:outline-none">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown aria-hidden className={cn("h-3 w-3", HOVER_CHROME, projects.value.collapsed && "-rotate-90")} /></button>
+            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-[11px] font-medium text-muted hover:text-ink focus-visible:outline-none max-md:text-xs">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown aria-hidden className={cn("h-3 w-3", HOVER_CHROME, projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               {/* The one list-wide menu (sort, filter, mark all read) stays on a
                   phone: it is the only place those live. Per-row actions do not. */}
@@ -1291,7 +1291,7 @@ function ThreadNode({
                 child: undefined,
               })}
               className={cn(
-                "flex-1 min-w-0 h-[26px] max-md:h-auto max-md:min-h-11 flex items-center rounded-md pl-8 text-[13px]",
+                "flex-1 min-w-0 h-[26px] max-md:h-auto max-md:min-h-11 flex items-center rounded-md pl-8 text-[13px] max-md:text-[15px]",
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
                 active ? "font-medium text-ink" : "text-ink/70 group-hover:text-ink",
               )}

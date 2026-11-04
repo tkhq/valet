@@ -4,10 +4,9 @@ import { House } from "lucide-react";
 import { Badge } from "~/components/primitives";
 import { useNeedsYouCount } from "~/components/home/tasks-panel";
 import { AssistantRail } from "~/components/session/assistant-rail";
+import { SELECTED_ROW, TOP_ROW } from "~/components/session/sidebar-rows";
 import { cn } from "~/lib/cn";
 import { useSidebarControls } from "./app-shell";
-
-const ROW = "flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm max-md:min-h-11 hover:bg-ink-wash focus-visible:bg-ink-wash focus-visible:outline-none";
 
 /**
  * The one navigation surface for conversations: Home, the Spaces tree with
@@ -31,9 +30,10 @@ export function AppDrawer() {
     closeDrawer?.();
   }, [href, closeDrawer]);
   return <div className="flex min-h-0 flex-1 flex-col">
-    <div className="shrink-0 space-y-1 px-2 pt-2">
-      <Link to="/" className={cn(ROW, onHome ? "bg-moss-wash-strong font-medium text-ink" : "text-ink/85")}>
-        <House className="h-4 w-4 shrink-0" aria-hidden />
+    {/* A top-level row like the sidebar's: one neutral fill when selected. */}
+    <div className="shrink-0 pt-2">
+      <Link to="/" className={cn(TOP_ROW, "gap-2 px-2 focus-visible:bg-ink-wash focus-visible:outline-none", onHome ? SELECTED_ROW : "hover:bg-ink-wash")}>
+        <House className="h-4 w-4 shrink-0 text-muted" aria-hidden />
         <span className="flex-1">Home</span>
         {needsYou.count > 0 && <Badge variant="warning" aria-label={`${needsYou.count} need you`}>{needsYou.count}{needsYou.partial ? "+" : ""}</Badge>}
       </Link>

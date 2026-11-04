@@ -33,10 +33,11 @@ export function PageHeader({ title, clause, description, actions, back, classNam
           actions on the title row: a `sm` control is as tall as its line. */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          {/* `clause` is the breadcrumb step before the title: "Space / Page". */}
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          {/* `clause` is the breadcrumb step before the title: "Space / Page".
+              A phone keeps both on one line and truncates the space first. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 max-md:flex-nowrap">
             {clause}
-            <h1 className="min-w-0 break-words font-display text-2xl text-ink">{title}</h1>
+            <h1 className={cn("min-w-0 break-words font-display text-2xl text-ink max-md:text-xl", clause && "max-md:truncate max-md:only:overflow-visible max-md:only:whitespace-normal")}>{title}</h1>
           </div>
           {description && <p className="mt-1 text-sm text-muted">{description}</p>}
         </div>
