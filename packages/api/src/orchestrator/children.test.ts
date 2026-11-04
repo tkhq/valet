@@ -2977,6 +2977,48 @@ describe("ChildWatcher", () => {
     expect(childData).not.toBeNull();
   });
 
+  it("tears down a plugin child's sandbox on settle, so it stops counting against the child cap", async () => {
+    api = await bootTestApi();
+    const watcher = testChildWatcher(childrenDeps(api));
+    const { engineHost, engineStore, db } = api.providers;
+    const parent = await engineHost.sessionFor("parent-plg", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+    const child = await engineHost.childSessionFor("child-plg", {
+      parentSessionId: "parent-plg",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    const attachment = child.attachment;
+    const itemId = "qi-plg-1";
+    await engineStore.admitSubmission("child-plg", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await appendTerminalResult(engineStore, "child-plg", childThread.id, itemId);
+    await engineStore.settleUnclaimed("child-plg", childThread.id, itemId, { outcome: "completed" });
+    const watch = {
+      childSessionId: "child-plg",
+      queueItemId: itemId,
+      parentSessionId: "parent-plg",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), reportToParent: false });
+
+    watcher.arm(watch);
+
+    await waitFor(async () => engineHost.liveSession("child-plg") === null);
+    expect(attachment.state).toBe("released");
+    const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-plg")).limit(1);
+    expect(row?.settled).toBe(true);
+    // The result the plugin reads with awaitChild survives the teardown.
+    expect((await engineStore.getQueueItem("child-plg", itemId))?.status).toBe("settled");
+  });
+
   it("teardown revokes the settled child's sandbox tokens", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
