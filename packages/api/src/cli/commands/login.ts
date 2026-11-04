@@ -25,7 +25,6 @@
  * A credential is never echoed back to the user.
  */
 import { InstanceClient } from "../client.js";
-import { withAccess } from "../cloudflare-access.js";
 import type { PendingLogin, ProfileConfig, ValetConfig } from "../config.js";
 import { updateConfig } from "../config.js";
 import { deviceCodeInstructions, openInBrowser, pollDeviceLogin, revokeDeviceLogin, startDeviceLogin } from "../device-login.js";
@@ -314,13 +313,12 @@ async function promptHidden(promptText: string): Promise<string> {
 
 async function authConfig(url: string): Promise<Pick<AuthConfigResponse, "stub">> {
   const endpoint = `${url}/api/auth-config`;
-  const res = await withAccess(endpoint, async (access) => {
-    try {
-      return await fetch(endpoint, { headers: access });
-    } catch (err) {
-      throw new UnreachableError(`could not reach ${endpoint}: ${(err as Error).message}`);
-    }
-  });
+  let res: Response;
+  try {
+    res = await fetch(endpoint);
+  } catch (err) {
+    throw new UnreachableError(`could not reach ${endpoint}: ${(err as Error).message}`);
+  }
   if (!res.ok) throw new UnreachableError(`${endpoint} returned ${res.status}. Check that the URL is a Valet instance.`);
   const body = (await res.json()) as Partial<AuthConfigResponse>; // Public route; narrowed below.
   return { stub: body.stub === true };
