@@ -244,7 +244,9 @@ beforeEach(() => {
 });
 
 describe("ThreadTree — Home row", () => {
-  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastAgentActivityAt: Date.now() + 1 });
+  // Fixed times: two `Date.now()` reads can differ on a slow runner, and the
+  // unread mark needs the agent's activity to be newer than the person's.
+  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastUserActivityAt: 1_000, lastAgentActivityAt: 2_000 });
 
   it("pins Home above the list in the person's own workspace and keeps it out of Recents", () => {
     homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
