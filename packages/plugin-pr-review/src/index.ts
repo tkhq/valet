@@ -19,6 +19,7 @@ export {
   type PipelineResult,
 } from "./pipeline.js";
 export {
+  buildVerifierPrompt,
   createVerifierSpec,
   decideFinding,
   quoteInFile,
@@ -26,6 +27,7 @@ export {
   VerdictSchema,
   type FinalVerdict,
   type Verdict,
+  type VerifierPromptInput,
   type VerifierSpec,
 } from "./verify.js";
 export {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { buildVerifierPrompt, createVerifierSpec, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -191,5 +191,20 @@ describe("mergeFindings", () => {
         [at("a.py", 13, "A again"), at("a.py", 20, "C"), at("b.py", 10, "D")],
       ]).map((f) => f.title),
     ).toEqual(["A", "A2", "B", "C", "D"]);
+  });
+});
+
+describe("buildVerifierPrompt", () => {
+  it("is the prompt createVerifierSpec sends, and takes another finish line", async () => {
+    const { dir, base, head } = repo();
+    const f = finding("Division by zero");
+    const spec = await createVerifierSpec({ workspace: dir, base, head, title: "t", finding: f, label: "verify:0" });
+    const fileDiff = execFileSync("git", ["diff", "--unified=5", base, head, "--", "a.py"], { cwd: dir, encoding: "utf8" });
+    expect(spec.prompt).toBe(buildVerifierPrompt({ title: "t", base, head, finding: f, fileDiff }));
+    expect(spec.prompt).toContain("y = x / 0");
+    const remote = buildVerifierPrompt({ title: "t", base, head, finding: f, fileDiff: "", recheckFrom: "abc", finish: "Answer in JSON." });
+    expect(remote).toContain("(no changes to this file in the PR)");
+    expect(remote).toContain("posted this claim on commit abc");
+    expect(remote.endsWith("Answer in JSON.")).toBe(true);
   });
 });

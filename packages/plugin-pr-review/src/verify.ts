@@ -73,6 +73,49 @@ export interface VerifierSpecOptions {
   model?: string;
 }
 
+export interface VerifierPromptInput {
+  title: string;
+  base: string;
+  head: string;
+  finding: Finding;
+  /** The PR's diff of the finding's file, already cut to the caller's budget. */
+  fileDiff: string;
+  /** Recheck of a finding posted on an earlier commit whose code has since changed. */
+  recheckFrom?: string;
+  /** The last line: how to hand back the verdict. Default: call submit_verdict. */
+  finish?: string;
+}
+
+/**
+ * The verifier's first prompt: the claim and the file's diff. Pure, so a
+ * host without a local checkout (the plugin handler) sends the same prompt
+ * as `createVerifierSpec`.
+ */
+export function buildVerifierPrompt(input: VerifierPromptInput): string {
+  const f = input.finding;
+  return [
+    `# Pull request: ${input.title}`,
+    `BASE commit: ${input.base}`,
+    `HEAD commit: ${input.head} (checked out)`,
+    "",
+    "## Claim to check",
+    input.recheckFrom !== undefined
+      ? `A reviewer posted this claim on commit ${input.recheckFrom}. Later commits changed the code at that line. Check whether the defect is still present at HEAD; the line may have moved. Refute it if the new code fixes it.`
+      : "Another reviewer posted this claim. Check it against the code.",
+    `File: ${f.path}, line ${f.line} (HEAD)`,
+    `Severity claimed: ${f.severity}, category: ${f.category}`,
+    `Title: ${f.title}`,
+    `Body: ${f.body}`,
+    "",
+    `## Diff of ${f.path}`,
+    "```diff",
+    input.fileDiff.trimEnd() || "(no changes to this file in the PR)",
+    "```",
+    "",
+    input.finish ?? "Check the claim, then call submit_verdict.",
+  ].join("\n");
+}
+
 export interface VerifierSpec extends AgentSpec {
   verdict(): Verdict | undefined;
 }
@@ -98,27 +141,14 @@ export async function createVerifierSpec(opts: VerifierSpecOptions): Promise<Ver
     },
   };
 
-  const prompt = [
-    `# Pull request: ${opts.title}`,
-    `BASE commit: ${opts.base}`,
-    `HEAD commit: ${opts.head} (checked out)`,
-    "",
-    "## Claim to check",
-    opts.recheckFrom !== undefined
-      ? `A reviewer posted this claim on commit ${opts.recheckFrom}. Later commits changed the code at that line. Check whether the defect is still present at HEAD; the line may have moved. Refute it if the new code fixes it.`
-      : "Another reviewer posted this claim. Check it against the code.",
-    `File: ${f.path}, line ${f.line} (HEAD)`,
-    `Severity claimed: ${f.severity}, category: ${f.category}`,
-    `Title: ${f.title}`,
-    `Body: ${f.body}`,
-    "",
-    `## Diff of ${f.path}`,
-    "```diff",
-    fileDiff.trimEnd() || "(no changes to this file in the PR)",
-    "```",
-    "",
-    "Check the claim, then call submit_verdict.",
-  ].join("\n");
+  const prompt = buildVerifierPrompt({
+    title: opts.title,
+    base: opts.base,
+    head: opts.head,
+    finding: f,
+    fileDiff,
+    ...(opts.recheckFrom !== undefined ? { recheckFrom: opts.recheckFrom } : {}),
+  });
 
   return {
     label: opts.label,
