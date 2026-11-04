@@ -94,6 +94,8 @@ describe("parseBuildTolerations", () => {
     ['[{"key":1}]', /field "key" is not a string/],
     ['[{"key":"k","tolerationSeconds":"60"}]', /tolerationSeconds is not an integer/],
     ['[{"key":"k","operator":"Exists","value":"v"}]', /sets a value with operator "Exists"/],
+    ['[{"key":"valet.dev/build","operator":"Exists","effect":"NoSchedule","tolerationSeconds":60}]', /sets tolerationSeconds without effect "NoExecute"/],
+    ['[{"key":"k","operator":"Exists","tolerationSeconds":60}]', /sets tolerationSeconds without effect "NoExecute"/],
     ['[{"key":"pool?","operator":"Exists"}]', /key "pool\?" is not a valid Kubernetes label key/],
     ['[{"key":"k","operator":"Equal","value":"a b"}]', /value "a b" is not a valid Kubernetes label value/],
   ])("throws a boot error that names the fix for %j", (value, detail) => {

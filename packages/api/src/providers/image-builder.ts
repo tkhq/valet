@@ -166,6 +166,9 @@ export function parseBuildTolerations(value: string | undefined): V1Toleration[]
     if (toleration.value !== undefined && !isLabelValue(toleration.value)) {
       return fail(`entry ${index} value "${toleration.value}" is not a valid Kubernetes label value`);
     }
+    if (toleration.tolerationSeconds !== undefined && toleration.effect !== "NoExecute") {
+      return fail(`entry ${index} sets tolerationSeconds without effect "NoExecute"`);
+    }
     if (toleration.operator === "Exists" && toleration.value !== undefined) {
       return fail(`entry ${index} sets a value with operator "Exists"`);
     }
