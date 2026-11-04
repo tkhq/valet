@@ -91,7 +91,6 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
-import { SYSTEM_ARCHIVER, threadArchiveDays } from "../services/thread-auto-archive.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { trimToolResults } from "../services/transcript-trim.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
@@ -561,12 +560,9 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const { db } = c.var.providers;
 
   await ensureDefaultThreadWhereOwned(session.id, engineSession);
-  // `?archived=all` lists both, so search finds a thread the idle sweep archived.
-  const archivedParam = c.req.query("archived");
-  const wantArchived = archivedParam === "1";
-  const eitherArchive = archivedParam === "all";
+  const wantArchived = c.req.query("archived") === "1";
   const selectedThreadId = c.req.query("threadId");
-  const groups = await workspaceThreadGroups(c, session, selectedThreadId || eitherArchive ? undefined : wantArchived);
+  const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
   // Parse stored tokens: a legacy "off" row has no pin and shows the session
   // default, which is filled in for the returned page below.
   const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key))
@@ -582,7 +578,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           id: sessionThreads.id,
           title: sessionThreads.title,
           archivedAt: sessionThreads.archivedAt,
-          archivedBy: sessionThreads.archivedBy,
           lastUserActivityAt: sessionThreads.lastUserActivityAt,
           shareMode: sessionThreads.shareMode,
           approvalBypassBy: sessionThreads.approvalBypassBy,
@@ -598,7 +593,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           {
             title: r.title ?? undefined,
             archivedAt: r.archivedAt ?? undefined,
-            autoArchived: r.archivedAt !== null && r.archivedBy === SYSTEM_ARCHIVER,
             lastUserActivityAt: r.lastUserActivityAt ?? undefined,
             share: r.shareMode ?? undefined,
             approvalBypass: r.approvalBypassBy !== null,
@@ -607,8 +601,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
     ),
   );
 
-  // Default list excludes archived threads; `?archived=1` lists only them;
-  // `?archived=all` lists both.
+  // Default list excludes archived threads; `?archived=1` lists only them.
   // A team runtime's private threads show only to the people they belong to
   // (`services/thread-access.ts`).
   const query = c.req.query("q")?.trim().toLowerCase() ?? "";
@@ -626,13 +619,12 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const matchingIds = new Set([...contentMatches.map((row) => row.threadId), ...(c.req.queries("fixedId") ?? [])]);
   const summaries = threads
     .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
-    .filter(t => t.id === selectedThreadId || eitherArchive || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => {
       const meta = metaById.get(t.id);
       const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, t.key === HOME_THREAD_KEY ? HOME_THREAD_TITLE : meta?.title,
         t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
-      return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}),
-        ...(meta?.autoArchived ? { autoArchived: { idleDays: threadArchiveDays() } } : {}) };
+      return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}) };
     });
   let body: ListThreadsResponse;
   try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
@@ -1018,13 +1010,12 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
         sessionId: session.id,
         createdAt: thread.toThreadData().createdAt,
         archivedAt: nextArchivedAt ?? null,
-        archivedBy: body.archived === true ? c.var.user.id : null,
         title: nextTitle ?? null,
       })
       .onConflictDoUpdate({
         target: sessionThreads.id,
         set: {
-          ...(wantsArchived ? { archivedAt: nextArchivedAt, archivedBy: body.archived ? c.var.user.id : null } : {}),
+          ...(wantsArchived ? { archivedAt: nextArchivedAt } : {}),
           ...(wantsTitle ? { title: nextTitle } : {}),
         },
       });
