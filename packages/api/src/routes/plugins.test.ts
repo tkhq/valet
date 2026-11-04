@@ -104,6 +104,31 @@ describe("GET /api/plugins", () => {
     expect(bare?.dynamic).toBeUndefined();
   });
 
+  it("lists event handlers with their events and settings schema, and leaves them out for a plugin with none", async () => {
+    const withHandler: ValetPlugin = {
+      name: "handler-plugin",
+      version: "1.0.0",
+      eventHandlers: [{
+        id: "review-pull-request",
+        description: "Review each push.",
+        events: ["github.pull_request.opened"],
+        configSchema: Type.Object({ reviewDrafts: Type.Boolean({ default: false }) }),
+        handle: async () => {},
+      }],
+    };
+    api = await bootTestApi({ plugins: [withHandler, NO_DECLARATIONS_PLUGIN] });
+
+    const { plugins } = (await (await fetch(`${api.baseUrl}/api/plugins`)).json()) as ListPluginsResponse;
+
+    expect(plugins.find((p) => p.name === "handler-plugin")?.eventHandlers).toEqual([{
+      id: "review-pull-request",
+      description: "Review each push.",
+      events: ["github.pull_request.opened"],
+      configSchema: { type: "object", properties: { reviewDrafts: { type: "boolean", default: false } }, required: ["reviewDrafts"] },
+    }]);
+    expect(plugins.find((p) => p.name === "bare-plugin")?.eventHandlers).toBeUndefined();
+  });
+
   it("exposes actions:[] for a declared credential service with no matching action plugin", async () => {
     const noActionsPlugin: ValetPlugin = {
       name: "creds-only-plugin",

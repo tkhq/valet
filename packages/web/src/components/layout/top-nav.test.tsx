@@ -33,6 +33,10 @@ let securityPlugins: OrgPluginWire[] = [
   },
 ];
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {

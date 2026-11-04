@@ -50,6 +50,7 @@ export * from "./types.js";
 export {
   createReviewHandler,
   excluded,
+  POINTERS_COLLECTION,
   pullTarget,
   ReviewSettingsSchema,
   type FindingPointer,

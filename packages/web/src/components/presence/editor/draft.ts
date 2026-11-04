@@ -51,8 +51,15 @@ import {
 /** The When choice: an event service, or a schedule. */
 export type EditorService = WhenService | "schedule";
 
-/** What Valet does: reply in the conversation, work on the event, or run a workflow. */
-export type DoKind = "reply" | "work" | "workflow";
+/** What Valet does: reply in the conversation, work on the event, run a
+ * workflow, or hand the event to a plugin's event handler. */
+export type DoKind = "reply" | "work" | "workflow" | "plugin";
+
+/** A plugin event handler a line names (`target.kind: "plugin"`). */
+export interface HandlerRef {
+  plugin: string;
+  handler: string;
+}
 
 /** Which assistant acts. */
 export type AssistantKind = "user" | "team" | "org";
@@ -112,6 +119,10 @@ export interface Draft {
   threadLink: string;
   doKind: DoKind;
   workflowId: string;
+  /** The plugin handler a `plugin` line runs. Null until the reader picks one. */
+  handler: HandlerRef | null;
+  /** The handler's settings that differ from its defaults (`target.config`). */
+  handlerConfig: Record<string, unknown>;
   assistant: AssistantKind;
   teamId: string | null;
   /** Who may mention a team assistant. Sent only for a team reply line. */
@@ -224,6 +235,8 @@ export function newDraft(options: {
     threadLink: "",
     doKind: workflowId !== undefined ? "workflow" : service === "slack" ? "reply" : "work",
     workflowId: workflowId ?? "",
+    handler: null,
+    handlerConfig: {},
     assistant: teamId !== undefined ? "team" : "user",
     teamId: teamId ?? null,
     audience: "organization",
@@ -265,8 +278,10 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     anyChannel: storedAnyChannel(sub.eventKeys, sub.filters),
     threadFollow: followsSlackThread(sub),
     threadLink: "",
-    doKind: target.kind === "workflow" ? "workflow" : target.kind === "assistant" && target.follow === true ? "reply" : "work",
+    doKind: target.kind === "plugin" ? "plugin" : target.kind === "workflow" ? "workflow" : target.kind === "assistant" && target.follow === true ? "reply" : "work",
     workflowId: target.kind === "workflow" ? target.workflowId : "",
+    handler: target.kind === "plugin" ? { plugin: target.plugin, handler: target.handler } : null,
+    handlerConfig: target.kind === "plugin" ? target.config ?? {} : {},
     assistant: assistant ? target.assistant ?? "user" : sub.ownerType === "team" ? "team" : sub.ownerType === "org" ? "org" : "user",
     teamId: assistant ? target.teamId ?? (sub.ownerType === "team" ? sub.ownerId : null) : null,
     audience: sub.audience ?? "organization",
@@ -303,6 +318,8 @@ export function draftFromRoutine(routine: Routine): Draft {
     threadLink: "",
     doKind: workflow ? "workflow" : "work",
     workflowId: routine.workflowId ?? "",
+    handler: null,
+    handlerConfig: {},
     assistant: detail.ownerType === "team" ? "team" : "user",
     teamId: detail.ownerType === "team" ? detail.ownerId : null,
     audience: "organization",
@@ -346,6 +363,8 @@ export function setService(draft: Draft, next: EditorService): Draft {
   let doKind = draft.doKind;
   if (doKind === "reply" && next !== "slack") doKind = "work";
   if (next === "slack" && draft.service === "schedule" && doKind === "work") doKind = "reply";
+  // A routine has no event to hand to a plugin handler.
+  if (next === "schedule" && doKind === "plugin") doKind = "work";
   return {
     ...draft,
     service: next,
@@ -427,7 +446,7 @@ export function setThreadFollow(draft: Draft, on: boolean): Draft {
     creatorScopeId: null,
     anyChannel: false,
     // A thread follow works on each reply; it never starts a conversation to follow.
-    doKind: draft.doKind === "workflow" ? "workflow" : on ? "work" : draft.doKind,
+    doKind: draft.doKind === "workflow" || draft.doKind === "plugin" ? draft.doKind : on ? "work" : draft.doKind,
     where: null,
     whereChosen: false,
     whereTitle: undefined,
@@ -506,9 +525,31 @@ export function effectiveWhere(draft: Draft): AssistantThreadPolicy | null {
   return draft.where;
 }
 
-/** True when the line works through an assistant, not a workflow. */
+/** True when the line works through an assistant, not a workflow or a plugin handler. */
 export function isAssistantDraft(draft: Draft): boolean {
-  return draft.doKind !== "workflow";
+  return draft.doKind === "reply" || draft.doKind === "work";
+}
+
+/**
+ * Picks the plugin handler a line runs. Its settings start from the
+ * defaults, and When starts on the handler's events that `services` lists,
+ * so a new line hears what the handler accepts.
+ */
+export function setHandler(draft: Draft, handler: { plugin: string; id: string; events: readonly string[] }, services: readonly CatalogService[]): Draft {
+  const listed = new Set(services.flatMap((s) => s.entries.map((e) => e.key)));
+  const events = handler.events.filter((key) => listed.has(key));
+  const service = events.length > 0 ? serviceOfKeys(events) : draft.service;
+  return {
+    ...draft,
+    doKind: "plugin",
+    handler: { plugin: handler.plugin, handler: handler.id },
+    handlerConfig: {},
+    service,
+    events: events.length > 0 ? new Set(events) : draft.events,
+    conditions: service === draft.service ? draft.conditions : [],
+    threadFollow: false,
+    threadLink: "",
+  };
 }
 
 /** True when a stored or created mention line hears only its creator.
@@ -570,6 +611,16 @@ function lineTarget(draft: Draft): EventSubscriptionTargetWire {
     ...(once !== null ? { oncePerHours: once } : {}),
   };
   if (draft.doKind === "workflow") return { kind: "workflow", workflowId: draft.workflowId, ...appearance };
+  if (draft.doKind === "plugin") {
+    return {
+      kind: "plugin",
+      plugin: draft.handler?.plugin ?? "",
+      handler: draft.handler?.handler ?? "",
+      ...(draft.assistant === "team" && draft.teamId !== null ? { teamId: draft.teamId } : {}),
+      ...(Object.keys(draft.handlerConfig).length > 0 ? { config: draft.handlerConfig } : {}),
+      ...appearance,
+    };
+  }
   const where = effectiveWhere(draft);
   const thread = where !== null ? { thread: where } : {};
   const templates = promptFieldsToTarget({ systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate });
@@ -620,6 +671,7 @@ function patchLineBody(draft: Draft, sub: EventSubscriptionWire, review: boolean
     prompts: { systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate },
     appearance: draft.appearance,
     oncePerHours: oncePerHoursValue(draft),
+    config: draft.handlerConfig,
     ...(thread !== undefined ? { thread } : {}),
     ...(sub.ownerType === "user" && assistant
       ? { deliveryPreferences: { deliveryPolicy: draft.deliveryPolicy, pauseOnOverlap: draft.pauseOnOverlap } }
@@ -871,6 +923,9 @@ export function exampleSteps(draft: Draft, words: { when: string; workflow?: str
   if (draft.doKind === "workflow") {
     return [first, second.replace(" and your instructions", ""), `It runs ${words.workflow ?? "the workflow"}${as}.`];
   }
+  if (draft.doKind === "plugin") {
+    return [first, `Valet gives ${what} to the ${draft.handler?.plugin ?? "picked"} plugin.`, `The plugin works on it with its settings${as}.`];
+  }
   const where = whereWords(effectiveWhere(draft), draftSubjectKind(draft), draft.whereTitle);
   const verb = draft.doKind === "reply" ? "replies" : "works";
   return [first, second, `It ${verb} in ${where}${as}.`];
@@ -879,7 +934,7 @@ export function exampleSteps(draft: Draft, words: { when: string; workflow?: str
 /** True when the line answers through a team's assistant: the server then
  * adds no creator scope (`enforceMentionScope`'s `teamAssistant`). */
 function teamAssistantDraft(draft: Draft): boolean {
-  return draft.doKind !== "workflow" && draft.assistant === "team" && draft.teamId !== null;
+  return isAssistantDraft(draft) && draft.assistant === "team" && draft.teamId !== null;
 }
 
 /**
@@ -1026,10 +1081,12 @@ export function saveBlocker(
     }
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
+  if (draft.doKind === "plugin" && draft.handler === null) return "Pick a plugin handler.";
+  if (draft.doKind === "plugin" && draft.assistant === "org") return "A plugin handler acts for you or a team. Pick your assistant or a team's.";
   if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";
-  if (draft.doKind !== "workflow" && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
-  if (routine && draft.doKind !== "workflow" && draft.instructions.trim().length === 0) return "Give the routine instructions.";
-  if (!routine && draft.doKind !== "workflow") {
+  if (isAssistantDraft(draft) && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
+  if (routine && isAssistantDraft(draft) && draft.instructions.trim().length === 0) return "Give the routine instructions.";
+  if (!routine && isAssistantDraft(draft)) {
     const template = templateBlocker(draft, context.services ?? []);
     if (template !== null) return template;
   }
