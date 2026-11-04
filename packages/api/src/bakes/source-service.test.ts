@@ -1849,6 +1849,26 @@ describe("SourceService", () => {
       errors.mockRestore();
     });
 
+    it("re-seed fails a bake still in flight from the tampered commands and bakes the repaired row", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const full = (await db.select().from(imageSources).where(eq(imageSources.orgId, orgId))).find((s) => s.kind === "base" && s.profile === "full")!;
+      const [inFlight] = await db.select().from(bakes).where(eq(bakes.sourceId, full.id));
+      expect(inFlight?.status).toMatch(/queued|building/);
+      await db.update(imageSources).set({ setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }).where(eq(imageSources.id, full.id));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const specsBefore = builder.specs.length;
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, full.id));
+      expect(rows.find((r) => r.id === inFlight!.id)).toMatchObject({ status: "failed", error: "superseded by a built-in source repair" });
+      expect(rows.filter((r) => r.status === "queued" || r.status === "building")).toHaveLength(1);
+      expect(builder.specs.length).toBe(specsBefore + 1);
+      expect(builder.specs.at(-1)?.kind).toBe("base");
+      expect(JSON.stringify(builder.specs.at(-1))).not.toContain("aW1wbGFudA");
+      errors.mockRestore();
+    });
+
     it("re-seed puts a tampered stock-full row back and alarms", async () => {
       await service.seedDefaultBasesIfMissing(orgId);
       await db

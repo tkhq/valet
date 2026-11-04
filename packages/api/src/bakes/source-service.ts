@@ -2572,6 +2572,9 @@ export class SourceService {
         `old=${JSON.stringify(before)} new=${JSON.stringify(want)}`,
     );
     for (const field of drift) recordBuiltInSourceRepair(orgId, DEFAULT_FULL_SOURCE_NAME, field);
+    // A bake already queued or building may carry the tampered commands.
+    // Fail it so its image is never used, then bake the repaired row.
+    await this.failActiveBuilds("superseded by a built-in source repair", row.id);
     await this.maybeFireBaseBake(row.id, orgId);
   }
 
@@ -2593,10 +2596,20 @@ export class SourceService {
   /** Marks every `queued`/`building` row `failed` at boot (interrupted by
    * restart) and best-effort `cleanupOrphan`s durable cluster resources. */
   private async sweepOrphanedBuilds(): Promise<void> {
+    await this.failActiveBuilds("interrupted by restart");
+  }
+
+  /** Marks `queued`/`building` rows `failed` with `reason`, for one source
+   * or all, and best-effort `cleanupOrphan`s their cluster resources. A
+   * failed row is never synced again, so its image is never used. */
+  private async failActiveBuilds(reason: string, sourceId?: string): Promise<void> {
+    const active = sourceId === undefined
+      ? inArray(bakes.status, ["queued", "building"])
+      : and(eq(bakes.sourceId, sourceId), inArray(bakes.status, ["queued", "building"]));
     const orphaned = await this.db
       .select({ id: bakes.id, sourceId: bakes.sourceId, provider: bakes.builderBackend })
       .from(bakes)
-      .where(inArray(bakes.status, ["queued", "building"]));
+      .where(active);
     if (orphaned.length === 0) return;
 
     const sources = await this.db
@@ -2606,15 +2619,15 @@ export class SourceService {
     const sourceById = new Map(sources.map((source) => [source.id, source]));
     await this.db
       .update(bakes)
-      .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
-      .where(inArray(bakes.status, ["queued", "building"]));
+      .set({ status: "failed", error: reason, finishedAt: this.now() })
+      .where(inArray(bakes.id, orphaned.map((row) => row.id)));
     for (const row of orphaned) {
       const source = sourceById.get(row.sourceId);
       const dimensions = source
         ? this.dimensions(source, row.provider)
         : { sourceKind: "other", profile: "other", provider: row.provider };
       recordPrebuildTransition(dimensions, "failed");
-      logPrebuildEvent("bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source?.repoFullName, profile: source?.profile, provider: row.provider, error: "interrupted by restart" });
+      logPrebuildEvent("bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source?.repoFullName, profile: source?.profile, provider: row.provider, error: reason });
     }
 
     const builder = this.builder;
