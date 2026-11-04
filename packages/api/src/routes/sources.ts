@@ -39,7 +39,7 @@ import {
   type SourceChangeRequestRow,
 } from "../bakes/source-change-requests.js";
 import { auditRequest } from "./_admin-audit.js";
-import { diffFields, displayUrl } from "../services/admin-audit.js";
+import { commandDigest, diffFields, displayUrl } from "../services/admin-audit.js";
 
 /** The org's seeded `default-full` base (`seedDefaultBasesIfMissing`). Every sandbox image inherits it. */
 const BUILTIN_BASE_NAME = "default-full";
@@ -49,14 +49,14 @@ function isBuiltInSource(row: Pick<ImageSourceRow, "kind" | "name">): boolean {
 }
 
 /** The audit summary of a pending change: what the requester asked for.
- * `externalRef` is shown as a display URL; `sanitizeChanges` masks secrets
- * in setup commands. */
+ * `externalRef` is shown as a display URL, and setup commands as a digest. */
 function changeAuditView(row: SourceChangeRequestRow): Record<string, unknown> {
   const p = row.payload;
   const view: Record<string, unknown> = { changeId: row.id, change: row.action, requestedBy: row.requestedBy };
-  for (const field of ["name", "setupCommands", "parentId", "pullSecretName", "enabled", "schedule"]) {
+  for (const field of ["name", "parentId", "pullSecretName", "enabled", "schedule"]) {
     if (p[field] !== undefined) view[field] = p[field];
   }
+  if (p.setupCommands !== undefined) view.setupCommands = commandDigest(p.setupCommands);
   if (typeof p.externalRef === "string") view.externalRef = displayUrl(p.externalRef);
   return view;
 }
@@ -74,14 +74,14 @@ async function auditChangeRequested(c: Context<AppEnv>, row: SourceChangeRequest
   });
 }
 
-/** The audited fields of an image source. `externalRef` can embed registry credentials, so it is shown as a display URL. */
+/** The audited fields of an image source. `externalRef` can embed registry credentials, so it is shown as a display URL; setup commands are a digest. */
 function auditView(row: ImageSourceRow) {
   return {
     name: row.name,
     enabled: row.enabled,
     schedule: row.schedule,
     externalRef: row.externalRef ? displayUrl(row.externalRef) : null,
-    setupCommands: row.setupCommands,
+    setupCommands: commandDigest(row.setupCommands),
     parentId: row.parentId,
     sandboxResources: row.sandboxResources,
   };
@@ -355,7 +355,7 @@ sourcesRouter.post("/", async (c) => {
       targetType: "image_source",
       targetId: row.id,
       targetName: row.name,
-      changes: { kind: row.kind, profile: row.profile, setupCommands: row.setupCommands },
+      changes: { kind: row.kind, profile: row.profile, setupCommands: commandDigest(row.setupCommands) },
       alert: "image_source_created",
     });
     return c.json({ source: row }, 201);

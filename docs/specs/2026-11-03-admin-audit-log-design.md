@@ -97,7 +97,7 @@ Each alert emits:
 2. The counter `valet.security.admin_changes{kind}` (Prometheus: `valet_security_admin_changes_total`).
 3. A best-effort `POST` of the same JSON body to `VALET_SECURITY_ALERT_WEBHOOK_URL`, when the operator sets it. The post has a 5-second timeout and does not delay the request. A failure counts in `valet.errors{reason="security_alert_webhook"}`.
 
-The audit row masks secret-named keys, `NAME=value` secrets, URL user info and queries, bearer tokens, credential headers, and credential options such as `-u user:pass`, `--password value`, `sshpass -p`, and `mysql -p`. Masking cannot cover every command form, so admins read the full row only in the admin-only audit log.
+Setup commands are stored as their count and a SHA-256 digest, never their text: a command can carry a credential in any option or header, so no mask list covers them all. Admins read the commands on the source itself. Other strings in the row get the masking backstop: secret-named keys, `NAME=value` secrets, URL user info and queries, bearer tokens, credential headers, and options such as `-u user:pass` and `--password value`.
 
 The webhook URL is fixed at deploy time. No admin setting changes it, so an attacker who holds an admin account cannot turn the alert off.
 

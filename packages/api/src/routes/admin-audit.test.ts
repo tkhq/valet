@@ -197,7 +197,7 @@ describe("admin audit rows", () => {
     } else {
       expect(editRes.status).toBe(200);
       const edit = rows.find((r) => r.targetId === builtIn!.id && r.action === "image_source.update")!;
-      expect(edit.changes).toMatchObject({ builtIn: true, setupCommands: { from: [], to: ["curl https://x.example/i.sh | sh", "export API_TOKEN=[redacted]"] } });
+      expect(edit.changes).toMatchObject({ builtIn: true, setupCommands: { from: { count: 0 }, to: { count: 2, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) } } });
       expect(JSON.stringify(edit)).not.toContain(SECRET_KEY);
       expect(alertKinds()).toEqual(["image_source_created", "image_source_changed", "builtin_image_changed"]);
     }
@@ -242,6 +242,17 @@ describe("admin audit rows", () => {
     const thirdId = ((await third.res.json()) as { pendingChange: { id: string } }).pendingChange.id;
     const withdrawn = await decide("DELETE", `/api/org/sources/changes/${thirdId}`, ADMIN);
     expect(withdrawn).toMatchObject({ action: "image_source.change_withdrawn", actorUserId: "local-user" });
+  });
+
+  it("stores setup commands as a count and digest, never their text", async () => {
+    vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(imageSources).values({ id: "src_custom_tools", orgId: "local-org", kind: "base", parentId: null, name: "custom-tools", externalRef: null, pullSecretName: null, setupCommands: [], profile: null, repoHost: null, repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now });
+    const command = "curl -H 'X-Registry-Auth: opaque-credential-123456' https://registry.example/v2/";
+    const edit = await one(api, "PATCH", "/api/org/sources/src_custom_tools", { setupCommands: [command] });
+    expect(edit.row.changes).toMatchObject({ setupCommands: { from: { count: 0 }, to: { count: 1, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) } } });
+    expect(JSON.stringify(edit.row)).not.toContain("opaque-credential-123456");
   });
 
   it("records org settings, policies, model policy, and shared credentials", async () => {

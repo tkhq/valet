@@ -21,7 +21,7 @@
  * strings, masks `NAME=value` assignments for secret-like names in strings,
  * and caps sizes.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, lt, or, type SQL } from "drizzle-orm";
 import { metrics } from "@opentelemetry/api";
 import { log, reportError } from "@valet/engine";
@@ -157,6 +157,16 @@ export function sanitizeChanges(changes: Record<string, unknown> | null | undefi
   if (!changes) return null;
   const out = sanitizeObject(changes, 0);
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Setup commands as audit data: their count and a SHA-256 digest, never the
+ * text. A command can carry a credential in any option or header, so no
+ * mask list covers them all. Admins read the commands on the source itself.
+ */
+export function commandDigest(commands: unknown): { count: number; sha256: string } | null {
+  if (!Array.isArray(commands)) return null;
+  return { count: commands.length, sha256: createHash("sha256").update(JSON.stringify(commands)).digest("hex") };
 }
 
 /** `{ field: { from, to } }` for each listed field whose value changed. */
