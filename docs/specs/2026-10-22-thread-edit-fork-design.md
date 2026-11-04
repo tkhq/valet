@@ -206,6 +206,13 @@ empty repository there and applies the bundle. If the bundle needs commits
 that the fork's copy does not have, the apply fails, the empty repository
 is removed, and the note gives that reason.
 
+The check for a pending seed runs before every turn, so it must not read
+the thread. A fork that brings files along sets `forkSeedPending` on the
+destination thread. The turn reads the transcript snapshot only when that
+flag is set, or once for a fork made before the flag existed (`forkOf`
+present). After the check, `forkSeedApplied` stops later reads. A thread
+that was never forked does no read here.
+
 ### 10. Rewind is cache-safe
 
 Call: a rewind keeps the system prompt and every message before the edit

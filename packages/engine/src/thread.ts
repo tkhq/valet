@@ -1780,7 +1780,7 @@ export class Thread {
     // rest-state repair doesn't later rewrite it to an interrupted-error: the
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
-    await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
       result: toolResultText(toolResult), isError: false,
@@ -1882,12 +1882,14 @@ export class Thread {
    * live tool_execution_end path.
    */
   private async persistReplayedToolResult(
+    queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
   ): Promise<void> {
     const store = this.session.providers.store;
     const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
-    const entries = await store.getEntries(this.session.id, this.id);
+    // The suspended turn wrote the tool call, so its entries carry its queue item.
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
       const part = e.parts.find(
@@ -2758,6 +2760,9 @@ export class Thread {
     });
     this.entryAppendTail = append.catch(() => undefined);
     await append;
+    if (opts.seed && "repos" in opts.seed && opts.seed.repos.length > 0) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_PENDING_KEY]: true }), "before-save");
+    }
   }
 
   /** How a branch note sorts each tool by what its calls leave behind (`ToolDef.sideEffect`). */
@@ -3075,16 +3080,23 @@ export class Thread {
    * along. Returns without work when there is no pending seed.
    */
   private async applyForkSeed(): Promise<void> {
-    if (this.threadMetadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    // This runs before every turn, so the common case must not read the
+    // thread: only a fork with files pending (or an older fork that has not
+    // checked yet) goes on.
+    const metadata = this.threadMetadata;
+    if (metadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    if (metadata?.[FORK_SEED_PENDING_KEY] !== true && metadata?.[LEGACY_FORK_OF_KEY] === undefined) return;
     const store = this.session.providers.store;
-    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
-    if (!snapshot) return;
+    const snapshot = await this.transcriptSnapshot();
     const note = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId)
       // Copied history can contain completed forks. This destination owns
       // the newest fork note on its active path.
       .reverse().find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
     const facts = note ? readBranchNote(note.metadata) : undefined;
-    if (!note || !facts?.seed || facts.seedResult) return;
+    if (!note || !facts?.seed || facts.seedResult) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
+      return;
+    }
     const blobs = this.session.providers.blobs;
     const seedResult: NonNullable<BranchNote["seedResult"]> = [];
     for (const seed of facts.seed) {
@@ -3102,7 +3114,7 @@ export class Thread {
     const updatedFacts: BranchNote = { ...facts, seedResult };
     const updated: BranchSummaryEntry = { ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts } };
     await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
-    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true }), "before-save");
+    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
@@ -4439,7 +4451,8 @@ export class Thread {
     if (mode === "rearm") {
       this.armPendingGateForRestart(gate, suspended);
     } else {
-      const entries = await store.getEntries(this.session.id, this.id);
+      // The gate entry carries the queue item of the turn that opened the gate.
+      const entries = await store.getEntries(this.session.id, this.id, { queueItemId: gate.queueItemId });
       const entry = entries.find(
         (e) => e.type === "decision_gate" && e.gate.id === gate.id,
       );
@@ -8070,6 +8083,10 @@ export const THREAD_BRANCHED_KEY = "branched";
 
 /** Thread metadata key set once a fork's files were copied into its working directory. */
 export const FORK_SEED_APPLIED_KEY = "forkSeedApplied";
+/** Set by `copyPath` when a fork brings files along; `applyForkSeed` runs only then. */
+export const FORK_SEED_PENDING_KEY = "forkSeedPending";
+/** Forks made before `FORK_SEED_PENDING_KEY` carry only this marker (api `thread-links.ts`). */
+const LEGACY_FORK_OF_KEY = "forkOf";
 
 /** A turn's snapshots from before its first file change. */
 interface PendingCheckpoint {

@@ -642,7 +642,13 @@ export type SessionEntry =
 export interface MessageQuery {
   /** Exact submission filter, applied before the tail limit. */
   queueItemId?: string;
+  /** Exact entry ids. Reads only these rows. */
+  entryIds?: readonly string[];
   limit?: number;
+  /** The oldest N entries instead of the newest. Ignored when `limit` is set. */
+  headLimit?: number;
+  /** Only these entry types. Applied before `limit` or `headLimit`. */
+  entryTypes?: readonly SessionEntry["type"][];
   cursor?: string;
   afterEntryId?: string;
   beforeEntryId?: string;
@@ -2215,6 +2221,17 @@ export interface SessionStore {
     sessionId: string,
     threadId: string,
     opts?: { keepQueueItemId?: string },
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
+  /**
+   * The thread row and every entry as a stub, in `getThreadSnapshot` order:
+   * the stub shape `getTranscriptSnapshot` uses for covered entries, for
+   * every message and compaction. Use it to walk links, types and queue items
+   * without loading payloads. Optional: `readThreadOutline` falls back to the
+   * full snapshot.
+   */
+  getThreadOutline?(
+    sessionId: string,
+    threadId: string,
   ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
