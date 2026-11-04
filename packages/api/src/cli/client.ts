@@ -11,8 +11,14 @@
  *     header (key prefix `vlt_`), including the WS upgrade (see `stream.ts`).
  *   - Local stub instances (`VALET_LOCAL_AUTH=1`) need no credential — when
  *     `apiKey` is undefined the header is simply omitted.
+ *   - An instance behind Cloudflare Access redirects a request without an
+ *     Access session to its login page. The client then gets a token from
+ *     `cloudflared`, sends the request once more with `cf-access-token`, and
+ *     sends that header on later requests (`cloudflare-access.ts`). Other
+ *     instances never run `cloudflared`.
  */
 import { cliTelemetryHeaders } from "./telemetry.js";
+import { withAccess } from "./cloudflare-access.js";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
 import { latestCredential } from "./token-refresh.js";
 import type {
@@ -86,18 +92,19 @@ export class InstanceClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
     const isForm = body instanceof FormData;
-    const send = async (): Promise<Response> => {
-      try {
-        return await fetch(url, {
-          method,
-          headers: this.headers(!isForm),
-          body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
-        });
-      } catch (err) {
-        // fetch rejects only on transport/network failure (DNS, refused, reset).
-        throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
-      }
-    };
+    const send = (): Promise<Response> =>
+      withAccess(this.base, async (access) => {
+        try {
+          return await fetch(url, {
+            method,
+            headers: { ...this.headers(!isForm), ...access },
+            body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
+          });
+        } catch (err) {
+          // fetch rejects only on transport/network failure (DNS, refused, reset).
+          throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+        }
+      });
     let res = await send();
     // A CLI token this command started with may have been replaced by
     // another command's refresh. Pick up the new one and try once more.

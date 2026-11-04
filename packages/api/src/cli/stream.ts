@@ -6,6 +6,10 @@
  *
  * Auth: the `x-api-key` header is set on the upgrade GET when an `apiKey` is
  * present (real instances); omitted for the local stub (`VALET_LOCAL_AUTH=1`).
+ * Behind Cloudflare Access, the upgrade also carries `cf-access-token` when
+ * the process has a token for the origin (`cloudflare-access.ts`). When the
+ * first connection fails before any frame and no token passes, the stream
+ * checks for an Access block with one HTTP request and gets a token.
  *
  * Reconnect design (documented, deliberately simple):
  *   - Durable frames carry a numeric `offset`. We track the highest one seen
@@ -25,7 +29,8 @@
  * protocol-level pings automatically — those never surface here.)
  */
 import { WebSocket, type RawData } from "ws";
-import { UnreachableError } from "./exit.js";
+import { AuthError, UnreachableError } from "./exit.js";
+import { accessHeaders, isAccessBlock, withAccess } from "./cloudflare-access.js";
 import { printErr } from "./output.js";
 import { latestCredential } from "./token-refresh.js";
 import type { WireEvent, WireEventType } from "../wire/types.js";
@@ -239,6 +244,8 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
   let attempt = 0;
   let stopping = false;
   let currentWs: StreamSocket | null = null;
+  let receivedFrame = false;
+  let accessChecked = false;
 
   const stop = (): void => {
     stopping = true;
@@ -260,7 +267,8 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
 
   const runConnection = async (): Promise<ConnectionOutcome> => {
     apiKey = await latestCredential(apiKey);
-    return connectOnce(apiKey ? { "x-api-key": apiKey } : undefined);
+    const headers = { ...(apiKey ? { "x-api-key": apiKey } : {}), ...accessHeaders(url) };
+    return connectOnce(Object.keys(headers).length > 0 ? headers : undefined);
   };
 
   const connectOnce = (headers: Record<string, string> | undefined): Promise<ConnectionOutcome> =>
@@ -283,6 +291,7 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
         }
         // Progress → reset backoff and advance the resume offset.
         attempt = 0;
+        receivedFrame = true;
         if (typeof parsed.offset === "string" && parsed.offset !== "") {
           const n = Number(parsed.offset);
           if (Number.isFinite(n)) lastOffset = n;
@@ -314,6 +323,25 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
       while (!stopping) {
         const outcome = await runConnection();
         if (stopping || outcome === "terminal" || outcome === "clean") break;
+        // A WebSocket client cannot read the upgrade's redirect. If the first
+        // connection fails before any frame, check once over HTTP for an
+        // Access block. `withAccess` gets a token, or throws `AuthError`.
+        if (!receivedFrame && !accessChecked) {
+          accessChecked = true;
+          let blocked = false;
+          const probe = await withAccess(url, async (headers) => {
+            const res = await fetch(`${url}/api/health`, { headers, signal });
+            blocked ||= isAccessBlock(res);
+            return res;
+          }).catch((err: unknown) => {
+            // Only an Access result ends the stream. A transport failure or
+            // an abort falls through to the usual reconnect handling.
+            if (err instanceof AuthError) throw err;
+            return undefined;
+          });
+          await probe?.body?.cancel();
+          if (blocked) continue;
+        }
         attempt += 1;
         if (attempt > MAX_RETRIES) {
           queue.fail(
