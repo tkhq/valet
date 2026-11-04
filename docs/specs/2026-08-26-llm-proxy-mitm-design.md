@@ -110,7 +110,7 @@ resolveUpstream(orgId, kind):   // kind ∈ { "anthropic", "openai" }
 
 `defaultBase("anthropic") = "https://api.anthropic.com"`, `defaultBase("openai") = "https://api.openai.com"`.
 
-**Env auto-provision** (`ensureEnvProviders`, called at boot after migrations): for each kind, if the env key is set and `defaultLlmProvider(orgId, kind)` is null, call the existing `createLlmProvider` + credential write with the env value and a name such as `env:anthropic`. Idempotent — a second boot finds the row and skips.
+**Env auto-provision** (`ensureEnvProviders`, called at boot after migrations): for each kind, if the env key is set and the org has no provider of that kind, call `createLlmProvider` with a name such as `env:anthropic`. The row stores no key. Every key reader falls back to the env key when `llm:{id}` is empty, so rotating the env var and restarting the api changes the key Valet uses (TKAI-710). Earlier builds stored a copy of the env key on the row. The same step deletes that copy from any `env:` row whose credential has no `metadata.last4`. A key saved in Settings always has `metadata.last4`, so it stays and still wins. Idempotent: a second boot finds the row and changes nothing.
 
 ### 4. Forward and tee
 
