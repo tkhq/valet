@@ -599,7 +599,7 @@ export class InMemorySessionStore implements SessionStore {
     // exactly: idempotent replays never trip the cap, and the count reflects
     // state as of immediately before this item lands.
     if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
-      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
+      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled" && (!opts.steer || steerKeepsSubmission(i.metadata)));
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
       }

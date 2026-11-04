@@ -895,6 +895,18 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect((await store.getQueueItem(SESSION_ID, task.id))?.supersededByItemId).toBeUndefined();
     });
 
+    it("a steer counts the workflow items it keeps against the pending cap", async () => {
+      const workflow = { [UNATTENDED_WORKFLOW_KEY]: true };
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100, metadata: workflow }));
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200, metadata: workflow }));
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 300, updatedAt: 300, content: "follow-up" }));
+      // Two kept workflow items fill a cap of 2; the follow-up does not count.
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, maxPending: 2 }))
+        .rejects.toBeInstanceOf(PendingCapError);
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 500, updatedAt: 500 }), { steer: true, maxPending: 3 });
+      expect(admitted.supersededItemIds).toHaveLength(1);
+    });
+
     it("steer does not stamp settled items or items admitted after it", async () => {
       const settled = makeItem({ createdAt: 100, updatedAt: 100 });
       await store.admitSubmission(SESSION_ID, THREAD_ID, settled);
