@@ -134,15 +134,14 @@ const FLOWS = [
   {
     flow: "integrations.open",
     kinds: ["route", "data"],
+    // The space's Settings row opens the team page; its Integrations tab is the flow.
     async prepare(page, vp) {
       const scope = await nav(page, vp);
-      const settings = scope.getByRole("button", { name: "Show Platform settings" });
-      if (await settings.count()) await settings.click();
-      if (vp.name === "mobile") await page.keyboard.press("Escape");
+      await scope.getByRole("link", { name: "Platform settings" }).click();
+      await page.getByRole("navigation", { name: "Platform settings" }).waitFor();
     },
-    async run(page, vp) {
-      const scope = await nav(page, vp);
-      await scope.getByRole("list", { name: "Platform settings" }).getByRole("link", { name: "Integrations" }).click();
+    async run(page) {
+      await page.getByRole("navigation", { name: "Platform settings" }).getByRole("link", { name: "Integrations" }).click();
     },
   },
   {

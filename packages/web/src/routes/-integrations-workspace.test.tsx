@@ -6,14 +6,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { CredentialSummary, ListCredentialsResponse, ListPluginsResponse, TeamSummary } from "@valet/api/wire";
 import { api, ApiError } from "~/api/client";
 import { qkIntegrations } from "~/api/integrations";
-import { qkSettings } from "~/api/settings";
 
 let teamId: string | undefined;
-let realWorkspace = false;
-const setKey = vi.fn();
 vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/lib/workspace-scope")>();
-  return { ...original, useWorkspaceScope: () => realWorkspace ? original.useWorkspaceScope() : { teamId, setKey } };
+  return { ...original, useWorkspaceScope: () => ({ teamId }) };
 });
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -56,8 +53,7 @@ vi.mock("~/api/repos", async (importOriginal) => ({
   useConnectGithub: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
-import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
-import { IntegrationsPage } from "./integrations";
+import { IntegrationsPage, integrationsTarget } from "./integrations";
 
 const PERSONAL_PLUGINS: ListPluginsResponse = { plugins: [{
   name: "typefully", version: "1", actionCount: 0, dynamic: true,
@@ -81,14 +77,7 @@ function shownOnPhones(elements: HTMLElement[]): boolean {
 
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  if (realWorkspace) {
-    // importOriginal can load the provider through the settings module cycle
-    // before its hook overrides apply. Seed the real queries as well: missing
-    // data means membership is unknown, not that the callback team was lost.
-    client.setQueryData(qkSettings.teams(), { teams });
-    client.setQueryData(qkSettings.org(), { features: { organizations: true } });
-  }
-  const page = () => <QueryClientProvider client={client}>{realWorkspace ? <WorkspaceScopeProvider><IntegrationsPage /></WorkspaceScopeProvider> : <IntegrationsPage />}</QueryClientProvider>;
+  const page = () => <QueryClientProvider client={client}><IntegrationsPage /></QueryClientProvider>;
   const view = render(page());
   return { client, switchTo: (id?: string) => { teamId = id; view.rerender(page()); } };
 }
@@ -97,9 +86,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   searchState = {};
   window.history.replaceState(null, "", "/integrations");
-  setKey.mockClear();
   teamId = undefined;
-  realWorkspace = false;
   window.sessionStorage.clear();
   orgRole = "member";
   teams = [team("a", "Team A", "admin"), team("b", "Team B", "admin")];
@@ -337,37 +324,20 @@ describe("Team account connection", () => {
     expect(submit.hasAttribute("disabled")).toBe(false);
   });
 
-  it("returns OAuth feedback to its team without forcing later workspace switches back", async () => {
-    window.history.replaceState(null, "", "/integrations?teamId=a&connected=linear");
+  it("shows OAuth feedback on its team's page and not on another team's", async () => {
+    window.history.replaceState(null, "", "/settings/teams/a/integrations?teamId=a&connected=linear");
     teamId = "a";
     const view = mount();
     expect(await screen.findByRole("status")).toHaveProperty("textContent", "Connected Linear via MCP.");
-    expect(setKey).toHaveBeenCalledWith("a");
-    setKey.mockClear();
     view.switchTo("b");
     await screen.findByText("Sentry");
-    expect(setKey).not.toHaveBeenCalled();
     expect(screen.queryByText("Connected Linear via MCP.")).toBeNull();
   });
-
-  it("adopts an accessible callback team with the real workspace provider", async () => {
-    realWorkspace = true;
-    window.history.replaceState(null, "", "/integrations?teamId=a&connected=linear");
-    mount();
-    expect(await screen.findByText("Connected Linear via MCP.")).toBeTruthy();
-    expect(await screen.findByText("Linear MCP")).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("a");
-    expect(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" })).toBeTruthy();
-    expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
-  });
-
-  it("shows the callback error when the real workspace provider rejects a lost team", async () => {
-    realWorkspace = true;
-    window.history.replaceState(null, "", "/integrations?teamId=gone&error=team_access_changed");
+  it("shows a lost team's callback error on personal Integrations", async () => {
+    window.history.replaceState(null, "", "/settings/integrations?teamId=gone&error=team_access_changed");
     mount();
     expect(await screen.findByText("Team access changed. Ask a team admin to restart the connection.")).toBeTruthy();
     expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
     // Only the personal list (for saved credentials no row covers) loads.
     expect(api.listCredentials).not.toHaveBeenCalledWith("team", expect.anything());
@@ -444,4 +414,24 @@ describe("Team account connection", () => {
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });
 
+});
+
+describe("/integrations redirect target", () => {
+  const available = ["user", "a", "b"];
+  it("sends a team connect result to that team's Integrations", () => {
+    expect(integrationsTarget("?teamId=a&connected=linear", "user", available))
+      .toBe("/settings/teams/a/integrations?teamId=a&connected=linear");
+  });
+  it("sends a personal connect result home whatever the switcher holds", () => {
+    expect(integrationsTarget("?connected=github", "b", available)).toBe("/settings/integrations?connected=github");
+  });
+  it("sends a lost team's result to personal Integrations", () => {
+    expect(integrationsTarget("?teamId=gone&error=team_access_changed", "a", available))
+      .toBe("/settings/integrations?teamId=gone&error=team_access_changed");
+  });
+  it("follows ?workspace=, else the switcher, and keeps the rest of the query", () => {
+    expect(integrationsTarget("?workspace=user&service=github", "a", available)).toBe("/settings/integrations?service=github");
+    expect(integrationsTarget("?workspace=b", "a", available)).toBe("/settings/teams/b/integrations");
+    expect(integrationsTarget("", "a", available)).toBe("/settings/teams/a/integrations");
+  });
 });

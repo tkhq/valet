@@ -14,9 +14,6 @@ const HEADER_PAGES = [
   "routes/workflows.tsx",
   "routes/memory.tsx",
   "routes/skills.index.tsx",
-  "routes/usage.tsx",
-  "routes/integrations.tsx",
-  "components/integrations/team-integrations.tsx",
   "routes/security.index.tsx",
 ];
 
