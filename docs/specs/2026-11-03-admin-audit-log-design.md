@@ -93,7 +93,7 @@ Sign-in methods (`AUTH_METHODS`, OIDC settings) come from the environment at boo
 
 Each alert emits:
 
-1. A structured warn log line with `event: "security.admin_change"`, the kind, action, target, actor, IP, and `changedFields` (the changed field names only). Values, such as setup commands, stay in the audit row, so no command text or credential leaves the instance in an alert.
+1. A structured warn log line with `event: "security.admin_change"`, the kind, action, target type and id, actor, IP, and `changedFields` (the changed field names only). Target names and values stay in the audit row, so no admin-entered text or credential leaves the instance in an alert.
 2. The counter `valet.security.admin_changes{kind}` (Prometheus: `valet_security_admin_changes_total`).
 3. A best-effort `POST` of the same JSON body to `VALET_SECURITY_ALERT_WEBHOOK_URL`, when the operator sets it. The post has a 5-second timeout and does not delay the request. A failure counts in `valet.errors{reason="security_alert_webhook"}`.
 

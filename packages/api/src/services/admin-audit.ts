@@ -111,10 +111,16 @@ const MAX_DEPTH = 4;
 export function displayUrl(raw: string): string {
   try {
     const url = new URL(raw);
-    return `${url.protocol}//${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return `${url.protocol}//${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    }
   } catch {
-    return raw.split(/[?#]/)[0] ?? "";
+    // Not an absolute URL: handled below.
   }
+  // Another scheme (ssh://user:pass@host), or a schemeless reference such as
+  // the image ref user:pass@registry/repo:tag, which parses as a URL with
+  // `user:` as its scheme. Drop the user info and query.
+  return (raw.split(/[?#]/)[0] ?? "").replace(/^([a-z][a-z0-9+.-]*:\/\/)?[^/@]*@/i, "$1");
 }
 
 function sanitizeString(value: string): string {
@@ -252,18 +258,18 @@ function emitSecurityAlert(entry: AdminAuditEntry, kind: SecurityAlertKind, chan
     orgId: entry.orgId,
     action: entry.action,
     targetType: entry.targetType,
+    // No target name: it is admin-chosen text. Read it in the audit row.
     targetId: entry.targetId ?? null,
-    targetName: entry.targetName ?? null,
     actorUserId: entry.actor.userId,
     actorEmail: entry.actor.email,
     ip: entry.actor.ip ?? null,
-    // Field names only. Values, such as setup commands, stay in the audit
-    // row, so no command text or credential leaves the instance in an alert.
+    // Field names only. Values stay in the audit row, so no admin-entered
+    // text or credential leaves the instance in an alert.
     changedFields: changes ? Object.keys(changes) : [],
     at: new Date(at).toISOString(),
   };
   countAlert(kind);
-  log.warn(`${SECURITY_ALERT_EVENT}: ${entry.action} on ${entry.targetType} ${entry.targetName ?? entry.targetId ?? ""}`.trim(), body);
+  log.warn(`${SECURITY_ALERT_EVENT}: ${entry.action} on ${entry.targetType} ${entry.targetId ?? ""}`.trim(), body);
   const url = webhookUrl();
   if (!url) return;
   const pending = postWebhook(url, body).finally(() => pendingWebhooks.delete(pending));

@@ -16,6 +16,7 @@ import { adminAuditEvents, imageSources, type AdminAuditEventRow } from "../sche
 import {
   flushSecurityAlerts,
   recordAdminAudit,
+  displayUrl,
   sanitizeChanges,
   SECURITY_ALERT_EVENT,
   SECURITY_ALERT_WEBHOOK_ENV,
@@ -395,10 +396,29 @@ describe("security alert delivery", () => {
     expect(res.status).toBe(201);
     await flushSecurityAlerts();
     expect(hook.bodies).toHaveLength(1);
-    expect(hook.bodies[0]).toMatchObject({ event: SECURITY_ALERT_EVENT, kind: "llm_provider_created", action: "llm_provider.create", orgId: "local-org", actorEmail: "local@dev", targetName: "internal" });
+    expect(hook.bodies[0]).toMatchObject({ event: SECURITY_ALERT_EVENT, kind: "llm_provider_created", action: "llm_provider.create", orgId: "local-org", actorEmail: "local@dev" });
+    expect(hook.bodies[0]).not.toHaveProperty("targetName");
     expect(JSON.stringify(hook.bodies)).not.toContain("leak");
     expect(hook.bodies[0]).toMatchObject({ changedFields: expect.arrayContaining(["baseUrl"]) });
     expect(hook.bodies[0]).not.toHaveProperty("changes");
+  });
+
+  it("drops registry credentials from a schemeless image ref and keeps target names out of alerts", async () => {
+    vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
+    const hook = await receiver();
+    vi.stubEnv(SECURITY_ALERT_WEBHOOK_ENV, hook.url);
+    api = await bootTestApi();
+    const created = await one(api, "POST", "/api/org/sources", {
+      kind: "external",
+      name: "Authorization: Bearer leaked-token-value",
+      externalRef: "registry-user:registry-password@registry.example/acme/sandbox:1",
+    });
+    expect(created.row.changes).toMatchObject({ externalRef: "registry.example/acme/sandbox:1" });
+    expect(JSON.stringify(created.row)).not.toMatch(/registry-password|leaked-token-value/);
+    await flushSecurityAlerts();
+    expect(JSON.stringify(hook.bodies)).not.toMatch(/registry-password|leaked-token-value/);
+    const logged = JSON.stringify(warnSpy.mock.calls);
+    expect(logged).not.toMatch(/registry-password|leaked-token-value/);
   });
 
   it("sends no webhook for a low-risk change", async () => {
@@ -421,6 +441,17 @@ describe("security alert delivery", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("displayUrl", () => {
+  it.each([
+    ["https://u:p@h.example/p?q=1", "https://h.example/p"],
+    ["registry-user:registry-password@registry.example/acme/sandbox:1", "registry.example/acme/sandbox:1"],
+    ["ssh://git:token@git.example/repo.git", "ssh://git.example/repo.git"],
+    ["ghcr.io/acme/tools:1", "ghcr.io/acme/tools:1"],
+  ])("drops user info and query from %j", (raw, shown) => {
+    expect(displayUrl(raw)).toBe(shown);
   });
 });
 
