@@ -24,6 +24,20 @@ export const ACCESS_TOKEN_HEADER = "cf-access-token";
 
 const TOKEN_TIMEOUT_MS = 10_000;
 
+/** The two ways this module runs `cloudflared`. */
+export interface CloudflaredProcesses {
+  execFile: (file: string, args: string[], opts: { timeout: number }, cb: (err: Error | null, stdout: string) => void) => void;
+  spawn: (command: string, args: string[], opts: { stdio: ["inherit", 2, "inherit"] }) => { once(event: "error" | "exit", listener: () => void): unknown };
+}
+
+/** Test seam: the api unit tests share one module graph (`isolate: false`),
+ * so a `vi.mock` of `node:child_process` can arrive after another test file
+ * already loaded this module with the real functions. */
+let processes: CloudflaredProcesses = { execFile, spawn };
+export function setCloudflaredProcessesForTests(override: CloudflaredProcesses | undefined): void {
+  processes = override ?? { execFile, spawn };
+}
+
 /** Resolved tokens, read synchronously when a request builds its headers. */
 const tokens = new Map<string, string>();
 /** One lookup per origin, shared by concurrent requests. */
@@ -62,7 +76,7 @@ export function accessBlockedMessage(url: string): string {
 
 function cloudflaredToken(origin: string): Promise<string | undefined> {
   return new Promise((resolve) => {
-    execFile("cloudflared", ["access", "token", `-app=${origin}`], { timeout: TOKEN_TIMEOUT_MS }, (err, stdout) => {
+    processes.execFile("cloudflared", ["access", "token", `-app=${origin}`], { timeout: TOKEN_TIMEOUT_MS }, (err, stdout) => {
       // Missing binary, no saved token, or timeout: no token.
       const token = err ? "" : String(stdout).trim();
       resolve(token === "" ? undefined : token);
@@ -73,7 +87,7 @@ function cloudflaredToken(origin: string): Promise<string | undefined> {
 function cloudflaredLogin(origin: string): Promise<void> {
   return new Promise((resolve) => {
     // The child's stdout goes to stderr, so piped command output stays clean.
-    const child = spawn("cloudflared", ["access", "login", origin], { stdio: ["inherit", 2, "inherit"] });
+    const child = processes.spawn("cloudflared", ["access", "login", origin], { stdio: ["inherit", 2, "inherit"] });
     child.once("error", () => resolve());
     child.once("exit", () => resolve());
   });

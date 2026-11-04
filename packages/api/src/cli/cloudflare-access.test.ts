@@ -4,20 +4,16 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { InstanceClient } from "./client.js";
-import { accessBlockedMessage, accessToken, isAccessBlock, resetAccessTokens } from "./cloudflare-access.js";
+import { accessBlockedMessage, accessToken, isAccessBlock, resetAccessTokens, setCloudflaredProcessesForTests } from "./cloudflare-access.js";
 import { startDeviceLogin } from "./device-login.js";
 import { AuthError } from "./exit.js";
 import { streamSession } from "./stream.js";
 
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
 
-const { execFileMock, spawnMock } = vi.hoisted(() => ({ execFileMock: vi.fn(), spawnMock: vi.fn() }));
+const execFileMock = vi.fn();
+const spawnMock = vi.fn();
 
-vi.mock("node:child_process", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:child_process")>()),
-  execFile: execFileMock,
-  spawn: spawnMock,
-}));
 
 const BASE = "https://valet.example.com";
 const LOGIN_URL = "https://tkhq.cloudflareaccess.com/cdn-cgi/access/login/valet.example.com?redirect_url=%2F";
@@ -47,7 +43,8 @@ function cloudflaredTokens(...outputs: Array<string | undefined>): void {
 function headerOf(init: RequestInit | undefined, name: string): string | undefined {
   const headers = init?.headers;
   if (!headers || headers instanceof Headers || Array.isArray(headers)) return undefined;
-  return headers[name];
+  const value = headers[name];
+  return typeof value === "string" ? value : undefined;
 }
 
 /** A fetch stub that serves `ok` only with the expected Access token. */
@@ -70,6 +67,7 @@ const stderrTty = process.stderr.isTTY;
 beforeEach(() => {
   resetAccessTokens();
   execFileMock.mockReset();
+  setCloudflaredProcessesForTests({ execFile: execFileMock, spawn: spawnMock });
   spawnMock.mockReset();
   vi.stubEnv("VALET_CF_ACCESS_TOKEN", "");
   vi.spyOn(process.stderr, "write").mockReturnValue(true);
@@ -77,6 +75,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setCloudflaredProcessesForTests(undefined);
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -161,7 +160,7 @@ describe("InstanceClient behind Cloudflare Access", () => {
   });
 
   it("does not run cloudflared or send the header when nothing blocks", async () => {
-    const fetchMock = vi.fn(async () => json({ ok: true }));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => json({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
     await new InstanceClient({ url: BASE }).health();
     expect(execFileMock).not.toHaveBeenCalled();
