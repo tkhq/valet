@@ -34,6 +34,8 @@ export interface CliOptions {
   reasoning?: ReasoningLevel;
   /** Cases in flight at once. */
   concurrency?: number;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -56,6 +58,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "prune-baselines": { type: "string" },
       reasoning: { type: "string" },
       concurrency: { type: "string" },
+      "verify-model": { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -113,6 +116,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(pruneBaselinesKeep !== undefined ? { pruneBaselinesKeep } : {}),
     ...(reasoning !== undefined ? { reasoning: reasoning as ReasoningLevel } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
   };
 }
 

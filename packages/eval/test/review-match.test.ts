@@ -4,6 +4,7 @@ import {
   CaseValidationError,
   formatReviewSummary,
   llmGatewayFromEnv,
+  parseCliArgs,
   parseEvalCase,
   profileMetrics,
   viaGateway,
@@ -132,6 +133,13 @@ describe("pull_request cases", () => {
     expect(() => parseEvalCase({ ...base, checks: [{ type: "review_match", golden: [] }] }, "x.yaml")).toThrow(
       CaseValidationError,
     );
+  });
+});
+
+describe("--verify-model", () => {
+  it("sets the code-review verifier model", () => {
+    expect(parseCliArgs(["--verify-model", "openai/gpt-5.6-terra"]).verifyModel).toBe("openai/gpt-5.6-terra");
+    expect(parseCliArgs([]).verifyModel).toBeUndefined();
   });
 });
 

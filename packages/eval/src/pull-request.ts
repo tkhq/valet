@@ -137,13 +137,15 @@ async function reviewInWorkspace(
   const agentTrajectories: { label: string; trajectory: Trajectory }[] = [];
   const runAgent: AgentRunner = async (agent) => {
     const agentStarted = Date.now();
+    const agentModel = agent.model !== undefined ? resolveModelId(agent.model) : model;
+    if (!agentModel) throw new Error(`unknown model spec \`${agent.model}\`. Use provider/model form, e.g. openai/gpt-5.6-terra.`);
     const session = await engine.createSession({
       userId: "eval-user",
       orgId: "eval-org",
       workspace,
       sandbox: { workspace },
-      model: opts.gateway !== undefined ? viaGateway(model, opts.gateway) : model,
-      modelSpec,
+      model: opts.gateway !== undefined ? viaGateway(agentModel, opts.gateway) : agentModel,
+      modelSpec: agent.model ?? modelSpec,
       ...(opts.gateway !== undefined ? { resolveModel: gatewayModelResolver(opts.gateway) } : {}),
       systemPrompt: agent.systemPrompt,
       builtinTools: builtinTools.filter((t) => agent.builtinToolNames.has(t.name)),
@@ -172,7 +174,7 @@ async function reviewInWorkspace(
         extractTrajectory({
           caseId: `${evalCase.id}#${agent.label}`,
           prompt: agent.label === "review" ? reviewPrompt(spec) : `Verify finding ${agent.label}`,
-          model: modelSpec,
+          model: agent.model ?? modelSpec,
           durationMs: Date.now() - agentStarted,
           entries,
         }),
@@ -183,7 +185,15 @@ async function reviewInWorkspace(
 
   const verify = evalCase.pull_request?.verify ?? true;
   const pipeline = await runReviewPipeline(
-    { workspace, base: spec.base, head: spec.head, title: spec.title, body: spec.body ?? "", verify },
+    {
+      workspace,
+      base: spec.base,
+      head: spec.head,
+      title: spec.title,
+      body: spec.body ?? "",
+      verify,
+      ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+    },
     runAgent,
   );
   const main = agentTrajectories.find((a) => a.label === "review")?.trajectory;

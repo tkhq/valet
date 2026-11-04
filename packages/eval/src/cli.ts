@@ -11,6 +11,7 @@
  *   --cases <dir>        cases directory (default: evals/cases)
  *   --baselines <dir>    baselines directory (default: evals/baselines)
  *   --concurrency <n>    cases in flight at once (default 1)
+ *   --verify-model <spec> model for code-review verifiers (default: --model)
  *
  * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,
  * every model call goes through that Valet gateway with the Valet key, and
@@ -104,6 +105,7 @@ async function main(): Promise<number> {
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.runsOverride !== undefined ? { runsOverride: opts.runsOverride } : {}),
     ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
+    ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
     saveBaselines: opts.saveBaseline,
     allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {

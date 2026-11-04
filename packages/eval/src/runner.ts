@@ -87,6 +87,8 @@ export interface RunnerOptions {
    * `reasoning:` wins). Threaded to pi-ai via the engine sampling seam.
    */
   reasoning?: ReasoningLevel;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
   /**
    * Send every model call through this Valet LLM gateway with its `vlt_`
    * key, instead of provider keys from the environment.

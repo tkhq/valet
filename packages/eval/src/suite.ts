@@ -54,6 +54,8 @@ export interface SuiteOptions {
   runsOverride?: number;
   /** Suite-level reasoning effort (a case's own `reasoning:` wins). */
   reasoning?: ReasoningLevel;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -167,6 +169,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
             : await runCase(caseForRun, {
                 model: evalCase.model ?? opts.model,
                 ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
+                ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
