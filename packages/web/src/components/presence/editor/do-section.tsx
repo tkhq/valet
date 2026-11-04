@@ -6,6 +6,7 @@
  * workspace offers more than one.
  */
 import { useId, useRef } from "react";
+import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
 import { fieldLabel } from "~/components/events/filter-editor";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
@@ -22,7 +23,20 @@ import {
 import { cn } from "~/lib/cn";
 import { selectsSlackMention } from "~/lib/slack-mention";
 import type { WorkflowNames } from "../sentences";
-import { parseRunInput, type AssistantKind, type DoKind, type Draft, type EditorMode } from "./draft";
+import {
+  characterCount,
+  instructionsLength,
+  instructionsTooLong,
+  parseRunInput,
+  type AssistantKind,
+  type DoKind,
+  type Draft,
+  type EditorMode,
+} from "./draft";
+
+/** A line's instructions show their count from this length on, so the
+ * limit is visible before the field reaches it. */
+const COUNT_FROM = Math.floor(MAX_PROMPT_TEMPLATE_CHARS * 0.8);
 
 /** One assistant the reader may pick. */
 export interface AssistantOption {
@@ -109,6 +123,11 @@ export function DoSection({
   const mention = selectsSlackMention([...draft.events]);
   const replyNeedsMention = !stored && !routine && draft.service === "slack" && !mention;
   const chosen = cards(routine).find((card) => card.kind === draft.doKind);
+  // A line's instructions have the api's limit; a routine's have none.
+  const tooLong = instructionsTooLong(draft);
+  const length = instructionsLength(draft);
+  const counted = !routine && tooLong === null && length >= COUNT_FROM;
+  const limitId = `${id}-instructions-limit`;
 
   function pick(kind: DoKind) {
     if (kind === draft.doKind || fixedWorkflow) return;
@@ -245,8 +264,18 @@ export function DoSection({
             required={required}
             onChange={(e) => onChange({ ...draft, instructions: e.target.value })}
             placeholder={routine ? "Summarize what changed overnight." : "If the check failed, find the failing job and summarize the cause."}
-            className="resize-none overflow-hidden"
+            aria-invalid={tooLong !== null}
+            aria-describedby={tooLong !== null || counted ? limitId : undefined}
+            className={cn("resize-none overflow-hidden", tooLong !== null && "border-danger-500 focus-visible:ring-danger-500/40")}
           />
+          {/* No live region: the count changes with each key, and the field's
+              description already carries it. */}
+          {tooLong !== null && <p id={limitId} className="text-xs text-danger-500">{tooLong}</p>}
+          {counted && (
+            <p id={limitId} className="text-xs tabular-nums text-muted">
+              {characterCount(length)} of {characterCount(MAX_PROMPT_TEMPLATE_CHARS)} characters
+            </p>
+          )}
           <p className="text-xs text-muted">{routine ? "Plain words." : "Plain words. Valet also receives the event itself."}</p>
           {routine && <p className="text-xs text-muted">Valet sends this to the assistant each time the routine runs.</p>}
         </div>
