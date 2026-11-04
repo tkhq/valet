@@ -136,13 +136,13 @@ const FLOWS = [
     kinds: ["route", "data"],
     async prepare(page, vp) {
       const scope = await nav(page, vp);
-      const more = scope.getByRole("button", { name: "Show more Platform pages" });
-      if (await more.count()) await more.click();
+      const settings = scope.getByRole("button", { name: "Show Platform settings" });
+      if (await settings.count()) await settings.click();
       if (vp.name === "mobile") await page.keyboard.press("Escape");
     },
     async run(page, vp) {
       const scope = await nav(page, vp);
-      await scope.getByRole("list", { name: "Platform pages" }).getByRole("link", { name: "Integrations" }).click();
+      await scope.getByRole("list", { name: "Platform settings" }).getByRole("link", { name: "Integrations" }).click();
     },
   },
   {
