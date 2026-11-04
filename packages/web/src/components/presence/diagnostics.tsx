@@ -19,6 +19,7 @@ const DECISION_WORDS: Record<ReceiptSubscriptionDecision["outcome"], string> = {
   authorization_denied: "the sender may not use it",
   disabled: "it was off",
   key_mismatch: "a different event",
+  rate_limited: "it already ran within its once-every-N-hours limit",
 };
 
 /** One intake record as a line: the event, then what this line decided. */

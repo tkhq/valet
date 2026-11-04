@@ -3458,6 +3458,8 @@ export interface CreateWorkflowEventTriggerRequest {
   name: string;
   eventKeys: string[];
   filters?: unknown[];
+  /** Run at most once in this many hours (1 to 168). See `events/once-per.ts`. */
+  oncePerHours?: number;
   /** Explicit opt-out of the channel requirement on a `slack.app_mention`
    * subscription (see `events/mention-scope.ts`). Ignored for other keys.
    * Not persisted: a stored mention subscription with no channel filter is
@@ -3470,6 +3472,8 @@ export interface UpdateWorkflowEventTriggerRequest {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  /** Run at most once in this many hours. Null removes the limit. */
+  oncePerHours?: number | null;
   /** See `CreateWorkflowEventTriggerRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;
@@ -3484,6 +3488,7 @@ export interface WorkflowEventTriggerResponse {
     eventKeys: string[];
     filters: unknown[];
     enabled: boolean;
+    oncePerHours?: number;
   };
 }
 
@@ -5529,7 +5534,7 @@ export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignor
  * that sends both names for one field is refused (`events/target-names.ts`).
  */
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string; appearance?: Appearance }
+  | { kind: "workflow"; workflowId: string; appearance?: Appearance; oncePerHours?: number }
   /** `teamId` is required when `assistant` is `"team"`, and refused
    * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
@@ -5539,6 +5544,8 @@ export type EventSubscriptionTargetWire =
       appearance?: Appearance;
       /** Which assistant receives the deliveries. Absent reads as `user`. */
       assistant?: "user" | "team" | "org";
+      /** Deliver at most once in this many hours (`events/once-per.ts`). */
+      oncePerHours?: number;
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
@@ -5726,6 +5733,8 @@ export interface ListEventSubscriptionsResponse {
 export interface PatchEventSubscriptionRequest {
   /** Replace the reply identity. Null clears the override; omission preserves it. */
   appearance?: Appearance | null;
+  /** Act at most once in this many hours. Null removes the limit; omission preserves it. */
+  oncePerHours?: number | null;
   /** @deprecated Send `appearance`. Accepted for one release; a patch that sends both is refused. */
   presence?: Appearance | null;
   deliveryPolicy?: EventDeliveryPolicy;
@@ -6620,7 +6629,8 @@ export interface BrowserAnnotation {
 export interface ReceiptStage { stage: string; outcome: string; detail: string; at: number }
 export interface ReceiptSubscriptionDecision {
   id: string; name?: string; ownerType: string; ownerId: string; target: string; targetId?: string;
-  outcome: "matched" | "filter_excluded" | "authorization_denied" | "disabled" | "key_mismatch";
+  /** `rate_limited`: the line matched but is inside its "once every N hours" window. */
+  outcome: "matched" | "filter_excluded" | "authorization_denied" | "disabled" | "key_mismatch" | "rate_limited";
   failedFilters?: Array<{ field: string; op: string }>;
 }
 export interface EventReceiptWire {

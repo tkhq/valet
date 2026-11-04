@@ -55,6 +55,8 @@ export function buildSubscriptionPatch(
     prompts?: PromptFieldsValue;
     deliveryPreferences?: DeliveryPreferencesValue;
     thread?: AssistantThreadPolicy;
+    /** "Only once every N hours". Null for no limit. */
+    oncePerHours?: number | null;
   },
 ): PatchEventSubscriptionRequest | null {
   const body: PatchEventSubscriptionRequest = {};
@@ -102,6 +104,10 @@ export function buildSubscriptionPatch(
     if (form.appearance.displayName !== stored.displayName || form.appearance.avatarUrl !== stored.avatarUrl) {
       body.appearance = Object.keys(form.appearance).length > 0 ? form.appearance : null;
     }
+  }
+
+  if (form.oncePerHours !== undefined && form.oncePerHours !== (sub.target.oncePerHours ?? null)) {
+    body.oncePerHours = form.oncePerHours;
   }
 
   return Object.keys(body).length === 0 ? null : body;

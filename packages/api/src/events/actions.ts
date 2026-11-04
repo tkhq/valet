@@ -178,6 +178,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     system_prompt: Type.Optional(Type.String()),
     audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
     replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
+    once_per_hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "Deliver at most once in this many hours, however often the event happens. Use it with slack.user_online." })),
   }))({
     id: "events.propose_subscription",
     name: "Propose assistant event subscription",
@@ -214,6 +215,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
         ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
         ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
+        ...(input.once_per_hours !== undefined ? { oncePerHours: input.once_per_hours } : {}),
       };
       const write = await validateSubscriptionWrite(db, typeof plugins === "function" ? plugins() : plugins, {
         name: input.name, eventKeys: input.event_keys, filters: input.filters ?? [], target, audience: input.audience,

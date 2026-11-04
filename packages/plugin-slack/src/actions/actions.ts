@@ -29,6 +29,7 @@ import { buildContentBlocks, hasTableBlock, needsContentBlocks, slackEscapedText
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
+import { readOnlineStatus } from "../online-status.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -576,6 +577,29 @@ const lookupUserByEmail = action(Type.Object({
         error: `Slack recipient lookup failed: ${detail}. Check the Slack app connection, then try again.`,
       };
     }
+  },
+});
+
+const getUserStatus = action(Type.Object({
+    user: Type.String({ pattern: '^[UW][A-Z0-9]+$', description: 'Slack user ID (U...). Use list_users or lookup_user_by_email to find it.' }),
+    include_local_time: Type.Optional(Type.Boolean({ description: "Also return the user's local time and time zone." })),
+  }))({
+  id: 'slack.get_user_status',
+  name: 'Get User Online Status',
+  description: 'Check whether a Slack user is online now: presence active or away, plus their status text and emoji, and optionally their local time. Works only for members of the connected Slack workspace. For "when they come back online", create a workflow trigger on slack.user_online instead of checking in a loop.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Slack is not connected. Connect Slack in Settings → Organization → Slack.' };
+    const teamId = typeof cred?.metadata?.teamId === 'string' ? cred.metadata.teamId : undefined;
+    const result = await readOnlineStatus(token, args.user, {
+      ...(teamId ? { teamId } : {}),
+      includeLocalTime: args.include_local_time === true,
+      signal: ctx.signal,
+    });
+    if (!result.ok) return { success: false, error: result.error };
+    return { success: true, data: result.status };
   },
 });
 
@@ -1658,6 +1682,7 @@ export const slackPlugin: ActionPlugin = {
     dmOwner,
     dmUser,
     lookupUserByEmail,
+    getUserStatus,
     addReaction,
     listChannels,
     searchChannels,

@@ -341,3 +341,31 @@ describe("threadFollowHint (E10)", () => {
     expect(threadFollowHint({ ...thread, channelLabel: "C123ABC" }, { timeZone: "UTC" })).not.toContain("C123ABC");
   });
 });
+
+describe("WhenSection comes back online", () => {
+  const ONLINE_SERVICES: CatalogService[] = [{
+    service: "slack",
+    entries: [
+      { key: "slack.user_online", description: "When a chosen person comes back online", filters: [{ field: "user" }] },
+      { key: "slack.message", description: "Message", filters: [{ field: "user" }] },
+    ],
+  }];
+  function onlineDraft(over: Partial<Draft> = {}): Draft {
+    return {
+      ...newDraft({ preselected: { workflowId: "wf-1" }, timezone: "UTC" }),
+      events: new Set(["slack.user_online"]),
+      conditions: [{ id: "r1", field: "user", op: "eq", value: "U1", label: "Ada" }],
+      ...over,
+    };
+  }
+
+  it("shows the limit field only for the comes-online event", () => {
+        const { unmount } = render(<Harness initial={onlineDraft()} services={ONLINE_SERVICES} />);
+    const input = screen.getByLabelText("Only once every … hours") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "6" } });
+    expect(input.value).toBe("6");
+    unmount();
+    render(<Harness initial={onlineDraft({ events: new Set(["slack.message"]), conditions: [] })} services={ONLINE_SERVICES} />);
+    expect(screen.queryByLabelText("Only once every … hours")).toBeNull();
+  });
+});

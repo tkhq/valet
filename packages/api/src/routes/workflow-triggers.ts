@@ -370,6 +370,7 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
     eventKeys: body.eventKeys,
     filters: body.filters,
     anyChannel: body.anyChannel,
+    ...(body.oncePerHours !== undefined ? { oncePerHours: body.oncePerHours } : {}),
   });
   if (!result.ok) return c.json({ error: result.error }, 400);
   const resp: WorkflowEventTriggerResponse = { trigger: result.trigger };

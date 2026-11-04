@@ -1296,6 +1296,13 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   } else if (appearance !== undefined) {
     patchedTarget = { ...patchedTarget, appearance };
   }
+  // `null` removes the limit; the merged re-validation below checks a number.
+  if (body.oncePerHours === null) {
+    const { oncePerHours: _cleared, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  } else if (body.oncePerHours !== undefined) {
+    patchedTarget = { ...patchedTarget, oncePerHours: body.oncePerHours };
+  }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
     if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." }, 400);
     patchedTarget = { ...patchedTarget,

@@ -24,6 +24,9 @@ import { buildSubscriptionPatch } from "~/components/events/subscription-patch";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
 import { SLACK_APP_MENTION, selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
+
+/** The "comes online" event (`plugin-slack/src/online-status.ts`). */
+export const USER_ONLINE = "slack.user_online";
 import { placeFilter, type PreselectedPlace } from "../place-filter";
 import type { SectionId } from "./section";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-link";
@@ -128,6 +131,9 @@ export interface Draft {
   deliveryPolicy: EventDeliveryPolicy;
   pauseOnOverlap: boolean;
   appearance: Appearance;
+  /** "Only once every N hours", as typed. Empty means every time. The When
+   * section offers it for `slack.user_online` (`events/once-per.ts`). */
+  oncePerHours: string;
   name: string;
   /** False while the name follows the suggestion. */
   nameEdited: boolean;
@@ -229,6 +235,7 @@ export function newDraft(options: {
     deliveryPolicy: "always",
     pauseOnOverlap: true,
     appearance: {},
+    oncePerHours: "",
     name: "",
     nameEdited: false,
   };
@@ -273,6 +280,7 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     // not `always`, so an untouched line sends no change.
     pauseOnOverlap: assistant ? target.pauseOnOverlap ?? deliveryPolicy === "always" : true,
     appearance: target.appearance ?? {},
+    oncePerHours: target.oncePerHours !== undefined ? String(target.oncePerHours) : "",
     name: sub.name,
     nameEdited: true,
   };
@@ -306,6 +314,7 @@ export function draftFromRoutine(routine: Routine): Draft {
     deliveryPolicy: "always",
     pauseOnOverlap: true,
     appearance: {},
+    oncePerHours: "",
     name: routine.name,
     nameEdited: true,
   };
@@ -544,8 +553,22 @@ function assistantFields(draft: Draft): AssistantTargetWire {
   return { kind: "assistant", assistant: draft.assistant === "team" ? "user" : draft.assistant };
 }
 
+/** The typed "once every N hours", or null for none or a value that is not a whole number. */
+export function oncePerHoursValue(draft: Draft): number | null {
+  const text = draft.oncePerHours.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const hours = Number(text);
+  return hours >= 1 && hours <= MAX_ONCE_PER_HOURS ? hours : null;
+}
+
+export const MAX_ONCE_PER_HOURS = 168;
+
 function lineTarget(draft: Draft): EventSubscriptionTargetWire {
-  const appearance = Object.keys(draft.appearance).length > 0 ? { appearance: draft.appearance } : {};
+  const once = oncePerHoursValue(draft);
+  const appearance = {
+    ...(Object.keys(draft.appearance).length > 0 ? { appearance: draft.appearance } : {}),
+    ...(once !== null ? { oncePerHours: once } : {}),
+  };
   if (draft.doKind === "workflow") return { kind: "workflow", workflowId: draft.workflowId, ...appearance };
   const where = effectiveWhere(draft);
   const thread = where !== null ? { thread: where } : {};
@@ -596,6 +619,7 @@ function patchLineBody(draft: Draft, sub: EventSubscriptionWire, review: boolean
     anyChannel: draft.anyChannel,
     prompts: { systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate },
     appearance: draft.appearance,
+    oncePerHours: oncePerHoursValue(draft),
     ...(thread !== undefined ? { thread } : {}),
     ...(sub.ownerType === "user" && assistant
       ? { deliveryPreferences: { deliveryPolicy: draft.deliveryPolicy, pauseOnOverlap: draft.pauseOnOverlap } }
@@ -938,6 +962,13 @@ export function saveBlocker(
       return filters.some((f) => f.field === "channel_name")
         ? "A channel name condition also matches new channels. Choose Any channel to keep it."
         : "Add a channel, or choose Any channel.";
+    }
+    // The watcher checks only the people a line names (`online-status-watch.ts`).
+    if (draft.events.has(USER_ONLINE) && !filters.some((f) => f.field === "user" && (f.op === "eq" || f.op === "in"))) {
+      return "Pick the person to watch: add the condition user is <person>.";
+    }
+    if (draft.oncePerHours.trim().length > 0 && oncePerHoursValue(draft) === null) {
+      return `Enter a whole number of hours from 1 to ${MAX_ONCE_PER_HOURS}, or leave it empty.`;
     }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";

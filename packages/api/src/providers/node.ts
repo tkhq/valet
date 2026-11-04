@@ -37,6 +37,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { routeAttention } from "../orchestrator/attention.js";
@@ -889,6 +890,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/assistant/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
+  // Polled source of the slack.user_online event (Slack sends no webhook for it).
+  // `start()`/`stop()` are called from `main.ts`.
+  const onlineStatusWatcher = new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials, onIngest: () => eventDispatcher.nudge() });
+
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
@@ -989,6 +994,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    onlineStatusWatcher,
     webhookRateLimiter,
     eventDispatcher,
     contentSync,
