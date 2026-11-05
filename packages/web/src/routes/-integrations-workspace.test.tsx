@@ -429,6 +429,10 @@ describe("/integrations redirect target", () => {
     expect(integrationsTarget("?teamId=gone&error=team_access_changed", "a", available))
       .toBe("/settings/integrations?teamId=gone&error=team_access_changed");
   });
+  it("keeps a team result on its team while membership could not be read", () => {
+    expect(integrationsTarget("?teamId=a&connected=linear", "user", undefined))
+      .toBe("/settings/teams/a/integrations?teamId=a&connected=linear");
+  });
   it("follows ?workspace=, else the switcher, and keeps the rest of the query", () => {
     expect(integrationsTarget("?workspace=user&service=github", "a", available)).toBe("/settings/integrations?service=github");
     expect(integrationsTarget("?workspace=b", "a", available)).toBe("/settings/teams/b/integrations");

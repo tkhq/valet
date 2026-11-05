@@ -26,9 +26,13 @@ import type {
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => undefined }));
+// The membership read can fail, as a network error would leave it.
+const membership = vi.hoisted(() => ({ failed: false }));
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
-  useTeams: () => ({ data: { teams: [team] }, isLoading: false, error: null }),
+  useTeams: () => membership.failed
+    ? { data: undefined, isLoading: false, error: new Error("offline") }
+    : { data: { teams: [team] }, isLoading: false, error: null },
   useOrg: () => ({ data: { features: { organizations: true } } }),
   useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
 }));
@@ -85,6 +89,7 @@ vi.mock("~/api/policies", async (importOriginal) => ({
 
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { Route as IntegrationsRoute } from "./settings.integrations";
+import { Route as IntegrationsRedirectRoute } from "./integrations";
 
 function service(name: string, extra: Partial<PluginServiceSummary> = {}): PluginServiceSummary {
   return { service: name, type: "api_key", configKeys: ["accessToken"], connected: false, connect: "manual", actions: [], ...extra };
@@ -116,6 +121,7 @@ function mount(initial = "/settings/integrations") {
 }
 
 beforeEach(() => {
+  membership.failed = false;
   window.sessionStorage.clear();
   credentials = [];
   plugins = { plugins: [plugin("notion", [service("notion", { connected: true })], "Notes and docs")] };
@@ -279,5 +285,33 @@ describe("other saved credentials", () => {
     mount();
     await screen.findByRole("link", { name: /Notion/ });
     expect(screen.queryByRole("list", { name: "Other saved credentials" })).toBeNull();
+  });
+});
+
+describe("the /integrations redirect", () => {
+  function mountRedirect(initial: string) {
+    const root = createRootRoute({ component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider> });
+    const routes = [
+      createRoute({ getParentRoute: () => root, path: "integrations", component: IntegrationsRedirectRoute.options.component }),
+      createRoute({ getParentRoute: () => root, path: "settings/integrations", component: () => <p>Personal integrations</p> }),
+      createRoute({ getParentRoute: () => root, path: "settings/teams/$teamId/integrations", component: () => <p>Team integrations</p> }),
+    ];
+    const router = createRouter({ routeTree: root.addChildren(routes), history: createMemoryHistory({ initialEntries: [initial] }) });
+    render(<RouterProvider router={router} />);
+    return router;
+  }
+
+  it("keeps a team result on its team when the membership read fails", async () => {
+    membership.failed = true;
+    const router = mountRedirect("/integrations?teamId=t1&connected=linear");
+    expect(await screen.findByText("Team integrations")).toBeTruthy();
+    expect(router.state.location.pathname).toBe("/settings/teams/t1/integrations");
+    expect(router.state.location.searchStr).toBe("?teamId=t1&connected=linear");
+  });
+
+  it("sends a result for a team you are not on to personal Integrations", async () => {
+    const router = mountRedirect("/integrations?teamId=gone&error=team_access_changed");
+    expect(await screen.findByText("Personal integrations")).toBeTruthy();
+    expect(router.state.location.searchStr).toBe("?teamId=gone&error=team_access_changed");
   });
 });

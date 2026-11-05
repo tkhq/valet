@@ -74,22 +74,26 @@ function IntegrationsRedirect() {
   // Wait for membership, so a result for a team you have left lands on your
   // own Integrations with its message instead of a page you cannot open.
   if (teamsQ.isLoading || orgQ.isLoading) return null;
-  return <Navigate to="/settings/integrations" href={integrationsTarget(searchStr, scope.key, scope.available)} replace />;
+  // A failed membership read proves nothing about the team: keep the named
+  // space, whose page reports the failure and keeps the query for a reload.
+  const membershipKnown = teamsQ.data !== undefined && orgQ.data !== undefined;
+  return <Navigate to="/settings/integrations" href={integrationsTarget(searchStr, scope.key, membershipKnown ? scope.available : undefined)} replace />;
 }
 
 /**
  * Where an `/integrations` link lands. A team connect result names its team
  * (`?teamId=`), and a result without one is personal. Otherwise
  * `?workspace=` names the space, else the switcher's space stands. A team
- * outside `available` falls back to your own workspace.
+ * outside `available` falls back to your own workspace. `available` is
+ * `undefined` while membership is unknown, and then the named space stands.
  */
-export function integrationsTarget(searchStr: string, scopeKey: string, available: readonly string[]): string {
+export function integrationsTarget(searchStr: string, scopeKey: string, available: readonly string[] | undefined): string {
   const params = new URLSearchParams(searchStr);
   const workspace = params.get("workspace");
   params.delete("workspace");
   const connectResult = params.has("connected") || params.has("error");
   const named = params.get("teamId") ?? (connectResult ? PERSONAL : workspace ?? scopeKey);
-  const key = available.includes(named) ? named : PERSONAL;
+  const key = !available || available.includes(named) ? named : PERSONAL;
   const rest = params.toString();
   return `${spaceSettingsHref(key, "integrations")}${rest ? `?${rest}` : ""}`;
 }
