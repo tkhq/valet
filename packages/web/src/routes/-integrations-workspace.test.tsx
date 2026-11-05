@@ -11,6 +11,11 @@ import { qkSettings } from "~/api/settings";
 let teamId: string | undefined;
 let realWorkspace = false;
 const setKey = vi.fn();
+vi.mock("~/api/commit-signing", () => ({
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/lib/workspace-scope")>();
   return { ...original, useWorkspaceScope: () => realWorkspace ? original.useWorkspaceScope() : { teamId, setKey } };

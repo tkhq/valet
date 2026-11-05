@@ -1886,6 +1886,7 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        sessionId,
         onIncompatible: async (info) => {
           // Count and stamp once per (session, bake), not once per sweep.
           const changed = await host.recordImageFallback(sessionId, { reason: "contract", sourceId: info.sourceId, bakeId: info.bakeId, at: Date.now() });
