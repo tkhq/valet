@@ -329,23 +329,32 @@ function SourceRow({
           {source.kinds.join(", ")} · {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}
           {source.lastSyncedAt === null ? "never synced" : `synced ${relativeTime(source.lastSyncedAt)}`}
         </p>
-        {/* A sync that imported nothing writes its reason here, so "0 skills"
-            and "Valet could not read it" and "it holds no SKILL.md" stop
-            looking the same. A warning takes the warning colour rather than
-            the muted one: muted text beside "0 skills" reads as a footnote,
-            and this line is the answer. */}
+        {/* Warnings can contain many skipped paths. Keep the full report
+            behind a disclosure while errors stay visible beside the source. */}
         {source.lastMessage && (
-          <p
-            className={
-              source.status === "error"
-                ? "mt-1 text-xs leading-relaxed text-danger-500"
-                : source.status === "warning"
-                  ? "mt-1 text-xs leading-relaxed text-warning-fg"
+          source.status === "warning" ? (
+            <details className="mt-1 text-xs leading-relaxed text-warning-fg">
+              <summary className="cursor-pointer">Sync warnings</summary>
+              <pre
+                role="region"
+                tabIndex={0}
+                aria-label={`Sync warning details for ${source.repo}`}
+                className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+              >
+                {source.lastMessage}
+              </pre>
+            </details>
+          ) : (
+            <p
+              className={
+                source.status === "error"
+                  ? "mt-1 text-xs leading-relaxed text-danger-500"
                   : "mt-1 text-xs leading-relaxed text-muted"
-            }
-          >
-            {source.lastMessage}
-          </p>
+              }
+            >
+              {source.lastMessage}
+            </p>
+          )
         )}
         {/* What the scan skipped, after a sync this person asked for. The
             exclusion rule can be wrong — a real skill can sit under a name

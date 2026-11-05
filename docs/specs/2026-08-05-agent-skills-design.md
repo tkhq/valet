@@ -318,6 +318,8 @@ Discovery now counts what it found, and the sync reports:
 | Candidates found, some skipped | `warning` | one line per skipped skill, as before |
 | Skills imported, updated, or deleted | `ok` | none |
 
+Both repository panels show `warning` messages in a closed **Sync warnings** disclosure. The expanded diagnostic preserves line breaks, wraps long paths, and scrolls within a fixed maximum height. Error messages and failed Sync or Remove actions stay visible inline.
+
 The "holds none" message fires only when discovery found zero candidates. A repository that yielded candidates and skipped every one of them reports those per-skill lines alone: a second message about the repository would hide the real reason behind a wrong one.
 
 Each "holds none" message also names how many mirrored skills the sync removed, when it removed any. The count is the part the reader acts on: advice to import the repository again is no use if it arrives without saying that the skills are already gone.

@@ -11,7 +11,7 @@
  * tooltip provider (as `session-header.test.tsx` uses).
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { ListSkillSourcesResponse, SkillSourceSummary, ListTeamsResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -334,7 +334,7 @@ describe("RepoSourcesPanel", () => {
     };
     renderPanel(PERSONAL, { owner: { type: "org", id: "org1" } });
 
-    expect(screen.getByText(/Install the GitHub App for this organization/)).toBeTruthy();
+    expect(screen.getByText(/Install the GitHub App for this organization/).closest("details")).toBeNull();
   });
 
   it("shows the server error when Remove fails", () => {
@@ -345,7 +345,7 @@ describe("RepoSourcesPanel", () => {
     currentData = { sources: [source()], nextCursor: null };
     renderPanel();
 
-    expect(screen.getByText(/Ask an org admin to remove this repository/)).toBeTruthy();
+    expect(screen.getByText(/Ask an org admin to remove this repository/).closest("details")).toBeNull();
   });
 
   it("shows the message from a failed sync", () => {
@@ -355,17 +355,35 @@ describe("RepoSourcesPanel", () => {
     };
     renderPanel();
 
-    expect(screen.getByText(/was not found on GitHub/)).toBeTruthy();
+    expect(screen.getByText(/was not found on GitHub/).closest("details")).toBeNull();
+    expect(screen.queryByText("Sync warnings")).toBeNull();
   });
 
-  it("shows the skipped skills from a sync that warned", () => {
+  it("keeps a large sync warning in a closed disclosure until expanded", () => {
+    const message = Array.from({ length: 50 }, (_, index) =>
+      `skills/deploy/references/deeply/nested/companion-${index}.md: skipped because the companion-file limit was reached.`,
+    ).join("\n");
     currentData = {
-      sources: [source({ status: "warning", lastMessage: "broken: name is required." })],
+      sources: [source({ status: "warning", lastMessage: message })],
       nextCursor: null,
     };
     renderPanel();
 
-    expect(screen.getByText(/broken: name is required/)).toBeTruthy();
+    const summary = screen.getByText("Sync warnings", { selector: "summary" });
+    const details = summary.closest("details");
+    if (details === null) throw new Error("Sync warnings is not a disclosure");
+    expect(details.open).toBe(false);
+    const diagnostic = within(details).getByText(message, { normalizer: (text) => text });
+
+    fireEvent.click(summary);
+
+    expect(details.open).toBe(true);
+    expect(diagnostic.textContent).toBe(message);
+
+    expect(diagnostic.tabIndex).toBe(0);
+    diagnostic.focus();
+    expect(document.activeElement).toBe(diagnostic);
+    expect(screen.getByRole("region", { name: "Sync warning details for tkhq/skills" })).toBe(diagnostic);
   });
 
   it("syncs and removes the source the buttons belong to", () => {
