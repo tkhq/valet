@@ -42,7 +42,8 @@ import { auditRequest } from "./_admin-audit.js";
  * That credential drives the Slack agent surface, whose misconfigurations
  * are all silent, so the route validates the token and signing secret
  * against Slack and records the workspace identity. See
- * `services/slack-connect.ts`.
+ * `services/slack-connect.ts`. The org `telegram` bot token is checked the
+ * same way against Telegram's `getMe` (`services/telegram-connect.ts`).
  */
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
@@ -54,6 +55,7 @@ import { credentialSecret, type CredentialOwner, type CredentialStore, type Stor
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
+import { verifyTelegramBotToken } from "../services/telegram-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import {
   isOnePasswordReference,
@@ -332,6 +334,25 @@ async function verifySlackCredential(
 ): Promise<Response | undefined> {
   if (scope === "org") return verifyOrgSlackCredential(c, credential, token);
   if (scope === "team") return verifySlackCredentialToken(c, credential, token);
+  return undefined;
+}
+
+/**
+ * Checks the org Telegram bot token with Telegram before it is stored. The
+ * channel host reads it only at boot, so a bad token would otherwise show
+ * up as a silent bot. Records the bot's username as `metadata.login`, which
+ * the summary already exposes. Other scopes are not channel credentials.
+ */
+async function verifyTelegramCredential(
+  c: Context<AppEnv>,
+  scope: CredentialScope,
+  credential: StoredCredential,
+  token: string,
+): Promise<Response | undefined> {
+  if (scope !== "org") return undefined;
+  const check = await verifyTelegramBotToken(token);
+  if (!check.ok) return c.json({ error: check.error }, 400);
+  credential.metadata = { ...credential.metadata, login: `@${check.username}` };
   return undefined;
 }
 
@@ -649,6 +670,10 @@ credentialsRouter.put("/:service", async (c) => {
       const rejected = await verifySlackCredential(c, scope, credential, resolved);
       if (rejected) return rejected;
     }
+    if (service === "telegram") {
+      const rejected = await verifyTelegramCredential(c, scope, credential, resolved);
+      if (rejected) return rejected;
+    }
     const saveError = await persistCredential(c, owner, service, credential, false);
     if (saveError) return saveError;
     await refreshCredentialReadiness(c.var.providers, owner, service);
@@ -692,6 +717,10 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (service === "slack") {
     const rejected = await verifySlackCredential(c, scope, credential, accessToken ?? apiKey ?? "");
+    if (rejected) return rejected;
+  }
+  if (service === "telegram") {
+    const rejected = await verifyTelegramCredential(c, scope, credential, accessToken ?? apiKey ?? "");
     if (rejected) return rejected;
   }
 

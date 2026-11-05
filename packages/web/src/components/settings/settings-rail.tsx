@@ -82,6 +82,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
       { to: "/settings/organization/mcp-servers", label: "MCP servers" },
       { to: "/settings/organization/github", label: "GitHub" },
       { to: "/settings/organization/slack", label: "Slack" },
+      { to: "/settings/organization/telegram", label: "Telegram" },
       { to: "/settings/organization/linear", label: "Linear" },
       { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
       { to: "/settings/organization/library", label: "Library" },

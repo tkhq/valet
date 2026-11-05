@@ -4,7 +4,9 @@
  * validation 400s for malformed bodies; unauth 401s (same pattern as
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -200,6 +202,49 @@ describe("DELETE /api/credentials/:service", () => {
 });
 
 describe("PUT/DELETE/GET /api/credentials — org scope", () => {
+  // The org Telegram token is checked with getMe before it is stored. This
+  // fixture accepts only "123:abc", the token the tests below save.
+  let telegram: Server | undefined;
+  const savedTelegramBase = process.env.VALET_TELEGRAM_API_BASE;
+  beforeAll(async () => {
+    telegram = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(req.url === "/bot123:abc/getMe"
+        ? { ok: true, result: { id: 1, is_bot: true, username: "valet_test_bot" } }
+        : { ok: false, error_code: 401, description: "Unauthorized" }));
+    });
+    await new Promise<void>((resolve) => telegram?.listen(0, "127.0.0.1", resolve));
+    process.env.VALET_TELEGRAM_API_BASE = `http://127.0.0.1:${(telegram.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    if (savedTelegramBase === undefined) delete process.env.VALET_TELEGRAM_API_BASE;
+    else process.env.VALET_TELEGRAM_API_BASE = savedTelegramBase;
+    await new Promise<void>((resolve) => telegram ? telegram.close(() => resolve()) : resolve());
+  });
+
+  it("checks the org Telegram bot token with Telegram and records the bot username", async () => {
+    api = await bootTestApi();
+
+    const bad = await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:wrong", scope: "org" }),
+    });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("Copy the token from @BotFather");
+    expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "telegram")).toBeNull();
+
+    const good = await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:abc", scope: "org" }),
+    });
+    expect(good.status).toBe(200);
+    const listed = await fetch(`${api.baseUrl}/api/credentials?scope=org`);
+    const { credentials } = (await listed.json()) as ListCredentialsResponse;
+    expect(credentials.find((c) => c.service === "telegram")?.login).toBe("@valet_test_bot");
+  });
+
   it("PUT with scope:\"org\" as an admin saves under the org owner", async () => {
     api = await bootTestApi();
 
