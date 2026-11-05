@@ -3749,11 +3749,27 @@ export interface ListPluginsResponse {
 
 // ── REST: code review ────────────────────────────────────────────────────
 
-/** One pull request the PR review plugin reviewed for a workspace. */
+export interface CodeReviewRoundWire {
+  head: string;
+  mode: "full" | "incremental";
+  /** ISO timestamp of the completed review. */
+  at: string;
+  newFindings: number;
+  resolved: number;
+}
+
+/** One open pull request with a review chain for a workspace. */
 export interface CodeReviewWire {
   /** `owner/repo`. */
   repo: string;
   number: number;
+  title: string;
+  url: string;
+  state: "open";
+  /** Running includes queued deliveries and retries. Failed means retries ended. */
+  status: "running" | "complete" | "failed";
+  /** The latest 100 completed review rounds, oldest first. */
+  rounds: CodeReviewRoundWire[];
   /** The GitHub review that Valet edits in place. Absent until the first post. */
   reviewId?: number;
   /** The last head commit Valet reviewed. */

@@ -26,6 +26,7 @@ import {
   type Finding,
   type PullPointers,
   type Review,
+  type ReviewRound,
   type Verdict,
 } from "../src/index.js";
 
@@ -275,6 +276,7 @@ describe("review-pull-request handler", () => {
       reviewId: review.id,
       lastReviewedHead: H1,
       nextId: 3,
+      rounds: [{ head: H1, mode: "full", at: expect.any(String), newFindings: ["f1", "f2"], resolved: [] }],
       findings: [
         { id: "f1", path: "a.ts", line: 5, status: "open", commentId: gh.comments[0].id },
         { id: "f2", path: "a.ts", line: 40, status: "open" },
@@ -318,6 +320,10 @@ describe("review-pull-request handler", () => {
       reviewId: summaryId,
       lastReviewedHead: H2,
       nextId: 3,
+      rounds: [
+        { head: H1, mode: "full", at: expect.any(String), newFindings: ["f1"], resolved: [] },
+        { head: H2, mode: "incremental", at: expect.any(String), newFindings: ["f2"], resolved: ["f1"] },
+      ],
       findings: [
         { id: "f1", status: "resolved", fixedIn: H2, commentId },
         { id: "f2", path: "a.ts", line: 12, status: "open" },
@@ -336,6 +342,19 @@ describe("review-pull-request handler", () => {
     await handler.handle(event("ev2"), context(second, store));
     expect(second.spawned.map((s) => s.req.role)).toEqual(["pr-reviewer"]);
     expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open" }]);
+  });
+
+  it("retains only the latest 100 completed review rounds", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const rounds: ReviewRound[] = Array.from({ length: 100 }, (_, i) => ({
+      head: `prior-${i}`, mode: "full", at: "2026-11-01T00:00:00.000Z", newFindings: [], resolved: [],
+    }));
+    await store.put("pulls", SLUG, { version: 1, lastReviewedHead: "prior-99", findings: [], nextId: 1, rounds } satisfies PullPointers);
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev101"), context(new FakeThreads(scripted(reviewOf([]), {})), store));
+    expect(store.pointers()?.rounds).toHaveLength(100);
+    expect(store.pointers()?.rounds?.[0]?.head).toBe("prior-1");
+    expect(store.pointers()?.rounds?.[99]).toMatchObject({ head: H1, mode: "incremental", newFindings: [], resolved: [] });
   });
 
   it("rechecks every open finding and reviews the whole PR after a force-push", async () => {

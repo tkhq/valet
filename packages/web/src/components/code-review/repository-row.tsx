@@ -16,11 +16,13 @@ function storedConfig(line: EventSubscriptionWire): HandlerConfig {
   return line.target.kind === "plugin" ? line.target.config ?? {} : {};
 }
 
-export function RepositoryRow({ line, handler, initiallyOpen = false }: {
+export function RepositoryRow({ line, handler, initiallyOpen = false, openRequest }: {
   line: EventSubscriptionWire;
   handler: HandlerOption | undefined;
   /** True for a line the reader just added, so its settings show at once. */
   initiallyOpen?: boolean;
+  /** A new request opens settings even when the row already exists. */
+  openRequest?: number;
 }) {
   const patch = usePatchEventSubscription();
   const remove = useDeleteEventSubscription();
@@ -29,6 +31,9 @@ export function RepositoryRow({ line, handler, initiallyOpen = false }: {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dirty = !sameSettings(config, storedConfig(line));
+  useEffect(() => {
+    if (openRequest !== undefined) setOpen(true);
+  }, [openRequest]);
   // A refetched line resets the form, unless the reader has unsaved changes.
   useEffect(() => {
     if (!dirty) setConfig(storedConfig(line));

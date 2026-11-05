@@ -2,7 +2,7 @@
 /**
  * `/code-review`: the workspace's code review lines with their settings,
  * Add repository creating a PR review line with a repo condition, and the
- * recent reviews with links to the pull request and the plugin thread.
+ * ongoing reviews with links to the pull request and the review conversation.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
@@ -121,11 +121,9 @@ describe("CodeReviewPage", () => {
     subscriptions = [reviewLine("l-site", "acme/site")];
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
-    const combobox = screen.getByRole("combobox", { name: "Search repositories" });
-    fireEvent.focus(combobox);
-    // A repository that already has a line is not offered again.
-    expect(screen.queryByRole("option", { name: /acme\/site/ })).toBeNull();
-    fireEvent.click(screen.getByRole("option", { name: /acme\/api/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: /acme\/site/ })).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: /acme\/api/ }));
     expect(create).toHaveBeenCalledWith({
       name: "Code review: acme/api",
       eventKeys: ["github.pull_request.opened", "github.pull_request.synchronize"],
@@ -134,13 +132,53 @@ describe("CodeReviewPage", () => {
     }, expect.anything());
   });
 
-  it("links each recent review to its pull request and plugin thread", () => {
-    reviews = [{ repo: "acme/site", number: 7, reviewId: 41, head: "abc1234def", openFindings: 2, resolvedFindings: 1, updatedAt: Date.now(), threadId: "t-7" }];
+  it("opens existing repository settings without creating another review line", () => {
+    subscriptions = [reviewLine("l-site", "acme/site")];
     renderPage();
-    const recent = screen.getByRole("region", { name: "Recent reviews" });
-    expect(within(recent).getByRole("link", { name: "acme/site#7" }).getAttribute("href")).toBe("https://github.com/acme/site/pull/7#pullrequestreview-41");
-    expect(within(recent).getByRole("link", { name: "Open thread" }).getAttribute("href")).toBe("/threads/t-7");
-    expect(within(recent).getByText(/2 open findings, 1 fixed, at abc1234/)).toBeTruthy();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /acme\/site/ }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.getByLabelText("Min severity")).toBeTruthy();
+      expect(create).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      expect(screen.queryByLabelText("Min severity")).toBeNull();
+    }
+  });
+
+  it("groups an open pull request with its ongoing review chain and conversation", () => {
+    reviews = [{
+      repo: "acme/site", number: 7, title: "Fix checkout retries", url: "https://github.com/acme/site/pull/7", state: "open", status: "complete",
+      reviewId: 41, head: "abc1234def", openFindings: 2, resolvedFindings: 1, updatedAt: Date.now(), threadId: "t-7",
+      rounds: [
+        { head: "111aaaa", mode: "full", at: "2026-11-04T12:00:00Z", newFindings: 3, resolved: 0 },
+        { head: "abc1234def", mode: "incremental", at: "2026-11-05T12:00:00Z", newFindings: 0, resolved: 1 },
+      ],
+    }];
+    renderPage();
+    const ongoing = screen.getByRole("region", { name: "Ongoing reviews" });
+    expect(within(ongoing).getByRole("link", { name: "acme/site#7" }).getAttribute("href")).toBe("https://github.com/acme/site/pull/7#pullrequestreview-41");
+    expect(within(ongoing).getByRole("link", { name: "Open conversation" }).getAttribute("href")).toBe("/threads/t-7");
+    expect(within(ongoing).getByText("Fix checkout retries")).toBeTruthy();
+    expect(within(ongoing).getByText(/2 open findings, 1 fixed/)).toBeTruthy();
+    fireEvent.click(within(ongoing).getByRole("button", { name: "Review chain (2)" }));
+    expect(within(ongoing).getByText("Full review")).toBeTruthy();
+    expect(within(ongoing).getByText("Incremental review")).toBeTruthy();
+    expect(within(ongoing).getByRole("link", { name: "111aaaa" }).getAttribute("href")).toBe("https://github.com/acme/site/commit/111aaaa");
+    expect(within(ongoing).getByText(/0 new findings, 1 fixed/)).toBeTruthy();
+  });
+
+  it("shows a first review while it runs before any completed rounds exist", () => {
+    reviews = [{
+      repo: "acme/api", number: 8, title: "Add billing export", url: "https://github.com/acme/api/pull/8", state: "open", status: "running",
+      openFindings: 0, resolvedFindings: 0, updatedAt: Date.now(), rounds: [],
+    }];
+    renderPage();
+    const ongoing = screen.getByRole("region", { name: "Ongoing reviews" });
+    expect(within(ongoing).getByText("Reviewing…")).toBeTruthy();
+    expect(within(ongoing).getByRole("link", { name: "acme/api#8" })).toBeTruthy();
+    expect(within(ongoing).queryByRole("button", { name: /Review chain/ })).toBeNull();
+    expect(within(ongoing).getByText("Waiting for the first review result.")).toBeTruthy();
   });
 
   it("says so when the deployment has no PR review plugin", () => {
