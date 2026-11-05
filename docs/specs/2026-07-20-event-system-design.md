@@ -151,6 +151,12 @@ it. Presence shows them as "is not", "doesn't start with", and "doesn't
 match". A line that must skip some sources, such as some alert bots, puts
 them in an exclusion filter, so an excluded event starts no assistant turn.
 
+For `github.*` events, `repo` identifies the repository at
+`repository.full_name`. Its `eq`, `in`, and `not_in` comparisons ignore case,
+so `Acme/Valet` and `acme/valet` name the same repository. Pattern operators
+still match the original text with case sensitivity. Other fields and event
+services keep case-sensitive comparisons.
+
 A value is absent when the event's catalog entry does not declare the field,
 or when the payload holds no text or number at the field's path. An absent
 value fails `eq`, `in`, `prefix`, `contains`, and `regex`. It passes
